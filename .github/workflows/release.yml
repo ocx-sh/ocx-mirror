@@ -1,0 +1,143 @@
+name: Release
+
+# Tag-driven release: verify gate on the tag, 6-target build (shared with
+# deploy-dev via build-matrix.yml), publish `ocx.sh/ocx/mirror:<ver>_<TS>`
+# with cascade tags, plus a GitHub Release with bare archives as a secondary
+# channel. Lean by design — the ocx registry IS the release channel
+# (`ocx --global add ocx.sh/ocx/mirror`); no cargo-dist ceremony.
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    uses: ./.github/workflows/verify.yml
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+
+  verify-version:
+    name: Verify tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Compare versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          v="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          if [[ "v${v}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${v}"
+            exit 1
+          fi
+
+  compute-version:
+    name: Compute publish tag
+    needs: [verify-version]
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.tag.outputs.version_tag }}
+    steps:
+      - name: Freeze publish tag
+        id: tag
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${REF_NAME#v}"
+          ts="$(date -u +%Y%m%d%H%M%S)"
+          echo "version_tag=${version}_${ts}" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: [verify, verify-version]
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      version_semver: ${{ github.ref_name }}
+      channel: release
+
+  publish-registry:
+    name: Publish to ocx.sh
+    # Pre-release tags (e.g. v0.5.0-rc.1) skip the production registry.
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: [compute-version, build]
+    uses: ./.github/workflows/oci-publish.yml
+    with:
+      registry: ocx.sh
+      version_tag: ${{ needs.compute-version.outputs.version_tag }}
+      environment: ocx.sh
+    secrets:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+
+  github-release:
+    name: GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ocx-mirror-*
+          path: dist/
+          merge-multiple: true
+      - name: Package archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
+            d="ocx-mirror-${t}"
+            mkdir -p "$d/bin"
+            install -m 0755 "dist/ocx-mirror-${t}" "$d/bin/ocx-mirror"
+            tar -cJf "out/${d}.tar.xz" "$d"
+          done
+          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+            d="ocx-mirror-${t}"
+            mkdir -p "$d/bin"
+            cp "dist/ocx-mirror-${t}.exe" "$d/bin/ocx-mirror.exe"
+            zip -qr "out/${d}.zip" "$d"
+          done
+          (cd out && sha256sum -- * > sha256.sum)
+      - name: Install git-cliff
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+        with:
+          tool: git-cliff
+      - name: Generate release notes
+        run: git-cliff --latest --strip header -o RELEASE_NOTES.md
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          prerelease_flag=""
+          [[ "$TAG" == *-* ]] && prerelease_flag="--prerelease"
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file RELEASE_NOTES.md \
+            $prerelease_flag \
+            out/*

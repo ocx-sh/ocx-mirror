@@ -1,0 +1,73 @@
+name: Deploy Dev
+
+# Manual deploy pipeline. Run via `gh workflow run "Deploy Dev"` or the Actions
+# UI. Builds all production targets (linux musl + darwin + windows) and
+# publishes them to `dev.ocx.sh/ocx/mirror:<core>-dev_<TS>` with cascade tags.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize runs so the timestamp suffix stays monotonic; never cancel a
+# publish in flight.
+concurrency:
+  group: deploy-dev-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compute-version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.cliff.outputs.version_tag }}
+      version_semver: ${{ steps.cliff.outputs.version_semver }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install git-cliff
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+        with:
+          tool: git-cliff
+      - name: Compute next version
+        id: cliff
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw="$(git-cliff --bumped-version)"
+          version="${raw#v}"
+          if [[ -z "$version" ]]; then
+            echo "::error::git-cliff --bumped-version returned empty output — refusing to publish a dev build"
+            exit 1
+          fi
+          # Freeze the UTC build-metadata segment here so every target leg of
+          # the publish loop shares the same tag (a per-push timestamp would
+          # split the multi-platform index).
+          ts="$(date -u +%Y%m%d%H%M%S)"
+          echo "version_tag=${version}-dev_${ts}"    | tee -a "$GITHUB_OUTPUT"
+          # SemVer form (`+` is invalid in OCI references) for in-binary embedding.
+          echo "version_semver=${version}-dev+${ts}" | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    name: Build
+    needs: [compute-version]
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      version_semver: ${{ needs.compute-version.outputs.version_semver }}
+      channel: dev
+
+  publish:
+    name: Publish to dev.ocx.sh
+    needs: [compute-version, build]
+    uses: ./.github/workflows/oci-publish.yml
+    with:
+      registry: dev.ocx.sh
+      version_tag: ${{ needs.compute-version.outputs.version_tag }}
+      environment: dev.ocx.sh
+    secrets:
+      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}

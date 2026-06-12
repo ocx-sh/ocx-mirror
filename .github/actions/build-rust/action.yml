@@ -1,0 +1,67 @@
+name: Build Rust Binary
+description: Build the ocx-mirror binary for a given target (native builds or zig cross-compile)
+
+inputs:
+  target:
+    description: Rust target triple
+    required: true
+  use_zigbuild:
+    description: Use cargo-zigbuild instead of cargo build (required for cross-compiling aarch64-linux and musl from x86 runners)
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust Toolchain
+      uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+      with:
+        toolchain: stable
+        targets: ${{ inputs.target }}
+    - name: Install target on rust-toolchain.toml channel
+      # rust-toolchain.toml pins an explicit channel; dtolnay's `targets:` only
+      # adds the target to the `stable` alias toolchain. Re-add against the
+      # pinned channel resolved from the workspace root so cargo finds std/core.
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: rustup target add "$TARGET"
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      with:
+        save-if: ${{ github.ref == 'refs/heads/main' }}
+    - name: Install Zig
+      if: ${{ inputs.use_zigbuild == 'true' }}
+      uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+    - name: Install cargo-zigbuild
+      if: ${{ inputs.use_zigbuild == 'true' }}
+      uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+      with:
+        tool: cargo-zigbuild
+    - name: Build (cargo)
+      if: ${{ inputs.use_zigbuild != 'true' }}
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: cargo build --release --target="$TARGET" --locked
+    - name: Build (zigbuild)
+      if: ${{ inputs.use_zigbuild == 'true' }}
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: cargo zigbuild --release --target="$TARGET" --locked
+    - name: Prepare Binary
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        ext=""
+        [[ "$TARGET" == *windows* ]] && ext=".exe"
+        cp "target/${TARGET}/release/ocx-mirror${ext}" "ocx-mirror-${TARGET}${ext}"
+    - name: Upload Binary
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ocx-mirror-${{ inputs.target }}
+        path: ocx-mirror-${{ inputs.target }}${{ contains(inputs.target, 'windows') && '.exe' || '' }}
+        compression-level: 0
+        retention-days: 1
