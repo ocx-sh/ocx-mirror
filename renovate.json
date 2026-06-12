@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "schedule:weekly"
+  ],
+  "semanticCommits": "enabled",
+  "git-submodules": {
+    "enabled": true
+  },
+  "packageRules": [
+    {
+      "description": "GitHub Actions — group, SHA-pin, ci(deps) prefix",
+      "matchManagers": ["github-actions"],
+      "groupName": "actions",
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "deps",
+      "pinDigests": true
+    },
+    {
+      "description": "Cargo crates — group, chore(deps) prefix",
+      "matchManagers": ["cargo"],
+      "groupName": "rust-deps",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "external/ocx submodule bump — ocx_lib advances with it; chore(deps) prefix",
+      "matchManagers": ["git-submodules"],
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Action pins embedded in pipeline workflow templates — same actions group + ci(deps) prefix",
+      "matchManagers": ["custom.regex"],
+      "groupName": "actions",
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "deps"
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Bump SHA-pinned GitHub Actions baked into pipeline templates (outside .github/, so the built-in manager never sees them)",
+      "managerFilePatterns": [
+        "/^src/command/pipeline/generate/templates/[^/]+\\.yml$/"
+      ],
+      "matchStrings": [
+        "uses:\\s+(?<depName>[^@\\s]+)@(?<currentDigest>[0-9a-f]{40})\\s+#\\s+(?<currentValue>v[^\\s]+)"
+      ],
+      "datasourceTemplate": "github-tags",
+      "autoReplaceStringTemplate": "uses: {{{depName}}}@{{{newDigest}}}  # {{{newValue}}}"
+    }
+  ]
+}

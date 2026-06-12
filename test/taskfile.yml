@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  REPO_ROOT: '{{.TASKFILE_DIR}}/..'
+  BIN_DIR: '{{.TASKFILE_DIR}}/bin'
+  OCX_MIRROR_BINARY: '{{.BIN_DIR}}/ocx-mirror{{exeExt}}'
+  SKIP_BUILD: '{{.SKIP_BUILD | default .CI | default "false"}}'
+  # ocx is provided by the project toolchain (direnv / setup-ocx), not built
+  # here. Honour an explicit OCX_COMMAND from the environment, else resolve
+  # from PATH. Empty result is fine — conftest.py falls back to test/bin/ocx
+  # and fails with a clear message if no binary is found.
+  OCX_RESOLVED:
+    sh: printf '%s' "${OCX_COMMAND:-$(command -v ocx || true)}"
+
+tasks:
+  build:
+    internal: true
+    dir: '{{.REPO_ROOT}}'
+    cmds:
+      - cargo build --release --locked
+      - mkdir -p {{.BIN_DIR}}
+      - cp {{.REPO_ROOT}}/target/release/ocx-mirror{{exeExt}} {{.OCX_MIRROR_BINARY}}
+    status:
+      - '{{eq .SKIP_BUILD "true"}}'
+
+  default:
+    desc: Run mirror acceptance tests (builds ocx-mirror + starts registry automatically)
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - task: build
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+      - uv run pytest {{.CLI_ARGS | default "-v"}}
+    env:
+      OCX_COMMAND: "{{.OCX_RESOLVED}}"
+      OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"
+
+  quick:
+    desc: Run mirror acceptance tests in parallel without rebuilding the binary
+    cmds:
+      - task: default
+        vars:
+          SKIP_BUILD: "true"
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+
+  parallel:
+    desc: Run mirror acceptance tests in parallel
+    sources:
+      - tests/**/*.py
+      - src/**/*.py
+      - conftest.py
+      - pyproject.toml
+      - fixtures/**/*
+      - '{{.REPO_ROOT}}/target/release/ocx-mirror{{exeExt}}'
+    cmds:
+      - task: default
+        vars:
+          CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'

@@ -1,6 +1,7 @@
 ---
 paths:
-  - crates/ocx_mirror/**
+  - src/**
+  - tests/**
 ---
 
 # Mirror Subsystem
@@ -104,7 +105,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 
 ## Error Model
 
-`MirrorError` enum with exit codes. See `crates/ocx_mirror/src/error.rs::MirrorError::kind_exit_code`.
+`MirrorError` enum with exit codes. See `src/error.rs::MirrorError::kind_exit_code`.
 
 | Variant | Exit code | Meaning |
 |---------|-----------|---------|
@@ -164,7 +165,6 @@ Opt-out (discouraged): top-level `allow_manual_edits: true` in `mirror.yml`. Whe
 
 - Design spec: `.claude/artifacts/system_design_mirror_test_pipeline.md` — component contracts, CLI shape, GHA job contracts, install strategy
 - ADR: `.claude/artifacts/adr_ocx_mirror_test_pipeline.md` — rationale, risk register, open-call resolutions
-- Plan: `.claude/state/plans/plan_mirror_test_pipeline.md` — implementation phases
 
 ## Quality Gate
 
