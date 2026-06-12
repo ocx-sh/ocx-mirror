@@ -1,0 +1,110 @@
+name: Build Targets
+
+# Reusable 6-target build matrix shared by deploy-dev.yml (rolling dev
+# publishes) and release.yml (tag-driven releases) — one build path, zero
+# dev/release drift. Uploads one bare-binary artifact per target named
+# `ocx-mirror-<target>`.
+
+on:
+  workflow_call:
+    inputs:
+      version_semver:
+        description: SemVer build version (forwarded as `__OCX_BUILD_VERSION`
+          for a future build.rs; currently informational).
+        required: true
+        type: string
+      channel:
+        description: Build channel (`dev` or `release`).
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    name: Build (${{ matrix.target }})
+    # ubuntu-22.04 — older glibc baseline, matches the ocx prod target set.
+    runs-on: ubuntu-22.04
+    env:
+      __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
+      __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build
+        uses: ./.github/actions/build-rust
+        with:
+          target: ${{ matrix.target }}
+          use_zigbuild: true
+
+  build-darwin:
+    name: Build (${{ matrix.target }})
+    runs-on: macos-latest
+    env:
+      __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
+      __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Build
+        uses: ./.github/actions/build-rust
+        with:
+          target: ${{ matrix.target }}
+
+  build-windows:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    env:
+      __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
+      __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
+    container:
+      # messense/cargo-xwin has no stable versioned tag — pinned by digest. Re-pin with:
+      #   docker pull messense/cargo-xwin && docker inspect --format='{{index .RepoDigests 0}}' messense/cargo-xwin
+      image: messense/cargo-xwin@sha256:543cdaeb5cd3ed0ca1dd29b9e5aba4100aa0008f8ed088b793f3b9255a635869
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Rust target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        shell: bash
+        run: cargo xwin build --release --target=${{ matrix.target }} --locked
+      - name: Prepare Binary
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/ocx-mirror.exe ocx-mirror-${{ matrix.target }}.exe
+      - name: Upload Binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ocx-mirror-${{ matrix.target }}
+          path: ocx-mirror-${{ matrix.target }}.exe
+          compression-level: 0
+          retention-days: 1

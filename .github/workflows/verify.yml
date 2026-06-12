@@ -1,0 +1,143 @@
+name: Verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # release.yml reuses this workflow as its quality gate on the tag.
+  workflow_call: {}
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  conventional-commits:
+    name: Conventional Commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check conventional commits
+        uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
+        with:
+          command: check
+          args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  smoke:
+    name: Smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Nested: external/ocx itself carries the fork submodules the
+          # [patch.crates-io] table points at.
+          submodules: recursive
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+        with:
+          matcher: true
+          # Defer warning-denial to [lints.rust]. The action's default
+          # RUSTFLAGS=-D warnings is global and also denies the path-vendored
+          # forks (Cargo auto-caps registry/git deps, not path deps).
+          rustflags: ""
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Install nextest
+        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
+        with:
+          tool: cargo-nextest
+      - name: Verify fork patches bind
+        # Dropping the [patch.crates-io] table does NOT error — cargo would
+        # silently resolve the unpatched crates.io releases. Assert the fork
+        # path source is in the graph.
+        run: |
+          cargo tree -i oci-client --locked | head -1 | grep -F 'external/ocx/external/rust-oci-client' \
+            || { echo "::error::oci-client does not resolve to the vendored fork — [patch.crates-io] broken"; exit 1; }
+      - name: Check formatting
+        id: fmt
+        run: task rust:format:check
+        continue-on-error: true
+      - name: Clippy
+        id: clippy
+        run: task rust:clippy:check
+        continue-on-error: true
+      - name: Build
+        run: task rust:build
+      - name: Test
+        run: task rust:test:unit -- --profile ci
+      - name: Upload Binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ocx-mirror-binary
+          path: target/release/ocx-mirror
+          compression-level: 0
+          retention-days: 1
+      - name: Publish Unit Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: target/nextest/ci/junit.xml
+          check_name: "Unit Test Results"
+      - name: Check lint results
+        if: ${{ !cancelled() }}
+        run: |
+          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" ]]; then
+            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }})"
+            exit 1
+          fi
+
+  acceptance-tests:
+    name: Acceptance Tests
+    needs: smoke
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:2
+        ports:
+          - 5000:5000
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ocx-mirror-binary
+          path: test/bin
+      - name: Prepare Binary
+        run: chmod +x test/bin/ocx-mirror
+      - name: Setup OCX
+        # Provides the `ocx` binary OcxRunner drives for install-side
+        # verification. Bump the version alongside external/ocx submodule bumps.
+        uses: ocx-sh/setup-ocx@8cd2f38eed07c9b79aaed22e61f9ba6b36e967a3 # v1.2.2
+        with:
+          version: "0.3.7"
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Run Acceptance Tests
+        run: task test:parallel -- --junit-xml=results/junit.xml
+        env:
+          OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
+      - name: Publish Acceptance Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: test/results/junit.xml
+          check_name: "Acceptance Test Results"
