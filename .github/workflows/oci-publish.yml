@@ -127,3 +127,12 @@ jobs:
 
             rm -rf "$WORK"
           done
+
+          # Repository-level catalog description (__ocx.desc tag) — README from
+          # CATALOG.md (frontmatter supplies title/description/keywords) plus
+          # the project logo. Version-independent; refreshed on every publish.
+          echo "==> Pushing catalog description for ${REGISTRY}/ocx/mirror"
+          ocx package describe \
+            --readme CATALOG.md \
+            --logo assets/logo.svg \
+            "${REGISTRY}/ocx/mirror"
