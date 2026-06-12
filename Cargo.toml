@@ -1,9 +1,20 @@
 [package]
 name = "ocx_mirror"
+version = "0.4.0"
 edition = "2024"
-license.workspace = true
+license = "Apache-2.0"
+description = "Mirror upstream tool releases into OCI registries as OCX packages"
+repository = "https://github.com/ocx-sh/ocx-mirror"
+homepage = "https://ocx.sh"
 publish = false
-version.workspace = true
+
+# Explicit workspace root: anchors the [patch.crates-io] table below. The
+# vendored ocx checkout is excluded so its packages bind to their own
+# workspace root (external/ocx/Cargo.toml) for workspace-inherited fields —
+# without the exclude, this workspace claims the subtree and inheritance
+# (version.workspace etc.) fails to resolve.
+[workspace]
+exclude = ["external/ocx"]
 
 [[bin]]
 name = "ocx-mirror"
@@ -14,29 +25,63 @@ default = []
 jsonschema = ["dep:schemars"]
 
 [dependencies]
-ocx_lib.workspace = true
-tokio.workspace = true
+# ocx_lib is consumed as a path dependency into the ocx git submodule —
+# the same easy-to-maintain pattern ocx itself uses for its vendored forks.
+# Bumping ocx_lib = bumping the external/ocx submodule pointer.
+ocx_lib = { path = "external/ocx/crates/ocx_lib" }
 
-clap.workspace = true
-anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_yaml_ng.workspace = true
-schemars = { workspace = true, optional = true }
-chrono.workspace = true
-regex.workspace = true
-url.workspace = true
-octocrab.workspace = true
-quick-junit.workspace = true
-reqwest.workspace = true
-sha2.workspace = true
-hex.workspace = true
-tracing.workspace = true
-rustls.workspace = true
+# Feature lists below are copied EXACTLY from ocx's [workspace.dependencies]
+# (external/ocx/Cargo.toml). Keep them in sync when bumping the submodule —
+# widening defaults here (e.g. reqwest native-tls) would drag openssl into the
+# shared dependency graph.
+tokio = { version = "1.52", features = ["full"] }
+clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
+anyhow = "1.0.102"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+serde_yaml_ng = "0.10.0"
+schemars = { version = "1.2.1", optional = true }
+chrono = "0.4.44"
+regex = "1.12.3"
+url = { version = "2.5.8", features = ["serde"] }
+octocrab = { version = "0.51", default-features = false, features = [
+    "default-client",
+    "follow-redirect",
+    "jwt-aws-lc-rs",
+    "retry",
+    "rustls",
+    "rustls-aws-lc-rs",
+    "timeout",
+    "tracing",
+] }
+quick-junit = "0.6"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots-no-provider", "json"] }
+rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
+sha2 = "0.11.0"
+hex = "0.4.3"
+tracing = "0.1.44"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
-tempfile.workspace = true
+tokio = { version = "1.52", features = ["full", "test-util"] }
+tempfile = "3.27.0"
 
-[lints]
-workspace = true
+# ocx_lib is developed against the ocx-sh forks of oci-client and
+# docker_credential via [patch.crates-io] in the ocx workspace. Patch tables
+# only apply at the consuming workspace root — they do NOT travel with path or
+# git dependencies — so they are re-declared here, pointing into the nested
+# submodules of external/ocx. Requires `git submodule update --init --recursive`.
+#
+# Invariant: the fork versions must keep satisfying ocx_lib's requirements
+# (oci-client "0.16", docker_credential "1.3"). A drift surfaces as a hard
+# resolution error at `cargo update`. WARNING: dropping this table does NOT
+# error — cargo would silently resolve the unpatched crates.io releases.
+# CI guards this with `cargo tree -i oci-client` (see verify workflow).
+[patch.crates-io]
+oci-client = { path = "external/ocx/external/rust-oci-client" }
+docker_credential = { path = "external/ocx/external/docker_credential" }
+
+# Deny warnings for this package only. Cargo applies --cap-lints to registry
+# and git deps but NOT path deps; a blanket RUSTFLAGS=-D warnings would
+# promote the vendored forks' upstream warnings to hard errors.
+[lints.rust]
+warnings = "deny"

@@ -1,0 +1,6 @@
+[toolchain]
+channel = "1.95.0"
+profile = "default"
+components = ["rustfmt", "clippy"]
+# Keep the channel in sync with external/ocx/rust-toolchain.toml when bumping
+# the submodule. No extra targets — cross-compiles happen in CI (zigbuild/xwin).

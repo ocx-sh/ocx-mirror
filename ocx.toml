@@ -1,0 +1,5 @@
+[tools]
+go-task = "ocx.sh/go-task:3"
+git-cliff = "ocx.sh/git-cliff:2"
+uv = "ocx.sh/uv:0"
+lychee = "ocx.sh/lychee:0"

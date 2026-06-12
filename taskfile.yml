@@ -1,0 +1,77 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
+
+includes:
+  rust: ./taskfiles/rust.taskfile.yml
+  release: ./taskfiles/release.taskfile.yml
+  docs: ./taskfiles/docs.taskfile.yml
+  test:
+    taskfile: ./test/taskfile.yml
+    dir: ./test
+
+tasks:
+  ocx:index-update:
+    desc: Updates this repository's index lock.
+    cmds:
+      - rm -rf .ocx/index
+      - ocx index update go-task:3 git-cliff:2 uv:0 lychee:0
+
+  checkpoint:
+    cmds:
+      - if: '! [[ $(git show -s --format=%s HEAD) == "Checkpoint" ]]'
+        cmd: git commit --allow-empty -m "Checkpoint"
+      - cmd: git add .
+      - cmd: git commit --amend --no-edit --allow-empty
+
+  check:
+    cmd: cargo check
+
+  run:
+    desc: Build and run ocx-mirror (pass args after --)
+    cmd: cargo run --release --bin ocx-mirror -- {{.CLI_ARGS}}
+
+  default:
+    deps:
+      - task: rust:format:check
+      - task: rust:clippy:check
+      - task: check
+
+  # Shared internal helpers (called by subsystem taskfiles via :prefix)
+  # Convention: dot-prefix (.name) for internal tasks, like GitLab CI hidden jobs.
+  .ensure-cargo-tool:
+    internal: true
+    status:
+      - '{{.TOOL}} --version'
+    cmds:
+      - cargo install --locked {{.CRATE | default .TOOL}}
+
+  # Two-phase verify: parallel lint, then sequential build+test
+  verify:
+    desc: Full quality gate
+    summary: |
+      Phase 1 (parallel): format, clippy
+      Phase 2 (sequential): license, build, unit tests, acceptance tests
+      Use `task --force verify` to bypass caching.
+      Use `task --status verify` to check freshness without running.
+    cmds:
+      - task: .verify:lint
+      - task: .verify:build-test
+
+  .verify:lint:
+    internal: true
+    deps:
+      - task: rust:format:check
+      - task: rust:clippy:check
+
+  .verify:build-test:
+    internal: true
+    cmds:
+      - task: rust:license:check
+      - task: rust:license:deps
+      - task: rust:build
+      - task: rust:test:unit
+      - task: test:parallel

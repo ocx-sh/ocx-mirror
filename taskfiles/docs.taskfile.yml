@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  serve:
+    desc: Serve the mkdocs site locally (http://127.0.0.1:8000)
+    cmd: uv run --with mkdocs-material mkdocs serve
+
+  build:
+    desc: Build the mkdocs site (strict — broken nav/links fail)
+    cmd: uv run --with mkdocs-material mkdocs build --strict
+
+  lint:links:
+    desc: Check external links in the docs
+    cmd: lychee --no-progress docs/
