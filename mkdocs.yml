@@ -1,0 +1,49 @@
+# yaml-language-server: $schema=https://squidfunk.github.io/mkdocs-material/schema.json
+
+site_name: ocx-mirror
+site_description: "Mirror upstream tool releases into OCI registries as OCX packages"
+site_url: https://ocx-sh.github.io/ocx-mirror/
+repo_url: https://github.com/ocx-sh/ocx-mirror
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - content.code.copy
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Reference:
+      - mirror.yml: reference/mirror-yml.md
+      - CLI: reference/cli.md
+      - Environment: reference/environment.md
+  - Changelog: changelog.md
