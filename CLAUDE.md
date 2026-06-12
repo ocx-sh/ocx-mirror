@@ -67,8 +67,29 @@ Releases: `task release:prepare` → human reviews → commit + tag + push
 (see README.md).
 
 Rules in `.claude/rules/` auto-load by path (`quality-rust`, `quality-core`,
-`quality-python`, `subsystem-mirror`). Design records live in
+`quality-python`, `subsystem-mirror`, `workflow-*`,
+`meta-plan-status`). Design records live in
 `.claude/artifacts/` (ADRs and design specs moved from the ocx mono-repo).
+
+## Skills & Workflow
+
+Every task starts with
+[workflow-intent.md](./.claude/rules/workflow-intent.md) — classify
+(feature/bugfix/refactor), check GitHub for related issues/PRs, route to
+`workflow-feature.md` / `workflow-bugfix.md` / `workflow-refactor.md`.
+
+Skills in `.claude/skills/` (ported from ocx): `/architect`,
+`/swarm-plan`, `/swarm-execute`, `/swarm-review`, `/commit`, `/finalize`.
+Worker agents the swarm skills spawn live in `.claude/agents/`.
+
+Planning flow: ADR → Design Spec → Plan → Implementation. Templates →
+`.claude/templates/artifacts/`; durable artifacts → `.claude/artifacts/`;
+executable plans + status tracking → `.claude/state/plans/`
+([meta-plan-status.md](./.claude/rules/meta-plan-status.md)).
+
+Dev cycle: `/commit` (working phase, rolling Checkpoints) →
+`/finalize` (clean conventional commits, fast-forward onto main). Full
+model → [workflow-git.md](./.claude/rules/workflow-git.md).
 
 > Shared-rule distribution via grimoire packages is a planned follow-up;
 > until then rules are plain copies from ocx — keep edits upstream-compatible.
