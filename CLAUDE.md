@@ -21,6 +21,7 @@ same authors, same conventions. Architecture rule:
 | `test/` | pytest acceptance harness (Docker registry on :5000) |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
+| `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package describe` in `oci-publish.yml` (frontmatter = title/description/keywords) |
 | `src/command/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
 
 ## Dependency model (read before touching Cargo.toml)

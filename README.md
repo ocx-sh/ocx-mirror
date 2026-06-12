@@ -1,4 +1,10 @@
+<div align="center">
+
+<img src="./assets/logo.svg" width="192" />
+
 # ocx-mirror
+
+</div>
 
 Mirror upstream tool releases (GitHub Releases, URL indexes) into any OCI
 registry as [OCX](https://github.com/ocx-sh/ocx) packages. YAML-configured,
