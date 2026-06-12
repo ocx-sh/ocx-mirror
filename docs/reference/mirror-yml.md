@@ -1,7 +1,3 @@
----
-layout: doc
-outline: deep
----
 # mirror.yml Reference
 
 `mirror.yml` describes one tool to mirror — where to fetch upstream releases, which platforms to build for, how to test each bundle, and how to report results. The file is consumed by `ocx-mirror sync`, `ocx-mirror check`, and all `ocx-mirror pipeline` subcommands.
@@ -15,7 +11,7 @@ outline: deep
 | `source` | object | Yes | Upstream release source ([GitHub Releases][github-releases] or URL index) |
 | `assets` | object | Yes | Platform → regex list mapping for selecting upstream release archives |
 | `asset_type` | string | No | `Archive` (default) or `Binary` |
-| `cascade` | boolean | No | Cascade rolling tags on push (`false` by default) |
+| `cascade` | boolean | No | Cascade rolling tags on push (`true` by default) |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
 | `verify` | object | No | Checksum verification options |
 | `concurrency` | object | No | Parallel download and push limits |
@@ -58,6 +54,9 @@ tests:
 ## `platforms` {#platforms}
 
 Declares the GHA runner and container matrix for the generated workflow. Each key is a platform slug in `<os>/<arch>` form.
+
+!!! warning "Container legs are currently rejected by the renderer"
+    `pipeline generate ci` is native-only after the setup-ocx migration: a spec that declares `containers:` is rejected with exit 64. The `containers` fields below remain part of the spec schema but cannot be used with the current renderer.
 
 ```yaml
 platforms:
@@ -177,9 +176,8 @@ ocx_mirror:
 
 When all Linux platforms are container-less (native-only mirror), `release_tag` is optional and `rev` alone is sufficient.
 
-::: info How ocx-mirror is installed in CI
-Generated `discover`, `prepare`, `push`, and `notify` jobs install `ocx-mirror` via `cargo install --git ... --rev ${rev}`, cached by [`Swatinem/rust-cache`][swatinem-rust-cache]. A cold install takes roughly 2–3 minutes; a cache hit takes roughly 5 seconds.
-:::
+!!! info "How ocx-mirror is installed in CI"
+    Generated jobs install the toolchain via the [`ocx-sh/setup-ocx`][setup-ocx] action, which activates the mirror repository's project toolchain (`ocx.toml`) onto `PATH` — `ocx-mirror` and `ocx` both come from there.
 
 ## `notify` {#notify}
 
@@ -246,18 +244,18 @@ target:
   repository: cmake
 
 source:
-  github_release:
-    owner: Kitware
-    repo: CMake
-    tag_pattern: "v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
 
 assets:
   linux/amd64:
-    - "cmake-{{ version }}-linux-x86_64\\.tar\\.gz$"
+    - "cmake-.*-linux-x86_64\\.tar\\.gz$"
   darwin/arm64:
-    - "cmake-{{ version }}-macos-universal\\.tar\\.gz$"
+    - "cmake-.*-macos-universal\\.tar\\.gz$"
   windows/amd64:
-    - "cmake-{{ version }}-windows-x86_64\\.zip$"
+    - "cmake-.*-windows-x86_64\\.zip$"
 
 cascade: true
 
@@ -270,9 +268,6 @@ tests:
 platforms:
   linux/amd64:
     runner: ubuntu-latest
-    containers:
-      - { image: "ubuntu:24.04", shell: bash }
-      - { image: "alpine:3.20",  shell: sh }
 
   darwin/arm64:
     runner: macos-latest
@@ -304,8 +299,8 @@ notify:
 [github-actions-secrets]: https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions
 [discord]: https://discord.com/developers/docs/resources/webhook
 [discord-snowflake]: https://discord.com/developers/docs/reference#snowflakes
-[swatinem-rust-cache]: https://github.com/Swatinem/rust-cache
+[setup-ocx]: https://github.com/ocx-sh/setup-ocx
 
 <!-- commands -->
-[cmd-pipeline]: ./command-line.md#ocx-mirror-pipeline
-[cmd-sync]: ./command-line.md#ocx-mirror-sync
+[cmd-pipeline]: ./cli.md#pipeline
+[cmd-sync]: ./cli.md#sync
