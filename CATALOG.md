@@ -1,10 +1,10 @@
 ---
-title: ocx-mirror
+title: OCX Mirror
 description: Mirror upstream tool releases into OCI registries as OCX packages
 keywords: [mirror, oci, registry, github-releases, ci, ocx]
 ---
 
-# ocx-mirror
+# OCX Mirror
 
 Mirror upstream tool releases — GitHub Releases or URL indexes — into any OCI
 registry as [OCX](https://github.com/ocx-sh/ocx) packages.
