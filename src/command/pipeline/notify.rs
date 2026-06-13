@@ -4,12 +4,12 @@
 //! `ocx-mirror pipeline notify` — read `run-summary.json` and POST Discord
 //! webhook notifications per the D10 taxonomy.
 //!
-//! One embed per version (so a field never trips Discord's 1024-char cap with
-//! many releases), batched into messages of ≤10 embeds. Any message carrying a
-//! partial/failed version is prefixed with an in-message `<@id>` mention when
-//! `OCX_MIRROR_DISCORD_USER_ID` is set.
+//! One Discord message per published version (one embed per message). Any
+//! message carrying a partial/failed version is prefixed with an in-message
+//! `<@id>` mention when `OCX_MIRROR_DISCORD_USER_ID` is set.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ocx_lib::cli::DataInterface;
 
@@ -87,7 +87,13 @@ impl Notify {
             ))
         })?;
 
-        for payload in &messages {
+        for (index, payload) in messages.iter().enumerate() {
+            // Proactive rate-limit pacing: small inter-message delay between
+            // consecutive POSTs. Skipped before the first message so single-
+            // message runs incur no delay.
+            if index > 0 {
+                tokio::time::sleep(INTER_MESSAGE_DELAY).await;
+            }
             discord::post(&webhook_url, payload).await?;
         }
         Ok(())
@@ -97,43 +103,39 @@ impl Notify {
 /// Maximum length of a single Discord embed field value.
 const DISCORD_FIELD_VALUE_LIMIT: usize = 1024;
 
-/// Maximum embeds Discord accepts in a single webhook message.
-const MAX_EMBEDS_PER_MESSAGE: usize = 10;
+/// Proactive inter-message delay between consecutive webhook POSTs.
+///
+/// One message per version multiplies POST count on backfills. A 750 ms gap
+/// between messages stays well within Discord's per-webhook rate limit while
+/// keeping CI notification latency acceptable for typical runs (1–5 versions).
+/// Skipped before the first message so single-message runs incur no delay.
+const INTER_MESSAGE_DELAY: Duration = Duration::from_millis(750);
 
 /// Build the Discord messages for a run.
 ///
-/// Emits one embed per version that has rows (pushed / failed / excluded),
-/// batched into messages of ≤10 embeds. A message that carries any
-/// partial/failed version is prefixed with `<@id>` (scoped via
+/// Emits one `DiscordWebhookPayload` per version that has rows (pushed /
+/// failed / excluded) — exactly one embed per message. A message that carries
+/// a partial/failed version is prefixed with `<@id>` (scoped via
 /// `allowed_mentions`) when `user_id` is set. Returns an empty vec when no
 /// version is notifiable (caller treats that as silent).
+///
+/// The author strip and thumbnail are attached only to the **first emitted**
+/// embed so a multi-version run does not render a column of repeated logos.
 fn build_messages(summary: &RunSummary, user_id: Option<&str>) -> Vec<DiscordWebhookPayload> {
-    let mut embeds: Vec<(DiscordEmbed, bool)> = Vec::new();
+    let mut messages: Vec<DiscordWebhookPayload> = Vec::new();
     for version in &summary.versions {
-        // Decorate the first *emitted* embed with the author strip + thumbnail
-        // so a multi-version run doesn't render a column of repeated logos.
-        // Keyed on `embeds.is_empty()`, not the loop index: versions are stored
+        // Decorate the first *emitted* embed with the author strip + thumbnail.
+        // Keyed on `messages.is_empty()`, not the loop index: versions are stored
         // oldest-first, so versions[0] is often an already-published
         // SkippedExisting version that yields no embed — the decoration must
         // land on the first version that actually produces one.
-        if let Some(embed) = build_version_embed(summary, version, embeds.is_empty()) {
+        let is_first = messages.is_empty();
+        if let Some(embed) = build_version_embed(summary, version, is_first) {
             let is_red = matches!(version.status, VersionStatus::Partial | VersionStatus::Failed);
-            embeds.push((embed, is_red));
-        }
-    }
-    if embeds.is_empty() {
-        return Vec::new();
-    }
-
-    embeds
-        .chunks(MAX_EMBEDS_PER_MESSAGE)
-        .map(|chunk| {
-            let chunk_has_red = chunk.iter().any(|(_, red)| *red);
-            let embeds: Vec<DiscordEmbed> = chunk.iter().map(|(embed, _)| embed.clone()).collect();
-            // Ping only when the message carries a failed/partial version AND a
-            // user id is configured. `parse: []` + explicit `users` scopes the
-            // ping to that one user (no @everyone / role escalation).
-            let (content, allowed_mentions) = match user_id.filter(|_| chunk_has_red) {
+            // Ping only when this version is failed/partial AND a user id is
+            // configured. `parse: []` + explicit `users` scopes the ping to
+            // that one user (no @everyone / role escalation).
+            let (content, allowed_mentions) = match user_id.filter(|_| is_red) {
                 Some(id) => (
                     Some(format!("<@{id}>")),
                     Some(AllowedMentions {
@@ -143,13 +145,14 @@ fn build_messages(summary: &RunSummary, user_id: Option<&str>) -> Vec<DiscordWeb
                 ),
                 None => (None, None),
             };
-            DiscordWebhookPayload {
-                embeds,
+            messages.push(DiscordWebhookPayload {
+                embeds: vec![embed],
                 content,
                 allowed_mentions,
-            }
-        })
-        .collect()
+            });
+        }
+    }
+    messages
 }
 
 /// Build the embed for a single version, or `None` when it has no rows to show
@@ -702,10 +705,12 @@ mod tests {
         assert!(messages[0].allowed_mentions.is_some());
     }
 
-    // ── Per-version embeds + ≤10/message batching ──────────────────────────
+    // ── Per-version messages (C1: one message per version) ────────────────
 
     #[test]
-    fn one_embed_per_version() {
+    fn one_message_per_version() {
+        // C1: 2 published versions → 2 messages, each with exactly 1 embed.
+        // OLD behavior (now rejected): 2 versions → 1 message with 2 embeds.
         let versions = vec![
             {
                 let mut v = version(VersionStatus::Published, "3.7.0");
@@ -720,14 +725,17 @@ mod tests {
         ];
         let summary = run_summary(versions, true, false);
         let messages = build_messages(&summary, None);
-        assert_eq!(messages.len(), 1, "two versions fit in one message");
-        assert_eq!(messages[0].embeds.len(), 2, "one embed per version");
+        assert_eq!(messages.len(), 2, "2 published versions must produce 2 messages");
+        assert_eq!(messages[0].embeds.len(), 1, "each message carries exactly 1 embed");
+        assert_eq!(messages[1].embeds.len(), 1, "each message carries exactly 1 embed");
         assert_eq!(messages[0].embeds[0].title, "ocx.sh/shfmt: 3.7.0 published");
-        assert_eq!(messages[0].embeds[1].title, "ocx.sh/shfmt: 3.8.0 published");
+        assert_eq!(messages[1].embeds[0].title, "ocx.sh/shfmt: 3.8.0 published");
     }
 
     #[test]
     fn skipped_existing_versions_produce_no_embed() {
+        // C1: a skipped-existing version with no rows yields no message.
+        // The one published version produces 1 message with 1 embed.
         let versions = vec![
             {
                 let mut v = version(VersionStatus::Published, "3.8.0");
@@ -738,13 +746,15 @@ mod tests {
         ];
         let summary = run_summary(versions, true, false);
         let messages = build_messages(&summary, None);
-        assert_eq!(messages[0].embeds.len(), 1, "skipped-existing version yields no embed");
+        assert_eq!(messages.len(), 1, "skipped-existing version yields no message");
+        assert_eq!(messages[0].embeds.len(), 1, "the published version yields 1 embed");
         assert_eq!(messages[0].embeds[0].title, "ocx.sh/shfmt: 3.8.0 published");
     }
 
     #[test]
-    fn embeds_batch_into_messages_of_at_most_ten() {
-        // 11 published versions → 2 messages (10 + 1).
+    fn each_published_version_is_its_own_message() {
+        // C1: 11 published versions → 11 messages, each with exactly 1 embed.
+        // OLD behavior (now rejected): 11 versions → 2 messages (10+1 batching).
         let versions: Vec<VersionSummary> = (0..11)
             .map(|i| {
                 let mut v = version(VersionStatus::Published, &format!("1.0.{i}"));
@@ -754,41 +764,80 @@ mod tests {
             .collect();
         let summary = run_summary(versions, true, false);
         let messages = build_messages(&summary, None);
-        assert_eq!(messages.len(), 2, "11 versions must spill into a second message");
-        assert_eq!(messages[0].embeds.len(), 10);
-        assert_eq!(messages[1].embeds.len(), 1);
+        assert_eq!(messages.len(), 11, "11 versions must produce 11 messages, not 2");
+        for (i, msg) in messages.iter().enumerate() {
+            assert_eq!(msg.embeds.len(), 1, "message {i} must carry exactly 1 embed");
+        }
+        // Oldest-first order preserved: first message is 1.0.0, last is 1.0.10.
+        assert!(
+            messages[0].embeds[0].title.contains("1.0.0"),
+            "first message must be for version 1.0.0: {}",
+            messages[0].embeds[0].title
+        );
+        assert!(
+            messages[10].embeds[0].title.contains("1.0.10"),
+            "last message must be for version 1.0.10: {}",
+            messages[10].embeds[0].title
+        );
     }
 
     #[test]
-    fn each_message_with_a_failure_carries_the_ping() {
+    fn only_failing_versions_message_carries_the_ping() {
+        // C1 + ping scoping: 3 versions where the middle one is Failed.
+        // → 3 messages; ONLY the failed version's message pings.
+        // The two green messages must have content == None.
         let id = "123456789012345678";
-        // 11 versions, the 11th (second message) is the only failure.
-        let mut versions: Vec<VersionSummary> = (0..10)
-            .map(|i| {
-                let mut v = version(VersionStatus::Published, &format!("1.0.{i}"));
-                v.platforms_pushed = vec!["linux/amd64".to_string()];
-                v
-            })
-            .collect();
-        let mut failing = version(VersionStatus::Failed, "1.0.99");
-        failing.platforms_failed = vec![PlatformFailure {
+        let mut published_v100 = version(VersionStatus::Published, "1.0.0");
+        published_v100.platforms_pushed = vec!["linux/amd64".to_string()];
+        let mut failed_v101 = version(VersionStatus::Failed, "1.0.1");
+        failed_v101.platforms_failed = vec![PlatformFailure {
             platform: "linux/amd64".to_string(),
             reason: "test_failed".to_string(),
             failed_tests: vec![],
             job_url: None,
         }];
-        versions.push(failing);
-        let summary = run_summary(versions, true, true);
+        let mut published_v102 = version(VersionStatus::Published, "1.0.2");
+        published_v102.platforms_pushed = vec!["linux/amd64".to_string()];
+        let summary = run_summary(vec![published_v100, failed_v101, published_v102], true, true);
         let messages = build_messages(&summary, Some(id));
-        assert_eq!(messages.len(), 2);
-        // First message is all green → no ping.
-        assert!(messages[0].content.is_none(), "all-green first message must not ping");
-        // Second message carries the failure → ping.
-        assert_eq!(messages[1].content.as_deref(), Some("<@123456789012345678>"));
+        assert_eq!(messages.len(), 3, "3 versions must produce 3 messages");
+        // Green version 1.0.0 → no ping.
+        assert!(
+            messages[0].content.is_none(),
+            "green 1.0.0 message must not carry a ping: {:?}",
+            messages[0].content
+        );
+        assert!(
+            messages[0].allowed_mentions.is_none(),
+            "green message must have no allowed_mentions"
+        );
+        // Failed version 1.0.1 → ping with scoped mentions.
+        assert_eq!(
+            messages[1].content.as_deref(),
+            Some("<@123456789012345678>"),
+            "failed 1.0.1 message must carry the ping"
+        );
+        assert!(
+            messages[1].allowed_mentions.is_some(),
+            "failed message must have scoped allowed_mentions"
+        );
+        // Green version 1.0.2 → no ping.
+        assert!(
+            messages[2].content.is_none(),
+            "green 1.0.2 message must not carry a ping: {:?}",
+            messages[2].content
+        );
+        assert!(
+            messages[2].allowed_mentions.is_none(),
+            "green message must have no allowed_mentions"
+        );
     }
 
     #[test]
-    fn only_first_embed_carries_author_and_thumbnail() {
+    fn only_first_message_carries_author_and_thumbnail() {
+        // C1 decoration rule: first *emitted* message's embed gets author + thumbnail;
+        // later messages' embeds do not.
+        // OLD test asserted first embed in a single message; now first of multiple messages.
         let mut summary = make_all_green_summary();
         summary.source_url = Some("https://github.com/mvdan/sh".to_string());
         summary.logo_url = Some("https://raw.githubusercontent.com/ocx-sh/mirror-shfmt/abc/logo.png".to_string());
@@ -798,38 +847,102 @@ mod tests {
             v
         });
         let messages = build_messages(&summary, None);
-        let embeds = &messages[0].embeds;
-        assert_eq!(embeds.len(), 2);
-        assert!(embeds[0].author.is_some(), "first embed carries the author strip");
-        assert!(embeds[0].thumbnail.is_some(), "first embed carries the thumbnail");
-        assert!(embeds[1].author.is_none(), "later embeds drop the author strip");
-        assert!(embeds[1].thumbnail.is_none(), "later embeds drop the thumbnail");
+        assert_eq!(messages.len(), 2, "2 versions must produce 2 messages");
+        // First message's embed is decorated.
+        assert_eq!(messages[0].embeds.len(), 1);
+        assert!(
+            messages[0].embeds[0].author.is_some(),
+            "first message's embed carries the author strip"
+        );
+        assert!(
+            messages[0].embeds[0].thumbnail.is_some(),
+            "first message's embed carries the thumbnail"
+        );
+        // Second message's embed is NOT decorated.
+        assert_eq!(messages[1].embeds.len(), 1);
+        assert!(
+            messages[1].embeds[0].author.is_none(),
+            "second message's embed must not carry author"
+        );
+        assert!(
+            messages[1].embeds[0].thumbnail.is_none(),
+            "second message's embed must not carry thumbnail"
+        );
     }
 
     #[test]
     fn first_emitted_embed_decorated_when_leading_version_yields_no_embed() {
-        // Regression: versions are stored oldest-first, so versions[0] is often
-        // an already-published SkippedExisting version that produces no embed.
-        // The author strip + thumbnail must decorate the first *emitted* embed,
-        // not summary.versions[0]. (Bug: decorate was keyed on the loop index,
-        // so the sole visible embed lost its author + thumbnail.)
+        // Regression guard: versions stored oldest-first; versions[0] is often
+        // a SkippedExisting that produces no message. The author strip + thumbnail
+        // must decorate the first *emitted* message, not summary.versions[0].
+        //
+        // Under the new C1 contract: 1 skipped + 1 published → 1 message (from
+        // the published version); its embed must carry author + thumbnail.
         let mut summary = make_all_green_summary();
         summary.source_url = Some("https://github.com/mvdan/sh".to_string());
         summary.logo_url = Some("https://raw.githubusercontent.com/ocx-sh/mirror-shfmt/abc/logo.png".to_string());
-        // Prepend an older, already-mirrored version with no rows → no embed.
+        // Prepend an older, already-mirrored version with no rows → no message.
         summary
             .versions
             .insert(0, version(VersionStatus::SkippedExisting, "3.6.0"));
         let messages = build_messages(&summary, None);
-        let embeds = &messages[0].embeds;
-        assert_eq!(embeds.len(), 1, "only the published version yields an embed");
+        assert_eq!(messages.len(), 1, "only the published version yields a message");
+        assert_eq!(messages[0].embeds.len(), 1);
         assert!(
-            embeds[0].author.is_some(),
-            "the first emitted embed must carry the author strip"
+            messages[0].embeds[0].author.is_some(),
+            "the first emitted message must carry the author strip"
         );
         assert!(
-            embeds[0].thumbnail.is_some(),
-            "the first emitted embed must carry the thumbnail"
+            messages[0].embeds[0].thumbnail.is_some(),
+            "the first emitted message must carry the thumbnail"
+        );
+    }
+
+    #[test]
+    fn each_message_has_correct_color_and_non_empty_url() {
+        // C1 acceptance (a): 3 published versions with distinct statuses →
+        // 3 messages; assert each message's single embed has the color matching
+        // that version's status AND a non-empty url.
+        let mut published_v100 = version(VersionStatus::Published, "1.0.0");
+        published_v100.platforms_pushed = vec!["linux/amd64".to_string()];
+        let mut partial_v101 = version(VersionStatus::Partial, "1.0.1");
+        partial_v101.platforms_pushed = vec!["linux/amd64".to_string()];
+        partial_v101.platforms_failed = vec![PlatformFailure {
+            platform: "darwin/arm64".to_string(),
+            reason: "test_failed".to_string(),
+            failed_tests: vec![],
+            job_url: None,
+        }];
+        let mut failed_v102 = version(VersionStatus::Failed, "1.0.2");
+        failed_v102.platforms_failed = vec![PlatformFailure {
+            platform: "linux/amd64".to_string(),
+            reason: "test_failed".to_string(),
+            failed_tests: vec![],
+            job_url: None,
+        }];
+        let summary = run_summary(vec![published_v100, partial_v101, failed_v102], true, true);
+        let messages = build_messages(&summary, None);
+        assert_eq!(messages.len(), 3, "3 versions must produce 3 messages");
+        // Message 0: Published → green.
+        let embed0 = &messages[0].embeds[0];
+        assert_eq!(embed0.color, colors::GREEN, "published version must be green");
+        assert!(
+            embed0.url.as_deref().is_some_and(|u| !u.is_empty()),
+            "published version embed must have a non-empty url"
+        );
+        // Message 1: Partial → yellow.
+        let embed1 = &messages[1].embeds[0];
+        assert_eq!(embed1.color, colors::YELLOW, "partial version must be yellow");
+        assert!(
+            embed1.url.as_deref().is_some_and(|u| !u.is_empty()),
+            "partial version embed must have a non-empty url"
+        );
+        // Message 2: Failed → red.
+        let embed2 = &messages[2].embeds[0];
+        assert_eq!(embed2.color, colors::RED, "failed version must be red");
+        assert!(
+            embed2.url.as_deref().is_some_and(|u| !u.is_empty()),
+            "failed version embed must have a non-empty url"
         );
     }
 
@@ -886,6 +999,34 @@ mod tests {
             let _ = stream.read(&mut buf).await;
             let response = format!("HTTP/1.1 {status_code} \r\nContent-Length: 0\r\n\r\n");
             let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        url
+    }
+
+    /// Spawn a minimal HTTP server that accepts one TCP connection per status code in
+    /// `statuses`, replying with `Connection: close` so reqwest opens a fresh connection
+    /// per request. Increments `served` on each accepted connection. Returns the server URL.
+    async fn sequence_status_server(
+        statuses: Vec<u16>,
+        served: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/webhook");
+
+        tokio::spawn(async move {
+            for status_code in statuses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = stream.read(&mut buf).await;
+                let response = format!("HTTP/1.1 {status_code} \r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(response.as_bytes()).await;
+                served.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
         });
 
         url
@@ -949,6 +1090,90 @@ mod tests {
         assert!(
             matches!(result, Err(MirrorError::WebhookPermissionDenied(_))),
             "403 must return WebhookPermissionDenied: {result:?}"
+        );
+    }
+
+    // B1: pacing loop — 2-version green summary → 2 POSTs with INTER_MESSAGE_DELAY between them.
+    #[tokio::test]
+    async fn notify_execute_posts_once_per_version_with_pacing() {
+        ensure_crypto_provider();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_url = sequence_status_server(vec![204, 204], served.clone()).await;
+        let _guard = WebhookEnvGuard::set(&server_url);
+
+        // Build a 2-version green summary.
+        let versions = vec![
+            {
+                let mut version_entry = version(VersionStatus::Published, "1.0.0");
+                version_entry.platforms_pushed = vec!["linux/amd64".to_string()];
+                version_entry
+            },
+            {
+                let mut version_entry = version(VersionStatus::Published, "1.0.1");
+                version_entry.platforms_pushed = vec!["linux/amd64".to_string()];
+                version_entry
+            },
+        ];
+        let summary = run_summary(versions, true, false);
+
+        let start = std::time::Instant::now();
+        let f = write_run_summary(&summary);
+        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let cmd = Notify {
+            run_summary: f.path().to_path_buf(),
+        };
+        let result = cmd.execute(&printer).await;
+        let elapsed = start.elapsed();
+        let _ = f;
+
+        assert!(matches!(result, Ok(())), "2-version green run must succeed: {result:?}");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "execute must POST exactly once per version (2 total)"
+        );
+        assert!(
+            elapsed >= INTER_MESSAGE_DELAY,
+            "pacing delay must be applied between messages; elapsed: {elapsed:?}, expected >= {INTER_MESSAGE_DELAY:?}"
+        );
+        // Exactly one delay must elapse: a regression that also delayed before the
+        // first message would push elapsed past two delays. Upper bound catches it
+        // while leaving a full INTER_MESSAGE_DELAY of slack for setup + I/O.
+        assert!(
+            elapsed < INTER_MESSAGE_DELAY * 2,
+            "only one inter-message delay must elapse (none before the first message); elapsed: {elapsed:?}, bound: {:?}",
+            INTER_MESSAGE_DELAY * 2
+        );
+    }
+
+    // B1: single-version run — no delay before the first (and only) message.
+    #[tokio::test]
+    async fn notify_execute_single_message_skips_pre_delay() {
+        ensure_crypto_provider();
+        let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_url = sequence_status_server(vec![204], served.clone()).await;
+        let _guard = WebhookEnvGuard::set(&server_url);
+
+        let summary = make_all_green_summary();
+        let start = std::time::Instant::now();
+        let f = write_run_summary(&summary);
+        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let cmd = Notify {
+            run_summary: f.path().to_path_buf(),
+        };
+        let result = cmd.execute(&printer).await;
+        let elapsed = start.elapsed();
+        let _ = f;
+
+        assert!(matches!(result, Ok(())), "single-version run must succeed: {result:?}");
+        assert_eq!(
+            served.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "execute must POST exactly once for a single-version summary"
+        );
+        assert!(
+            elapsed < INTER_MESSAGE_DELAY,
+            "no inter-message delay before the first (only) message; elapsed: {elapsed:?}, bound: {INTER_MESSAGE_DELAY:?}"
         );
     }
 

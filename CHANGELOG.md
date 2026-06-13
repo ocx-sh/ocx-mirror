@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Discord notify now sends one message per published version instead of batching up to 10 embeds; consecutive messages are paced and HTTP 429 rate-limits are retried per the `retry_after` hint (#10) *(mirror)*
+
 ## [0.4.0] - 2026-06-12
 
 ### Added

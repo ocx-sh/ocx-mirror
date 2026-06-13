@@ -101,7 +101,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 
 ### Discord notify
 
-`notify.discord.user_id` (snowflake, non-secret) is inlined by the renderer into the notify job env as `OCX_MIRROR_DISCORD_USER_ID`. `notify.rs` emits **one embed per version** (avoids Discord's 1024-char field cap), batched ≤10 embeds/message; a message carrying a partial/failed version is prefixed with a scoped `<@id>` mention. `discord.rs` carries `content` + `allowed_mentions` (`parse: []` + explicit `users` so only that user pings). 🔒 rows render `platforms_excluded`.
+`notify.discord.user_id` (snowflake, non-secret) is inlined by the renderer into the notify job env as `OCX_MIRROR_DISCORD_USER_ID`. `notify.rs` emits **one Discord message per published version** (one embed each — avoids Discord's 1024-char field cap and reads as a distinct notification per release); a message carrying a partial/failed version is prefixed with a scoped `<@id>` mention. Consecutive POSTs are paced (~750ms) and `discord.rs::post` retries HTTP 429 honoring `retry_after` (3 retries, capped) to stay under Discord's webhook rate limit. `discord.rs` carries `content` + `allowed_mentions` (`parse: []` + explicit `users` so only that user pings). 🔒 rows render `platforms_excluded`.
 
 ## Error Model
 

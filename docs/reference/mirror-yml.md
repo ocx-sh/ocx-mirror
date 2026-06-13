@@ -204,7 +204,7 @@ notify:
 
 **Messages:**
 
-The report posts **one embed per version** (so a release-heavy run never trips Discord's 1024-character field cap), batched into messages of at most 10 embeds. Each embed lists that version's platforms with a status chip:
+The report posts **one Discord message per published version** — a single embed each (so a release-heavy run never trips Discord's 1024-character field cap, and each release reads as its own notification). Consecutive messages are paced and a `429 Too Many Requests` is retried per Discord's `retry_after`, so a large backfill stays under the webhook rate limit. Each embed lists that version's platforms with a status chip:
 
 | Chip | Meaning |
 |------|---------|
