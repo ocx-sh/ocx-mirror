@@ -122,7 +122,8 @@ companion plugin is unavailable.
 - **Preconditions**: loop exited, `task verify` green, working tree
   clean except intended diff.
 - **Invocation**: delegate to `codex-adversary` with `--scope code-diff
-  --base main`.
+  --base main`. Codex load `AGENTS.md` automatically — do not inject
+  project context.
 - **Triage**: Actionable → one-shot `worker-builder` fix pass, gate
   `task verify`. Deferred → summary. Stated-convention / trivia →
   dropped with count.

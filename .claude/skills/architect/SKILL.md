@@ -40,6 +40,7 @@ Role: system design, technical specs, high-level architecture decisions for ocx-
 
 ## Tool Preferences
 
+- **Sequential Thinking MCP** — structured trade-off analysis, step-by-step reasoning
 - **Context7 MCP** (`mcp__context7__resolve-library-id` + docs query) — current crate API shape when design decision hinge on "what does crate X look like today". Training-data API knowledge decay fast. Fallback: WebFetch of `docs.rs`.
 - **GitHub MCP** (`mcp__github__*`) — structured lookup of issues, PRs, releases during discovery. Fallback: `gh` CLI.
 

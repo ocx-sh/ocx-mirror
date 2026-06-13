@@ -69,7 +69,7 @@ Releases: `task release:prepare` → human reviews → commit + tag + push
 
 Rules in `.claude/rules/` auto-load by path (`quality-rust`, `quality-core`,
 `quality-python`, `subsystem-mirror`, `workflow-*`,
-`meta-plan-status`). Design records live in
+`meta-plan-status`, `meta-ai-config`). Design records live in
 `.claude/artifacts/` (ADRs and design specs moved from the ocx mono-repo).
 
 ## Skills & Workflow
@@ -92,5 +92,10 @@ Dev cycle: `/commit` (working phase, rolling Checkpoints) →
 `/finalize` (clean conventional commits, fast-forward onto main). Full
 model → [workflow-git.md](./.claude/rules/workflow-git.md).
 
-> Shared-rule distribution via grimoire packages is a planned follow-up;
-> until then rules are plain copies from ocx — keep edits upstream-compatible.
+> The ported AI-config surface (skills, agents, most rules) is plain copies
+> from ocx; mirror-native files (`subsystem-mirror.md`, `meta-plan-status.md`,
+> `meta-ai-config.md`, `.claude/artifacts/`) are owned here.
+> [meta-ai-config.md](./.claude/rules/meta-ai-config.md) governs the port /
+> re-sync protocol and the adaptation list — register any new port in this file
+> the same commit it lands. Grimoire-package distribution is a planned
+> follow-up; until then keep ported edits upstream-compatible.
