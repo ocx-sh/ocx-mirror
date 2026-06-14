@@ -16,18 +16,21 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 
 | Path | Purpose |
 |------|---------|
-| `command/sync.rs` | Main sync command: spec → versions → filter → pipeline |
-| `command/target_registry.rs` | Fail-safe target-registry state loading (`list_target_tags`, `fetch_published_platforms`) shared by sync + plan; only authoritative not-found counts as absent (issue #157) |
-| `command/check.rs` | Dry-run sync |
-| `command/validate.rs` | Spec validation only |
-| `command/options.rs` | Shared `SyncOptions` (--exact-version, --latest, --fail-fast) |
-| `command/pipeline/mod.rs` | `Pipeline` subcommand dispatcher; routes to generate/plan/prepare/push/notify |
-| `command/pipeline/generate/mod.rs` | `generate` subgroup dispatcher |
-| `command/pipeline/generate/ci.rs` | `pipeline generate ci` — renderer + `--check` |
-| `command/pipeline/plan.rs` | `pipeline plan` — discover new work, emit plan.json (schema v2: entries carry `source_version`, `variant`, resolved per-platform `assets`) |
-| `command/pipeline/prepare.rs` | `pipeline prepare --version V [--plan plan.json]` — download + bundle; `--plan` builds from discover's resolved assets, no source re-crawl (issue #160) |
-| `command/pipeline/push.rs` | `pipeline push` — serial push driver, writes run-summary.json |
-| `command/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
+| `command.rs` | Top-level `Command` dispatcher: `Package` (subcommand group) + `Schema`; threads printer + progress |
+| `command/package/mod.rs` | `PackageCommand` dispatcher: routes sync/check/validate/pipeline |
+| `command/registry/mod.rs` | **Reserved** namespace (registry-to-registry mirroring); documented placeholder, no live verb — see `adr_cli_namespace_restructure.md` |
+| `command/package/sync.rs` | Main sync command: spec → versions → filter → pipeline |
+| `command/package/target_registry.rs` | Fail-safe target-registry state loading (`list_target_tags`, `fetch_published_platforms`) shared by sync + plan; only authoritative not-found counts as absent (issue #157) |
+| `command/package/check.rs` | Dry-run sync |
+| `command/package/validate.rs` | Spec validation only |
+| `command/package/options.rs` | Shared `SyncOptions` (--exact-version, --latest, --fail-fast) |
+| `command/package/pipeline/mod.rs` | `Pipeline` subcommand dispatcher; routes to generate/plan/prepare/push/notify |
+| `command/package/pipeline/generate/mod.rs` | `generate` subgroup dispatcher |
+| `command/package/pipeline/generate/ci.rs` | `pipeline generate ci` — renderer + `--check` |
+| `command/package/pipeline/plan.rs` | `pipeline plan` — discover new work, emit plan.json (schema v2: entries carry `source_version`, `variant`, resolved per-platform `assets`) |
+| `command/package/pipeline/prepare.rs` | `pipeline prepare --version V [--plan plan.json]` — download + bundle; `--plan` builds from discover's resolved assets, no source re-crawl (issue #160) |
+| `command/package/pipeline/push.rs` | `pipeline push` — serial push driver, writes run-summary.json |
+| `command/package/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
 | `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
 | `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex) |
 | `spec/target.rs` | `Target` (registry + repository) |
@@ -125,7 +128,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 
 ## Test Pipeline {#test-pipeline}
 
-`ocx-mirror pipeline` is a family of five subcommands that together implement per-mirror CI pipelines. The pipeline smoke-tests every `(version, platform)` pair before publishing to the registry, preventing broken packages from reaching users.
+`ocx-mirror package pipeline` is a family of five subcommands that together implement per-mirror CI pipelines. The pipeline smoke-tests every `(version, platform)` pair before publishing to the registry, preventing broken packages from reaching users.
 
 ### Subcommand contracts
 
@@ -155,7 +158,7 @@ concurrency:
 
 ### R4: Generated drift guard (`verify-generated.yml`)
 
-`pipeline generate ci` emits a third workflow, `.github/workflows/verify-generated.yml`, alongside `mirror.yml` + `describe.yml`. On `pull_request` + push to `main` it runs `ocx-mirror pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
+`pipeline generate ci` emits a third workflow, `.github/workflows/verify-generated.yml`, alongside `mirror.yml` + `describe.yml`. On `pull_request` + push to `main` it runs `ocx-mirror package pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
 
 **Pins are mirror-repo-owned.** Before diffing, `check_drift` normalizes every `uses: owner/action@<ref>` line (`normalize_for_drift` in `ci.rs`), stripping the `@<ref>` digest/tag and any trailing `# vX` comment. A downstream Renovate/Dependabot bump of an action pin therefore does **not** trip the guard — the mirror repo owns its pins. The `owner/action` identity is preserved, so swapping in a *different* action, or any change to step logic, still reds. Templates ship a known-good seed pin (incl. `ocx-sh/setup-ocx`, SHA-pinned) for the first render.
 

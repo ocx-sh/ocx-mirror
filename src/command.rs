@@ -2,6 +2,10 @@
 // Copyright 2026 The OCX Authors
 
 mod package;
+// Reserved namespace — registry-to-registry mirroring. Documented placeholder
+// only; no `Registry` arm on `Command` until the first subcommand lands.
+// See .claude/artifacts/adr_cli_namespace_restructure.md.
+mod registry;
 #[cfg(feature = "jsonschema")]
 mod schema;
 
