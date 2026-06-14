@@ -11,7 +11,8 @@
 | `source` | object | Yes | Upstream release source ([GitHub Releases][github-releases] or URL index) |
 | `assets` | object | Yes | Platform → regex list mapping for selecting upstream release archives |
 | `asset_type` | string | No | `Archive` (default) or `Binary` |
-| `cascade` | boolean | No | Cascade rolling tags on push (`true` by default) |
+| `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
+| `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
 | `verify` | object | No | Checksum verification options |
 | `concurrency` | object | No | Parallel download and push limits |
@@ -21,6 +22,31 @@
 | `notify` | object | No | Discord webhook notification settings |
 
 The `tests`, `platforms`, `ocx_mirror`, and `notify` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
+
+## `build_timestamp` & GC-safe publishing {#build-timestamp}
+
+`build_timestamp` controls the tag a mirrored version is published under. Each `(version, platform)` push writes a **primary tag** for that version; with `cascade: true` (the default) it also re-points the **rolling tags** `X.Y`, `X`, and `latest` to the newest build.
+
+| Value | Primary tag for `3.28.0` | Effect |
+|-------|--------------------------|--------|
+| `datetime` (default) | `3.28.0_20260310142359` | Unique per build (UTC `YYYYMMDDHHMMSS`). Never re-pointed. |
+| `date` | `3.28.0_20260310` | Unique per build-day (UTC `YYYYMMDD`). |
+| `none` | `3.28.0` | Bare version tag. Re-published in place on every rebuild. |
+
+Pre-releases keep their identifier: `3.28.0-rc1` → `3.28.0-rc1_20260310142359`. A version that already carries a build suffix is rejected rather than double-stamped.
+
+!!! warning "The garbage-collection hazard of `build_timestamp: none`"
+    A digest is immutable, but a *tag* is not. Re-publishing a version under `build_timestamp: none` — or moving a rolling cascade tag to a newer build — re-points the tag and leaves the previous digest **untagged**. Once untagged, registry garbage collection can reap it, breaking any consumer `ocx.lock` pinned to that `@sha256:` digest. "Digests are immutable" only holds until GC runs.
+
+    With `datetime` or `date`, every build also lands under its own unique `X.Y.Z_<ts>` tag that is never re-pointed, so the digest stays permanently reachable even as the rolling cascade tags float. This is the **GC-safe** choice. Trade-off: storage grows with every build, and the version tag is no longer bare.
+
+**Choosing a value:**
+
+- **`datetime` (default)** — GC-safe, no registry configuration required. Recommended for any mirror whose packages are pinned by digest downstream.
+- **`date`** — GC-safe across days with coarser tags. Caveat: a second build on the same UTC day re-points that day's tag, orphaning the earlier same-day digest — the within-day hazard remains.
+- **`none`** — bare tags only. Use exclusively when the target registry protects referenced digests from GC: a retention policy that keeps untagged manifests still referenced by consumers, an OCI referrers/lock guard, or a guarantee that a version is never re-published (each `X.Y.Z` treated as immutable upstream).
+
+`ocx-mirror` emits a parse-time warning when `build_timestamp: none` is combined with `cascade`, so the hazard surfaces on every `validate`, `check`, `sync`, and `pipeline` run. It is advisory, not fatal — a registry with retention configured can use `none` safely.
 
 ## `tests` {#tests}
 

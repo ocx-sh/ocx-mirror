@@ -77,6 +77,9 @@ ocx-mirror package sync mirror.yml --latest
 !!! tip "GitHub API rate limits"
     Release listing is unauthenticated by default (60 requests/hour). Set `GITHUB_TOKEN` to raise the quota to 5 000 requests/hour — required for backfilling release-heavy tools.
 
+!!! warning "Tag re-points and digest pins"
+    By default each build is published under a unique `X.Y.Z_<timestamp>` tag, so a re-publish never fully orphans a prior digest — safe for consumers that pin by `@sha256:`. Setting `build_timestamp: none` publishes bare `X.Y.Z` tags that re-point in place; combined with `cascade`, a rebuild can leave the old digest exposed to registry garbage collection. Read [build_timestamp & GC-safe publishing][ref-build-timestamp] before turning timestamps off.
+
 ## Step 5: Scaffold a mirror repository {#pipeline}
 
 One-shot syncs work, but a mirror should run on a schedule and never publish a broken binary. `pipeline generate ci` renders complete [GitHub Actions][github-actions] workflows that discover new versions, build bundles, smoke-test every `(version, platform)` pair on a real runner, and only push the green ones.
@@ -126,5 +129,6 @@ Finally, configure two repository secrets so the push job can log in to the targ
 
 <!-- internal -->
 [ref-mirror-yml]: ./reference/mirror-yml.md
+[ref-build-timestamp]: ./reference/mirror-yml.md#build-timestamp
 [ref-cli]: ./reference/cli.md
 [ref-environment]: ./reference/environment.md
