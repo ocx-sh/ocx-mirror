@@ -36,6 +36,7 @@ pub use verify_config::VerifyConfig;
 pub(crate) use versions_config::BackfillOrder;
 pub use versions_config::VersionsConfig;
 
+use ocx_lib::log;
 use ocx_lib::package::version::Version;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -238,6 +239,22 @@ impl MirrorSpec {
         }
 
         errors
+    }
+
+    /// Whether this spec publishes cascade tags without a build timestamp.
+    ///
+    /// With `cascade: true` and `build_timestamp: none`, every re-publish of a
+    /// version re-points the bare `X.Y.Z` tag (and the rolling `X.Y` / `X` /
+    /// `latest` tags) to a fresh digest. The prior digest is then only reachable
+    /// by content address, so once the registry runs garbage collection it can be
+    /// reaped — breaking any consumer `ocx.lock` pinned to that `@sha256:` digest.
+    /// A non-`none` `build_timestamp` keeps each build under a unique, permanently
+    /// retained `X.Y.Z_<ts>` tag, so the digest never fully orphans (issue #12).
+    ///
+    /// This is an advisory hazard, not a hard error: registry-side retention or a
+    /// referrers policy can make `none` safe, so `load_spec` warns rather than rejects.
+    fn cascade_without_build_stamp(&self) -> bool {
+        self.cascade && self.build_timestamp == BuildTimestampFormat::None
     }
 
     /// Whether `platform` applies to `version` under the per-platform
@@ -743,6 +760,17 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
         return Err(MirrorError::SpecInvalid(errors));
     }
 
+    // Advisory (not fatal): cascade publishing without a build timestamp lets a
+    // re-publish orphan the prior digest, which registry GC can reap and break
+    // `@sha256:` pins. See `cascade_without_build_stamp` and the build_timestamp
+    // reference for GC-safe options (issue #12).
+    if spec.cascade_without_build_stamp() {
+        log::warn!(
+            "[{}] build_timestamp: none with cascade publishing — re-pointing a cascade tag orphans the prior digest, which registry GC can reap and break @sha256: pins; set build_timestamp: date|datetime or configure registry retention (see the mirror.yml build_timestamp reference)",
+            spec.name
+        );
+    }
+
     Ok(spec)
 }
 
@@ -842,6 +870,43 @@ fn shallow_merge(base: &mut serde_yaml_ng::Value, overlay: serde_yaml_ng::Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Parse a spec whose only varying lines are `cascade` / `build_timestamp`,
+    /// for exercising [`MirrorSpec::cascade_without_build_stamp`].
+    fn spec_with(cascade: &str, build_timestamp: &str) -> MirrorSpec {
+        let yaml = format!(
+            r#"
+name: gctest
+target:
+  registry: ocx.sh
+  repository: gctest
+source:
+  type: github_release
+  owner: o
+  repo: r
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "x\\.tar\\.gz"
+cascade: {cascade}
+build_timestamp: {build_timestamp}
+"#
+        );
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn cascade_without_build_stamp_flags_only_none_plus_cascade() {
+        // The GC-unsafe combination: re-pointable cascade tags, no unique stamp.
+        assert!(spec_with("true", "none").cascade_without_build_stamp());
+
+        // A retained per-build tag keeps every digest reachable — safe.
+        assert!(!spec_with("true", "date").cascade_without_build_stamp());
+        assert!(!spec_with("true", "datetime").cascade_without_build_stamp());
+
+        // No cascade means no rolling tag to re-point — safe even with `none`.
+        assert!(!spec_with("false", "none").cascade_without_build_stamp());
+    }
 
     #[test]
     fn parse_github_release_spec() {
