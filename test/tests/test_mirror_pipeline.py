@@ -152,7 +152,7 @@ def test_pipeline_generate_ci_produces_yaml(
     output_dir.mkdir()
 
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "generate", "ci",
+        [str(mirror_binary), "package", "pipeline", "generate", "ci",
          "--spec", str(pipeline_spec)],
         cwd=str(output_dir),
         capture_output=True,
@@ -183,7 +183,7 @@ def test_pipeline_plan_exits_zero_or_unimplemented(
     Phase 4+: emits JSON with has_new and versions fields.
     """
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "plan",
+        [str(mirror_binary), "package", "pipeline", "plan",
          "--spec", str(pipeline_spec)],
         capture_output=True,
         text=True,
@@ -211,7 +211,7 @@ def test_pipeline_prepare_exits_unimplemented(
     Phase 4+: produces bundles in work_dir.
     """
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "prepare",
+        [str(mirror_binary), "package", "pipeline", "prepare",
          "--spec", str(pipeline_spec),
          "--version", "3.7.0",
          "--work-dir", str(mirror_work_dir)],
@@ -245,7 +245,7 @@ def test_pipeline_push_exits_unimplemented(
     summary_path = mirror_work_dir / "run-summary.json"
 
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "push",
+        [str(mirror_binary), "package", "pipeline", "push",
          "--spec", str(pipeline_spec),
          "--junit-dir", str(junit_dir),
          "--bundles-dir", str(bundles_dir),
@@ -300,7 +300,7 @@ def test_pipeline_notify_stub_is_callable(
     summary_path.write_text(json.dumps(summary))
 
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "notify",
+        [str(mirror_binary), "package", "pipeline", "notify",
          "--run-summary", str(summary_path),
          "--webhook-env-var", "DISCORD_WEBHOOK_URL"],
         capture_output=True,
@@ -324,7 +324,7 @@ def test_pipeline_notify_stub_is_callable(
 def test_mirror_binary_has_pipeline_subcommand(mirror_binary: Path) -> None:
     """§3.8: ocx-mirror binary exposes 'pipeline' subcommand group."""
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "--help"],
+        [str(mirror_binary), "package", "pipeline", "--help"],
         capture_output=True,
         text=True,
     )
@@ -338,7 +338,7 @@ def test_mirror_binary_has_pipeline_subcommand(mirror_binary: Path) -> None:
 def test_mirror_binary_has_pipeline_generate_ci_subcommand(mirror_binary: Path) -> None:
     """§3.8: pipeline generate ci subcommand is registered."""
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "generate", "ci", "--help"],
+        [str(mirror_binary), "package", "pipeline", "generate", "ci", "--help"],
         capture_output=True,
         text=True,
     )
@@ -350,7 +350,7 @@ def test_mirror_binary_has_pipeline_generate_ci_subcommand(mirror_binary: Path) 
 def test_mirror_binary_has_pipeline_plan_subcommand(mirror_binary: Path) -> None:
     """§3.8: pipeline plan subcommand is registered."""
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "plan", "--help"],
+        [str(mirror_binary), "package", "pipeline", "plan", "--help"],
         capture_output=True,
         text=True,
     )
@@ -362,7 +362,7 @@ def test_mirror_binary_has_pipeline_plan_subcommand(mirror_binary: Path) -> None
 def test_mirror_binary_has_pipeline_prepare_subcommand(mirror_binary: Path) -> None:
     """§3.8: pipeline prepare subcommand is registered."""
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "prepare", "--help"],
+        [str(mirror_binary), "package", "pipeline", "prepare", "--help"],
         capture_output=True,
         text=True,
     )
@@ -374,7 +374,7 @@ def test_mirror_binary_has_pipeline_prepare_subcommand(mirror_binary: Path) -> N
 def test_mirror_binary_has_pipeline_push_subcommand(mirror_binary: Path) -> None:
     """§3.8: pipeline push subcommand is registered."""
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "push", "--help"],
+        [str(mirror_binary), "package", "pipeline", "push", "--help"],
         capture_output=True,
         text=True,
     )
@@ -386,7 +386,7 @@ def test_mirror_binary_has_pipeline_push_subcommand(mirror_binary: Path) -> None
 def test_mirror_binary_has_pipeline_notify_subcommand(mirror_binary: Path) -> None:
     """§3.8: pipeline notify subcommand is registered."""
     result = subprocess.run(
-        [str(mirror_binary), "pipeline", "notify", "--help"],
+        [str(mirror_binary), "package", "pipeline", "notify", "--help"],
         capture_output=True,
         text=True,
     )

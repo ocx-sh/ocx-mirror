@@ -48,7 +48,7 @@ The full field list lives in the [mirror.yml reference][ref-mirror-yml].
 ## Step 2: Validate the spec {#validate}
 
 ```sh
-ocx-mirror validate mirror.yml
+ocx-mirror package validate mirror.yml
 ```
 
 Schema errors, invalid regexes, and missing capture groups are reported with exit code 65 — nothing touches the network.
@@ -58,7 +58,7 @@ Schema errors, invalid regexes, and missing capture groups are reported with exi
 `check` runs the full discovery pass — list upstream releases, resolve assets per platform, compare against the tags already in the target registry — without downloading or pushing anything:
 
 ```sh
-ocx-mirror check mirror.yml
+ocx-mirror package check mirror.yml
 ```
 
 The output is a table of `(version, platform)` pairs and what a real run would do, followed by a `total / pushed / skipped / failed` summary. Use `--latest` to restrict to the highest version, or `--version 3.10.0` for one exact version.
@@ -66,7 +66,7 @@ The output is a table of `(version, platform)` pairs and what a real run would d
 ## Step 4: Mirror {#sync}
 
 ```sh
-ocx-mirror sync mirror.yml --latest
+ocx-mirror package sync mirror.yml --latest
 ```
 
 `sync` downloads the matched assets, bundles them as OCX packages, and pushes one tag per `(version, platform)` — concurrently for downloads, sequentially for pushes so rolling tags cascade in semver order. Drop `--latest` to backfill every version the spec's filters admit.
@@ -98,7 +98,7 @@ platforms:
 Then, from the root of the mirror repository:
 
 ```sh
-ocx-mirror pipeline generate ci
+ocx-mirror package pipeline generate ci
 ```
 
 This writes three workflows under `.github/workflows/`:
@@ -109,7 +109,7 @@ This writes three workflows under `.github/workflows/`:
 | `describe.yml` | Publishes catalog metadata (README + logo) to the registry |
 | `verify-generated.yml` | Drift guard — fails CI when generated workflows are hand-edited |
 
-The workflows are generated files: edit the spec, re-run `ocx-mirror pipeline generate ci`, and commit the result. `--check` mode (used by the drift guard) exits 65 when the committed files no longer match the spec.
+The workflows are generated files: edit the spec, re-run `ocx-mirror package pipeline generate ci`, and commit the result. `--check` mode (used by the drift guard) exits 65 when the committed files no longer match the spec.
 
 Finally, configure two repository secrets so the push job can log in to the target registry: `OCX_MIRROR_REGISTRY_USER` and `OCX_MIRROR_REGISTRY_TOKEN`. Without them the pipeline still runs — in test/validation mode with the registry push skipped.
 

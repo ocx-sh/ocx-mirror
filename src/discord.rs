@@ -3,7 +3,7 @@
 
 //! Discord webhook payload types and HTTP POST helper.
 //!
-//! Used by `ocx-mirror pipeline notify` to report pipeline outcomes.
+//! Used by `ocx-mirror package pipeline notify` to report pipeline outcomes.
 //!
 //! # Payload shape
 //!

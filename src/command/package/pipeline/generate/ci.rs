@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline generate ci` — renders the GHA workflow and support
+//! `ocx-mirror package pipeline generate ci` — renders the GHA workflow and support
 //! scripts from `mirror.yml` using baked-in templates.
 
 use std::collections::BTreeMap;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 
-use crate::command::options::OutputFormat;
+use crate::command::package::options::OutputFormat;
 use crate::error::MirrorError;
 use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
 
@@ -442,7 +442,7 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
 /// Lighter than `mirror.yml`: only the release-tag + target-registry
 /// placeholders need substitution. The workflow itself triggers on changes to
 /// `CATALOG.md`, `logo.*`, or `mirror.yml` and invokes
-/// `ocx-mirror pipeline describe` to publish the README + logo to the
+/// `ocx-mirror package pipeline describe` to publish the README + logo to the
 /// `__ocx.desc` referrer tag on the target repository.
 fn render_describe(spec: &MirrorSpec) -> String {
     let release_tag = spec
@@ -461,7 +461,7 @@ fn render_describe(spec: &MirrorSpec) -> String {
 
 /// Render the `verify-generated.yml` drift-guard workflow.
 ///
-/// The workflow runs `ocx-mirror pipeline generate ci --check` on pull requests
+/// The workflow runs `ocx-mirror package pipeline generate ci --check` on pull requests
 /// and pushes, so a hand-edit to any generated workflow fails CI. Emitted unless
 /// the spec opts out via `allow_manual_edits` (see [`render`]); only the header
 /// placeholders need substitution — the body is spec-independent.
@@ -637,7 +637,7 @@ mod tests {
                 // Pipeline subcommands are invoked directly — setup-ocx has
                 // already activated the project toolchain onto PATH for the step.
                 assert!(
-                    content.contains("ocx-mirror pipeline plan"),
+                    content.contains("ocx-mirror package pipeline plan"),
                     "Generated workflow must invoke ocx-mirror directly (no `ocx run --` wrapper)"
                 );
                 // Lock the toolchain-sourcing model: no step wraps a tool in
@@ -1076,8 +1076,8 @@ mod tests {
                 "describe.yml must declare workflow name"
             );
             assert!(
-                content.contains("ocx-mirror pipeline describe"),
-                "describe.yml must invoke `ocx-mirror pipeline describe`"
+                content.contains("ocx-mirror package pipeline describe"),
+                "describe.yml must invoke `ocx-mirror package pipeline describe`"
             );
             assert!(content.contains("CATALOG.md"), "path filter must include CATALOG.md");
             assert!(
@@ -1103,7 +1103,7 @@ mod tests {
                 "describe workflow must install ocx via the setup-ocx action"
             );
             assert!(
-                content.contains("ocx-mirror pipeline describe"),
+                content.contains("ocx-mirror package pipeline describe"),
                 "describe workflow must invoke pipeline describe directly (no `ocx run --`)"
             );
             assert!(
@@ -1204,7 +1204,7 @@ asset_type:
                 "drift guard must install ocx via the setup-ocx action"
             );
             assert!(
-                content.contains("ocx-mirror pipeline generate ci --check"),
+                content.contains("ocx-mirror package pipeline generate ci --check"),
                 "drift guard must run `generate ci --check` directly (no `ocx run --`)"
             );
             assert!(
@@ -1301,7 +1301,7 @@ asset_type:
     fn verify_generated_template_runs_check_command() {
         let template = super::VERIFY_GENERATED_TEMPLATE;
         assert!(
-            template.contains("ocx-mirror pipeline generate ci --check"),
+            template.contains("ocx-mirror package pipeline generate ci --check"),
             "drift-guard template must invoke `generate ci --check`"
         );
         assert!(
@@ -1608,7 +1608,7 @@ notify:
 
     #[test]
     fn push_job_push_step_has_creds_guard() {
-        // The 'Push' step (ocx-mirror pipeline push) must also be guarded so the
+        // The 'Push' step (ocx-mirror package pipeline push) must also be guarded so the
         // run-summary.json is only written when credentials are available.
         let template = super::WORKFLOW_TEMPLATE;
         // Count occurrences: both login and push steps must have the guard.

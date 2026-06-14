@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline push` — aggregate JUNIT results, apply go/no-go logic,
+//! `ocx-mirror package pipeline push` — aggregate JUNIT results, apply go/no-go logic,
 //! call `ocx package push --cascade --format json` for passing `(V, P)` pairs,
 //! and emit `run-summary.json`.
 
@@ -17,7 +17,7 @@ use crate::junit::{self, JunitTestcase};
 use crate::run_summary::{ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary};
 use crate::spec::{self, MirrorSpec, PlatformConfig, Severity};
 
-/// `ocx-mirror pipeline push` subcommand.
+/// `ocx-mirror package pipeline push` subcommand.
 ///
 /// Single serial push driver. Sole writer of cascade tags in the pipeline.
 ///

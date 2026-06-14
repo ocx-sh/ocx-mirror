@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline prepare` — download, verify, and bundle one version
+//! `ocx-mirror package pipeline prepare` — download, verify, and bundle one version
 //! across all declared platforms. Mirrors the per-version subset of the
 //! existing `command/sync.rs` Phase-1 loop.
 
@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
-use crate::command::pipeline::plan::PlanReport;
-use crate::command::sync::list_upstream_versions;
+use crate::command::package::pipeline::plan::PlanReport;
+use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
 use crate::normalizer;
 use crate::pipeline::mirror_task::{MirrorTask, VariantContext};
@@ -20,7 +20,7 @@ use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
 use crate::spec::{self, MirrorSpec};
 
-/// `ocx-mirror pipeline prepare` subcommand.
+/// `ocx-mirror package pipeline prepare` subcommand.
 ///
 /// Outputs `{work_dir}/{V}/{platform_slug}/bundle.tar.xz` per declared
 /// platform and `{work_dir}/{V}/manifest.json` listing bundles with sizes
@@ -598,7 +598,7 @@ platforms:
 
     // ── issue #160: plan-based task building (no source re-crawl) ───────────
 
-    use crate::command::pipeline::plan::{PlanAssetEntry, PlanVersionEntry, PlanVersionKind};
+    use crate::command::package::pipeline::plan::{PlanAssetEntry, PlanVersionEntry, PlanVersionKind};
 
     /// Spec whose source is unreachable by construction (unroutable remote
     /// url_index). Any code path that queries the source fails; plan-based

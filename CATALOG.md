@@ -32,9 +32,9 @@ upstream version into your registry. Consumers then install the tool with
 ```sh
 ocx --global add ocx.sh/ocx/mirror
 
-ocx-mirror validate mirror.yml   # check a spec
-ocx-mirror check mirror.yml      # dry-run: what would be mirrored
-ocx-mirror sync mirror.yml       # mirror upstream releases into the registry
+ocx-mirror package validate mirror.yml   # check a spec
+ocx-mirror package check mirror.yml      # dry-run: what would be mirrored
+ocx-mirror package sync mirror.yml       # mirror upstream releases into the registry
 ```
 
 ## Links

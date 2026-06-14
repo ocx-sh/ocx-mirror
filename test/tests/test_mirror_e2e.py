@@ -311,7 +311,7 @@ def test_full_pipeline_against_registry(
         )
 
     # Step 1: plan (discover versions)
-    plan_result = run_step(["pipeline", "plan", "--spec", str(spec_path)])
+    plan_result = run_step(["package", "pipeline", "plan", "--spec", str(spec_path)])
     if plan_result.returncode != 0:
         # Expected in Phase 3: unimplemented
         pytest.skip(
@@ -322,7 +322,7 @@ def test_full_pipeline_against_registry(
 
     # Step 2: prepare (download + bundle)
     prepare_result = run_step([
-        "pipeline", "prepare",
+        "package", "pipeline", "prepare",
         "--spec", str(spec_path),
         "--version", "3.7.0",
         "--work-dir", str(work_dir),
@@ -333,7 +333,7 @@ def test_full_pipeline_against_registry(
 
     # Step 3: push (run tests + push to registry + write run-summary.json)
     push_result = run_step([
-        "pipeline", "push",
+        "package", "pipeline", "push",
         "--spec", str(spec_path),
         "--junit-dir", str(junit_dir),
         "--bundles-dir", str(bundles_dir),
@@ -357,7 +357,7 @@ def test_full_pipeline_against_registry(
         "DISCORD_WEBHOOK_URL": webhook_server.url,
     }
     notify_result = subprocess.run(
-        [str(mirror_binary_e2e), "pipeline", "notify",
+        [str(mirror_binary_e2e), "package", "pipeline", "notify",
          "--run-summary", str(summary_path),
          "--webhook-env-var", "DISCORD_WEBHOOK_URL"],
         capture_output=True,

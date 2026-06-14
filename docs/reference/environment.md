@@ -9,7 +9,7 @@ Environment variables read by `ocx-mirror` and the secrets consumed by the [GitH
 Authenticates GitHub API release listing for `github_release` sources. Optional: without it, release listing runs against the unauthenticated quota (60 requests/hour) instead of the authenticated one (5 000 requests/hour) — backfilling release-heavy tools needs the token.
 
 ```sh
-GITHUB_TOKEN=ghp_... ocx-mirror sync mirror.yml
+GITHUB_TOKEN=ghp_... ocx-mirror package sync mirror.yml
 ```
 
 **Scope:** Any command that crawls a `github_release` source — `sync`, `check`, `pipeline plan`, and `pipeline prepare` without `--plan`. The generated `discover` job forwards the workflow's `GITHUB_TOKEN` automatically.
@@ -71,7 +71,7 @@ Credentials for the target registry. The `push` and `describe` jobs use them for
 Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s `notify.discord.webhook_secret` field names the secret (any `^[A-Z][A-Z0-9_]+$` name works); the generated workflow maps it onto [`OCX_MIRROR_DISCORD_HOOK`](#ocx-mirror-discord-hook).
 
 !!! warning "Never hardcode the URL"
-    `ocx-mirror pipeline generate ci` rejects any `mirror.yml` where `notify.discord.webhook_secret` contains a URL (matching `https?://`, `discord.com`, or `discordapp.com`) with exit 64. This prevents live webhook URLs from being committed to the repository.
+    `ocx-mirror package pipeline generate ci` rejects any `mirror.yml` where `notify.discord.webhook_secret` contains a URL (matching `https?://`, `discord.com`, or `discordapp.com`) with exit 64. This prevents live webhook URLs from being committed to the repository.
 
 <!-- external -->
 [github-actions-docs]: https://docs.github.com/en/actions

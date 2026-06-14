@@ -1,6 +1,6 @@
 # mirror.yml Reference
 
-`mirror.yml` describes one tool to mirror — where to fetch upstream releases, which platforms to build for, how to test each bundle, and how to report results. The file is consumed by `ocx-mirror sync`, `ocx-mirror check`, and all `ocx-mirror pipeline` subcommands.
+`mirror.yml` describes one tool to mirror — where to fetch upstream releases, which platforms to build for, how to test each bundle, and how to report results. The file is consumed by `ocx-mirror package sync`, `ocx-mirror package check`, and all `ocx-mirror package pipeline` subcommands.
 
 ## Top-level keys {#top-level}
 
@@ -20,7 +20,7 @@
 | `ocx_mirror` | object | No* | ocx-mirror version pin for generated workflows. Required when any Linux platform declares containers. |
 | `notify` | object | No | Discord webhook notification settings |
 
-The `tests`, `platforms`, `ocx_mirror`, and `notify` keys are used only by `ocx-mirror pipeline` subcommands. `sync` and `check` ignore them.
+The `tests`, `platforms`, `ocx_mirror`, and `notify` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
 
 ## `tests` {#tests}
 

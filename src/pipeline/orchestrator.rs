@@ -76,7 +76,7 @@ pub struct VersionManifest {
 ///
 /// Call sites:
 /// - `execute_mirror` — drives the existing sync pipeline
-/// - `command::pipeline::prepare` — standalone `ocx-mirror pipeline prepare` subcommand
+/// - `command::package::pipeline::prepare` — standalone `ocx-mirror package pipeline prepare` subcommand
 pub(crate) async fn prepare_version(
     version: &str,
     tasks: &[MirrorTask],

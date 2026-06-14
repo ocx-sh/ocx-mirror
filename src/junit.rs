@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! JUNIT XML parser for `ocx-mirror pipeline push`.
+//! JUNIT XML parser for `ocx-mirror package pipeline push`.
 //!
 //! # Dialect
 //!

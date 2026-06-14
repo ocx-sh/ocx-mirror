@@ -3,8 +3,8 @@
 
 //! `run-summary.json` schema — the inter-job message between `push` and `notify`.
 //!
-//! The summary is produced by `ocx-mirror pipeline push` and consumed by
-//! `ocx-mirror pipeline notify`. It is also uploaded as a GHA workflow artifact
+//! The summary is produced by `ocx-mirror package pipeline push` and consumed by
+//! `ocx-mirror package pipeline notify`. It is also uploaded as a GHA workflow artifact
 //! for post-run inspection.
 
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,7 @@ pub struct VersionSummary {
 
 /// Top-level `run-summary.json` schema (schema_version 1).
 ///
-/// Produced by `ocx-mirror pipeline push`, consumed by `ocx-mirror pipeline notify`.
+/// Produced by `ocx-mirror package pipeline push`, consumed by `ocx-mirror package pipeline notify`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunSummary {
     /// Schema version for forward-compat detection (currently `1`).

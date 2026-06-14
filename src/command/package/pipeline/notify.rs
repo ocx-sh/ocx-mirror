@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline notify` — read `run-summary.json` and POST Discord
+//! `ocx-mirror package pipeline notify` — read `run-summary.json` and POST Discord
 //! webhook notifications per the D10 taxonomy.
 //!
 //! One Discord message per published version (one embed per message). Any
@@ -20,7 +20,7 @@ use crate::discord::{
 use crate::error::MirrorError;
 use crate::run_summary::{RunSummary, VersionStatus, VersionSummary};
 
-/// `ocx-mirror pipeline notify` subcommand.
+/// `ocx-mirror package pipeline notify` subcommand.
 ///
 /// Reads `run-summary.json` and posts to the Discord webhook URL sourced from
 /// `$OCX_MIRROR_DISCORD_HOOK`. Silent (exit 0, no POST) when all versions are

@@ -19,7 +19,7 @@ use ocx_lib::oci::{Identifier, Platform};
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 
-use crate::command::sync::extract_platforms;
+use crate::command::package::sync::extract_platforms;
 use crate::error::MirrorError;
 
 /// Lists all tags on the target repository.

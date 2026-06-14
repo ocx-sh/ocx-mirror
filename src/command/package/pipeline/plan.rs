@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline plan` — compute which versions need work without
+//! `ocx-mirror package pipeline plan` — compute which versions need work without
 //! side-effects. Used by the GHA `discover` job.
 
 use std::collections::HashSet;
@@ -13,9 +13,9 @@ use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 use serde::{Deserialize, Serialize};
 
-use crate::command::options::OutputFormat;
-use crate::command::sync::list_upstream_versions;
-use crate::command::target_registry;
+use crate::command::package::options::OutputFormat;
+use crate::command::package::sync::list_upstream_versions;
+use crate::command::package::target_registry;
 use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
@@ -76,7 +76,7 @@ pub struct PlanVersionEntry {
     pub assets: Vec<PlanAssetEntry>,
 }
 
-/// Structured output of `ocx-mirror pipeline plan`.
+/// Structured output of `ocx-mirror package pipeline plan`.
 ///
 /// JSON shape (schema_version 2 — v2 adds `source_version`, `variant`, and
 /// resolved `assets` per version entry so `prepare --plan` consumes the
@@ -104,7 +104,7 @@ pub struct PlanReport {
     pub ocx_mirror_rev: Option<String>,
 }
 
-/// `ocx-mirror pipeline plan` subcommand.
+/// `ocx-mirror package pipeline plan` subcommand.
 ///
 /// Reads `mirror.yml`, queries source + target registry, and emits a
 /// side-effect-free plan document listing versions that need action.
@@ -366,7 +366,7 @@ mod tests {
 
     use super::*;
 
-    // ── §3.5 S5: ocx-mirror pipeline plan — unit tests ────────────────────
+    // ── §3.5 S5: ocx-mirror package pipeline plan — unit tests ────────────────────
     //
     // These tests verify the JSON output schema of PlanReport and the types
     // involved. The actual plan computation (source/registry queries) is

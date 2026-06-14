@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline` subcommand group.
+//! `ocx-mirror package pipeline` subcommand group.
 //!
 //! Five subcommands implement the pre-publish multi-runner test pipeline:
 //!
@@ -25,7 +25,7 @@ use ocx_lib::cli::DataInterface;
 
 use crate::error::MirrorError;
 
-/// Dispatcher for `ocx-mirror pipeline <subcommand>`.
+/// Dispatcher for `ocx-mirror package pipeline <subcommand>`.
 #[derive(clap::Subcommand)]
 pub enum PipelineCommand {
     /// Generate CI workflow files from a mirror spec.

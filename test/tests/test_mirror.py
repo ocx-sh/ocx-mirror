@@ -183,7 +183,7 @@ def test_validate_valid_spec(mirror: MirrorRunner, tmp_path: Path, registry: str
         versions=[{"version": "1.0.0", "assets": {"test-tool.tar.gz": "https://example.com/test-tool.tar.gz"}}],
         metadata_path=metadata_path,
     )
-    result = mirror.run("validate", str(spec_path))
+    result = mirror.run("package", "validate", str(spec_path))
     assert result.returncode == 0
 
 
@@ -191,7 +191,7 @@ def test_validate_invalid_spec(mirror: MirrorRunner, tmp_path: Path):
     """validate command exits non-zero for an invalid spec."""
     spec_path = tmp_path / "bad-spec.yaml"
     spec_path.write_text("name: test\n")  # Missing required fields
-    result = mirror.run("validate", str(spec_path), check=False)
+    result = mirror.run("package", "validate", str(spec_path), check=False)
     assert result.returncode != 0
 
 
@@ -222,7 +222,7 @@ def test_check_shows_would_mirror(
         metadata_path=metadata_path,
     )
 
-    result = mirror.run("check", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    result = mirror.run("package", "check", str(spec_path), "--work-dir", str(mirror.temp_dir))
     assert "would mirror" in result.stderr.lower()
 
 
@@ -292,7 +292,7 @@ def test_pipeline_prepare_drops_excluded_platform(
     )
 
     work_dir = mirror.temp_dir / "prep"
-    mirror.run("pipeline", "prepare", "--spec", str(spec_path), "--version", "1.0.0", "--work-dir", str(work_dir))
+    mirror.run("package", "pipeline", "prepare", "--spec", str(spec_path), "--version", "1.0.0", "--work-dir", str(work_dir))
 
     version_dir = work_dir / "1.0.0"
     host_slug = host.replace("/", "_")
@@ -332,7 +332,7 @@ def test_sync_mirrors_versions(
         metadata_path=metadata_path,
     )
 
-    result = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    result = mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
     assert "pushed" in result.stdout.lower() or "mirror complete" in result.stderr.lower()
 
     # Verify tags exist via ocx
@@ -365,10 +365,10 @@ def test_sync_idempotent(
     )
 
     # First sync
-    mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     # Second sync — should find nothing new
-    result = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    result = mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
     assert "nothing to mirror" in result.stderr.lower()
 
 
@@ -399,7 +399,7 @@ def test_sync_cascade_creates_rolling_tags(
         cascade=True,
     )
 
-    mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     # Verify rolling tags
     ocx.plain("index", "update", unique_mirror_repo)
@@ -438,7 +438,7 @@ def test_sync_version_min_filter(
         cascade=False,
     )
 
-    mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     ocx.plain("index", "update", f"{unique_mirror_repo}:2.0.0")
     data = ocx.json("index", "list", unique_mirror_repo)
@@ -473,9 +473,9 @@ def test_sync_new_per_run_cap(
     )
 
     # First run: should mirror only 1 version
-    result = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    result = mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
     assert "pushed" in result.stdout.lower()
 
     # Second run should still have work to do
-    result2 = mirror.run("sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+    result2 = mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
     assert "nothing to mirror" not in result2.stderr.lower()

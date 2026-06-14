@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror pipeline describe` — publish catalog metadata (README + logo)
+//! `ocx-mirror package pipeline describe` — publish catalog metadata (README + logo)
 //! to the registry as a referrer of the target repository.
 //!
 //! Loads `mirror.yml`, resolves the optional `catalog:` block (defaults to
@@ -22,11 +22,11 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 
-use crate::command::pipeline::push::{forward_ocx_env, resolve_ocx_binary};
+use crate::command::package::pipeline::push::{forward_ocx_env, resolve_ocx_binary};
 use crate::error::MirrorError;
 use crate::spec;
 
-/// `ocx-mirror pipeline describe` subcommand.
+/// `ocx-mirror package pipeline describe` subcommand.
 #[derive(clap::Parser)]
 pub struct Describe {
     /// Path to the mirror spec file.
