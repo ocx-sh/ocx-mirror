@@ -41,13 +41,13 @@ pub(crate) struct EnvPushReport {
 
 /// Enumerate env manifests under `bundles_dir`: one per version directory
 /// carrying an `env-manifest.json`, as written by
-/// `prepare_env_version` (`{work_dir}/{version}/env-manifest.json`; the push
-/// job's `bundles_dir` is that same `work_dir` for a pylock mirror).
+/// `prepare_env_version` (`{version_dir}/env-manifest.json`).
 ///
-/// W3.1 (deferred): manifest layer/metadata paths are absolute,
-/// prepare-job-local paths — correct while prepare and push share one
-/// `work_dir` (hermetic, local); CI-split path portability across separate
-/// prepare/push jobs is a follow-up concern, not solved here.
+/// `prepare_env_version` records each manifest's layer/metadata paths relative
+/// to its version directory, so this function re-anchors them against the
+/// directory the manifest was actually found in. That makes the paths portable
+/// across the CI prepare→push job split, where the artifact is downloaded to a
+/// different absolute location than prepare wrote it.
 pub(crate) async fn enumerate_env_manifests(bundles_dir: &Path) -> Result<Vec<EnvManifest>, String> {
     let mut manifests = Vec::new();
 
@@ -68,8 +68,22 @@ pub(crate) async fn enumerate_env_manifests(bundles_dir: &Path) -> Result<Vec<En
         let content = tokio::fs::read_to_string(&manifest_path)
             .await
             .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
-        let manifest: EnvManifest =
+        let mut manifest: EnvManifest =
             serde_json::from_str(&content).map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))?;
+
+        // Re-anchor the version-dir-relative layer/metadata paths onto this
+        // manifest's actual directory so they resolve after a CI artifact
+        // download landed them at a different absolute location. (An
+        // already-absolute path from an older/local manifest is left as-is:
+        // `Path::join` with an absolute component discards the base.)
+        let version_dir = entry.path();
+        for env in &mut manifest.envs {
+            env.metadata_path = version_dir.join(&env.metadata_path);
+            for layer in &mut env.layers {
+                layer.path = version_dir.join(&layer.path);
+            }
+        }
+
         manifests.push(manifest);
     }
 
@@ -202,6 +216,57 @@ mod tests {
         let manifests = enumerate_env_manifests(temp.path()).await.expect("reads manifest");
         assert_eq!(manifests.len(), 1);
         assert_eq!(manifests[0].version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn enumerate_env_manifests_resolves_relative_paths() {
+        use crate::pipeline::python_prepare::{EnvEntry, EnvLayer};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let version_dir = temp.path().join("1.0.0");
+        let layers_dir = version_dir.join("linux_amd64/layers");
+        tokio::fs::create_dir_all(&layers_dir).await.expect("create dirs");
+        // The referenced files must exist so the resolved absolute paths do.
+        tokio::fs::write(version_dir.join("linux_amd64/metadata.json"), "{}")
+            .await
+            .expect("write metadata");
+        tokio::fs::write(layers_dir.join("wheel.tar.zst"), "x")
+            .await
+            .expect("write layer");
+
+        // Manifest carries version-dir-relative paths, as prepare_env_version writes.
+        let manifest = EnvManifest {
+            version: "1.0.0".to_string(),
+            envs: vec![EnvEntry {
+                platform_slug: "linux_amd64".to_string(),
+                platform: "linux/amd64".to_string(),
+                variant: None,
+                metadata_path: PathBuf::from("linux_amd64/metadata.json"),
+                layers: vec![EnvLayer {
+                    wheel_repository: "pip-packages/example".to_string(),
+                    digest: "sha256:aaa".to_string(),
+                    path: PathBuf::from("linux_amd64/layers/wheel.tar.zst"),
+                    package_name: "example".to_string(),
+                    wheel_sha256: "aa".to_string(),
+                }],
+            }],
+        };
+        tokio::fs::write(
+            version_dir.join("env-manifest.json"),
+            serde_json::to_string(&manifest).expect("serialize"),
+        )
+        .await
+        .expect("write manifest");
+
+        let manifests = enumerate_env_manifests(temp.path()).await.expect("enumerate");
+        assert_eq!(manifests.len(), 1);
+        let env = &manifests[0].envs[0];
+
+        // Paths are re-anchored onto the version dir → absolute and existing.
+        assert_eq!(env.metadata_path, version_dir.join("linux_amd64/metadata.json"));
+        assert!(env.metadata_path.exists(), "resolved metadata path must exist");
+        assert_eq!(env.layers[0].path, version_dir.join("linux_amd64/layers/wheel.tar.zst"));
+        assert!(env.layers[0].path.exists(), "resolved layer path must exist");
     }
 
     #[tokio::test]

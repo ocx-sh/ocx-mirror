@@ -302,9 +302,17 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .map(|id| format!("\n          OCX_MIRROR_DISCORD_USER_ID: \"{id}\""))
         .unwrap_or_default();
 
+    // pylock sources produce env packages (multi-layer + composed metadata),
+    // not per-platform archive bundles, so the prepare-job artifact gathering
+    // and the test-job package target differ. Everything else in the workflow
+    // is source-agnostic. Archive/binary output stays byte-identical.
+    let is_pylock = matches!(spec.source, spec::Source::Pylock { .. });
+
     let matrix = build_matrix(spec);
     let matrix_entries = render_matrix_entries(&matrix);
-    let test_run_steps = render_test_run_steps(&matrix);
+    let prepare_flatten = prepare_flatten_script(is_pylock);
+    let test_target_resolve = test_target_resolve_script(is_pylock);
+    let test_run_steps = render_test_run_steps(&matrix, is_pylock);
     let target_identifier = format!("{}/{}", spec.target.registry, spec.target.repository);
 
     WORKFLOW_TEMPLATE
@@ -312,7 +320,9 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
         .replace("{MIRROR_NAME}", &spec.name)
         .replace("{SCHEDULE_BLOCK}", &schedule_block)
+        .replace("{PREPARE_FLATTEN}", &prepare_flatten)
         .replace("{TEST_MATRIX_ENTRIES}", &matrix_entries)
+        .replace("{TEST_TARGET_RESOLVE}", &test_target_resolve)
         .replace("{TEST_RUN_STEPS}", &test_run_steps)
         .replace("{TARGET_IDENTIFIER}", &target_identifier)
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
@@ -377,13 +387,21 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
 /// renderer emits a single shell block that iterates per-version. Native-only
 /// — container mode (musl-ocx-in-docker) is rejected upstream by
 /// `policy_check_no_containers`.
-fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
+fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
     if legs.is_empty() {
         return String::new();
     }
 
-    let body = r#"            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
-            mkdir -p junit
+    // The package under test: for archive/binary legs a single bundle file;
+    // for pylock env legs the composed metadata via `-m` plus the ordered wheel
+    // layers as positional args (both resolved by `{TEST_TARGET_RESOLVE}`).
+    let test_target = if is_pylock {
+        r#"-m "${METADATA}" ${LAYERS}"#
+    } else {
+        r#""${BUNDLE}""#
+    };
+
+    let body = r#"            mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
             TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length')
@@ -396,15 +414,15 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
+                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
-                printf '%s' "${TEST_INLINE}" | ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                printf '%s' "${TEST_INLINE}" | ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script - || RC=$?
               fi
               END=$(date +%s)
@@ -434,7 +452,88 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
               exit 1
             fi
 "#;
-    body.to_string()
+    body.replace("{TEST_TARGET}", test_target)
+}
+
+/// The prepare-job artifact-gathering script, source-dependent.
+///
+/// Archive/binary legs flatten each per-platform `bundle.tar.xz` (and its
+/// metadata sibling) into a flat `bundles/` namespace keyed by
+/// `bundle-{V}-{slug}`. Pylock legs copy the whole per-version env subtree
+/// (`env-manifest.json` plus each `{slug}/` metadata + `layers/`) verbatim into
+/// `bundles/{V}/`, so the push job's `enumerate_env_manifests` finds
+/// `bundles/{V}/env-manifest.json` and resolves its version-dir-relative
+/// layer/metadata paths against it. Emitted into the prepare `run:` block at a
+/// 10-space indent.
+fn prepare_flatten_script(is_pylock: bool) -> String {
+    if is_pylock {
+        // The pylock prepare dir is named by the raw version (no `+`→`_`
+        // slugging — pylock versions carry no build metadata in the corpus).
+        // The version subtree already carries relative manifest paths, so a
+        // plain recursive copy is enough.
+        r#"          V="${{ matrix.version.version }}"
+          mkdir -p bundles
+          if [ -d ".ocx-mirror/${V}" ]; then
+            cp -R ".ocx-mirror/${V}" "bundles/${V}"
+          fi"#
+        .to_string()
+    } else {
+        r#"          # Flatten .ocx-mirror/{V}/{P}/bundle.tar.xz → bundles/bundle-{V}-{P_slug}.tar.xz
+          # and copy the per-platform metadata.json written by `pipeline prepare`
+          # as sibling so `ocx package test` auto-discovers the correct override
+          # (e.g. metadata-darwin.json baked content) via its bundle→metadata
+          # sibling convention. Do NOT copy the spec-level metadata.json from CWD
+          # — that always contains the default path, not the platform override.
+          V="${{ matrix.version.version }}"
+          # `pipeline prepare` normalises the build separator `+` → `_` when
+          # naming its on-disk version directory (OCI-tag safe slug); the
+          # matrix value still carries the original `+`, so translate before
+          # globbing into the platform tree.
+          V_SLUG="${V//+/_}"
+          mkdir -p bundles
+          shopt -s nullglob
+          for platform_dir in ".ocx-mirror/${V_SLUG}"/*/; do
+            [ -d "${platform_dir}" ] || continue
+            P_SLUG=$(basename "${platform_dir}")
+            cp "${platform_dir}bundle.tar.xz" "bundles/bundle-${V}-${P_SLUG}.tar.xz"
+            cp "${platform_dir}metadata.json" "bundles/bundle-${V}-${P_SLUG}-metadata.json"
+          done"#
+            .to_string()
+    }
+}
+
+/// The per-version test-target resolution, source-dependent. Emitted just
+/// before `{TEST_RUN_STEPS}` inside the test job's per-version loop, at a
+/// 12-space indent, resolving the shell vars the test invocation references.
+///
+/// Archive/binary legs set `BUNDLE` (+ its `METADATA_SIBLING`) so
+/// `ocx package test` receives a single bundle path. Pylock legs read the
+/// version's `env-manifest.json`, select this leg's platform entry, and set
+/// `METADATA` + `LAYERS` (version-dir-relative paths joined back onto the
+/// downloaded artifact root) for the `-m <metadata> <layers…>` form.
+fn test_target_resolve_script(is_pylock: bool) -> String {
+    if is_pylock {
+        // The jq resolution is guarded (`2>/dev/null || true`, `// empty`) so a
+        // genuine miss — a version whose prepare leg failed and never uploaded
+        // its env-manifest.json — reds THIS version attributably via the
+        // `ocx package test … || RC=$?` capture below (empty METADATA/LAYERS →
+        // ocx fails cleanly → one JUnit <failure>), rather than a bare jq exit
+        // tripping the step's `set -e` and aborting every remaining version in
+        // the loop with no JUnit written. Mirrors the archive path's
+        // "genuine miss still reds" invariant.
+        r#"            VERSION_DIR="bundles/${VERSION}"
+            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" '.envs[] | select(.platform == $p)' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
+            METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null || true)"
+            LAYERS=""
+            for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null || true); do
+              LAYERS="${LAYERS} ${VERSION_DIR}/${rel}"
+            done"#
+        .to_string()
+    } else {
+        r#"            BUNDLE="bundles/bundle-${VERSION}-${{ matrix.platform_slug }}.tar.xz"
+            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json""#
+            .to_string()
+    }
 }
 
 /// Render the describe.yml catalog-publish workflow.
@@ -655,6 +754,76 @@ mod tests {
                 panic!("Unexpected error rendering minimal fixture: {e}");
             }
         }
+    }
+
+    #[test]
+    fn render_pylock_spec_gathers_env_subtree_and_multi_layer_test() {
+        // A `source.type: pylock` spec must render the env-package workflow
+        // shape: the prepare job copies the whole per-version env subtree into
+        // `bundles/{V}/` (not the archive `bundle.tar.xz` flatten), and the
+        // test job resolves the env manifest into a `-m <metadata> <layers…>`
+        // `ocx package test` invocation.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-pylock.yml", dir.path()).expect("pylock fixture renders");
+
+        let workflow = dir.path().join(".github/workflows/mirror.yml");
+        let content = std::fs::read_to_string(&workflow).expect("workflow written");
+
+        // Prepare job: env subtree copy, NOT the archive bundle flatten.
+        assert!(
+            content.contains(r#"cp -R ".ocx-mirror/${V}" "bundles/${V}""#),
+            "pylock prepare must copy the version env subtree into bundles/:\n{content}"
+        );
+        assert!(
+            !content.contains("bundle.tar.xz"),
+            "pylock workflow must not carry archive bundle.tar.xz flattening:\n{content}"
+        );
+
+        // Test job: resolve the manifest and pass metadata + ordered layers.
+        assert!(
+            content.contains("env-manifest.json"),
+            "pylock test job must read the env manifest:\n{content}"
+        );
+        assert!(
+            content.contains(r#"-m "${METADATA}" ${LAYERS}"#),
+            "pylock test job must invoke `ocx package test` with -m + positional layers:\n{content}"
+        );
+        // The manifest resolution must be guarded so a genuine miss (absent
+        // env-manifest.json from a failed prepare leg) reds one version
+        // attributably instead of aborting the whole `set -e` step.
+        assert!(
+            content.contains(r#""${VERSION_DIR}/env-manifest.json" 2>/dev/null || true"#),
+            "pylock manifest jq resolution must tolerate a missing manifest (2>/dev/null || true):\n{content}"
+        );
+        assert!(
+            !content.contains(r#""${BUNDLE}""#),
+            "pylock test job must not reference the archive BUNDLE var:\n{content}"
+        );
+    }
+
+    #[test]
+    fn render_archive_spec_keeps_bundle_flatten() {
+        // Regression anchor for the pylock branch: an archive/binary spec must
+        // still render the bundle-flatten prepare step and the single-bundle
+        // `ocx package test` target — the pylock branch is strictly additive.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-minimal.yml", dir.path()).expect("minimal fixture renders");
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".github/workflows/mirror.yml")).expect("workflow written");
+
+        assert!(
+            content.contains(r#"cp "${platform_dir}bundle.tar.xz""#),
+            "archive prepare must still flatten bundle.tar.xz:\n{content}"
+        );
+        assert!(
+            content.contains(r#"BUNDLE="bundles/bundle-${VERSION}-${{ matrix.platform_slug }}.tar.xz""#),
+            "archive test job must still resolve the single bundle path:\n{content}"
+        );
+        assert!(
+            !content.contains("env-manifest.json"),
+            "archive workflow must not carry pylock env-manifest logic:\n{content}"
+        );
     }
 
     #[test]
@@ -1428,7 +1597,7 @@ ocx_mirror:
   release_tag: v0.7.2
 "#,
         );
-        let shell_block = render_test_run_steps(&legs);
+        let shell_block = render_test_run_steps(&legs, false);
 
         // Must extract TEST_KIND.
         assert!(

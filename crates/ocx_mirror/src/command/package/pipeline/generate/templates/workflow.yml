@@ -77,26 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           ocx-mirror package pipeline prepare --version "${{ matrix.version.version }}" --plan plan.json
-          # Flatten .ocx-mirror/{V}/{P}/bundle.tar.xz → bundles/bundle-{V}-{P_slug}.tar.xz
-          # and copy the per-platform metadata.json written by `pipeline prepare`
-          # as sibling so `ocx package test` auto-discovers the correct override
-          # (e.g. metadata-darwin.json baked content) via its bundle→metadata
-          # sibling convention. Do NOT copy the spec-level metadata.json from CWD
-          # — that always contains the default path, not the platform override.
-          V="${{ matrix.version.version }}"
-          # `pipeline prepare` normalises the build separator `+` → `_` when
-          # naming its on-disk version directory (OCI-tag safe slug); the
-          # matrix value still carries the original `+`, so translate before
-          # globbing into the platform tree.
-          V_SLUG="${V//+/_}"
-          mkdir -p bundles
-          shopt -s nullglob
-          for platform_dir in ".ocx-mirror/${V_SLUG}"/*/; do
-            [ -d "${platform_dir}" ] || continue
-            P_SLUG=$(basename "${platform_dir}")
-            cp "${platform_dir}bundle.tar.xz" "bundles/bundle-${V}-${P_SLUG}.tar.xz"
-            cp "${platform_dir}metadata.json" "bundles/bundle-${V}-${P_SLUG}-metadata.json"
-          done
+{PREPARE_FLATTEN}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: bundle-${{ matrix.version.version }}
@@ -155,7 +136,7 @@ jobs:
               echo "skip ${VERSION} on ${{ matrix.platform }} (platform not in version's set)"
               continue
             fi
-            BUNDLE="bundles/bundle-${VERSION}-${{ matrix.platform_slug }}.tar.xz"
+{TEST_TARGET_RESOLVE}
 {TEST_RUN_STEPS}
           done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

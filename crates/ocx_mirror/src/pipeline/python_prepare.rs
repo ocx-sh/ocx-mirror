@@ -203,12 +203,32 @@ pub(crate) async fn prepare_env_version(
         envs.push(result?);
     }
 
+    let version_dir = work_dir.join(version);
+
+    // Record layer/metadata paths relative to the version directory (the
+    // manifest's own directory) rather than the absolute prepare-job-local
+    // paths `prepare_env_task` returns. The push leg runs in a *separate* CI
+    // job with this version dir downloaded to a different absolute location;
+    // relative paths let `enumerate_env_manifests` re-anchor them against
+    // wherever the artifact landed (see `python_push`).
+    //
+    // ponytail: `strip_prefix` works because the default variant's task_dir is
+    // `{version_dir}/{platform_slug}`. A named-variant leg (normalized tag ≠
+    // version) lives in a sibling dir and won't strip — its path stays
+    // absolute and fails loudly in push rather than resolving wrong. Named
+    // variants are deferred (W4).
+    for env in &mut envs {
+        env.metadata_path = relativize_to(&env.metadata_path, &version_dir);
+        for layer in &mut env.layers {
+            layer.path = relativize_to(&layer.path, &version_dir);
+        }
+    }
+
     let manifest = EnvManifest {
         version: version.to_owned(),
         envs,
     };
 
-    let version_dir = work_dir.join(version);
     tokio::fs::create_dir_all(&version_dir)
         .await
         .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create version dir: {e}")]))?;
@@ -388,6 +408,16 @@ fn validate_wheel_filename(filename: &str) -> Result<(), MirrorError> {
             "unsafe wheel filename '{filename}': must be a single path component"
         )))
     }
+}
+
+/// Return `path` made relative to `base` when it is a descendant; otherwise
+/// return it unchanged. A non-descendant path (e.g. a named-variant leg living
+/// in a sibling version dir) stays absolute so the push leg fails loudly
+/// instead of silently re-anchoring it against the wrong root.
+fn relativize_to(path: &Path, base: &Path) -> PathBuf {
+    path.strip_prefix(base)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Computes the hex-encoded `sha256` of the file at `path`.
@@ -660,5 +690,28 @@ mod tests {
             work_dir.join(version).join("env-manifest.json").exists(),
             "env-manifest.json must be persisted"
         );
+
+        // Portability: manifest paths are recorded relative to the version dir
+        // (so they survive the CI prepare→push job split — see python_push).
+        for env in &manifest.envs {
+            assert!(
+                env.metadata_path.is_relative(),
+                "metadata_path must be version-dir-relative, got {}",
+                env.metadata_path.display()
+            );
+            assert_eq!(env.metadata_path, Path::new(&env.platform_slug).join("metadata.json"));
+            for layer in &env.layers {
+                assert!(
+                    layer.path.is_relative(),
+                    "layer path must be version-dir-relative, got {}",
+                    layer.path.display()
+                );
+                assert!(
+                    layer.path.starts_with(&env.platform_slug),
+                    "layer path must sit under the platform slug dir, got {}",
+                    layer.path.display()
+                );
+            }
+        }
     }
 }
