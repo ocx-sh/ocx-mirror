@@ -330,14 +330,15 @@ fn platform_to_slug(platform: &str) -> String {
 
 /// Derive the upstream project homepage from a mirror spec's `source:` block.
 ///
-/// `github_release` → `https://github.com/{owner}/{repo}`. `url_index` has no
-/// canonical homepage to infer (the URL points at a generated JSON index, not
-/// a project page), so we return `None` and let the notify embed render
-/// without an author link in that case.
+/// `github_release` → `https://github.com/{owner}/{repo}`. `url_index` and
+/// `pylock` have no canonical homepage to infer (a generated JSON index or a
+/// committed lock file, not a project page), so we return `None` and let the
+/// notify embed render without an author link in that case.
 fn compute_source_url(source: &spec::Source) -> Option<String> {
     match source {
         spec::Source::GithubRelease { owner, repo, .. } => Some(format!("https://github.com/{owner}/{repo}")),
         spec::Source::UrlIndex(_) => None,
+        spec::Source::Pylock { .. } => None,
     }
 }
 

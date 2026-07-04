@@ -18,6 +18,16 @@ pub enum Source {
         tag_pattern: String,
     },
     UrlIndex(UrlIndexSource),
+    /// A PEP 751 `pylock.toml` committed alongside the mirror spec.
+    ///
+    /// Unlike `GithubRelease`/`UrlIndex` (many upstream versions discovered
+    /// per run), a lock resolves one version: the project version recorded in
+    /// the lock itself. Wheel selection uses variant constraint fields
+    /// (`spec/variant.rs`) instead of asset regex patterns.
+    Pylock {
+        /// Path to the committed `pylock.toml`, relative to the spec directory.
+        path: String,
+    },
 }
 
 /// The three modes of providing url_index data.
@@ -123,6 +133,11 @@ impl Source {
                 }
             }
             Source::UrlIndex(_) => {}
+            Source::Pylock { path } => {
+                if path.trim().is_empty() {
+                    errors.push("source.path must not be empty".to_string());
+                }
+            }
         }
     }
 }

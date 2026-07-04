@@ -9,6 +9,7 @@ mod metadata_config;
 mod notify_config;
 mod ocx_mirror_config;
 mod platforms_config;
+mod python_config;
 mod source;
 mod strip_components_config;
 mod target;
@@ -27,6 +28,7 @@ pub use notify_config::{DiscordConfig, NotifyConfig};
 pub use ocx_mirror_config::OcxMirrorConfig;
 #[allow(unused_imports)]
 pub use platforms_config::{ContainerConfig, ExcludeEntry, PlatformConfig, Severity};
+pub use python_config::PythonConfig;
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
@@ -51,7 +53,19 @@ pub struct MirrorSpec {
     pub target: Target,
     pub source: Source,
 
+    /// Interpreter configuration for `source.type: pylock` mirrors. Required
+    /// when `source.type` is `pylock`; unused otherwise.
+    #[serde(default)]
+    pub python: Option<PythonConfig>,
+
+    /// Wheel repo naming scope prefix for `source.type: pylock` mirrors —
+    /// maps to `ocx_python::WheelScope`. Defaults to `"pip-packages"`.
+    #[serde(default = "default_wheel_scope")]
+    #[allow(dead_code)] // read from YAML spec; consumed once the pylock adapter (W2.2) wires ocx_python
+    pub wheel_scope: String,
+
     /// Asset patterns for non-variant specs. Mutually exclusive with `variants`.
+    /// Not supported for `source.type: pylock` (see `validate`).
     #[serde(default)]
     pub assets: Option<AssetPatterns>,
 
@@ -147,6 +161,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_wheel_scope() -> String {
+    "pip-packages".to_string()
+}
+
 /// Regex for valid variant names: starts with lowercase letter, then lowercase
 /// letters, digits, or dots.
 static VARIANT_NAME_RE: std::sync::LazyLock<regex::Regex> =
@@ -187,20 +205,14 @@ impl MirrorSpec {
 
         self.source.validate(&mut errors);
 
-        // Validate assets/variants mutual exclusivity
-        match (&self.assets, &self.variants) {
-            (Some(_), Some(_)) => {
-                errors.push("cannot specify both top-level 'assets' and 'variants'".to_string());
-            }
-            (None, None) => {
-                errors.push("must specify either 'assets' or 'variants'".to_string());
-            }
-            (Some(assets), None) => {
-                assets.validate(&mut errors);
-            }
-            (None, Some(variants)) => {
-                self.validate_variants(variants, spec_dir, &mut errors);
-            }
+        let is_pylock = matches!(self.source, Source::Pylock { .. });
+        self.validate_assets_or_variants(is_pylock, spec_dir, &mut errors);
+
+        if is_pylock && self.python.is_none() {
+            errors.push("python: required when source.type is 'pylock'".to_string());
+        }
+        if let Some(python) = &self.python {
+            python.validate(&mut errors);
         }
 
         if let Some(metadata) = &self.metadata {
@@ -304,7 +316,45 @@ impl MirrorSpec {
         config.exclude.iter().find(|entry| entry.matches(&parsed))
     }
 
-    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, errors: &mut Vec<String>) {
+    /// Validate the `assets` / `variants` surface, source-aware.
+    ///
+    /// `github_release` / `url_index` sources resolve assets via regex
+    /// patterns — exactly one of top-level `assets` xor per-variant `assets`
+    /// must be present. `pylock` sources select wheels via variant constraint
+    /// fields instead (`libc`, `min_manylinux`, `min_musllinux`, `abi`); any
+    /// asset pattern on a `pylock` spec is meaningless and rejected outright
+    /// rather than silently ignored.
+    fn validate_assets_or_variants(&self, is_pylock: bool, spec_dir: &Path, errors: &mut Vec<String>) {
+        if is_pylock {
+            if self.assets.is_some() {
+                errors.push(
+                    "assets: not supported for source.type 'pylock' (use variant constraint fields instead)"
+                        .to_string(),
+                );
+            }
+            if let Some(variants) = &self.variants {
+                self.validate_variants(variants, spec_dir, true, errors);
+            }
+            return;
+        }
+
+        match (&self.assets, &self.variants) {
+            (Some(_), Some(_)) => {
+                errors.push("cannot specify both top-level 'assets' and 'variants'".to_string());
+            }
+            (None, None) => {
+                errors.push("must specify either 'assets' or 'variants'".to_string());
+            }
+            (Some(assets), None) => {
+                assets.validate(errors);
+            }
+            (None, Some(variants)) => {
+                self.validate_variants(variants, spec_dir, false, errors);
+            }
+        }
+    }
+
+    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, is_pylock: bool, errors: &mut Vec<String>) {
         if variants.is_empty() {
             errors.push("variants: must declare at least one variant".to_string());
             return;
@@ -347,8 +397,27 @@ impl MirrorSpec {
                 }
             }
 
-            // Per-variant asset validation
-            v.assets.validate(errors);
+            // Per-variant asset / constraint validation — source-aware.
+            if is_pylock {
+                if v.assets.is_some() {
+                    errors.push(variant_error(
+                        &v.name,
+                        "cannot specify 'assets' for source.type 'pylock' (use constraint fields instead)",
+                    ));
+                }
+                v.validate_python_constraints(errors);
+            } else {
+                match &v.assets {
+                    Some(assets) => assets.validate(errors),
+                    None => errors.push(variant_error(&v.name, "must specify 'assets'")),
+                }
+                if v.has_python_constraints() {
+                    errors.push(variant_error(
+                        &v.name,
+                        "constraint fields (libc/min_manylinux/min_musllinux/abi) are only supported for source.type 'pylock'",
+                    ));
+                }
+            }
 
             // Per-variant metadata validation
             if let Some(metadata) = &v.metadata {
@@ -364,14 +433,19 @@ impl MirrorSpec {
     ///   inheriting top-level `metadata` and `asset_type` as defaults.
     pub fn effective_variants(&self) -> Vec<EffectiveVariant> {
         match &self.variants {
+            // ponytail: `pylock` variants carry no `assets` (constraint
+            // fields instead) — filter_map skips them rather than fabricating
+            // empty patterns; the pylock adapter resolves those separately.
             Some(variants) => variants
                 .iter()
-                .map(|v| EffectiveVariant {
-                    name: v.name.clone(),
-                    is_default: v.default,
-                    assets: v.assets.clone(),
-                    metadata: v.metadata.clone().or_else(|| self.metadata.clone()),
-                    asset_type: v.asset_type.clone().or_else(|| self.asset_type.clone()),
+                .filter_map(|v| {
+                    Some(EffectiveVariant {
+                        name: v.name.clone(),
+                        is_default: v.default,
+                        assets: v.assets.clone()?,
+                        metadata: v.metadata.clone().or_else(|| self.metadata.clone()),
+                        asset_type: v.asset_type.clone().or_else(|| self.asset_type.clone()),
+                    })
                 })
                 .collect(),
             None => vec![EffectiveVariant {
@@ -385,6 +459,14 @@ impl MirrorSpec {
                 asset_type: self.asset_type.clone(),
             }],
         }
+    }
+}
+
+/// Format a per-variant validation error, naming the variant when possible.
+fn variant_error(name: &Option<String>, message: &str) -> String {
+    match name {
+        Some(name) => format!("variants: variant '{name}' {message}"),
+        None => format!("variants: unnamed variant {message}"),
     }
 }
 
@@ -1003,6 +1085,241 @@ assets:
         } else {
             panic!("Expected UrlIndex Remote source, got: {:?}", spec.source);
         }
+    }
+
+    #[test]
+    fn parse_and_validate_pylock_spec_with_variants() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheel_scope: acme-wheels
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+  - name: musl
+    libc: musl
+    min_musllinux: "1_2"
+  - name: cp313t
+    abi: cp313t
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(matches!(spec.source, Source::Pylock { .. }));
+        assert_eq!(spec.wheel_scope, "acme-wheels");
+        assert!(spec.python.is_some());
+
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(errors.is_empty(), "valid pylock spec should validate: {errors:?}");
+
+        // No `assets`/`variants` mutual-exclusion invariant to violate here —
+        // effective_variants() must not panic on a spec whose variants carry
+        // no `assets` at all.
+        assert!(spec.effective_variants().is_empty());
+    }
+
+    #[test]
+    fn pylock_spec_defaults_wheel_scope() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(spec.wheel_scope, "pip-packages");
+        assert!(spec.validate(Path::new("test.yaml")).is_empty());
+    }
+
+    #[test]
+    fn validate_reject_pylock_missing_python_block() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("python: required")),
+            "Expected missing python block error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_with_top_level_assets() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+assets:
+  linux/amd64:
+    - "should-not-be-here\\.whl"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("assets") && e.contains("not supported for source.type 'pylock'")),
+            "Expected asset-patterns-on-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_variant_with_assets() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    assets:
+      linux/amd64:
+        - "should-not-be-here\\.whl"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("variant 'default'") && e.contains("cannot specify 'assets'")),
+            "Expected per-variant asset-patterns-on-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_bad_constraint_formats() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: glibc
+    min_manylinux: "bad"
+    abi: python313
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(errors.iter().any(|e| e.contains("libc 'glibc' must be")), "{errors:?}");
+        assert!(errors.iter().any(|e| e.contains("min_manylinux 'bad'")), "{errors:?}");
+        assert!(
+            errors.iter().any(|e| e.contains("not a valid CPython ABI tag")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_non_pylock_variant_missing_assets() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("variant 'debug'") && e.contains("must specify 'assets'")),
+            "Expected missing-assets error for non-pylock variant, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_non_pylock_variant_with_constraint_fields() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    libc: gnu
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("variant 'debug'") && e.contains("only supported for source.type 'pylock'")),
+            "Expected constraint-fields-on-non-pylock error, got: {errors:?}"
+        );
     }
 
     #[test]
