@@ -34,6 +34,10 @@ ocx_lib = { path = "external/ocx/crates/ocx_lib" }
 # (external/ocx/Cargo.toml). Keep them in sync when bumping the submodule —
 # widening defaults here (e.g. reqwest native-tls) would drag openssl into the
 # shared dependency graph.
+# EXCEPTION (since ocx v0.4.1, the upstream commit that extracted ocx-mirror):
+# reqwest, rustls, octocrab, and url are NO LONGER in ocx's
+# [workspace.dependencies] — they were mirror-only. This crate now owns them
+# outright; there is no upstream source of truth to sync these four against.
 tokio = { version = "1.52", features = ["full"] }
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
 anyhow = "1.0.102"

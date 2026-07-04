@@ -32,8 +32,11 @@ same authors, same conventions. Architecture rule:
   **nested** submodules (`external/ocx/external/...`). Patches do not travel
   with path deps; dropping the table silently resolves unpatched crates.io
   releases. CI asserts the fork source via `cargo tree -i oci-client`.
-- Dependency feature lists are copied exactly from ocx's
-  `[workspace.dependencies]` — keep in sync on submodule bumps.
+- Dependency feature lists for deps shared with `ocx_lib`/`ocx_cli` are copied
+  exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
+  bumps. **Since v0.4.1** (the upstream commit that extracted ocx-mirror)
+  `reqwest`, `rustls`, `octocrab`, `url` are mirror-owned — ocx dropped them, so
+  there is no upstream source of truth for these four.
 - Clone/checkout always `--recurse-submodules`.
 
 ## Build & Development

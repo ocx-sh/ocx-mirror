@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use anyhow::Result;
+use ocx_lib::oci::LayerLayoutSpec;
 use ocx_lib::package::info::Info;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::{LayerRef, Publisher};
@@ -31,7 +32,11 @@ pub async fn push_and_cascade(
 ) -> Result<MirrorResult> {
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
-    let layers = [LayerRef::File(bundle_path.to_path_buf())];
+    // ponytail: default layout (no strip/prefix) preserves pre-bump behavior exactly.
+    let layers = [LayerRef::File {
+        path: bundle_path.to_path_buf(),
+        layout: LayerLayoutSpec::default(),
+    }];
 
     if cascade {
         publisher
