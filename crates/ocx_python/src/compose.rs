@@ -158,13 +158,18 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
             if !script.extras.iter().all(|extra| spec.requested_extras.contains(extra)) {
                 continue;
             }
-            let shim = synthesize_shim(&script.reference).ok_or_else(|| ComposeError::InvalidEntryPoint {
-                name: script.name.clone(),
-                reference: script.reference.clone(),
-            })?;
+            // Validate the entrypoint name first so it is a known-safe slug
+            // (`^[a-z0-9][a-z0-9_-]*$`) before it is embedded in the shim's
+            // `sys.argv[0]` assignment.
             let name = EntrypointName::try_from(script.name.as_str()).map_err(|_| ComposeError::InvalidEntryPoint {
                 name: script.name.clone(),
                 reference: script.reference.clone(),
+            })?;
+            let shim = synthesize_shim(script.name.as_str(), &script.reference).ok_or_else(|| {
+                ComposeError::InvalidEntryPoint {
+                    name: script.name.clone(),
+                    reference: script.reference.clone(),
+                }
             })?;
             // `command` is the fixed, compile-time-valid slug `python3` and the
             // args are plain strings, so this Entrypoint always deserializes.
@@ -239,10 +244,19 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
 /// Returns `None` when the reference is malformed (empty module, empty attr
 /// segment, or more than one `:`), which the caller turns into a
 /// [`ComposeError::InvalidEntryPoint`].
-fn synthesize_shim(reference: &str) -> Option<String> {
+///
+/// `name` is the console-script name; the caller validates it as an
+/// `EntrypointName` (`^[a-z0-9][a-z0-9_-]*$`) before calling, so it embeds
+/// safely inside the double-quoted `sys.argv[0]` literal with no escaping.
+fn synthesize_shim(name: &str, reference: &str) -> Option<String> {
     let (module, attrs) = parse_object_reference(reference)?;
     let mut lines = vec![
         "import importlib, sys".to_string(),
+        // Present the console-script name as argv[0]. Without this the process
+        // sees `sys.argv[0] == "-c"` (the `python3 -c` invocation slug), so
+        // tools that derive their program name from argv[0] — click, argparse —
+        // print `-c` instead of the command name in --help/--version/usage.
+        format!("sys.argv[0] = \"{name}\""),
         format!("_obj = importlib.import_module(\"{module}\")"),
     ];
     for attr in attrs {
@@ -462,6 +476,12 @@ mod tests {
         assert!(
             shim.contains("sys.exit(_obj())"),
             "shim calls the resolved object: {shim}"
+        );
+        // Regression: argv[0] must be the console-script name, not `-c`, so
+        // click/argparse report the real program name in --version/--help.
+        assert!(
+            shim.contains("sys.argv[0] = \"mytool\""),
+            "shim must set argv[0] to the entrypoint name: {shim}"
         );
         assert!(
             !shim.contains("import func"),
