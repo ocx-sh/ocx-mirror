@@ -181,6 +181,22 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
             entries.insert(name, entrypoint);
         }
     }
+
+    // Always expose the composed interpreter as a `python3` entrypoint. Console
+    // scripts alone cannot run a LIBRARY env whose only public surface is
+    // importable modules (e.g. `google-cloud-aiplatform` ships no console
+    // script), and a bare `-- python3 …` override does NOT get the package's
+    // PRIVATE env (PYTHONPATH), so imports fail. Dispatching `python3` as an
+    // entrypoint runs the composed interpreter WITH the env applied — the only
+    // way to `import` the library (and generally useful: `ocx run <env> --
+    // python3 -c …`). `entry` skips insertion if a wheel already shipped a
+    // `python3` console script (never observed; fail-safe against override).
+    let python3_name = EntrypointName::try_from("python3").expect("`python3` is a valid entrypoint name");
+    entries.entry(python3_name).or_insert_with(|| {
+        serde_json::from_value(json!({ "command": "python3", "args": [] }))
+            .expect("a python3 entrypoint with empty args always deserializes")
+    });
+
     let entrypoints = Entrypoints::new(entries);
 
     // 4. Env block: expose the site-packages tree, prepend the launcher bin
@@ -440,16 +456,20 @@ mod tests {
     /// where a test isolates entrypoint/env behaviour from the ABI check.
     const PURE_WHEEL: &str = "foo-1.0-py3-none-any.whl";
 
-    /// Returns the sole entrypoint's args (`["-c", shim]`), asserting exactly one
-    /// entrypoint named `name` dispatching `python3`.
+    /// Returns the console-script entrypoint `name`'s args (`["-c", shim]`).
+    ///
+    /// Compose always adds a bare `python3` entrypoint alongside the console
+    /// scripts, so this looks the named one up rather than asserting a single
+    /// entry.
     fn sole_entrypoint_args(composition: &EnvComposition, name: &str) -> Vec<String> {
         let entrypoints = composition
             .metadata
             .entrypoints()
             .expect("bundle metadata carries entrypoints");
-        assert_eq!(entrypoints.len(), 1, "expected exactly one entrypoint");
-        let (entry_name, entry) = entrypoints.iter().next().expect("one entrypoint present");
-        assert_eq!(entry_name.as_str(), name);
+        let (_, entry) = entrypoints
+            .iter()
+            .find(|(entry_name, _)| entry_name.as_str() == name)
+            .unwrap_or_else(|| panic!("entrypoint {name} present"));
         assert_eq!(
             entry.command().expect("dispatch command set").as_str(),
             "python3",
@@ -458,6 +478,17 @@ mod tests {
         let args = entry.args();
         assert_eq!(args[0], "-c", "shim runs via python3 -c, no shell");
         args.to_vec()
+    }
+
+    /// Asserts a bare `python3` entrypoint (empty args) is always present.
+    fn assert_python3_entrypoint(composition: &EnvComposition) {
+        let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
+        let (_, py) = entrypoints
+            .iter()
+            .find(|(n, _)| n.as_str() == "python3")
+            .expect("compose always adds a python3 entrypoint");
+        assert_eq!(py.command().expect("command set").as_str(), "python3");
+        assert!(py.args().is_empty(), "python3 entrypoint takes no fixed args");
     }
 
     // ── Entrypoint synthesis: shim grammar ──────────────────────────────────
@@ -543,10 +574,24 @@ mod tests {
 
         let composition = compose_env(&spec, &wheels).expect("composition succeeds");
         let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
+        // No `blackd` launcher (extra not requested); only the always-present
+        // `python3` entrypoint remains.
         assert!(
-            entrypoints.is_empty(),
+            !entrypoints.iter().any(|(n, _)| n.as_str() == "blackd"),
             "an unrequested extra must not synthesize its launcher"
         );
+        assert_python3_entrypoint(&composition);
+    }
+
+    #[test]
+    fn library_wheel_with_no_scripts_still_exposes_python3() {
+        // A library env (no console scripts of its own — e.g.
+        // google-cloud-aiplatform) is still runnable as a plain interpreter, the
+        // only way to `import` and exercise it.
+        let spec = env_spec(&[], &[], "cp313");
+        let wheels = vec![wheel(PURE_WHEEL, Vec::new())];
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        assert_python3_entrypoint(&composition);
     }
 
     #[test]
