@@ -14,6 +14,9 @@ use ocx_lib::package::version::Version;
 
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
+use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
+use crate::pipeline::python_prepare::EnvManifest;
+use crate::pipeline::python_push;
 use crate::run_summary::{ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary};
 use crate::spec::{self, MirrorSpec, PlatformConfig, Severity};
 
@@ -77,6 +80,13 @@ impl Push {
     pub async fn execute(&self, _printer: &DataInterface) -> Result<(), MirrorError> {
         // ── Load spec ────────────────────────────────────────────────────────
         let spec = spec::load_spec(&self.spec).await?;
+
+        // pylock sources take a parallel env-push path: env packages (wheel
+        // layers + composed metadata) instead of the archive/binary bundle.
+        // Mirrors `prepare.rs`'s early Pylock dispatch.
+        if matches!(spec.source, spec::Source::Pylock { .. }) {
+            return self.execute_pylock_push(&spec).await;
+        }
 
         // GHA workflow stamps the push job's html_url here so the Discord
         // embed can link push-tier successes + failures back to push logs.
@@ -295,6 +305,229 @@ impl Push {
         // (`any_red` / `any_new_green`), not its `success()` status, and the
         // `summarise` step uses `if: always()` to write outputs even when this
         // call returns Err.
+        if summary.any_red {
+            let detail = if summary.any_new_green {
+                format!(
+                    "partial run across {} version(s): some platforms failed — see run-summary.json",
+                    summary.versions.len(),
+                )
+            } else {
+                format!(
+                    "all platforms failed across {} version(s); no package published — see run-summary.json",
+                    summary.versions.len(),
+                )
+            };
+            return Err(MirrorError::ExecutionFailed(vec![detail]));
+        }
+
+        Ok(())
+    }
+
+    /// Env-push path for `source.type: pylock` specs — the parallel to the
+    /// archive/binary path in [`execute`](Self::execute).
+    ///
+    /// Reads `{bundles_dir}/{version}/env-manifest.json` per version
+    /// (written by `python_prepare::prepare_env_version`), evaluates JUNIT
+    /// go/no-go per `(version, platform)` with the same `evaluate_junit`
+    /// AND-across-containers logic as the archive loop, and pushes each
+    /// green leg via `ocx package push` with the ordered wheel layers as
+    /// positional args and the composed `metadata.json` via `-m`.
+    ///
+    /// Stage 2 (deferred): wheel-repo upload-if-missing (content-addressed
+    /// layer reuse across packages) is not implemented — every push
+    /// re-uploads its full layer set. The env package is self-contained
+    /// either way, so `ocx package test` works without it.
+    ///
+    /// W3 (deferred): named-default-variant bare-tag aliasing (a second push
+    /// under the unprefixed tag) is not implemented — the current corpus
+    /// uses the unnamed default variant, whose tag is already bare.
+    async fn execute_pylock_push(&self, spec: &MirrorSpec) -> Result<(), MirrorError> {
+        let push_job_url = std::env::var("OCX_MIRROR_JOB_URL")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+
+        let mut manifests = python_push::enumerate_env_manifests(&self.bundles_dir)
+            .await
+            .map_err(MirrorError::TemplateError)?;
+
+        if manifests.is_empty() {
+            log::info!(
+                "[{}] No env manifests found in {}",
+                spec.name,
+                self.bundles_dir.display()
+            );
+        }
+
+        manifests.sort_by(|a: &EnvManifest, b: &EnvManifest| {
+            let va = Version::parse(&a.version);
+            let vb = Version::parse(&b.version);
+            match (va, vb) {
+                (Some(a), Some(b)) => a.cmp(&b),
+                _ => a.version.cmp(&b.version),
+            }
+        });
+
+        let platform_order = spec_platform_order(spec);
+        let newest_version = manifests.last().map(|manifest| manifest.version.clone());
+
+        let mut version_summaries: Vec<VersionSummary> = Vec::new();
+
+        for manifest in &manifests {
+            let version = &manifest.version;
+
+            let mut sorted_envs: Vec<_> = manifest.envs.iter().collect();
+            sorted_envs.sort_by_key(|env| {
+                platform_order
+                    .iter()
+                    .position(|p| p == &env.platform)
+                    .unwrap_or(usize::MAX)
+            });
+
+            let mut platforms_pushed: Vec<String> = Vec::new();
+            let mut platforms_failed: Vec<PlatformFailure> = Vec::new();
+            let mut all_test_failures: Vec<TestFailure> = Vec::new();
+            let mut cascade_tags: Vec<String> = Vec::new();
+            let mut all_skipped_existing = true;
+
+            for env_entry in &sorted_envs {
+                let platform_str = &env_entry.platform;
+                let container_ids = container_ids_for_platform(spec, platform_str);
+
+                let decision = evaluate_junit(
+                    &self.junit_dir,
+                    version,
+                    &env_entry.platform_slug,
+                    &container_ids,
+                    &test_names_for_platform(spec, platform_str),
+                )
+                .await;
+
+                match decision {
+                    VpDecision::Red {
+                        platform_failure,
+                        test_failures,
+                    } => {
+                        all_skipped_existing = false;
+                        platforms_failed.push(platform_failure);
+                        all_test_failures.extend(test_failures);
+                    }
+                    VpDecision::Green => {
+                        let target_ref = format!("{}:{}", spec.target.repository, version);
+                        let layer_paths: Vec<PathBuf> =
+                            env_entry.layers.iter().map(|layer| layer.path.clone()).collect();
+
+                        let push_result = python_push::invoke_env_push(
+                            platform_str,
+                            &target_ref,
+                            &env_entry.metadata_path,
+                            &layer_paths,
+                        )
+                        .await;
+
+                        match push_result {
+                            Ok(report) => {
+                                let status_str = report.status.as_deref().unwrap_or("pushed");
+                                if status_str == "skipped_existing" {
+                                    // Don't flip all_skipped_existing to false
+                                } else {
+                                    all_skipped_existing = false;
+                                    platforms_pushed.push(platform_str.clone());
+                                    cascade_tags.extend(report.cascade_tags_written);
+                                }
+                            }
+                            Err(msg) => {
+                                all_skipped_existing = false;
+                                log::warn!(
+                                    "[{}] Env push failed for {}/{}: {}",
+                                    spec.name,
+                                    version,
+                                    platform_str,
+                                    msg
+                                );
+                                platforms_failed.push(PlatformFailure {
+                                    platform: platform_str.clone(),
+                                    reason: "push_error".to_string(),
+                                    failed_tests: vec![],
+                                    job_url: push_job_url.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !platforms_pushed.is_empty() && !cascade_tags.iter().any(|t| t == version) {
+                cascade_tags.insert(0, version.clone());
+            }
+            {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                cascade_tags.retain(|t| seen.insert(t.clone()));
+            }
+
+            let is_newest = Some(version.as_str()) == newest_version.as_deref();
+            let status = determine_status(
+                &platforms_pushed,
+                &platforms_failed,
+                all_skipped_existing && !sorted_envs.is_empty(),
+                is_newest,
+                &mut cascade_tags,
+            );
+
+            version_summaries.push(VersionSummary {
+                version: version.clone(),
+                status,
+                platforms_pushed,
+                platforms_failed,
+                cascade_tags_written: cascade_tags,
+                test_failures: all_test_failures,
+                platforms_excluded: collect_excluded_platforms(spec, version),
+            });
+        }
+
+        // ponytail: run-level flags + RunSummary assembly duplicate execute()'s
+        // tail block — the archive/binary push path must stay byte-identical
+        // (Two Hats), so this Stage 1 pylock path is additive rather than
+        // sharing a refactored helper. Dedup is a follow-up, not this commit.
+        let any_red = version_summaries
+            .iter()
+            .any(|vs| matches!(vs.status, VersionStatus::Failed | VersionStatus::Partial));
+        let any_new_green = version_summaries.iter().any(|vs| {
+            matches!(vs.status, VersionStatus::Published | VersionStatus::Partial) && !vs.platforms_pushed.is_empty()
+        });
+
+        let run_url = std::env::var("GITHUB_SERVER_URL")
+            .ok()
+            .and_then(|server| {
+                let repo = std::env::var("GITHUB_REPOSITORY").ok()?;
+                let run_id = std::env::var("GITHUB_RUN_ID").ok()?;
+                Some(format!("{server}/{repo}/actions/runs/{run_id}"))
+            })
+            .unwrap_or_else(|| "https://github.com/actions/runs/unknown".to_string());
+
+        let summary = RunSummary {
+            schema_version: 1,
+            mirror: spec.name.clone(),
+            target: format!("{}/{}", spec.target.registry, spec.target.repository),
+            run_url,
+            push_job_url,
+            source_url: compute_source_url(&spec.source),
+            logo_url: compute_logo_url(),
+            versions: version_summaries,
+            any_red,
+            any_new_green,
+        };
+
+        write_run_summary(&self.write_summary, &summary).await?;
+
+        log::info!(
+            "[{}] Run summary written to {} (any_red={}, any_new_green={})",
+            spec.name,
+            self.write_summary.display(),
+            summary.any_red,
+            summary.any_new_green,
+        );
+
         if summary.any_red {
             let detail = if summary.any_new_green {
                 format!(
@@ -766,60 +999,6 @@ async fn invoke_push(
         .map_err(|e| format!("failed to parse push JSON output: {e}\nstdout: {}", stdout.trim()))?;
 
     Ok(report)
-}
-
-/// Resolve the path to the `ocx` binary.
-///
-/// Preference order:
-/// 1. `OCX_BINARY_PIN` env var (per CLAUDE.md env table — set by ocx itself).
-/// 2. Current executable path (`std::env::current_exe()`).
-/// 3. `"ocx"` on `PATH` as final fallback.
-pub(crate) fn resolve_ocx_binary() -> Result<PathBuf, String> {
-    if let Ok(pin) = std::env::var("OCX_BINARY_PIN")
-        && !pin.is_empty()
-    {
-        return Ok(PathBuf::from(pin));
-    }
-
-    // The current binary is `ocx-mirror`. We want the co-located `ocx` binary.
-    if let Ok(current) = std::env::current_exe()
-        && let Some(dir) = current.parent()
-    {
-        let candidate = dir.join("ocx");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    // Fallback: hope `ocx` is on PATH.
-    Ok(PathBuf::from("ocx"))
-}
-
-/// Forward all `OCX_*` environment variables from the current process into a
-/// child command. This ensures offline mode, remote mode, registry config, and
-/// index paths are inherited by the subprocess.
-pub(crate) fn forward_ocx_env(cmd: &mut tokio::process::Command) {
-    const OCX_VARS: &[&str] = &[
-        "OCX_HOME",
-        "OCX_DEFAULT_REGISTRY",
-        "OCX_INSECURE_REGISTRIES",
-        "OCX_OFFLINE",
-        "OCX_REMOTE",
-        "OCX_CONFIG",
-        "OCX_NO_CONFIG",
-        "OCX_PROJECT",
-        "OCX_NO_PROJECT",
-        "OCX_INDEX",
-        "OCX_BINARY_PIN",
-        "OCX_NO_UPDATE_CHECK",
-        "OCX_NO_MODIFY_PATH",
-    ];
-
-    for var in OCX_VARS {
-        if let Ok(val) = std::env::var(var) {
-            cmd.env(var, val);
-        }
-    }
 }
 
 /// Write a [`RunSummary`] to the given path as pretty-printed JSON.
@@ -1901,6 +2080,102 @@ platforms:
                     "{reason} failure must carry stamped push_job_url, got: {f}",
                 );
             }
+        }
+    }
+
+    // ── W2.4 Stage 1: pylock env-push dispatch ─────────────────────────────
+
+    #[test]
+    fn execute_pylock_push_reads_env_manifest_and_writes_summary() {
+        use crate::pipeline::python_prepare::{EnvEntry, EnvLayer, EnvManifest};
+
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "1.0.0";
+        let version_dir = bundles_dir.path().join(version);
+        std::fs::create_dir_all(&version_dir).unwrap();
+
+        let make_layer = |name: &str| EnvLayer {
+            wheel_repository: format!("pip-packages/example.com/{name}/none-any"),
+            digest: format!("sha256:{}", "0".repeat(64)),
+            path: version_dir.join(format!("{name}.tar.zst")),
+            package_name: name.to_string(),
+            wheel_sha256: "1".repeat(64),
+        };
+
+        // Fixture env-manifest.json mirroring what `prepare_env_version`
+        // writes: two platforms (matching `mirror-pylock.yml`'s declared
+        // platforms), each with 2 ordered wheel layers.
+        let manifest = EnvManifest {
+            version: version.to_string(),
+            envs: vec![
+                EnvEntry {
+                    platform_slug: "linux_amd64".to_string(),
+                    platform: "linux/amd64".to_string(),
+                    variant: None,
+                    metadata_path: version_dir.join("linux_amd64-metadata.json"),
+                    layers: vec![make_layer("pycowsay"), make_layer("six")],
+                },
+                EnvEntry {
+                    platform_slug: "linux_arm64".to_string(),
+                    platform: "linux/arm64".to_string(),
+                    variant: None,
+                    metadata_path: version_dir.join("linux_arm64-metadata.json"),
+                    layers: vec![make_layer("pycowsay"), make_layer("six")],
+                },
+            ],
+        };
+        let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
+        std::fs::write(version_dir.join("env-manifest.json"), manifest_json).unwrap();
+
+        // mirror-pylock.yml declares no containers/tests, so each platform
+        // evaluates in native mode against a single `_native_` JUNIT. A
+        // passing suite for both platforms reaches the Green branch, so the
+        // loop attempts `invoke_env_push` (which fails — no `ocx` on PATH —
+        // recorded as `push_error`), exercising the multi-layer argv path.
+        for (platform, slug) in [("linux/amd64", "linux_amd64"), ("linux/arm64", "linux_arm64")] {
+            write_junit(
+                junit_dir.path(),
+                version,
+                slug,
+                "_native_",
+                &passing_junit(version, platform, "_native_"),
+            );
+        }
+
+        let spec_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+            .to_path_buf();
+
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        // The push subprocess fails in the test environment (no `ocx` on
+        // PATH) → push_error → any_red → ExecutionFailed, same exit
+        // contract as the archive path. The summary must still be written.
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "expected ExecutionFailed from push_error, got {result:?}",
+        );
+        assert!(summary_path.exists(), "run-summary.json must be written");
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(summary["schema_version"], serde_json::json!(1));
+
+        let versions = summary["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "one version from the env manifest");
+        assert_eq!(versions[0]["version"], serde_json::json!(version));
+
+        let failures = versions[0]["platforms_failed"].as_array().unwrap();
+        assert_eq!(failures.len(), 2, "both platforms fail via push_error: {failures:?}");
+        for f in failures {
+            assert_eq!(f["reason"], serde_json::json!("push_error"));
         }
     }
 }

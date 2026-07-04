@@ -347,6 +347,19 @@ determinism, analogous to ocx's manifest byte-golden test.
 
 1. Wheel-blob placement: cross-repo OCI blob mount vs re-push per env repo
    — `Publisher` capability check; storage-dedup only.
+   **RESOLVED (W2.4, 2026-07-04): re-push per env repo.** `Publisher` has
+   NO cross-repo blob-mount capability (`LayerRef::Digest` HEAD-verifies a
+   blob only in the manifest's OWN repo; blobs always upload to the manifest
+   repo — `publisher/layer_ref.rs`, `oci/client.rs:729,804`). Option A
+   (cross-mount) is therefore not implementable now. Env push uses
+   `LayerRef::File{layer_path, LayerLayoutSpec::default()}` per wheel →
+   the wheel blob is re-uploaded into the env repo. The wheel's own
+   content-addressed repo (`<scope>/<host>/<pkg>/<slug>:<sha256>`) is still
+   published (upload-if-missing) as the discoverable "layer repo" the goal
+   requires, but it is a SEPARATE registration — the env package is
+   self-contained (all layers present in the env repo), so `ocx run` /
+   `ocx package test` never depend on the wheel repos. Cross-mount is a v2
+   storage optimization, gated on a future `Publisher` mount API.
 2. `VersionInfo` multi-asset extension — option (a) vs (b) above.
 3. Interpreter package pipeline: mirror python-build-standalone via
    existing `github_release` source type — sequencing vs PR 3.

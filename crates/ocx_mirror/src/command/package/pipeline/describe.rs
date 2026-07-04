@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 
-use crate::command::package::pipeline::push::{forward_ocx_env, resolve_ocx_binary};
 use crate::error::MirrorError;
+use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
 use crate::spec;
 
 /// `ocx-mirror package pipeline describe` subcommand.
