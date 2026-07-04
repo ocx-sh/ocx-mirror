@@ -2342,6 +2342,7 @@ dependencies = [
  "hex",
  "octocrab",
  "ocx_lib",
+ "ocx_python",
  "quick-junit",
  "regex",
  "reqwest 0.12.28",

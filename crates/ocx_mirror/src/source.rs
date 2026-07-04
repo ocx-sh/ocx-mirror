@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 pub mod github_release;
+pub mod pylock;
 pub mod url_index;
 
 use std::collections::HashMap;

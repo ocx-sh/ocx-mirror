@@ -42,6 +42,16 @@ pub enum MirrorError {
     WebhookUnavailable(String),
     /// Discord webhook returned 401/403 — secret rotated or misconfigured.
     WebhookPermissionDenied(String),
+    /// A `pylock`-sourced mirror spec could not be resolved into plan
+    /// entries: no locked package matches the spec's app name, an invalid
+    /// platform/variant mapping, or `ocx_python::select_wheels` found no
+    /// compatible wheel. The underlying cause is malformed spec/lock content,
+    /// not a transient resource — same exit class as `SpecInvalid`. Covers
+    /// W2.2's single `select_wheels` call site (the plan phase); the fuller
+    /// `ocx_python` error-type wiring across all `resolve_assets` call sites
+    /// (`LockError`/`SelectError`/`CollisionError`/`ComposeError`) is a
+    /// separate follow-up.
+    PylockError(String),
 }
 
 impl MirrorError {
@@ -68,6 +78,7 @@ impl MirrorError {
             Self::TemplateError(_) => ExitCode::IoError,
             Self::WebhookUnavailable(_) => ExitCode::Unavailable,
             Self::WebhookPermissionDenied(_) => ExitCode::PermissionDenied,
+            Self::PylockError(_) => ExitCode::DataError,
         }
     }
 }
@@ -107,6 +118,7 @@ impl std::fmt::Display for MirrorError {
             Self::TemplateError(msg) => write!(f, "template error: {msg}"),
             Self::WebhookUnavailable(msg) => write!(f, "webhook unavailable: {msg}"),
             Self::WebhookPermissionDenied(msg) => write!(f, "webhook permission denied: {msg}"),
+            Self::PylockError(msg) => write!(f, "pylock error: {msg}"),
         }
     }
 }
@@ -153,6 +165,15 @@ mod tests {
         // Issue #160: PlanError → DataError (65) — plan.json input is malformed
         // or lacks resolved assets; same class as RunSummaryError.
         let err = MirrorError::PlanError("version '1.2.3' not present in plan".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn pylock_error_maps_to_data_error() {
+        // W2.2: select_wheels failures (no compatible wheel) surface via
+        // PylockError → DataError (65) — malformed lock/spec content, not a
+        // transient resource.
+        let err = MirrorError::PylockError("no compatible wheel for 'numpy' on linux/amd64".into());
         assert_eq!(err.kind_exit_code(), ExitCode::DataError);
     }
 

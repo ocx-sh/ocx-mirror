@@ -18,6 +18,7 @@ jsonschema = ["dep:schemars"]
 
 [dependencies]
 ocx_lib = { workspace = true }
+ocx_python = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

@@ -1,0 +1,28 @@
+# Mirror spec: pylock source fixture for plan-phase unit tests (W2.2).
+# Pairs with pylock-pycowsay.toml (committed alongside). The default variant
+# is left unnamed (bare `1.0.0` tag) — `default: true` with no `name:` is the
+# convention for an unprefixed cascade chain.
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+
+source:
+  type: pylock
+  path: pylock-pycowsay.toml
+
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+
+variants:
+  - default: true
+    libc: gnu
+    min_manylinux: "2_28"
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+  linux/arm64:
+    runner: ubuntu-24.04-arm

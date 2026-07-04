@@ -340,10 +340,11 @@ pub(crate) async fn list_upstream_versions(
                     .map_err(|e| MirrorError::SourceError(format!("generator failed: {e}")))
             }
         },
-        // ponytail: adapter lands in W2.2 (lock -> VersionInfo); spec/config
-        // surface only for now.
-        spec::Source::Pylock { .. } => Err(MirrorError::ExecutionFailed(vec![
-            "source.type 'pylock' adapter not yet wired (tracked: W2.2)".to_string(),
-        ])),
+        spec::Source::Pylock { path } => {
+            log::debug!("Reading pylock source for {}", spec.name);
+            source::pylock::list_versions(spec_dir, path, &spec.name)
+                .await
+                .map_err(|e| MirrorError::SourceError(format!("failed to read pylock source: {e}")))
+        }
     }
 }

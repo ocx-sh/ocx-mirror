@@ -19,6 +19,10 @@ homepage = "https://ocx.sh"
 # the same easy-to-maintain pattern ocx itself uses for its vendored forks.
 # Bumping ocx_lib = bumping the external/ocx submodule pointer.
 ocx_lib = { path = "external/ocx/crates/ocx_lib" }
+# ocx_python is an in-workspace path dep (crates/ocx_python) — the pylock
+# translation library ocx_mirror's `source.type: pylock` adapter and plan
+# phase call into (W2.2, first ocx_mirror -> ocx_python dependency).
+ocx_python = { path = "crates/ocx_python" }
 
 # Feature lists below are copied EXACTLY from ocx's [workspace.dependencies]
 # (external/ocx/Cargo.toml). Keep them in sync when bumping the submodule —

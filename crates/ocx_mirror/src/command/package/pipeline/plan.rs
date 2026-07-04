@@ -8,9 +8,13 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ocx_lib::cli::DataInterface;
-use ocx_lib::oci::ClientBuilder;
+use ocx_lib::oci::{Architecture, ClientBuilder, OperatingSystem, Platform};
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
+use ocx_python::{
+    Implementation, InterpreterPin, LibcFamily, PythonTarget, TargetArchitecture, TargetOperatingSystem,
+    TargetPlatform, VariantConstraints,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::command::package::options::OutputFormat;
@@ -21,7 +25,8 @@ use crate::filter;
 use crate::normalizer;
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
-use crate::spec::{self, MirrorSpec};
+use crate::source;
+use crate::spec::{self, MirrorSpec, PythonConfig, Source, VariantSpec};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// `new` | `backfill-partial` — what kind of work is needed for this version.
@@ -198,6 +203,25 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
     // Build timestamp (reuse existing normalizer).
     let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
 
+    // `pylock` selects wheel SETS (N per platform) via `ocx_python::select_wheels`
+    // instead of the regex `resolve_assets`, which assumes exactly one asset per
+    // platform and errors (`AmbiguousAsset`) on 2+ — structurally incompatible
+    // with wheel sets (D1, plan_pylock_mirror.md). The branch builds its own
+    // `PlanVersionEntry` list directly rather than joining the regex path below.
+    if let Source::Pylock { path } = &spec.source {
+        let versions =
+            build_pylock_plan_entries(spec, spec_dir, path, &upstream_versions, &all_tags, &version_map).await?;
+        let target = format!("{}/{}", spec.target.registry, spec.target.repository);
+        let ocx_mirror_rev = spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone());
+        return Ok(PlanReport {
+            schema_version: 2,
+            has_new: !versions.is_empty(),
+            versions,
+            target,
+            ocx_mirror_rev,
+        });
+    }
+
     // Resolve assets per effective variant — same logic as sync.rs.
     let effective_variants = spec.effective_variants();
     let mut resolved_versions = Vec::new();
@@ -270,6 +294,201 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
         versions: version_entries,
         target,
         ocx_mirror_rev,
+    })
+}
+
+/// Builds the `PlanVersionEntry` list for a `pylock`-sourced spec.
+///
+/// Bypasses `resolve_assets`/`filter::filter_versions` entirely (D1): for
+/// each declared platform key that `spec.platform_applies` accepts and is not
+/// already published (per `version_map`), resolves a `PythonTarget` per
+/// variant and calls `ocx_python::select_wheels` directly, emitting one
+/// `PlanAssetEntry` per selected wheel (N per platform — the shape the regex
+/// resolver cannot express).
+async fn build_pylock_plan_entries(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    path: &str,
+    upstream_versions: &[source::VersionInfo],
+    all_tags: &[String],
+    version_map: &VersionPlatformMap,
+) -> Result<Vec<PlanVersionEntry>, MirrorError> {
+    let app_version = upstream_versions
+        .first()
+        .map(|info| info.version.clone())
+        .ok_or_else(|| MirrorError::PylockError("pylock source produced no version".to_string()))?;
+
+    // The source adapter (list_upstream_versions, above) already parsed the
+    // lock once to extract the app version; parsing it again here is the
+    // price of keeping `source::VersionInfo` source-agnostic (no `Pylock`
+    // leaking into it) — a committed local pylock.toml is small, so the extra
+    // parse is cheaper than threading the parsed value across the source
+    // boundary.
+    let lock = source::pylock::load(spec_dir, path)
+        .await
+        .map_err(|e| MirrorError::SourceError(format!("failed to load pylock source: {e}")))?;
+
+    let python = spec
+        .python
+        .as_ref()
+        .expect("validated: python required for source.type 'pylock'");
+    let interpreter = pylock_interpreter_pin(python)?;
+
+    let mut platform_keys: Vec<&str> = spec
+        .platforms
+        .as_ref()
+        .map_or_else(Vec::new, |platforms| platforms.keys().map(String::as_str).collect());
+    platform_keys.sort_unstable();
+    let declared_platform_count = platform_keys.len();
+
+    let mut entries = Vec::new();
+    for (variant_name, constraints) in pylock_variants(spec) {
+        let tagged = match variant_name {
+            Some(name) => format!("{name}-{app_version}"),
+            None => app_version.clone(),
+        };
+        let check_version = Version::parse(&tagged).expect("normalized pylock tag must be a valid version");
+
+        let mut missing_platforms = Vec::new();
+        let mut assets = Vec::new();
+
+        for &platform_key in &platform_keys {
+            if !spec.platform_applies(&app_version, platform_key) {
+                continue;
+            }
+            let platform: Platform = platform_key
+                .parse()
+                .map_err(|e| MirrorError::PylockError(format!("invalid platform key '{platform_key}': {e}")))?;
+            if version_map.has(&check_version, &platform) {
+                continue; // already published for this (variant, platform)
+            }
+
+            let target = PythonTarget {
+                platform: pylock_target_platform(&platform, platform_key)?,
+                variant: constraints.clone(),
+                interpreter: interpreter.clone(),
+            };
+
+            let wheels = ocx_python::select_wheels(&lock, &target).map_err(|e| {
+                MirrorError::PylockError(format!("wheel selection failed for platform '{platform_key}': {e}"))
+            })?;
+
+            missing_platforms.push(platform_key.to_string());
+            for wheel in wheels {
+                let url_str = wheel.url.ok_or_else(|| {
+                    MirrorError::PylockError(format!(
+                        "wheel '{}' for package '{}' selected with no download URL",
+                        wheel.filename, wheel.name
+                    ))
+                })?;
+                let url = url::Url::parse(&url_str)
+                    .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
+                assets.push(PlanAssetEntry {
+                    platform: platform_key.to_string(),
+                    asset_name: wheel.filename,
+                    url,
+                });
+            }
+        }
+
+        if missing_platforms.is_empty() {
+            continue; // this variant has no outstanding work for any declared platform
+        }
+
+        // Same New/BackfillPartial convention as build_version_entries: the
+        // bare (variant-prefixed, un-timestamped) tag already on the registry
+        // means some platform was published before, so a shorter missing-set
+        // than the declared count is a backfill, not a first publish.
+        let version_on_registry = Version::parse(&app_version)
+            .is_some_and(|v| all_tags.iter().any(|t| Version::parse(t).is_some_and(|tv| tv == v)));
+        let kind = if version_on_registry && declared_platform_count > missing_platforms.len() {
+            PlanVersionKind::BackfillPartial
+        } else {
+            PlanVersionKind::New
+        };
+
+        entries.push(PlanVersionEntry {
+            version: tagged,
+            platforms: missing_platforms,
+            kind,
+            source_version: app_version.clone(),
+            variant: variant_name.map(str::to_string),
+            assets,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Enumerates `pylock` variants directly from `VariantSpec`'s constraint
+/// fields — unlike `effective_variants()` (the regex asset-pattern path),
+/// which filters pylock variants out (they carry no `assets`). Absent
+/// `variants:` is one implicit, unconstrained default variant (matches
+/// `select`'s own defaults: gnu libc + manylinux_2_28 floor).
+fn pylock_variants(spec: &MirrorSpec) -> Vec<(Option<&str>, VariantConstraints)> {
+    match &spec.variants {
+        Some(variants) => variants
+            .iter()
+            .map(|variant| (variant.name.as_deref(), pylock_variant_constraints(variant)))
+            .collect(),
+        None => vec![(None, VariantConstraints::default())],
+    }
+}
+
+/// Maps a pylock `VariantSpec`'s constraint fields to `ocx_python`'s
+/// `VariantConstraints`. `VariantSpec::validate_python_constraints` already
+/// restricts `libc` to `"gnu"`/`"musl"`, so anything else defaults to `Gnu`.
+fn pylock_variant_constraints(variant: &VariantSpec) -> VariantConstraints {
+    VariantConstraints {
+        libc: variant.libc.as_deref().map(|libc| {
+            if libc == "musl" {
+                LibcFamily::Musl
+            } else {
+                LibcFamily::Gnu
+            }
+        }),
+        min_manylinux: variant.min_manylinux.clone(),
+        min_musllinux: variant.min_musllinux.clone(),
+        abi: variant.abi.clone(),
+    }
+}
+
+/// Builds the interpreter pin from the spec's `python:` block.
+fn pylock_interpreter_pin(python: &PythonConfig) -> Result<InterpreterPin, MirrorError> {
+    let version = Version::parse(&python.version)
+        .ok_or_else(|| MirrorError::PylockError(format!("invalid python.version '{}'", python.version)))?;
+    let minor = version
+        .minor()
+        .ok_or_else(|| MirrorError::PylockError(format!("python.version '{}' needs major.minor", python.version)))?;
+    Ok(InterpreterPin {
+        python_version: format!("{}.{minor}", version.major()),
+        python_full_version: python.version.clone(),
+        abi: python.abi.clone(),
+        implementation: Implementation::CPython,
+    })
+}
+
+/// Maps a spec platform key's parsed `ocx_lib::oci::Platform` to
+/// `ocx_python`'s `TargetPlatform` (os/arch only — L2 v1 keeps libc/ABI in
+/// the variant prefix, not the platform key).
+fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPlatform, MirrorError> {
+    let Platform::Specific { os, arch, .. } = platform else {
+        return Err(MirrorError::PylockError(format!(
+            "platform key '{key}' must be a concrete os/arch pair for pylock sources"
+        )));
+    };
+    let operating_system = match os {
+        OperatingSystem::Linux => TargetOperatingSystem::Linux,
+        OperatingSystem::Darwin => TargetOperatingSystem::Darwin,
+        OperatingSystem::Windows => TargetOperatingSystem::Windows,
+    };
+    let architecture = match arch {
+        Architecture::Amd64 => TargetArchitecture::Amd64,
+        Architecture::Arm64 => TargetArchitecture::Arm64,
+    };
+    Ok(TargetPlatform {
+        operating_system,
+        architecture,
     })
 }
 
@@ -362,8 +581,6 @@ fn print_plan_plain(report: &PlanReport) {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::oci::Platform;
-
     use super::*;
 
     // ── §3.5 S5: ocx-mirror package pipeline plan — unit tests ────────────────────
@@ -577,5 +794,163 @@ mod tests {
             result.is_ok(),
             "PlanCmd::execute must not panic after implementation; got panic instead of Result"
         );
+    }
+
+    // ── W2.2: pylock source — plan-phase wheel selection ────────────────────
+    //
+    // `build_pylock_plan_entries` is the registry-independent half of the
+    // pylock branch (the caller already fetched `all_tags`/`version_map` from
+    // the target registry) — the seam that reuses `select_wheels` instead of
+    // the regex `resolve_assets` (D1). Tested directly so no live OCI
+    // registry is needed; `pipeline plan`'s registry-facing prelude is
+    // unchanged for every source type.
+
+    fn pylock_fixture_spec_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_emits_wheel_assets_per_platform() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let upstream_versions = list_upstream_versions(&spec, spec_dir)
+            .await
+            .expect("pylock source must list the app's locked version");
+        assert_eq!(upstream_versions.len(), 1);
+        assert_eq!(upstream_versions[0].version, "1.0.0");
+
+        let Source::Pylock { path } = &spec.source else {
+            panic!("fixture spec must be source.type: pylock");
+        };
+
+        let version_map = VersionPlatformMap::default();
+        let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map)
+            .await
+            .expect("wheel selection must succeed for the fixture lock");
+
+        assert_eq!(entries.len(), 1, "one declared (unnamed default) variant -> one entry");
+        let entry = &entries[0];
+        assert_eq!(
+            entry.version, "1.0.0",
+            "unnamed default variant must produce a bare tag"
+        );
+        assert_eq!(entry.source_version, "1.0.0");
+        assert_eq!(entry.variant, None);
+        assert!(matches!(entry.kind, PlanVersionKind::New));
+
+        let mut platforms = entry.platforms.clone();
+        platforms.sort();
+        assert_eq!(platforms, vec!["linux/amd64".to_string(), "linux/arm64".to_string()]);
+
+        // Two pure-python ("none-any") wheels apply identically on both
+        // declared platforms -> N=2 wheel `PlanAssetEntry` per platform.
+        assert_eq!(entry.assets.len(), 4, "2 wheels x 2 platforms");
+        for platform in ["linux/amd64", "linux/arm64"] {
+            let names: Vec<&str> = entry
+                .assets
+                .iter()
+                .filter(|asset| asset.platform == platform)
+                .map(|asset| asset.asset_name.as_str())
+                .collect();
+            assert_eq!(names.len(), 2, "platform {platform} must carry 2 wheel assets");
+            assert!(names.contains(&"pycowsay-1.0.0-py3-none-any.whl"));
+            assert!(names.contains(&"six-1.16.0-py2.py3-none-any.whl"));
+        }
+
+        // Wheel URLs are concrete absolute http(s) — the existing download
+        // path (pipeline/download.rs) consumes them as-is.
+        for asset in &entry.assets {
+            assert_eq!(asset.url.scheme(), "https");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_skips_already_published_platforms() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let upstream_versions = list_upstream_versions(&spec, spec_dir).await.unwrap();
+        let Source::Pylock { path } = &spec.source else {
+            panic!("fixture spec must be source.type: pylock");
+        };
+
+        // Both declared platforms already published for this version — a
+        // repeat `pipeline plan` run must report no outstanding work.
+        let mut version_map = VersionPlatformMap::default();
+        let version = Version::parse("1.0.0").unwrap();
+        version_map.add(version.clone(), "linux/amd64".parse().unwrap());
+        version_map.add(version, "linux/arm64".parse().unwrap());
+
+        let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map)
+            .await
+            .unwrap();
+        assert!(
+            entries.is_empty(),
+            "already-published (version, platform) pairs must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_wraps_select_error_as_pylock_error_exit_65() {
+        // A wheel with no tag intersecting the target platform (windows-only
+        // build, no marker, requested against linux/amd64) is
+        // `SelectError::NoCompatibleWheel` inside `ocx_python::select_wheels`
+        // — must surface as `MirrorError::PylockError` (DataError, exit 65),
+        // not panic or an unrelated error kind.
+        let dir = tempfile::tempdir().unwrap();
+        let lock_toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "windows-only-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "windows_only_pkg-1.0.0-cp313-cp313-win_amd64.whl"
+url = "https://example.com/windows_only_pkg-1.0.0-cp313-cp313-win_amd64.whl"
+hashes = { sha256 = "3333333333333333333333333333333333333333333333333333333333cccc" }
+"#;
+        tokio::fs::write(dir.path().join("pylock.toml"), lock_toml)
+            .await
+            .unwrap();
+
+        let spec_yaml = r#"
+name: windows-only-pkg
+target:
+  registry: ocx.sh
+  repository: windows-only-pkg
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        let spec_path = dir.path().join("mirror.yml");
+        tokio::fs::write(&spec_path, spec_yaml).await.unwrap();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+
+        let upstream_versions = list_upstream_versions(&spec, dir.path()).await.unwrap();
+        let version_map = VersionPlatformMap::default();
+
+        let err = build_pylock_plan_entries(&spec, dir.path(), "pylock.toml", &upstream_versions, &[], &version_map)
+            .await
+            .expect_err("a windows-only wheel must fail selection for a linux/amd64 target");
+
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
     }
 }
