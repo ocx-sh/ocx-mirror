@@ -236,20 +236,6 @@ impl MirrorSpec {
             validate_notify_config(notify, &mut errors);
         }
 
-        // Cross-field: release_tag required when any platform declares containers.
-        // This catches the case where ocx_mirror block is absent or release_tag is omitted.
-        let any_platform_has_containers = self.platforms.as_ref().is_some_and(|plats| {
-            plats
-                .values()
-                .any(|p| p.containers.as_ref().is_some_and(|c| !c.is_empty()))
-        });
-        if any_platform_has_containers {
-            let has_release_tag = self.ocx_mirror.as_ref().and_then(|m| m.release_tag.as_ref()).is_some();
-            if !has_release_tag {
-                errors.push("ocx_mirror.release_tag is required when any platform declares containers".to_string());
-            }
-        }
-
         errors
     }
 
@@ -2850,8 +2836,10 @@ platforms:
     }
 
     #[test]
-    fn validate_release_tag_required_when_linux_has_containers() {
-        // §3.1: Rejection — ocx_mirror.release_tag absent when any linux platform has containers
+    fn validate_accepts_containers_without_release_tag() {
+        // Container legs pin the ocx CLI directly in the generated workflow (a
+        // libc-matched release binary), so `ocx_mirror.release_tag` is no longer
+        // required when a platform declares containers — its absence must NOT error.
         let yaml = format!(
             r#"{base}
 tests:
@@ -2870,10 +2858,8 @@ platforms:
         let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
         let errors = spec.validate(Path::new("test.yml"));
         assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("release_tag") || e.contains("ocx_mirror")),
-            "Expected error about missing release_tag when containers declared, got: {errors:?}"
+            !errors.iter().any(|e| e.contains("release_tag")),
+            "containers without release_tag must validate cleanly, got: {errors:?}"
         );
     }
 
