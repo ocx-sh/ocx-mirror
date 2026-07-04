@@ -81,7 +81,6 @@ mod tests {
             wheel_sha256: "0".to_string(),
             entry_points: Vec::new(),
             record_paths: record_paths.iter().map(|path| (*path).to_string()).collect(),
-            locked_extras: Vec::new(),
         }
     }
 

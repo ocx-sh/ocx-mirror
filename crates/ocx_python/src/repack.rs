@@ -39,6 +39,12 @@ const MODE_FILE: u32 = 0o644;
 /// Unix mode for a `.data/scripts` launcher relocated into `bin/`.
 const MODE_EXECUTABLE: u32 = 0o755;
 
+/// Total decompressed-byte budget across every entry in a wheel zip — a
+/// zip-bomb guard (CWE-409). Wheels are essentially never anywhere near this
+/// large; 1 GiB only exists to abort a malicious/corrupt zip before it can
+/// exhaust memory.
+const MAX_TOTAL_DECOMPRESSED_BYTES: u64 = 1 << 30;
+
 /// A repacked wheel layer plus the metadata `compose` and `collide` need.
 #[derive(Debug, Clone)]
 pub struct RepackedWheel {
@@ -62,9 +68,6 @@ pub struct RepackedWheel {
     /// Every installed path from the wheel `RECORD` (post-relocation), for the
     /// cross-wheel collision pre-check.
     pub record_paths: Vec<String>,
-    /// The extras this wheel's scripts are gated on (union across its
-    /// `[console_scripts]`), so `compose` can honor extras gating.
-    pub locked_extras: Vec<String>,
 }
 
 /// A `[console_scripts]` entry point, as extracted from the wheel.
@@ -93,9 +96,22 @@ pub struct ConsoleScript {
 ///
 /// # Errors
 ///
-/// Returns [`RepackError::Io`] on a filesystem failure and
-/// [`RepackError::Zip`] when the wheel is not a readable zip.
+/// Returns [`RepackError::Io`] on a filesystem failure, [`RepackError::Zip`]
+/// when the wheel is not a readable zip, and [`RepackError::WheelTooLarge`]
+/// when the wheel's cumulative decompressed content exceeds the zip-bomb
+/// safety budget (CWE-409).
 pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<RepackedWheel, RepackError> {
+    repack_wheel_with_budget(wheel_path, output_dir, MAX_TOTAL_DECOMPRESSED_BYTES).await
+}
+
+/// [`repack_wheel`], parameterized over the decompressed-size budget so tests
+/// can exercise the zip-bomb guard with a small cap instead of a real
+/// gigabyte-scale payload.
+async fn repack_wheel_with_budget(
+    wheel_path: &Path,
+    output_dir: &Path,
+    decompressed_budget: u64,
+) -> Result<RepackedWheel, RepackError> {
     // ponytail: this crate declares no tokio dependency (pure-translation
     // library boundary, no registry/network I/O — see module docs), so the
     // zip read + tar/zstd write run inline rather than via `spawn_blocking`.
@@ -115,9 +131,9 @@ pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<Repack
     let mut zip = zip::ZipArchive::new(Cursor::new(wheel_bytes.as_slice())).map_err(RepackError::Zip)?;
 
     let mut tree = Vec::with_capacity(zip.len());
-    let mut metadata_text: Option<String> = None;
     let mut record_text: Option<String> = None;
     let mut entry_points_text: Option<String> = None;
+    let mut decompressed_total: u64 = 0;
 
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index).map_err(RepackError::Zip)?;
@@ -130,14 +146,14 @@ pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<Repack
             .ok_or_else(|| RepackError::UnsafeEntryPath(raw_name.clone()))?;
         let components = path_components(&enclosed);
 
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data).map_err(RepackError::Io)?;
+        let remaining_budget = decompressed_budget.saturating_sub(decompressed_total);
+        let data = read_entry_capped(&mut entry, remaining_budget, decompressed_budget)?;
+        decompressed_total += data.len() as u64;
 
         if let [dist_info, leaf] = components.as_slice()
             && dist_info.ends_with(".dist-info")
         {
             match leaf.as_str() {
-                "METADATA" => metadata_text = Some(String::from_utf8_lossy(&data).into_owned()),
                 "RECORD" => record_text = Some(String::from_utf8_lossy(&data).into_owned()),
                 "entry_points.txt" => entry_points_text = Some(String::from_utf8_lossy(&data).into_owned()),
                 _ => {}
@@ -163,7 +179,6 @@ pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<Repack
         .as_deref()
         .map(parse_console_scripts)
         .unwrap_or_default();
-    let locked_extras = metadata_text.as_deref().map(parse_provides_extra).unwrap_or_default();
     let mut record_paths = match record_text.as_deref() {
         Some(text) => relocate_record_paths(text)?,
         None => Vec::new(),
@@ -177,8 +192,23 @@ pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<Repack
         wheel_sha256,
         entry_points,
         record_paths,
-        locked_extras,
     })
+}
+
+/// Reads a zip entry, capping actual decompressed bytes at `remaining_budget`
+/// — reading one byte over aborts as [`RepackError::WheelTooLarge`] rather
+/// than trusting the entry's declared (attacker-controlled) size, before an
+/// unbounded read can exhaust memory (CWE-409 zip-bomb guard).
+fn read_entry_capped<R: Read>(entry: &mut R, remaining_budget: u64, total_budget: u64) -> Result<Vec<u8>, RepackError> {
+    let mut data = Vec::new();
+    entry
+        .take(remaining_budget.saturating_add(1))
+        .read_to_end(&mut data)
+        .map_err(RepackError::Io)?;
+    if data.len() as u64 > remaining_budget {
+        return Err(RepackError::WheelTooLarge { limit: total_budget });
+    }
+    Ok(data)
 }
 
 /// One file destined for the relocated tree: its final path, whether it must
@@ -321,15 +351,6 @@ fn parse_console_scripts(text: &str) -> Vec<ConsoleScript> {
     scripts
 }
 
-/// Parses `Provides-Extra:` headers from wheel `METADATA` (PEP 566) — the
-/// wheel's declared extras, for `compose`'s gating provenance.
-fn parse_provides_extra(text: &str) -> Vec<String> {
-    text.lines()
-        .filter_map(|line| line.strip_prefix("Provides-Extra:"))
-        .map(|value| value.trim().to_string())
-        .collect()
-}
-
 /// Hex-encodes a digest. No `hex` crate dependency is declared for this
 /// crate; this one-liner covers the only two call sites (wheel + layer digests).
 fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
@@ -350,6 +371,13 @@ pub enum RepackError {
     /// absolute path or `..` traversal (zip-slip).
     #[error("unsafe path in wheel entry: {0}")]
     UnsafeEntryPath(String),
+    /// The wheel's cumulative decompressed content exceeds the `limit`-byte
+    /// safety budget (CWE-409 zip-bomb guard).
+    #[error("wheel decompressed size exceeds the {limit}-byte safety budget")]
+    WheelTooLarge {
+        /// The decompressed-byte budget that was exceeded.
+        limit: u64,
+    },
 }
 
 #[cfg(test)]
@@ -422,7 +450,6 @@ mod tests {
         assert!(repacked.layer_digest.starts_with("sha256:"));
         assert_eq!(repacked.wheel_sha256.len(), 64, "wheel_sha256 is a bare hex digest");
         assert!(repacked.entry_points.is_empty());
-        assert!(repacked.locked_extras.is_empty());
 
         let entries = read_tar_entries(&repacked.layer_path);
         let paths: Vec<&str> = entries.iter().map(|(path, ..)| path.as_str()).collect();
@@ -563,6 +590,32 @@ mod tests {
         }
         // Nothing outside output_dir should exist as a result of the attempt.
         assert!(!Path::new("evil.txt").exists());
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn zip_bomb_decompressed_size_is_capped() {
+        use std::io::Write as _;
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("pkg-1.0.0.dist-info/METADATA", options)
+            .expect("start entry");
+        // 64 decompressed bytes against a 16-byte test budget below.
+        writer.write_all(&[b'a'; 64]).expect("write entry");
+        let cursor = writer.finish().expect("finish zip");
+
+        let output_dir = scratch_dir("zip-bomb");
+        let wheel_path = output_dir.join("bomb-1.0.0-py3-none-any.whl");
+        std::fs::write(&wheel_path, cursor.into_inner()).expect("write wheel");
+
+        let result = block_on(repack_wheel_with_budget(&wheel_path, &output_dir.join("out"), 16));
+        match result {
+            Err(RepackError::WheelTooLarge { limit }) => assert_eq!(limit, 16),
+            other => panic!("expected WheelTooLarge, got {other:?}"),
+        }
 
         std::fs::remove_dir_all(&output_dir).ok();
     }

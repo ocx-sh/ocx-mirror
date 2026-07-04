@@ -73,7 +73,7 @@ pub fn select_wheels(lock: &Pylock, target: &PythonTarget) -> Result<Vec<WheelRe
 
     let target_label = target_label(target);
     let variant_label = variant_label(&target.variant);
-    let interpreter_abi = effective_abi(target).to_string();
+    let interpreter_abi = target.effective_abi().to_string();
     let free_threaded = is_free_threaded(target);
 
     let mut selected = Vec::new();
@@ -331,15 +331,9 @@ fn parse_libc_floor(floor: &str) -> Result<(u16, u16), SelectError> {
     Ok((major, minor))
 }
 
-/// The effective ABI tag for the target: the variant override, else the
-/// interpreter pin's primary ABI.
-fn effective_abi(target: &PythonTarget) -> &str {
-    target.variant.abi.as_deref().unwrap_or(target.interpreter.abi.as_str())
-}
-
 /// `true` when the target is free-threaded CPython (`cp313t`-style ABI).
 fn is_free_threaded(target: &PythonTarget) -> bool {
-    effective_abi(target).ends_with('t')
+    target.effective_abi().ends_with('t')
 }
 
 /// A short `os/arch` triple label for error messages.
@@ -445,9 +439,6 @@ pub enum SelectError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    /// A wheel filename or platform tag failed to parse during ranking.
-    #[error("platform tag error during selection")]
-    Platform(#[from] crate::platform::PlatformError),
 }
 
 #[cfg(test)]

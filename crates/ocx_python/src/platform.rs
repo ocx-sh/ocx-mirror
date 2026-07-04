@@ -162,6 +162,19 @@ pub struct PythonTarget {
     pub interpreter: InterpreterPin,
 }
 
+impl PythonTarget {
+    /// The effective ABI tag for this target: the variant override, else the
+    /// interpreter pin's primary ABI.
+    ///
+    /// Single source of truth for both `select` (wheel ranking/ABI-consistency
+    /// check) and `compose` (per-wheel ABI check) — a target whose variant
+    /// overrides the ABI (e.g. free-threaded `cp313t`) must be judged by that
+    /// override everywhere, not just where the interpreter pin happens to match.
+    pub fn effective_abi(&self) -> &str {
+        self.variant.abi.as_deref().unwrap_or(self.interpreter.abi.as_str())
+    }
+}
+
 /// The derived PEP 508 marker environment for evaluating package markers.
 ///
 /// An `ocx_python`-owned struct (not `uv-pep508`'s type) so the derivation

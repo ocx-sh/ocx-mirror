@@ -140,9 +140,10 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         }
     }
 
-    // 2. ABI consistency: every wheel must match the interpreter pin (fail
-    //    closed) before any layer or entrypoint is emitted.
-    let interpreter_abi = spec.target.interpreter.abi.as_str();
+    // 2. ABI consistency: every wheel must match the target's effective ABI
+    //    (variant override, else the interpreter pin — fail closed) before any
+    //    layer or entrypoint is emitted.
+    let interpreter_abi = spec.target.effective_abi();
     for wheel in wheels {
         check_abi(&wheel.filename, interpreter_abi)?;
     }
@@ -410,7 +411,6 @@ mod tests {
             wheel_sha256: "c".repeat(64),
             entry_points: scripts,
             record_paths: Vec::new(),
-            locked_extras: Vec::new(),
         }
     }
 
@@ -578,6 +578,35 @@ mod tests {
             compose_env(&spec, &wheels).is_ok(),
             "a cp313 wheel matches a cp313 interpreter"
         );
+    }
+
+    #[test]
+    fn variant_abi_override_is_the_effective_abi_not_the_interpreter_pin() {
+        // A documented free-threaded target: variant.abi overrides to cp313t
+        // while the interpreter pin itself still reports cp313. compose must
+        // judge wheels against the effective (variant-overridden) ABI, the same
+        // one `select` used to pick them — not the raw interpreter pin.
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.target.variant.abi = Some("cp313t".to_string());
+
+        let free_threaded_wheel = wheel("numpy-2.1.3-cp313-cp313t-manylinux_2_28_x86_64.whl", Vec::new());
+        assert!(
+            compose_env(&spec, &[free_threaded_wheel]).is_ok(),
+            "a cp313t wheel must compose against a variant-overridden cp313t target"
+        );
+
+        let non_free_threaded_wheel = wheel("numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl", Vec::new());
+        let error = compose_env(&spec, &[non_free_threaded_wheel])
+            .expect_err("a cp313 wheel must not compose against the cp313t effective ABI");
+        match error {
+            ComposeError::AbiMismatch { interpreter_abi, .. } => {
+                assert_eq!(
+                    interpreter_abi, "cp313t",
+                    "must report the effective (variant-overridden) ABI, not the interpreter pin's"
+                );
+            }
+            other => panic!("expected AbiMismatch, got {other:?}"),
+        }
     }
 
     // ── Env block, layers, platform ─────────────────────────────────────────

@@ -104,7 +104,10 @@ fn extract_host(url: &str) -> Option<&str> {
     let authority = &after_scheme[..authority_end];
     let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
     let host = host.split(':').next().unwrap_or(host);
-    (!host.is_empty()).then_some(host)
+    // Reject a host that would fold into a path-traversal segment once joined
+    // into the repository path (CWE-22 defense-in-depth) — e.g.
+    // `https://../evil` parses to authority "..", which must not be honored.
+    (!host.is_empty() && host != "." && host != "..").then_some(host)
 }
 
 /// PEP 503 normalization: lowercase, runs of `-`/`_`/`.` collapsed to a
@@ -248,6 +251,28 @@ mod tests {
 
         let reference = wheel_reference(&WheelScope::default(), &wheel);
 
+        assert_eq!(
+            reference.repository,
+            format!("pip-packages/{NO_URL_INDEX_HOST}/foo/none-any")
+        );
+    }
+
+    #[test]
+    fn dot_dot_host_falls_back_to_documented_host_not_path_traversal() {
+        let wheel = wheel_ref(
+            "foo",
+            "foo-1.2.3-py3-none-any.whl",
+            Some("https://../evil/foo.whl"),
+            "cafebabe",
+        );
+
+        let reference = wheel_reference(&WheelScope::default(), &wheel);
+
+        assert!(
+            !reference.repository.contains(".."),
+            "rendered repository must not contain a path-traversal segment: {}",
+            reference.repository
+        );
         assert_eq!(
             reference.repository,
             format!("pip-packages/{NO_URL_INDEX_HOST}/foo/none-any")
