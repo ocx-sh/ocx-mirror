@@ -43,9 +43,11 @@ const VERIFY_GENERATED_TEMPLATE: &str = include_str!("templates/verify-generated
 
 /// Generate (or check) the CI workflow files for a mirror repository.
 ///
-/// In write mode: renders `.github/workflows/mirror.yml`,
-/// `.github/workflows/describe.yml`, and — unless the spec sets
-/// `allow_manual_edits: true` — the `verify-generated.yml` drift guard.
+/// In write mode: renders `.github/workflows/<slug>.yml`,
+/// `.github/workflows/<slug>.describe.yml`, and — unless the spec sets
+/// `allow_manual_edits: true` — the `<slug>.verify-generated.yml` drift guard.
+/// `<slug>` derives from the spec `name`, so multiple app specs coexist in one
+/// mirror repo without colliding on fixed workflow filenames.
 ///
 /// In `--check` mode: exits 65 (DataError) if any generated file drifts from
 /// what would be produced; emits path-only hints to stderr.
@@ -97,7 +99,16 @@ impl GenerateCi {
 
         // Phase 4: render all generated files.
         let repo_root = self.spec.parent().unwrap_or(Path::new("."));
-        let files = render(&spec, repo_root)?;
+        // Spec basename drives the `on.paths` triggers and the drift-guard
+        // `--check --spec` call so each app watches only its own spec. Paths in a
+        // workflow's `on.paths` are repo-root-relative, and repo_root is the
+        // spec's parent, so the basename is the correct relative reference.
+        let spec_file = self
+            .spec
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "mirror.yml".to_string());
+        let files = render(&spec, &spec_file)?;
 
         // Surface the discouraged opt-out so it is never silently in effect: the
         // drift guard is the only thing that keeps the generated workflows honest.
@@ -266,7 +277,7 @@ fn native_shell_for_platform<'a>(platform: &str, config: &'a PlatformConfig) -> 
 /// Render the GHA workflow YAML from a parsed spec.
 ///
 /// Substitution uses a simple `str::replace` chain — no templating engine dep.
-fn render_workflow(spec: &MirrorSpec) -> String {
+fn render_workflow(spec: &MirrorSpec, spec_file: &str, workflow_file: &str) -> String {
     let schedule_block = spec
         .versions
         .as_ref()
@@ -318,6 +329,8 @@ fn render_workflow(spec: &MirrorSpec) -> String {
     WORKFLOW_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_FILE}", spec_file)
+        .replace("{WORKFLOW_FILE}", workflow_file)
         .replace("{MIRROR_NAME}", &spec.name)
         .replace("{SCHEDULE_BLOCK}", &schedule_block)
         .replace("{PREPARE_FLATTEN}", &prepare_flatten)
@@ -543,7 +556,7 @@ fn test_target_resolve_script(is_pylock: bool) -> String {
 /// `CATALOG.md`, `logo.*`, or `mirror.yml` and invokes
 /// `ocx-mirror package pipeline describe` to publish the README + logo to the
 /// `__ocx.desc` referrer tag on the target repository.
-fn render_describe(spec: &MirrorSpec) -> String {
+fn render_describe(spec: &MirrorSpec, spec_file: &str, slug: &str) -> String {
     let release_tag = spec
         .ocx_mirror
         .as_ref()
@@ -555,6 +568,8 @@ fn render_describe(spec: &MirrorSpec) -> String {
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
         .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
+        .replace("{SPEC_FILE}", spec_file)
+        .replace("{SLUG}", slug)
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
 }
 
@@ -564,28 +579,82 @@ fn render_describe(spec: &MirrorSpec) -> String {
 /// and pushes, so a hand-edit to any generated workflow fails CI. Emitted unless
 /// the spec opts out via `allow_manual_edits` (see [`render`]); only the header
 /// placeholders need substitution — the body is spec-independent.
-fn render_verify_generated() -> String {
+fn render_verify_generated(spec_file: &str, slug: &str) -> String {
     VERIFY_GENERATED_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_FILE}", spec_file)
+        .replace("{SLUG}", slug)
+}
+
+/// Filesystem-safe slug derived from a spec's `name`, used to namespace the
+/// generated workflow files so multiple app specs coexist in one mirror repo.
+///
+/// One repo holds N app specs (the corpus lives in a single `mirror-pypi`), and
+/// two apps cannot both own `.github/workflows/mirror.yml`. Each app's workflows
+/// are keyed by this slug instead. Any character outside `[A-Za-z0-9._-]` is
+/// collapsed to `-` (spec names are already slug-shaped in practice — this is a
+/// defence-in-depth guard against a name that would escape the filename).
+fn workflow_slug(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // Never emit an empty or dot-only basename.
+    if slug.trim_matches(['.', '-', '_']).is_empty() {
+        "mirror".to_string()
+    } else {
+        slug
+    }
 }
 
 /// Build the full map of relative path → file content for all generated files.
 ///
 /// Keys are relative to the repo root (i.e. the spec file's parent directory).
-fn render(spec: &MirrorSpec, _repo_root: &Path) -> Result<BTreeMap<PathBuf, String>, MirrorError> {
+/// `spec_file` is the spec's basename (e.g. `black.mirror.yml`) — injected into
+/// the generated `on.paths` triggers and the drift-guard `--check --spec` call so
+/// each app's workflows watch and re-render only their own spec.
+fn render(spec: &MirrorSpec, spec_file: &str) -> Result<BTreeMap<PathBuf, String>, MirrorError> {
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
+    let slug = workflow_slug(&spec.name);
 
-    files.insert(PathBuf::from(".github/workflows/mirror.yml"), render_workflow(spec));
-    files.insert(PathBuf::from(".github/workflows/describe.yml"), render_describe(spec));
+    // ponytail: write-without-prune. Because filenames are now slug-keyed (not the
+    // fixed mirror.yml/describe.yml trio), renaming a spec's `name` or deleting a
+    // spec ORPHANS the old `<oldslug>.*` workflows — write_files never removes and
+    // check_drift only inspects the current spec's render map, so orphans keep
+    // running as live publish workflows outside every drift guard (a fail-open of
+    // the R4 invariant). Acceptable for the append-only corpus (specs are added,
+    // never renamed/removed); the upgrade path is a repo-wide `generate ci --all`
+    // that scans every spec and prunes `.github/workflows/*` not in the union map
+    // (W4 tooling). Until then: deleting/renaming a spec requires a manual
+    // `git rm` of its stale workflow files.
+
+    let workflow_file = format!("{slug}.yml");
+    let describe_file = format!("{slug}.describe.yml");
+    let verify_file = format!("{slug}.verify-generated.yml");
+
+    files.insert(
+        PathBuf::from(format!(".github/workflows/{workflow_file}")),
+        render_workflow(spec, spec_file, &workflow_file),
+    );
+    files.insert(
+        PathBuf::from(format!(".github/workflows/{describe_file}")),
+        render_describe(spec, spec_file, &slug),
+    );
 
     // Drift-guard workflow: emitted unless the spec opts out (discouraged). When
     // present it runs `generate ci --check` in CI, failing on any hand-edit to a
     // generated workflow. Skipping it means the repo owns its workflows by hand.
     if !spec.allow_manual_edits {
         files.insert(
-            PathBuf::from(".github/workflows/verify-generated.yml"),
-            render_verify_generated(),
+            PathBuf::from(format!(".github/workflows/{verify_file}")),
+            render_verify_generated(spec_file, &slug),
         );
     }
 
@@ -719,7 +788,7 @@ mod tests {
         let result = render_fixture("mirror-minimal.yml", dir.path());
         match result {
             Ok(()) => {
-                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                let workflow = dir.path().join(".github/workflows/shfmt.yml");
                 assert!(workflow.exists(), "Expected .github/workflows/mirror.yml to be written");
                 let content = std::fs::read_to_string(&workflow).unwrap();
                 // Generated file must have the DO-NOT-EDIT header
@@ -766,7 +835,9 @@ mod tests {
         let dir = tempdir().unwrap();
         render_fixture("mirror-pylock.yml", dir.path()).expect("pylock fixture renders");
 
-        let workflow = dir.path().join(".github/workflows/mirror.yml");
+        // Workflow filename derives from the spec's `name` (pycowsay), not a
+        // fixed `mirror.yml` — multiple app specs coexist in one repo.
+        let workflow = dir.path().join(".github/workflows/pycowsay.yml");
         let content = std::fs::read_to_string(&workflow).expect("workflow written");
 
         // Prepare job: env subtree copy, NOT the archive bundle flatten.
@@ -810,7 +881,7 @@ mod tests {
         render_fixture("mirror-minimal.yml", dir.path()).expect("minimal fixture renders");
 
         let content =
-            std::fs::read_to_string(dir.path().join(".github/workflows/mirror.yml")).expect("workflow written");
+            std::fs::read_to_string(dir.path().join(".github/workflows/shfmt.yml")).expect("workflow written");
 
         assert!(
             content.contains(r#"cp "${platform_dir}bundle.tar.xz""#),
@@ -840,7 +911,7 @@ mod tests {
                     msg.contains("container"),
                     "rejection message must call out container legs, got: {msg}"
                 );
-                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                let workflow = dir.path().join(".github/workflows/shfmt.yml");
                 assert!(
                     !workflow.exists(),
                     "no workflow must be written when the spec declares container legs"
@@ -858,7 +929,7 @@ mod tests {
         let result = render_fixture("mirror-full-platforms.yml", dir.path());
         match result {
             Ok(()) => {
-                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                let workflow = dir.path().join(".github/workflows/cmake.yml");
                 assert!(workflow.exists());
                 let content = std::fs::read_to_string(&workflow).unwrap();
                 // Per-platform test overrides must be present for windows
@@ -885,7 +956,7 @@ mod tests {
                     "Error message must mention ocx_install or release download, got: {msg}"
                 );
                 // No workflow file must have been written
-                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                let workflow = dir.path().join(".github/workflows/shfmt.yml");
                 assert!(
                     !workflow.exists(),
                     "No workflow must be written when spec is rejected for ocx_install: block"
@@ -913,7 +984,7 @@ mod tests {
                         || msg.to_lowercase().contains("discord"),
                     "Error must mention webhook/url/discord, got: {msg}"
                 );
-                let workflow = dir.path().join(".github/workflows/mirror.yml");
+                let workflow = dir.path().join(".github/workflows/shfmt.yml");
                 assert!(
                     !workflow.exists(),
                     "No workflow must be written when R3 discord URL is present"
@@ -1005,7 +1076,7 @@ mod tests {
 
         if let Ok(()) = write_result {
             // Mutate generated file
-            let workflow_path = dir.path().join(".github/workflows/mirror.yml");
+            let workflow_path = dir.path().join(".github/workflows/shfmt.yml");
             if workflow_path.exists() {
                 let mut content = std::fs::read_to_string(&workflow_path).unwrap();
                 content.push_str("\n# drift injection\n");
@@ -1083,7 +1154,7 @@ mod tests {
 
         write_result.expect("write-mode render must succeed");
         {
-            let workflow_path = dir.path().join(".github/workflows/mirror.yml");
+            let workflow_path = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow_path).unwrap();
             // Simulate a Renovate digest+comment bump on the checkout pin.
             let bumped = content.replace(
@@ -1135,7 +1206,7 @@ mod tests {
 
         write_result.expect("write-mode render must succeed");
         {
-            let workflow_path = dir.path().join(".github/workflows/mirror.yml");
+            let workflow_path = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow_path).unwrap();
             let swapped = content.replace("uses: actions/checkout@", "uses: evilcorp/checkout@");
             assert_ne!(swapped, content, "fixture must contain a checkout `uses:` to swap");
@@ -1152,8 +1223,8 @@ mod tests {
             match check_result {
                 Err(MirrorError::RendererDrift(paths)) => {
                     assert!(
-                        paths.iter().any(|p| p.contains("mirror.yml")),
-                        "drift must call out mirror.yml: {paths:?}"
+                        paths.iter().any(|p| p.contains("shfmt.yml")),
+                        "drift must call out the app's workflow file: {paths:?}"
                     );
                 }
                 Ok(()) => panic!("swapped action identity must trip drift"),
@@ -1213,7 +1284,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-full-platforms.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/cmake.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(
                 content.contains("CI_JOB_URL=$(gh api"),
@@ -1237,7 +1308,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let describe = dir.path().join(".github/workflows/describe.yml");
+            let describe = dir.path().join(".github/workflows/shfmt.describe.yml");
             assert!(describe.exists(), "describe.yml must be emitted alongside mirror.yml");
             let content = std::fs::read_to_string(&describe).unwrap();
             assert!(
@@ -1265,7 +1336,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let describe_path = dir.path().join(".github/workflows/describe.yml");
+            let describe_path = dir.path().join(".github/workflows/shfmt.describe.yml");
             let content = std::fs::read_to_string(&describe_path).unwrap();
             assert!(
                 content.contains("uses: ocx-sh/setup-ocx@"),
@@ -1305,7 +1376,7 @@ mod tests {
         });
 
         if write_result.is_ok() {
-            let describe_path = dir.path().join(".github/workflows/describe.yml");
+            let describe_path = dir.path().join(".github/workflows/shfmt.describe.yml");
             assert!(describe_path.exists(), "describe.yml must have been written");
             let mut content = std::fs::read_to_string(&describe_path).unwrap();
             content.push_str("\n# drift injection\n");
@@ -1364,7 +1435,7 @@ asset_type:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let verify = dir.path().join(".github/workflows/verify-generated.yml");
+            let verify = dir.path().join(".github/workflows/shfmt.verify-generated.yml");
             assert!(verify.exists(), "verify-generated.yml must be emitted by default");
             let content = std::fs::read_to_string(&verify).unwrap();
             assert!(content.contains("DO NOT EDIT"), "must carry the DO-NOT-EDIT header");
@@ -1387,9 +1458,9 @@ asset_type:
     fn verify_generated_emitted_by_default_in_render_map() {
         // Field absent → default false → drift guard present in the render map.
         let spec = spec_from_yaml(SHFMT_SPEC);
-        let files = render(&spec, Path::new(".")).unwrap();
+        let files = render(&spec, "mirror.yml").unwrap();
         assert!(
-            files.contains_key(Path::new(".github/workflows/verify-generated.yml")),
+            files.contains_key(Path::new(".github/workflows/shfmt.verify-generated.yml")),
             "verify-generated.yml must be in the render map by default"
         );
     }
@@ -1399,17 +1470,17 @@ asset_type:
         // Opt-out: `allow_manual_edits: true` drops the drift guard but keeps the
         // two primary generated workflows.
         let spec = spec_from_yaml(&format!("{SHFMT_SPEC}allow_manual_edits: true\n"));
-        let files = render(&spec, Path::new(".")).unwrap();
+        let files = render(&spec, "mirror.yml").unwrap();
         assert!(
-            files.contains_key(Path::new(".github/workflows/mirror.yml")),
+            files.contains_key(Path::new(".github/workflows/shfmt.yml")),
             "mirror.yml must still be rendered when opting out"
         );
         assert!(
-            files.contains_key(Path::new(".github/workflows/describe.yml")),
+            files.contains_key(Path::new(".github/workflows/shfmt.describe.yml")),
             "describe.yml must still be rendered when opting out"
         );
         assert!(
-            !files.contains_key(Path::new(".github/workflows/verify-generated.yml")),
+            !files.contains_key(Path::new(".github/workflows/shfmt.verify-generated.yml")),
             "verify-generated.yml must be skipped when allow_manual_edits is true"
         );
     }
@@ -1438,7 +1509,7 @@ asset_type:
         });
 
         if write_result.is_ok() {
-            let verify_path = dir.path().join(".github/workflows/verify-generated.yml");
+            let verify_path = dir.path().join(".github/workflows/shfmt.verify-generated.yml");
             assert!(verify_path.exists(), "verify-generated.yml must have been written");
             let mut content = std::fs::read_to_string(&verify_path).unwrap();
             content.push_str("\n# drift injection\n");
@@ -1493,7 +1564,7 @@ asset_type:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(
                 content.contains("kind: command"),
@@ -1512,7 +1583,7 @@ asset_type:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-all-test-kinds.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(
                 content.contains("kind: script"),
@@ -1532,7 +1603,7 @@ asset_type:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-all-test-kinds.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(
                 content.contains("kind: script_inline"),
@@ -1551,7 +1622,7 @@ asset_type:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-all-test-kinds.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(content.contains("kind: command"), "command kind missing");
             assert!(content.contains("kind: script"), "script kind missing");
@@ -1706,7 +1777,7 @@ notify:
     #[test]
     fn render_injects_discord_user_id_into_notify_env() {
         let spec = spec_from_yaml(NOTIFY_SPEC_WITH_USER_ID);
-        let workflow = render_workflow(&spec);
+        let workflow = render_workflow(&spec, "mirror.yml", "mirror.yml");
         assert!(
             workflow.contains("OCX_MIRROR_DISCORD_USER_ID: \"123456789012345678\""),
             "notify env must inline the configured user id; workflow:\n{workflow}"
@@ -1718,7 +1789,7 @@ notify:
     #[test]
     fn render_omits_discord_user_id_when_unset() {
         let spec = spec_from_yaml(SHFMT_SPEC);
-        let workflow = render_workflow(&spec);
+        let workflow = render_workflow(&spec, "mirror.yml", "mirror.yml");
         assert!(
             !workflow.contains("OCX_MIRROR_DISCORD_USER_ID"),
             "no user-id env line when user_id is unset"
@@ -1854,7 +1925,7 @@ notify:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(
                 content.contains("Detect registry credentials"),
@@ -1884,7 +1955,7 @@ notify:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let workflow = dir.path().join(".github/workflows/mirror.yml");
+            let workflow = dir.path().join(".github/workflows/shfmt.yml");
             let content = std::fs::read_to_string(&workflow).unwrap();
             assert!(
                 content.contains("name: plan\n          path: plan.json"),
@@ -1908,7 +1979,7 @@ notify:
         let dir = tempdir().unwrap();
         let result = render_fixture("mirror-minimal.yml", dir.path());
         if let Ok(()) = result {
-            let describe = dir.path().join(".github/workflows/describe.yml");
+            let describe = dir.path().join(".github/workflows/shfmt.describe.yml");
             let content = std::fs::read_to_string(&describe).unwrap();
             assert!(
                 content.contains("Detect registry credentials"),
