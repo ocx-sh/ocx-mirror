@@ -208,7 +208,7 @@ async fn build_env_tasks(
 
     let lock = crate::source::pylock::load(spec_dir, path)
         .await
-        .map_err(|e| MirrorError::PylockError(format!("failed to load pylock source: {e}")))?;
+        .map_err(|e| crate::source::pylock::classify_error("failed to load pylock source", e))?;
     let app_version =
         crate::source::pylock::app_version(&lock, &spec.name).map_err(|e| MirrorError::PylockError(e.to_string()))?;
 

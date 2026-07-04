@@ -195,10 +195,13 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
 
     let version_map = VersionPlatformMap::from_tags_and_platforms(&all_tags, platform_info);
 
-    // Fetch upstream versions — propagate failures as Unavailable.
-    let upstream_versions = list_upstream_versions(spec, spec_dir)
-        .await
-        .map_err(|e| MirrorError::SourceError(format!("failed to list upstream versions: {e}")))?;
+    // Fetch upstream versions. `list_upstream_versions` already classifies
+    // the failure per source type (pylock: PylockError for malformed lock
+    // content vs SourceError for an unreachable file; github_release/
+    // url_index: always SourceError) — propagate as-is instead of
+    // re-stamping every failure as SourceError, which would collapse a data
+    // error into an availability one.
+    let upstream_versions = list_upstream_versions(spec, spec_dir).await?;
 
     // Build timestamp (reuse existing normalizer).
     let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
@@ -326,7 +329,7 @@ async fn build_pylock_plan_entries(
     // boundary.
     let lock = source::pylock::load(spec_dir, path)
         .await
-        .map_err(|e| MirrorError::SourceError(format!("failed to load pylock source: {e}")))?;
+        .map_err(|e| source::pylock::classify_error("failed to load pylock source", e))?;
 
     let python = spec
         .python

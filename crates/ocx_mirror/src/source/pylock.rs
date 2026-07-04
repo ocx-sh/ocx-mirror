@@ -13,10 +13,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use anyhow::Context;
 use ocx_lib::package::version::Version;
-use ocx_python::Pylock;
+use ocx_python::{LockError, Pylock};
 
 use super::VersionInfo;
+use crate::error::MirrorError;
 
 /// Reads and parses the `pylock.toml` at `path` (resolved relative to
 /// `spec_dir`).
@@ -24,12 +26,37 @@ use super::VersionInfo;
 /// # Errors
 ///
 /// Returns an error when the file cannot be read or fails PEP 751 parsing.
+/// Uses `.context()`/`.with_context()` rather than `anyhow::anyhow!(...)` so
+/// the original `std::io::Error` / [`LockError`] stays in the chain —
+/// [`classify_error`] downcasts it to tell a bad file from bad content.
 pub async fn load(spec_dir: &Path, path: &str) -> anyhow::Result<Pylock> {
     let lock_path = spec_dir.join(path);
     let contents = tokio::fs::read_to_string(&lock_path)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to read pylock file '{}': {e}", lock_path.display()))?;
-    ocx_python::parse_pylock(&contents).map_err(|e| anyhow::anyhow!("failed to parse pylock.toml: {e}"))
+        .with_context(|| format!("failed to read pylock file '{}'", lock_path.display()))?;
+    ocx_python::parse_pylock(&contents).context("failed to parse pylock.toml")
+}
+
+/// Classifies an error surfaced by [`load`] or [`list_versions`] into the
+/// right [`MirrorError`] variant.
+///
+/// A lock-content problem — malformed TOML, a sdist-only package, a wheel
+/// missing its hash (any [`LockError`] in the chain) — is malformed DATA, not
+/// a transient resource, so it maps to [`MirrorError::PylockError`] (exit 65,
+/// same class as `SpecInvalid`). Anything else (the file itself could not be
+/// read) is a genuinely unavailable SOURCE and stays
+/// [`MirrorError::SourceError`] (exit 69).
+pub fn classify_error(context: &str, err: anyhow::Error) -> MirrorError {
+    let is_lock_data_error = err.chain().any(|cause| cause.downcast_ref::<LockError>().is_some());
+    // `{err:#}` (alternate format) walks the full source chain instead of
+    // just the outermost context string — otherwise the actionable detail
+    // (e.g. the offending package name from a `LockError`) never reaches the
+    // printed message.
+    if is_lock_data_error {
+        MirrorError::PylockError(format!("{context}: {err:#}"))
+    } else {
+        MirrorError::SourceError(format!("{context}: {err:#}"))
+    }
 }
 
 /// Lists the single upstream version recorded in the lock: the pinned
@@ -166,6 +193,35 @@ hashes = { sha256 = "bbbb" }
         let dir = tempfile::tempdir().unwrap();
         let err = list_versions(dir.path(), "missing.toml", "pycowsay").await.unwrap_err();
         assert!(err.to_string().contains("failed to read"));
+    }
+
+    #[tokio::test]
+    async fn classify_error_maps_lock_content_error_to_pylock_error() {
+        // W2.6: a sdist-only package fails at parse (LockError::SdistOnly) —
+        // malformed lock content, must classify as PylockError (exit 65),
+        // not SourceError (exit 69).
+        let dir = tempfile::tempdir().unwrap();
+        let toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "uwsgi"
+version = "2.0.24"
+"#;
+        tokio::fs::write(dir.path().join("pylock.toml"), toml).await.unwrap();
+
+        let err = load(dir.path(), "pylock.toml").await.unwrap_err();
+        let mirror_err = classify_error("failed to load pylock source", err);
+        assert!(matches!(mirror_err, MirrorError::PylockError(_)), "got: {mirror_err:?}");
+    }
+
+    #[tokio::test]
+    async fn classify_error_maps_missing_file_to_source_error() {
+        // A genuinely unreadable file is an unavailable source, not bad data.
+        let dir = tempfile::tempdir().unwrap();
+        let err = load(dir.path(), "missing.toml").await.unwrap_err();
+        let mirror_err = classify_error("failed to load pylock source", err);
+        assert!(matches!(mirror_err, MirrorError::SourceError(_)), "got: {mirror_err:?}");
     }
 
     #[test]

@@ -344,7 +344,7 @@ pub(crate) async fn list_upstream_versions(
             log::debug!("Reading pylock source for {}", spec.name);
             source::pylock::list_versions(spec_dir, path, &spec.name)
                 .await
-                .map_err(|e| MirrorError::SourceError(format!("failed to read pylock source: {e}")))
+                .map_err(|e| source::pylock::classify_error("failed to read pylock source", e))
         }
     }
 }
