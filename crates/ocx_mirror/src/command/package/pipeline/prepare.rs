@@ -139,8 +139,11 @@ impl Prepare {
         })?;
         // The interpreter digest is the one network dependency of task building;
         // resolving it here keeps `build_env_tasks` a pure (hermetically
-        // testable) local re-selection.
-        let interpreter_dependency = build_interpreter_dependency(python, &client).await?;
+        // testable) local re-selection. A variant may override
+        // `python.interpreter_package` (e.g. a musl-libc build for a
+        // `libc: musl` variant), so each distinct reference in play is
+        // resolved once, keyed by the reference string.
+        let interpreter_dependencies = resolve_interpreter_dependencies(spec, python, &client).await?;
 
         // When `--plan` is supplied (the CI path), restrict prepare to the
         // platforms discover still needs for this version. discover emits a
@@ -166,7 +169,7 @@ impl Prepare {
             spec,
             spec_dir,
             &self.version,
-            interpreter_dependency,
+            &interpreter_dependencies,
             allowed_platforms.as_ref(),
         )
         .await?;
@@ -220,26 +223,28 @@ impl Prepare {
 ///
 /// Pure local re-selection (no source re-crawl — issue #160): for the variant
 /// whose prefixed tag equals `version`, resolves a `PythonTarget` per declared,
-/// applicable platform and runs `ocx_python::select_wheels`. The private
-/// interpreter dependency is resolved by the caller (its digest needs the
-/// registry) and threaded onto every task, keeping this function network-free
+/// applicable platform and runs `ocx_python::select_wheels`. Private
+/// interpreter dependencies are resolved by the caller (their digests need
+/// the registry) and looked up per variant — a variant's own
+/// `interpreter_package` override wins over the spec-wide
+/// `python.interpreter_package` default — keeping this function network-free
 /// and unit-testable.
 async fn build_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_dependency: ocx_lib::package::metadata::dependency::Dependency,
+    interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
-    let spec::Source::Pylock { path } = &spec.source else {
+    let spec::Source::Pylock { path, .. } = &spec.source else {
         return Ok(Vec::new());
     };
 
     let lock = crate::source::pylock::load(spec_dir, path)
         .await
         .map_err(|e| crate::source::pylock::classify_error("failed to load pylock source", e))?;
-    let app_version =
-        crate::source::pylock::app_version(&lock, &spec.name).map_err(|e| MirrorError::PylockError(e.to_string()))?;
+    let app_version = crate::source::pylock::app_version(&lock, spec.source.pylock_app_name(&spec.name))
+        .map_err(|e| MirrorError::PylockError(e.to_string()))?;
 
     let python = spec
         .python
@@ -275,6 +280,24 @@ async fn build_env_tasks(
             continue;
         }
         let is_default = variant_name == default_variant_name;
+
+        // A variant's own `interpreter_package` override (e.g. a musl-libc
+        // CPython build for a `libc: musl` variant) takes precedence over the
+        // spec-wide `python.interpreter_package` default.
+        let interpreter_package_ref = spec
+            .variants
+            .as_ref()
+            .and_then(|variants| variants.iter().find(|variant| variant.name.as_deref() == variant_name))
+            .and_then(|variant| variant.interpreter_package.as_deref())
+            .unwrap_or(python.interpreter_package.as_str());
+        let interpreter_dependency = interpreter_dependencies
+            .get(interpreter_package_ref)
+            .cloned()
+            .ok_or_else(|| {
+                MirrorError::PylockError(format!(
+                    "no resolved interpreter dependency for reference '{interpreter_package_ref}'"
+                ))
+            })?;
 
         for &platform_key in &platform_keys {
             if !spec.platform_applies(&app_version, platform_key) {
@@ -349,22 +372,50 @@ async fn build_env_tasks(
     Ok(tasks)
 }
 
-/// Resolves the private interpreter dependency: parses `interpreter_package`,
-/// resolves its manifest digest, and pins it with `PRIVATE` visibility.
-async fn build_interpreter_dependency(
+/// Resolves one interpreter [`Dependency`](ocx_lib::package::metadata::dependency::Dependency)
+/// per distinct OCX reference in play for this spec — `python.interpreter_package`
+/// plus any per-variant `interpreter_package` override (e.g. a musl-libc
+/// CPython build for a `libc: musl` variant) — keyed by the reference string.
+/// Each distinct reference hits the registry at most once.
+async fn resolve_interpreter_dependencies(
+    spec: &MirrorSpec,
     python: &spec::PythonConfig,
     client: &ocx_lib::oci::Client,
+) -> Result<std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>, MirrorError> {
+    let mut interpreter_package_refs: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    interpreter_package_refs.insert(python.interpreter_package.as_str());
+    if let Some(variants) = &spec.variants {
+        for variant in variants {
+            if let Some(interpreter_package) = &variant.interpreter_package {
+                interpreter_package_refs.insert(interpreter_package.as_str());
+            }
+        }
+    }
+
+    let mut dependencies = std::collections::HashMap::with_capacity(interpreter_package_refs.len());
+    for interpreter_package_ref in interpreter_package_refs {
+        let dependency = build_interpreter_dependency(interpreter_package_ref, client).await?;
+        dependencies.insert(interpreter_package_ref.to_string(), dependency);
+    }
+    Ok(dependencies)
+}
+
+/// Resolves the private interpreter dependency for a single OCX reference:
+/// parses it, resolves its manifest digest, and pins it with `PRIVATE`
+/// visibility. Called once per distinct reference by
+/// [`resolve_interpreter_dependencies`].
+async fn build_interpreter_dependency(
+    interpreter_package: &str,
+    client: &ocx_lib::oci::Client,
 ) -> Result<ocx_lib::package::metadata::dependency::Dependency, MirrorError> {
-    let identifier = ocx_lib::oci::Identifier::parse(&python.interpreter_package).map_err(|e| {
+    let identifier = ocx_lib::oci::Identifier::parse(interpreter_package).map_err(|e| {
         MirrorError::PylockError(format!(
-            "invalid python.interpreter_package '{}': {e}",
-            python.interpreter_package
+            "invalid interpreter package reference '{interpreter_package}': {e}"
         ))
     })?;
     let digest = client.fetch_manifest_digest(&identifier).await.map_err(|e| {
         MirrorError::TargetError(format!(
-            "failed to resolve interpreter digest for '{}': {e:#}",
-            python.interpreter_package
+            "failed to resolve interpreter digest for '{interpreter_package}': {e:#}"
         ))
     })?;
     let pinned = ocx_lib::oci::PinnedIdentifier::try_from(identifier.clone_with_digest(digest))
@@ -1016,14 +1067,44 @@ build_timestamp: none
     // ── W2.3: pylock env task building (network-free — interpreter dep injected) ──
 
     /// A stand-in interpreter dependency with a fixed digest, so `build_env_tasks`
-    /// runs without resolving a real registry manifest.
-    fn fake_interpreter_dependency() -> ocx_lib::package::metadata::dependency::Dependency {
-        let json = format!(r#"{{"identifier":"ocx.sh/cpython:3.13@sha256:{}"}}"#, "a".repeat(64));
+    /// runs without resolving a real registry manifest. `identifier` lets tests
+    /// tell apart the spec-wide default from a per-variant override.
+    fn fake_interpreter_dependency(
+        identifier: &str,
+        digest_fill: char,
+    ) -> ocx_lib::package::metadata::dependency::Dependency {
+        let json = format!(
+            r#"{{"identifier":"{identifier}@sha256:{}"}}"#,
+            digest_fill.to_string().repeat(64)
+        );
         serde_json::from_str(&json).expect("interpreter dependency parses")
+    }
+
+    /// Resolves `spec.python.interpreter_package` alone — the map a spec with
+    /// no per-variant `interpreter_package` override needs.
+    fn default_interpreter_dependencies(
+        spec: &MirrorSpec,
+    ) -> std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency> {
+        let python = spec.python.as_ref().expect("fixture spec has a python config");
+        std::collections::HashMap::from([(
+            python.interpreter_package.clone(),
+            fake_interpreter_dependency("ocx.sh/cpython:3.13", 'a'),
+        )])
     }
 
     fn pylock_fixture_spec_path() -> PathBuf {
         PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+    }
+
+    /// Fixture with a second, named `musl` variant carrying its own
+    /// `interpreter_package` override — kept separate from
+    /// [`pylock_fixture_spec_path`] so its extra variant doesn't perturb the
+    /// entry counts `plan.rs`'s tests assert against that shared fixture.
+    fn pylock_musl_variant_fixture_spec_path() -> PathBuf {
+        PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-pylock-musl-variant.yml"
+        ))
     }
 
     #[tokio::test]
@@ -1032,7 +1113,8 @@ build_timestamp: none
         let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
         let spec_dir = spec_path.parent().unwrap();
 
-        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", fake_interpreter_dependency(), None)
+        let dependencies = default_interpreter_dependencies(&spec);
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependencies, None)
             .await
             .expect("build_env_tasks succeeds");
 
@@ -1072,7 +1154,8 @@ build_timestamp: none
         let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
         let spec_dir = spec_path.parent().unwrap();
 
-        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", fake_interpreter_dependency(), None)
+        let dependencies = default_interpreter_dependencies(&spec);
+        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", &dependencies, None)
             .await
             .expect("build_env_tasks succeeds");
         assert!(tasks.is_empty(), "no variant tag matches an unknown version");
@@ -1088,11 +1171,71 @@ build_timestamp: none
         let spec_dir = spec_path.parent().unwrap();
 
         let allowed: std::collections::HashSet<String> = ["linux/arm64".to_string()].into_iter().collect();
-        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", fake_interpreter_dependency(), Some(&allowed))
+        let dependencies = default_interpreter_dependencies(&spec);
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependencies, Some(&allowed))
             .await
             .expect("build_env_tasks succeeds");
 
         assert_eq!(tasks.len(), 1, "plan restricts to the single outstanding platform");
         assert_eq!(tasks[0].platform.to_string(), "linux/arm64");
+    }
+
+    // ── per-variant `interpreter_package` override (musl-libc CPython) ──────
+
+    #[tokio::test]
+    async fn build_env_tasks_resolves_variant_interpreter_override() {
+        // The fixture's "musl" variant declares its own `interpreter_package`
+        // — its tasks must carry that override, not the spec-wide default.
+        let spec_path = pylock_musl_variant_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let mut dependencies = default_interpreter_dependencies(&spec);
+        dependencies.insert(
+            "ocx.sh/python/cpython-musl:3.13.1".to_string(),
+            fake_interpreter_dependency("ocx.sh/cpython-musl:3.13", 'b'),
+        );
+
+        let tasks = build_env_tasks(&spec, spec_dir, "musl-1.0.0", &dependencies, None)
+            .await
+            .expect("build_env_tasks succeeds");
+
+        assert!(!tasks.is_empty(), "the musl variant produces env tasks");
+        for task in &tasks {
+            assert!(
+                task.interpreter.identifier.to_string().contains("cpython-musl"),
+                "the musl variant resolves its own interpreter_package override, got {}",
+                task.interpreter.identifier
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_falls_back_to_python_interpreter_package_without_override() {
+        // Same multi-variant fixture as the override test above: the default
+        // variant declares no `interpreter_package` of its own, so even
+        // alongside a sibling "musl" variant that does, its tasks must fall
+        // back to `python.interpreter_package`.
+        let spec_path = pylock_musl_variant_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let mut dependencies = default_interpreter_dependencies(&spec);
+        dependencies.insert(
+            "ocx.sh/python/cpython-musl:3.13.1".to_string(),
+            fake_interpreter_dependency("ocx.sh/cpython-musl:3.13", 'b'),
+        );
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependencies, None)
+            .await
+            .expect("build_env_tasks succeeds");
+
+        assert!(!tasks.is_empty());
+        for task in &tasks {
+            assert!(
+                !task.interpreter.identifier.to_string().contains("musl"),
+                "the default variant (no override) falls back to python.interpreter_package, got {}",
+                task.interpreter.identifier
+            );
+        }
     }
 }

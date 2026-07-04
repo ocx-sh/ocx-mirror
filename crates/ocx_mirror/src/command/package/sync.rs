@@ -340,9 +340,9 @@ pub(crate) async fn list_upstream_versions(
                     .map_err(|e| MirrorError::SourceError(format!("generator failed: {e}")))
             }
         },
-        spec::Source::Pylock { path } => {
+        spec::Source::Pylock { path, .. } => {
             log::debug!("Reading pylock source for {}", spec.name);
-            source::pylock::list_versions(spec_dir, path, &spec.name)
+            source::pylock::list_versions(spec_dir, path, spec.source.pylock_app_name(&spec.name))
                 .await
                 .map_err(|e| source::pylock::classify_error("failed to read pylock source", e))
         }

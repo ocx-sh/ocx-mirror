@@ -45,6 +45,12 @@ pub struct VariantSpec {
     /// Required CPython ABI tag, e.g. `"cp313t"` for the free-threaded build.
     #[serde(default)]
     pub abi: Option<String>,
+
+    /// Per-variant OCX interpreter package override for `pylock` (e.g. a
+    /// musl-libc CPython build for a `libc: musl` variant). Falls back to
+    /// `python.interpreter_package` when unset.
+    #[serde(default)]
+    pub interpreter_package: Option<String>,
 }
 
 static MANYLINUX_FLOOR_RE: std::sync::LazyLock<regex::Regex> =

@@ -27,7 +27,30 @@ pub enum Source {
     Pylock {
         /// Path to the committed `pylock.toml`, relative to the spec directory.
         path: String,
+        /// PEP 503 name of the application package to resolve inside the lock.
+        ///
+        /// Defaults to the mirror's `name`. Set it when the mirror must carry a
+        /// different name than the locked package — e.g. a `pycowsay-musl`
+        /// mirror (distinct target repo + workflow file) that resolves the
+        /// `pycowsay` package from a shared lock for the alpine/musl leg.
+        #[serde(default)]
+        package: Option<String>,
     },
+}
+
+impl Source {
+    /// The PEP 503 application-package name a `pylock` source resolves: the
+    /// source's `package` override when set, otherwise the mirror `name`.
+    /// Returns `spec_name` unchanged for non-`pylock` sources (never consulted
+    /// there).
+    pub fn pylock_app_name<'a>(&'a self, spec_name: &'a str) -> &'a str {
+        match self {
+            Source::Pylock {
+                package: Some(package), ..
+            } => package,
+            _ => spec_name,
+        }
+    }
 }
 
 /// The three modes of providing url_index data.
@@ -133,7 +156,7 @@ impl Source {
                 }
             }
             Source::UrlIndex(_) => {}
-            Source::Pylock { path } => {
+            Source::Pylock { path, .. } => {
                 if path.trim().is_empty() {
                     errors.push("source.path must not be empty".to_string());
                 }

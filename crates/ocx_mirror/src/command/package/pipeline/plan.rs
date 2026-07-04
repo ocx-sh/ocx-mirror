@@ -211,7 +211,7 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
     // platform and errors (`AmbiguousAsset`) on 2+ — structurally incompatible
     // with wheel sets (D1, plan_pylock_mirror.md). The branch builds its own
     // `PlanVersionEntry` list directly rather than joining the regex path below.
-    if let Source::Pylock { path } = &spec.source {
+    if let Source::Pylock { path, .. } = &spec.source {
         let versions =
             build_pylock_plan_entries(spec, spec_dir, path, &upstream_versions, &all_tags, &version_map).await?;
         let target = format!("{}/{}", spec.target.registry, spec.target.repository);
@@ -841,7 +841,7 @@ mod tests {
         assert_eq!(upstream_versions.len(), 1);
         assert_eq!(upstream_versions[0].version, "1.0.0");
 
-        let Source::Pylock { path } = &spec.source else {
+        let Source::Pylock { path, .. } = &spec.source else {
             panic!("fixture spec must be source.type: pylock");
         };
 
@@ -895,7 +895,7 @@ mod tests {
         let spec_dir = spec_path.parent().unwrap();
 
         let upstream_versions = list_upstream_versions(&spec, spec_dir).await.unwrap();
-        let Source::Pylock { path } = &spec.source else {
+        let Source::Pylock { path, .. } = &spec.source else {
             panic!("fixture spec must be source.type: pylock");
         };
 
