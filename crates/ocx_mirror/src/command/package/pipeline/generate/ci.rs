@@ -13,13 +13,17 @@ use crate::command::package::options::OutputFormat;
 use crate::error::MirrorError;
 use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
 
-// ── Native-only renderer ─────────────────────────────────────────────────────
+// ── Renderer (native + container legs) ───────────────────────────────────────
 //
-// As of the setup-ocx toolchain-sourcing migration the renderer emits a native-only
-// workflow shape. Container mode (legs that run tests inside a docker image
-// injected with a musl-built ocx) is deferred — see Phase 8 follow-up in
-// `.claude/artifacts/lively-leaping-quill.md`. Specs declaring `containers:`
-// are rejected by `policy_check_no_containers` before any file is written.
+// A platform without `containers:` renders a native leg (tests run on the GHA
+// runner via the setup-ocx toolchain). A platform WITH `containers:` renders
+// one leg per image: the job still runs on the host runner (so JS actions —
+// checkout, artifact up/download — keep the glibc node GitHub mounts, which
+// Alpine's musl userland cannot execute), and only the `ocx package test`
+// invocation is wrapped in `docker run <image>` with a statically-linked ocx of
+// the container's libc (musl for Alpine, gnu otherwise) mounted in. The env
+// under test is self-contained (local layers) and pulls only its private
+// interpreter from the registry anonymously.
 
 // ── Build-time constants ─────────────────────────────────────────────────────
 
@@ -95,7 +99,6 @@ impl GenerateCi {
 
         // Phase 3: content-policy validation on the parsed spec.
         policy_check_notify(&spec)?;
-        policy_check_no_containers(&spec)?;
 
         // Phase 4: render all generated files.
         let repo_root = self.spec.parent().unwrap_or(Path::new("."));
@@ -144,28 +147,21 @@ fn policy_check_notify(spec: &MirrorSpec) -> Result<(), MirrorError> {
     spec::policy_check_notify(notify)
 }
 
-/// Reject specs that declare container test legs.
+/// The libc family for a container image, driving which statically-linked ocx
+/// release binary the test leg mounts. Inferred from the image name: Alpine is
+/// musl, everything else (Debian, Ubuntu, Fedora, …) is gnu.
 ///
-/// The renderer is native-only after the setup-ocx toolchain-sourcing migration;
-/// container mode (musl ocx injected into a docker image) needs a separate
-/// install strategy that has not been re-implemented yet.
-fn policy_check_no_containers(spec: &MirrorSpec) -> Result<(), MirrorError> {
-    let Some(platforms) = &spec.platforms else {
-        return Ok(());
-    };
-    let with_containers: Vec<&str> = platforms
-        .iter()
-        .filter(|(_, config)| config.containers.as_ref().is_some_and(|c| !c.is_empty()))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if with_containers.is_empty() {
-        return Ok(());
-    }
-    Err(MirrorError::SpecUsageError(format!(
-        "container test legs are not supported by the current renderer (platforms: {}); \
-         remove the `containers:` blocks or pin an older ocx-mirror release",
-        with_containers.join(", "),
-    )))
+// ponytail: name-prefix inference, not a spec field — the corpus needs exactly
+// alpine(musl) + debian(gnu). Add an explicit `containers[].libc` to
+// `ContainerConfig` if a musl image that isn't Alpine ever shows up.
+fn container_libc_for_image(image: &str) -> &'static str {
+    if image.starts_with("alpine") { "musl" } else { "gnu" }
+}
+
+/// The default shell inside a container image when the config omits one:
+/// Alpine ships only BusyBox `sh`; the glibc distros carry `bash`.
+fn container_shell_for_image(image: &str) -> &'static str {
+    if image.starts_with("alpine") { "sh" } else { "bash" }
 }
 
 // ── Renderer ─────────────────────────────────────────────────────────────────
@@ -188,15 +184,21 @@ struct RenderedTest {
 
 /// Describes one matrix leg (test job matrix entry).
 ///
-/// The renderer is native-only — `container_id` is always the sentinel
-/// `_native_`. The field is retained because downstream consumers
-/// (`pipeline push`, `junit.rs`) still key on `(version, platform, container)`
-/// triples in JUnit XML and run-summary.json.
+/// A native leg has an empty `container_image` and the sentinel `container_id`
+/// `_native_`. A container leg carries the image, its libc family (which ocx
+/// release binary to mount), and a stable `container_id` derived from the
+/// config `id` or the slugified image. Downstream consumers (`pipeline push`,
+/// `junit.rs`) key on `(version, platform, container)` triples in JUnit XML and
+/// run-summary.json, so `container_id` stays meaningful in both modes.
 struct MatrixLeg {
     platform: String,
     platform_slug: String,
     runner: String,
     container_id: String,
+    /// Container image reference, or empty for a native leg.
+    container_image: String,
+    /// Container libc family (`musl`/`gnu`); empty for a native leg.
+    container_libc: String,
     shell: String,
     tests: Vec<RenderedTest>,
 }
@@ -247,17 +249,47 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
             .map(render_tests)
             .unwrap_or_else(|| top_level_tests.clone());
 
-        // Native-only mode after the setup-ocx toolchain-sourcing migration.
-        // `containers:` specs are rejected upfront by `policy_check_no_containers`.
-        let shell = native_shell_for_platform(platform_key, config);
-        legs.push(MatrixLeg {
-            platform: platform_key.clone(),
-            platform_slug: platform_slug.clone(),
-            runner: config.runner.clone(),
-            container_id: "_native_".to_string(),
-            shell: shell.to_string(),
-            tests: effective_tests,
-        });
+        match config.containers.as_deref().filter(|c| !c.is_empty()) {
+            // Container mode: one leg per image. The job runs on the host runner
+            // (JS actions keep glibc node); only `ocx package test` runs inside
+            // the image (see `render_test_run_steps`).
+            Some(containers) => {
+                for container in containers {
+                    let container_id = container
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| container.image.replace([':', '/'], "_"));
+                    let shell = container
+                        .shell
+                        .clone()
+                        .unwrap_or_else(|| container_shell_for_image(&container.image).to_string());
+                    legs.push(MatrixLeg {
+                        platform: platform_key.clone(),
+                        platform_slug: platform_slug.clone(),
+                        runner: config.runner.clone(),
+                        container_id,
+                        container_image: container.image.clone(),
+                        container_libc: container_libc_for_image(&container.image).to_string(),
+                        shell,
+                        tests: effective_tests.clone(),
+                    });
+                }
+            }
+            // Native leg: tests run directly on the GHA runner.
+            None => {
+                let shell = native_shell_for_platform(platform_key, config);
+                legs.push(MatrixLeg {
+                    platform: platform_key.clone(),
+                    platform_slug: platform_slug.clone(),
+                    runner: config.runner.clone(),
+                    container_id: "_native_".to_string(),
+                    container_image: String::new(),
+                    container_libc: String::new(),
+                    shell: shell.to_string(),
+                    tests: effective_tests,
+                });
+            }
+        }
     }
     legs
 }
@@ -357,6 +389,16 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
             "          - platform: {}\n            platform_slug: {}\n            runner: {}\n            container_id: {}\n",
             leg.platform, leg.platform_slug, leg.runner, leg.container_id,
         ));
+        // Container legs carry the image + libc; native legs omit both keys so
+        // native-only workflows stay byte-identical to the pre-container
+        // renderer. A referenced-but-absent matrix key evaluates to "" in GHA,
+        // which the test step's `container_image` guard reads as native mode.
+        if !leg.container_image.is_empty() {
+            out.push_str(&format!(
+                "            container_image: {:?}\n            container_libc: {:?}\n",
+                leg.container_image, leg.container_libc,
+            ));
+        }
         out.push_str(&format!("            shell: {}\n", leg.shell));
         // Inline the test entries so they are visible in the generated YAML.
         out.push_str("            tests:\n");
@@ -394,12 +436,22 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
     out
 }
 
+/// The ocx CLI release whose statically-linked binary is mounted into a
+/// container test leg. Pinned (not `latest`) for reproducible generated
+/// workflows; Renovate can bump it via the same customManager that pins the
+/// baked action refs.
+const OCX_CONTAINER_CLI_TAG: &str = "v0.4.1";
+
 /// Render per-test shell commands for the `test` job's run step.
 ///
 /// Each matrix leg runs all its tests for every discovered version. The
-/// renderer emits a single shell block that iterates per-version. Native-only
-/// — container mode (musl-ocx-in-docker) is rejected upstream by
-/// `policy_check_no_containers`.
+/// renderer emits a single shell block that iterates per-version.
+///
+/// A native leg (`container_image` empty) runs `ocx package test` directly on
+/// the runner. A container leg provisions a libc-matched, statically-linked ocx
+/// release binary and wraps every `ocx package test` in `docker run <image>`
+/// with the workspace and that binary mounted in — so the test executes against
+/// the target container's userland while JS actions keep the host's glibc node.
 fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
     if legs.is_empty() {
         return String::new();
@@ -414,7 +466,51 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
         r#""${BUNDLE}""#
     };
 
-    let body = r#"            mkdir -p junit
+    // Emit the container wrapper only when a leg actually declares an image, so
+    // native-only workflows stay byte-identical to the pre-container renderer
+    // (no drift on the archive/native corpus). `{OCX_TEST}` is the test-command
+    // prefix: `ocx_test package test` under container mode, plain
+    // `ocx package test` otherwise.
+    let has_container = legs.iter().any(|leg| !leg.container_image.is_empty());
+    let (container_prelude, ocx_test) = if has_container {
+        (
+            r#"            # Container legs: provision a libc-matched ocx release binary once and
+            # run `ocx package test` inside `docker run <image>`; native legs call
+            # `ocx` directly. The env under test is self-contained (local layers);
+            # only its private interpreter is pulled (anonymously) from the registry.
+            CONTAINER_IMAGE="${{ matrix.container_image }}"
+            if [ -n "${CONTAINER_IMAGE}" ]; then
+              case "${{ matrix.platform }}" in
+                linux/amd64) OCX_ARCH=x86_64 ;;
+                linux/arm64) OCX_ARCH=aarch64 ;;
+                *) echo "::error::container test legs are linux-only (got ${{ matrix.platform }})"; exit 1 ;;
+              esac
+              OCX_TRIPLE="${OCX_ARCH}-unknown-linux-${{ matrix.container_libc }}"
+              OCX_CONTAINER_BIN="${RUNNER_TEMP}/ocx-${OCX_TRIPLE}/ocx"
+              if [ ! -x "${OCX_CONTAINER_BIN}" ]; then
+                curl -fsSL "https://github.com/ocx-sh/ocx/releases/download/{OCX_CLI_TAG}/ocx-${OCX_TRIPLE}.tar.xz" \
+                  | tar -xJ -C "${RUNNER_TEMP}"
+              fi
+            fi
+            ocx_test() {
+              if [ -n "${CONTAINER_IMAGE}" ]; then
+                docker run --rm -i --platform "${{ matrix.platform }}" \
+                  -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+                  -v "${OCX_CONTAINER_BIN}:/usr/local/bin/ocx:ro" \
+                  -e OCX_HOME=/tmp/ocx-home -e OCX_NO_UPDATE_CHECK=1 \
+                  "${CONTAINER_IMAGE}" ocx "$@"
+              else
+                ocx "$@"
+              fi
+            }
+"#,
+            "ocx_test package test",
+        )
+    } else {
+        ("", "ocx package test")
+    };
+
+    let body = r#"{CONTAINER_PRELUDE}            mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
             TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length')
@@ -427,15 +523,15 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
+                {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
+                {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
-                printf '%s' "${TEST_INLINE}" | ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
+                printf '%s' "${TEST_INLINE}" | {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script - || RC=$?
               fi
               END=$(date +%s)
@@ -465,7 +561,10 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
               exit 1
             fi
 "#;
-    body.replace("{TEST_TARGET}", test_target)
+    body.replace("{CONTAINER_PRELUDE}", container_prelude)
+        .replace("{OCX_TEST}", ocx_test)
+        .replace("{TEST_TARGET}", test_target)
+        .replace("{OCX_CLI_TAG}", OCX_CONTAINER_CLI_TAG)
 }
 
 /// The prepare-job artifact-gathering script, source-dependent.
@@ -898,28 +997,49 @@ mod tests {
     }
 
     #[test]
-    fn render_rejects_container_legs_with_usage_error() {
-        // After the setup-ocx toolchain-sourcing migration the renderer is
-        // native-only; specs declaring `containers:` must be rejected before
-        // any file is written. Container mode is deferred — see Phase 8 in
-        // `.claude/artifacts/lively-leaping-quill.md`.
+    fn render_emits_container_legs() {
+        // A spec declaring `containers:` renders one matrix leg per image, each
+        // carrying its image + libc, and a test step that wraps
+        // `ocx package test` in `docker run <image>` with a libc-matched ocx
+        // release binary mounted in.
         let dir = tempdir().unwrap();
-        let result = render_fixture("mirror-multi-container.yml", dir.path());
-        match result {
-            Err(MirrorError::SpecUsageError(msg)) => {
-                assert!(
-                    msg.contains("container"),
-                    "rejection message must call out container legs, got: {msg}"
-                );
-                let workflow = dir.path().join(".github/workflows/shfmt.yml");
-                assert!(
-                    !workflow.exists(),
-                    "no workflow must be written when the spec declares container legs"
-                );
-            }
-            Ok(()) => panic!("expected SpecUsageError for spec with container legs"),
-            Err(e) => panic!("expected SpecUsageError, got: {e}"),
-        }
+        render_fixture("mirror-multi-container.yml", dir.path()).expect("container spec renders");
+        let workflow = dir.path().join(".github/workflows/shfmt.yml");
+        let content = std::fs::read_to_string(&workflow).expect("workflow written");
+
+        // One matrix leg per container image, with its inferred libc.
+        assert!(
+            content.contains(r#"container_image: "alpine:3.20""#),
+            "alpine leg present"
+        );
+        assert!(content.contains(r#"container_libc: "musl""#), "alpine leg is musl");
+        assert!(
+            content.contains(r#"container_image: "ubuntu:24.04""#),
+            "ubuntu leg present"
+        );
+        assert!(
+            content.contains(r#"container_image: "fedora:40""#),
+            "fedora leg present"
+        );
+        assert!(content.contains(r#"container_libc: "gnu""#), "glibc images are gnu");
+
+        // The container test wrapper + libc-matched ocx provisioning.
+        assert!(
+            content.contains("docker run --rm -i --platform"),
+            "test runs inside docker"
+        );
+        assert!(
+            content.contains("ocx_test package test"),
+            "test calls route through ocx_test"
+        );
+        assert!(
+            content.contains("releases/download/v0.4.1/ocx-${OCX_TRIPLE}.tar.xz"),
+            "pinned libc-matched ocx binary is provisioned"
+        );
+        assert!(
+            content.contains("container test legs are linux-only"),
+            "non-linux container legs are rejected at runtime"
+        );
     }
 
     #[test]
