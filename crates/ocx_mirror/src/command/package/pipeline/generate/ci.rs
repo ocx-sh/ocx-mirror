@@ -491,12 +491,18 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
                 curl -fsSL "https://github.com/ocx-sh/ocx/releases/download/{OCX_CLI_TAG}/ocx-${OCX_TRIPLE}.tar.xz" \
                   | tar -xJ -C "${RUNNER_TEMP}"
               fi
+              # The gnu ocx verifies TLS against the system CA store, which a
+              # minimal base image (e.g. debian:12) does not carry; mount the
+              # runner's resolved bundle at the path ocx reads by default.
+              # (The musl ocx bundles webpki roots, so this is a no-op there.)
+              OCX_CA_BUNDLE=$(realpath /etc/ssl/certs/ca-certificates.crt 2>/dev/null || echo /etc/ssl/certs/ca-certificates.crt)
             fi
             ocx_test() {
               if [ -n "${CONTAINER_IMAGE}" ]; then
                 docker run --rm -i --platform "${{ matrix.platform }}" \
                   -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
                   -v "${OCX_CONTAINER_BIN}:/usr/local/bin/ocx:ro" \
+                  -v "${OCX_CA_BUNDLE}:/etc/ssl/certs/ca-certificates.crt:ro" \
                   -e OCX_HOME=/tmp/ocx-home -e OCX_NO_UPDATE_CHECK=1 \
                   "${CONTAINER_IMAGE}" ocx "$@"
               else
@@ -1039,6 +1045,10 @@ mod tests {
         assert!(
             content.contains("container test legs are linux-only"),
             "non-linux container legs are rejected at runtime"
+        );
+        assert!(
+            content.contains("/etc/ssl/certs/ca-certificates.crt:ro"),
+            "the runner CA bundle is mounted so the gnu ocx can verify TLS in a minimal image"
         );
     }
 
