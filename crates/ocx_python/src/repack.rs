@@ -17,7 +17,10 @@
 //! metadata (the `module[:attr…]` grammar is parsed later, in `compose`, next
 //! to shim synthesis) and the `RECORD` for the collision pre-check.
 
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 /// The repack-determinism grammar version, stamped as a `repack-vN` annotation.
 ///
@@ -25,6 +28,16 @@ use std::path::{Path, PathBuf};
 /// entries, epoch mtimes, uid/gid 0, normalized modes, pinned zstd level).
 /// Parallels [`L2_GRAMMAR_VERSION`](crate::platform::L2_GRAMMAR_VERSION).
 pub const REPACK_VERSION: &str = "repack-v1";
+
+/// Pinned zstd compression level for the deterministic `tar.zst` layer
+/// (Convention #2) — matches the codebase-wide default pinned elsewhere
+/// (`ocx_lib::compression::CompressionLevel::Default`).
+const ZSTD_LEVEL: i32 = 3;
+
+/// Unix mode for a regular file in the relocated tree.
+const MODE_FILE: u32 = 0o644;
+/// Unix mode for a `.data/scripts` launcher relocated into `bin/`.
+const MODE_EXECUTABLE: u32 = 0o755;
 
 /// A repacked wheel layer plus the metadata `compose` and `collide` need.
 #[derive(Debug, Clone)]
@@ -83,8 +96,244 @@ pub struct ConsoleScript {
 /// Returns [`RepackError::Io`] on a filesystem failure and
 /// [`RepackError::Zip`] when the wheel is not a readable zip.
 pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path) -> Result<RepackedWheel, RepackError> {
-    let _ = (wheel_path, output_dir);
-    unimplemented!("W1.6")
+    // ponytail: this crate declares no tokio dependency (pure-translation
+    // library boundary, no registry/network I/O — see module docs), so the
+    // zip read + tar/zstd write run inline rather than via `spawn_blocking`.
+    // A caller invoking this from inside a tokio runtime should wrap the call
+    // in its own `spawn_blocking` if repacking large wheels on a shared
+    // executor becomes a bottleneck.
+    let filename = wheel_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let wheel_bytes = std::fs::read(wheel_path).map_err(RepackError::Io)?;
+    std::fs::create_dir_all(output_dir).map_err(RepackError::Io)?;
+
+    let wheel_sha256 = hex_encode(Sha256::digest(&wheel_bytes));
+
+    let mut zip = zip::ZipArchive::new(Cursor::new(wheel_bytes.as_slice())).map_err(RepackError::Zip)?;
+
+    let mut tree = Vec::with_capacity(zip.len());
+    let mut metadata_text: Option<String> = None;
+    let mut record_text: Option<String> = None;
+    let mut entry_points_text: Option<String> = None;
+
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(RepackError::Zip)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let raw_name = entry.name().to_string();
+        let enclosed = entry
+            .enclosed_name()
+            .ok_or_else(|| RepackError::UnsafeEntryPath(raw_name.clone()))?;
+        let components = path_components(&enclosed);
+
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).map_err(RepackError::Io)?;
+
+        if let [dist_info, leaf] = components.as_slice()
+            && dist_info.ends_with(".dist-info")
+        {
+            match leaf.as_str() {
+                "METADATA" => metadata_text = Some(String::from_utf8_lossy(&data).into_owned()),
+                "RECORD" => record_text = Some(String::from_utf8_lossy(&data).into_owned()),
+                "entry_points.txt" => entry_points_text = Some(String::from_utf8_lossy(&data).into_owned()),
+                _ => {}
+            }
+        }
+
+        let (path, executable) = relocate(&components);
+        if path.is_empty() {
+            continue;
+        }
+        tree.push(TreeEntry { path, executable, data });
+    }
+
+    tree.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let layer_bytes = write_deterministic_tar_zst(&tree)?;
+    let digest_hex = hex_encode(Sha256::digest(&layer_bytes));
+    let layer_digest = format!("sha256:{digest_hex}");
+    let layer_path = output_dir.join(format!("{digest_hex}.tar.zst"));
+    std::fs::write(&layer_path, &layer_bytes).map_err(RepackError::Io)?;
+
+    let entry_points = entry_points_text
+        .as_deref()
+        .map(parse_console_scripts)
+        .unwrap_or_default();
+    let locked_extras = metadata_text.as_deref().map(parse_provides_extra).unwrap_or_default();
+    let mut record_paths = match record_text.as_deref() {
+        Some(text) => relocate_record_paths(text)?,
+        None => Vec::new(),
+    };
+    record_paths.sort();
+
+    Ok(RepackedWheel {
+        filename,
+        layer_path,
+        layer_digest,
+        wheel_sha256,
+        entry_points,
+        record_paths,
+        locked_extras,
+    })
+}
+
+/// One file destined for the relocated tree: its final path, whether it must
+/// land executable (`.data/scripts` launchers), and its content.
+struct TreeEntry {
+    path: String,
+    executable: bool,
+    data: Vec<u8>,
+}
+
+/// Splits a sanitized zip-relative path into its forward-slash components.
+fn path_components(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Relocates a wheel-relative path into the final on-disk tree (Convention #3):
+/// `<dist>.data/scripts/*` → `bin/`, `<dist>.data/data/*` → the content root,
+/// everything else (purelib/platlib, `.dist-info`) → `lib/site-packages/`.
+/// Returns the relocated path and whether it must be marked executable.
+fn relocate(components: &[String]) -> (String, bool) {
+    let Some(first) = components.first() else {
+        return (String::new(), false);
+    };
+    if first.ends_with(".data") {
+        let rest = components.get(2..).unwrap_or(&[]).join("/");
+        return match components.get(1).map(String::as_str) {
+            Some("scripts") => (format!("bin/{rest}"), true),
+            Some("data") => (rest, false),
+            // ponytail: `.data/{purelib,platlib,headers}` are unused by the
+            // fixture corpus and rare in the wild; fall back to the same
+            // site-packages destination as top-level purelib/platlib content.
+            // Revisit if a real wheel needs distinct `headers` placement.
+            _ => (format!("lib/site-packages/{rest}"), false),
+        };
+    }
+    (format!("lib/site-packages/{}", components.join("/")), false)
+}
+
+/// Splits a RECORD path field into safe relative components, rejecting
+/// absolute paths and `..` traversal.
+fn record_components(raw_path: &str) -> Result<Vec<String>, RepackError> {
+    if raw_path.starts_with('/') {
+        return Err(RepackError::UnsafeEntryPath(raw_path.to_string()));
+    }
+    let mut components = Vec::new();
+    for part in raw_path.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => return Err(RepackError::UnsafeEntryPath(raw_path.to_string())),
+            _ => components.push(part.to_string()),
+        }
+    }
+    Ok(components)
+}
+
+/// Parses PEP 376 `RECORD` (`path,hash,size` lines; hash/size may be empty)
+/// and relocates each listed path into the final tree, matching what
+/// [`write_deterministic_tar_zst`] wrote.
+fn relocate_record_paths(record_text: &str) -> Result<Vec<String>, RepackError> {
+    record_text
+        .lines()
+        .filter_map(|line| {
+            // ponytail: naive first-field split — PEP 376 RECORD is
+            // technically CSV-quoted for paths containing commas; no fixture
+            // in the corpus exercises that, so a full CSV parser isn't
+            // justified yet.
+            let field = line.split(',').next()?.trim();
+            (!field.is_empty()).then(|| field.to_string())
+        })
+        .map(|raw| record_components(&raw).map(|components| relocate(&components).0))
+        .filter(|relocated| !matches!(relocated, Ok(path) if path.is_empty()))
+        .collect()
+}
+
+/// Writes `tree` as a deterministic `tar.zst`: entries sorted by path (the
+/// caller sorts `tree` before calling), epoch (0) mtimes, uid/gid 0, and
+/// normalized modes — Convention #2.
+fn write_deterministic_tar_zst(tree: &[TreeEntry]) -> Result<Vec<u8>, RepackError> {
+    let encoder = zstd::stream::write::Encoder::new(Vec::new(), ZSTD_LEVEL).map_err(RepackError::Io)?;
+    let mut builder = tar::Builder::new(encoder);
+    for entry in tree {
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(entry.data.len() as u64);
+        header.set_mode(if entry.executable { MODE_EXECUTABLE } else { MODE_FILE });
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        builder
+            .append_data(&mut header, &entry.path, entry.data.as_slice())
+            .map_err(RepackError::Io)?;
+    }
+    let encoder = builder.into_inner().map_err(RepackError::Io)?;
+    encoder.finish().map_err(RepackError::Io)
+}
+
+/// Parses `[console_scripts]` entries from `entry_points.txt`. The raw
+/// `module[:attr…]` object reference and optional `[extra1,extra2]` gate are
+/// kept verbatim — `compose` owns the grammar parse (module doc, above).
+fn parse_console_scripts(text: &str) -> Vec<ConsoleScript> {
+    let mut scripts = Vec::new();
+    let mut in_console_scripts = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_console_scripts = line.eq_ignore_ascii_case("[console_scripts]");
+            continue;
+        }
+        if !in_console_scripts {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (reference, extras) = match value.trim().split_once('[') {
+            Some((reference, extras)) => (
+                reference.trim().to_string(),
+                extras
+                    .trim_end()
+                    .trim_end_matches(']')
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|extra| !extra.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            ),
+            None => (value.trim().to_string(), Vec::new()),
+        };
+        scripts.push(ConsoleScript {
+            name: name.trim().to_string(),
+            reference,
+            extras,
+        });
+    }
+    scripts
+}
+
+/// Parses `Provides-Extra:` headers from wheel `METADATA` (PEP 566) — the
+/// wheel's declared extras, for `compose`'s gating provenance.
+fn parse_provides_extra(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("Provides-Extra:"))
+        .map(|value| value.trim().to_string())
+        .collect()
+}
+
+/// Hex-encodes a digest. No `hex` crate dependency is declared for this
+/// crate; this one-liner covers the only two call sites (wheel + layer digests).
+fn hex_encode(bytes: impl AsRef<[u8]>) -> String {
+    bytes.as_ref().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Errors from repacking a wheel.
@@ -97,4 +346,224 @@ pub enum RepackError {
     /// The wheel could not be read as a zip archive.
     #[error("failed to read wheel zip")]
     Zip(#[source] zip::result::ZipError),
+    /// A wheel entry (or `RECORD` path) escapes the wheel root via an
+    /// absolute path or `..` traversal (zip-slip).
+    #[error("unsafe path in wheel entry: {0}")]
+    UnsafeEntryPath(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Drives a future to completion without a runtime. Production code in
+    /// this module never actually suspends (see the `ponytail` note in
+    /// [`repack_wheel`]), so the first poll always resolves.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let waker = std::task::Waker::noop();
+        let mut context = std::task::Context::from_waker(waker);
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => {
+                panic!("repack_wheel unexpectedly returned Pending (no async runtime in this crate)")
+            }
+        }
+    }
+
+    fn fixture_wheel(name: &str) -> PathBuf {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/wheels")).join(name)
+    }
+
+    /// A fresh, per-test scratch directory under the OS temp dir (no
+    /// `tempfile` dependency declared for this crate).
+    fn scratch_dir(label: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "ocx_python-repack-test-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// Decompresses + reads back a written layer as `(path, mode, mtime, data)` tuples.
+    fn read_tar_entries(layer_path: &Path) -> Vec<(String, u32, u64, Vec<u8>)> {
+        let file = std::fs::File::open(layer_path).expect("open layer");
+        let decoder = zstd::stream::read::Decoder::new(file).expect("zstd decoder");
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .entries()
+            .expect("tar entries")
+            .map(|entry| {
+                let mut entry = entry.expect("tar entry");
+                let path = entry.path().expect("entry path").to_string_lossy().into_owned();
+                let mode = entry.header().mode().expect("entry mode");
+                let mtime = entry.header().mtime().expect("entry mtime");
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).expect("read entry data");
+                (path, mode, mtime, data)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn purelib_wheel_relocates_into_site_packages() {
+        let output_dir = scratch_dir("purelib");
+        let repacked = block_on(repack_wheel(
+            &fixture_wheel("purelib_pkg-1.0.0-py3-none-any.whl"),
+            &output_dir,
+        ))
+        .expect("repack succeeds");
+
+        assert_eq!(repacked.filename, "purelib_pkg-1.0.0-py3-none-any.whl");
+        assert!(repacked.layer_digest.starts_with("sha256:"));
+        assert_eq!(repacked.wheel_sha256.len(), 64, "wheel_sha256 is a bare hex digest");
+        assert!(repacked.entry_points.is_empty());
+        assert!(repacked.locked_extras.is_empty());
+
+        let entries = read_tar_entries(&repacked.layer_path);
+        let paths: Vec<&str> = entries.iter().map(|(path, ..)| path.as_str()).collect();
+        assert!(paths.contains(&"lib/site-packages/purelib_pkg/__init__.py"));
+        assert!(paths.contains(&"lib/site-packages/purelib_pkg/core.py"));
+        assert!(paths.contains(&"lib/site-packages/purelib_pkg-1.0.0.dist-info/METADATA"));
+        assert!(paths.contains(&"lib/site-packages/purelib_pkg-1.0.0.dist-info/RECORD"));
+
+        for (path, mode, mtime, _) in &entries {
+            assert_eq!(*mtime, 0, "{path} did not get an epoch mtime");
+            assert_eq!(*mode, 0o644, "{path} should be a plain 0o644 file");
+        }
+
+        assert!(
+            repacked
+                .record_paths
+                .contains(&"lib/site-packages/purelib_pkg/__init__.py".to_string())
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn data_pkg_relocates_scripts_and_data() {
+        let output_dir = scratch_dir("data-pkg");
+        let repacked = block_on(repack_wheel(
+            &fixture_wheel("data_pkg-1.0.0-py3-none-any.whl"),
+            &output_dir,
+        ))
+        .expect("repack succeeds");
+
+        let entries = read_tar_entries(&repacked.layer_path);
+        let by_path: std::collections::HashMap<&str, (u32, u64, &[u8])> = entries
+            .iter()
+            .map(|(path, mode, mtime, data)| (path.as_str(), (*mode, *mtime, data.as_slice())))
+            .collect();
+
+        let (launcher_mode, launcher_mtime, launcher_data) = *by_path
+            .get("bin/data_pkg-launcher")
+            .expect("launcher relocated to bin/");
+        assert_eq!(launcher_mode, 0o755, "script launcher must be executable");
+        assert_eq!(launcher_mtime, 0);
+        assert_eq!(launcher_data, b"#!python\nimport data_pkg\nprint('launched')\n");
+
+        let (config_mode, _, config_data) = *by_path
+            .get("share/data_pkg/config.json")
+            .expect(".data/data relocated to content root");
+        assert_eq!(config_mode, 0o644);
+        assert_eq!(config_data, b"{\"greeting\": \"hi\"}\n");
+
+        assert!(by_path.contains_key("lib/site-packages/data_pkg/__init__.py"));
+
+        assert!(repacked.record_paths.contains(&"bin/data_pkg-launcher".to_string()));
+        assert!(
+            repacked
+                .record_paths
+                .contains(&"share/data_pkg/config.json".to_string())
+        );
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn console_scripts_are_extracted_raw() {
+        let output_dir = scratch_dir("console-pkg");
+        let repacked = block_on(repack_wheel(
+            &fixture_wheel("console_pkg-1.0.0-py3-none-any.whl"),
+            &output_dir,
+        ))
+        .expect("repack succeeds");
+
+        let by_name: std::collections::HashMap<&str, &ConsoleScript> = repacked
+            .entry_points
+            .iter()
+            .map(|script| (script.name.as_str(), script))
+            .collect();
+        assert_eq!(repacked.entry_points.len(), 3);
+
+        let plain = by_name["console-pkg"];
+        assert_eq!(plain.reference, "console_pkg:main");
+        assert!(plain.extras.is_empty());
+
+        let gated = by_name["blackd"];
+        assert_eq!(gated.reference, "blackd:main");
+        assert_eq!(gated.extras, vec!["d".to_string()]);
+
+        let dotted = by_name["foo"];
+        assert_eq!(dotted.reference, "console_pkg.mod:Class.method");
+        assert!(dotted.extras.is_empty());
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn golden_digest_is_stable_across_runs() {
+        const EXPECTED_DIGEST: &str = "sha256:330a642c4e7fcc3a565889e85091f8397780a78ad360601c81fbe9e371cd8ebe";
+
+        let wheel = fixture_wheel("purelib_pkg-1.0.0-py3-none-any.whl");
+
+        let first_output = scratch_dir("golden-1");
+        let first = block_on(repack_wheel(&wheel, &first_output)).expect("first repack succeeds");
+        assert_eq!(
+            first.layer_digest, EXPECTED_DIGEST,
+            "repack output drifted from the pinned golden digest — determinism regression"
+        );
+
+        let second_output = scratch_dir("golden-2");
+        let second = block_on(repack_wheel(&wheel, &second_output)).expect("second repack succeeds");
+        assert_eq!(
+            second.layer_digest, first.layer_digest,
+            "re-running repack must reproduce the same layer digest"
+        );
+
+        std::fs::remove_dir_all(&first_output).ok();
+        std::fs::remove_dir_all(&second_output).ok();
+    }
+
+    #[test]
+    fn zip_slip_entry_is_rejected() {
+        use std::io::Write as _;
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("../evil.txt", options)
+            .expect("start malicious entry");
+        writer.write_all(b"pwned").expect("write malicious entry");
+        let cursor = writer.finish().expect("finish malicious zip");
+
+        let output_dir = scratch_dir("zip-slip");
+        let malicious_wheel = output_dir.join("malicious-1.0.0-py3-none-any.whl");
+        std::fs::write(&malicious_wheel, cursor.into_inner()).expect("write malicious wheel");
+
+        let result = block_on(repack_wheel(&malicious_wheel, &output_dir.join("out")));
+        match result {
+            Err(RepackError::UnsafeEntryPath(_)) => {}
+            other => panic!("expected UnsafeEntryPath, got {other:?}"),
+        }
+        // Nothing outside output_dir should exist as a result of the attempt.
+        assert!(!Path::new("evil.txt").exists());
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
 }
