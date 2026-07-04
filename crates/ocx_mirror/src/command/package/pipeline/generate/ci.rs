@@ -1973,6 +1973,34 @@ notify:
     }
 
     #[test]
+    fn rendered_pipeline_commands_thread_spec_file() {
+        // Regression: with per-app workflow filenames the spec is no longer the
+        // default `./mirror.yml`, so every pipeline job command (plan/prepare/
+        // push) MUST pass `--spec {SPEC_FILE}`. An unqualified `pipeline plan`
+        // reds discover with SpecNotFound (69) — the exact failure that broke the
+        // first multi-app corpus run.
+        let dir = tempdir().unwrap();
+        let result = render_fixture("mirror-minimal.yml", dir.path());
+        if let Ok(()) = result {
+            let content = std::fs::read_to_string(dir.path().join(".github/workflows/shfmt.yml")).unwrap();
+            assert!(
+                content.contains("pipeline plan --spec mirror-minimal.yml"),
+                "discover `plan` must pass --spec <spec-file>:\n{content}"
+            );
+            assert!(
+                content.contains("pipeline prepare --spec mirror-minimal.yml"),
+                "prepare must pass --spec <spec-file>:\n{content}"
+            );
+            // push spans multiple lines (backslash continuation); assert the flag
+            // lands on the push invocation without pinning the exact wrapping.
+            assert!(
+                content.contains("pipeline push \\\n            --spec mirror-minimal.yml"),
+                "push must pass --spec <spec-file>:\n{content}"
+            );
+        }
+    }
+
+    #[test]
     fn rendered_describe_contains_detect_step_and_guards() {
         // End-to-end: render from a fixture and assert the generated describe.yml
         // carries the credential-detect step and the guards.

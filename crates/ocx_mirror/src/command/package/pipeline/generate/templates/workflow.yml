@@ -38,7 +38,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          ocx-mirror package pipeline plan --format json > plan.json
+          ocx-mirror package pipeline plan --spec {SPEC_FILE} --format json > plan.json
           echo "has_new=$(jq -r '.has_new' plan.json)" >> "${GITHUB_OUTPUT}"
           # Project to the matrix-relevant fields only. The full plan — including
           # the resolved per-platform asset URLs — travels to the prepare legs
@@ -76,7 +76,7 @@ jobs:
         # GITHUB_TOKEN needed: asset downloads are plain HTTP.
         run: |
           set -euo pipefail
-          ocx-mirror package pipeline prepare --version "${{ matrix.version.version }}" --plan plan.json
+          ocx-mirror package pipeline prepare --spec {SPEC_FILE} --version "${{ matrix.version.version }}" --plan plan.json
 {PREPARE_FLATTEN}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -217,6 +217,7 @@ jobs:
           # nested `ocx package push --format json` would then resolve that
           # (older) binary, emit no JSON report, and be misrecorded as a red.
           ocx-mirror package pipeline push \
+            --spec {SPEC_FILE} \
             --bundles-dir .artifacts/bundles \
             --junit-dir .artifacts/junit \
             --write-summary run-summary.json
