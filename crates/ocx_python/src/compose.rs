@@ -181,9 +181,17 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
     // 4. Env block: expose the site-packages tree, prepend the launcher bin
     //    dir to PATH, and disable bytecode writes into read-only package
     //    content (design spec, "Runtime-write mitigation").
+    //
+    //    `bin` is OPTIONAL (`required: false`): a pure-python app whose only
+    //    entrypoints are synthesized console scripts (dispatched via the
+    //    interpreter's `python3`, not a wrapper in `bin/`) ships no `bin/`
+    //    directory at all — the repacked wheel is just `lib/site-packages`.
+    //    Marking it required makes env composition fail the "required path
+    //    exists" check with exit 79 for every such app. `site-packages` stays
+    //    required — repack always relocates purelib/platlib there.
     let env = EnvBuilder::new()
         .with_path("PYTHONPATH", "${installPath}/lib/site-packages", true)
-        .with_path("PATH", "${installPath}/bin", true)
+        .with_path("PATH", "${installPath}/bin", false)
         .with_constant("PYTHONDONTWRITEBYTECODE", "1")
         .build();
 
