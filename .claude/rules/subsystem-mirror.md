@@ -32,7 +32,8 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/package/pipeline/push.rs` | `pipeline push` — serial push driver, writes run-summary.json |
 | `command/package/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
 | `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
-| `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex) |
+| `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex, Pylock) |
+| `spec/python_config.rs` | `PythonConfig` (interpreter version/ABI + `interpreter_package` ref) — required for `source.type: pylock` |
 | `spec/target.rs` | `Target` (registry + repository) |
 | `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping) |
 | `spec/asset_type.rs` | `AssetTypeConfig` (Archive vs Binary) |
@@ -46,8 +47,12 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); URL-reject validator via `policy_check_notify` |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
+| `source/pylock.rs` | PEP 751 `pylock.toml` reader → single `VersionInfo` (the app's locked version, PEP 503 name match); wheel selection happens later in `plan.rs`/`prepare.rs` via `ocx_python` |
 | `pipeline/orchestrator.rs` | `execute_mirror()`: prepare (concurrent) + push (sequential) |
-| `pipeline/download.rs` | HTTP download with resumption |
+| `pipeline/download.rs` | HTTP download; "resume" = a task whose asset file already exists on disk skips re-download (task-level skip, NOT HTTP byte-range resumption) |
+| `pipeline/python_prepare.rs` | pylock env-prepare path (parallel to the archive `orchestrator::prepare_version`): per (version, platform, variant) download wheels → verify(sha256==lock) → repack → collide → `compose_env` → write `metadata.json` + N `tar.zst` layers + `env-manifest.json` |
+| `pipeline/python_push.rs` | pylock env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade --new -m META LAYERS…` invocation, spawn it |
+| `pipeline/ocx_cli.rs` | shared `ocx` subprocess helpers (`resolve_ocx_binary`, `forward_ocx_env`) used by both the archive push/describe legs and `python_push` |
 | `pipeline/verify.rs` | Checksum verify |
 | `pipeline/package.rs` | Extract archive, apply metadata, rebundle |
 | `pipeline/push.rs` | Push to registry + cascade tag compute |
@@ -116,6 +121,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `SpecNotFound` | 79 (NotFound) | `mirror.yml` not found at spec path |
 | `ExecutionFailed` | 1 (Failure) | Mirror pipeline execution error |
 | `SourceError` | 69 (Unavailable) | Upstream source unreachable |
+| `PylockError` | 65 (DataError) | `source.type: pylock` resolution failure: no locked package matches the app name, invalid platform/variant, no compatible wheel (`select_wheels`), wheel sha256 ≠ lock hash, collision, or compose failure — all malformed spec/lock content, not a transient resource. `RepackError` maps to `ExecutionFailed` (1); download failure to `SourceError` (69) |
 | `TargetError` | 69 (Unavailable) | Target registry read failed (tag list / manifest fetch) — fail-safe abort instead of re-flagging published versions as new (issue #157) |
 | `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, missing `release_tag` when containers declared, ambiguous shell |
 | `RendererDrift` | 65 (DataError) | `--check` mode: generated files differ from current spec |
