@@ -56,6 +56,28 @@ hex = "0.4.3"
 tracing = "0.1.44"
 tempfile = "3.27.0"
 
+# --- ocx_python translation-library dependencies ---------------------------
+# Consumed only by crates/ocx_python (the pure pylock→OCX translation lib).
+# ocx_mirror does NOT depend on these.
+#
+# The four `uv-*` crates are pinned to ONE upstream rev (git, not a published
+# crate — astral-sh/uv does not publish these to crates.io). They share the rev
+# so filename parsing, tag compatibility, and PEP 508/440 marker/version
+# evaluation stay mutually consistent; bump all four together (README procedure).
+# `version-ranges` (pubgrub) is pulled in transitively by uv-pep508 — do NOT add
+# it here.
+uv-distribution-filename = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-platform-tags         = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-pep508                = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-pep440                = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+# Versions/features copied from ocx's [workspace.dependencies] so a submodule
+# bump keeps these in sync (CLAUDE.md dependency model).
+toml = "1.1.2"
+thiserror = "2.0.18"
+tar = "0.4.46"
+zstd = { version = "0.13", features = ["zstdmt"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+
 # ocx_lib is developed against the ocx-sh forks of oci-client and
 # docker_credential via [patch.crates-io] in the ocx workspace. Patch tables
 # only apply at the consuming workspace root — they do NOT travel with path or

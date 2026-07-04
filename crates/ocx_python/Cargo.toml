@@ -1,0 +1,27 @@
+[package]
+name = "ocx_python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Pure translation library: PEP 751 pylock.toml into OCX package compositions"
+publish = false
+
+[dependencies]
+ocx_lib = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tar = { workspace = true }
+zstd = { workspace = true }
+zip = { workspace = true }
+uv-distribution-filename = { workspace = true }
+uv-platform-tags = { workspace = true }
+uv-pep508 = { workspace = true }
+uv-pep440 = { workspace = true }
+
+[lints]
+workspace = true

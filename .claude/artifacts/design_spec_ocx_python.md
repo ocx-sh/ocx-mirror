@@ -151,14 +151,17 @@ pub fn check_collisions(wheels: &[RepackedWheel]) -> Result<(), CollisionError>;
 
 pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel])
     -> Result<EnvComposition, ComposeError>;
-// EnvComposition {
-//   info: ocx_lib::package::info::Info,      // platform = L2 encoding
-//   layers: Vec<WheelLayer>,                  // source + {prefix, strip}
-//   entrypoints,                              // command=python3, args=[…]
-//   env,        // PYTHONPATH=${installPath}/lib/site-packages,
-//               // PATH+=${installPath}/bin, PYTHONDONTWRITEBYTECODE=1
-//   dependencies,                             // private interpreter ref
+// EnvComposition {                               // TARGET-AGNOSTIC — no registry host
+//   metadata: ocx_lib::package::metadata::Metadata, // Bundle: entrypoints
+//               // (command=python3, args=["-c",shim]), env (PYTHONPATH,
+//               // PATH, PYTHONDONTWRITEBYTECODE=1), interpreter dependency
+//   platform: ocx_lib::oci::Platform,          // L2 encoding
+//   layers: Vec<WheelLayer>,                    // source + LayerLayoutSpec (empty)
 // }
+// EnvComposition::into_info(self, id: oci::Identifier) -> Info
+//   — the SOLE seam where the consumer injects the registry host. A full Info
+//   requires an Identifier (registry-bearing), which this crate never knows;
+//   compose emits the two registry-independent thirds (metadata + platform).
 ```
 
 ### Entrypoint synthesis rules
@@ -305,8 +308,12 @@ determinism, analogous to ocx's manifest byte-golden test.
    disambiguation.
 2. **Repack determinism**: sorted entries, epoch mtimes, uid/gid 0, mode
    normalization, pinned zstd level; versioned `repack-v1` annotation.
-3. **Layout**: wheel layers `prefix=lib/site-packages`; `.data/scripts`→
-   `bin/`, `.data/data`→content root; env `PYTHONPATH`, `PATH`,
+3. **Layout**: `repack` emits the FINAL relocated tree per wheel —
+   purelib/platlib→`lib/site-packages/`, `.data/scripts`→`bin/`,
+   `.data/data`→content root (`share/…`) — so each wheel is ONE
+   content-addressed layer applied at the content root with an EMPTY
+   `LayerLayoutSpec` (a wheel spans three destination prefixes, which a
+   single layer prefix cannot express). Env metadata: `PYTHONPATH`, `PATH`,
    `PYTHONDONTWRITEBYTECODE=1`.
 4. **Entrypoint synthesis** incl. extras gating (above).
 5. **Platform/axis encoding**: L1 fact table + L2 v1 (variant prefixes,
