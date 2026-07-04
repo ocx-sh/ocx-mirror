@@ -4,8 +4,9 @@ version: '3'
 
 x-shared:
   rust-sources: &rust-sources
-    - '{{.ROOT_DIR}}/src/**/*.rs'
-    - '{{.ROOT_DIR}}/tests/**/*'
+    - '{{.ROOT_DIR}}/crates/*/src/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/*/tests/**/*'
+    - '{{.ROOT_DIR}}/crates/*/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.lock'
     - '{{.ROOT_DIR}}/rustfmt.toml'

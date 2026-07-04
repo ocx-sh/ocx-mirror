@@ -1,30 +1,20 @@
-[package]
-name = "ocx_mirror"
-version = "0.4.0"
-edition = "2024"
-license = "Apache-2.0"
-description = "Mirror upstream tool releases into OCI registries as OCX packages"
-repository = "https://github.com/ocx-sh/ocx-mirror"
-homepage = "https://ocx.sh"
-publish = false
-
-# Explicit workspace root: anchors the [patch.crates-io] table below. The
-# vendored ocx checkout is excluded so its packages bind to their own
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+# The vendored ocx checkout is excluded so its packages bind to their own
 # workspace root (external/ocx/Cargo.toml) for workspace-inherited fields —
 # without the exclude, this workspace claims the subtree and inheritance
 # (version.workspace etc.) fails to resolve.
-[workspace]
 exclude = ["external/ocx"]
 
-[[bin]]
-name = "ocx-mirror"
-path = "src/main.rs"
+[workspace.package]
+version = "0.4.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ocx-sh/ocx-mirror"
+homepage = "https://ocx.sh"
 
-[features]
-default = []
-jsonschema = ["dep:schemars"]
-
-[dependencies]
+[workspace.dependencies]
 # ocx_lib is consumed as a path dependency into the ocx git submodule —
 # the same easy-to-maintain pattern ocx itself uses for its vendored forks.
 # Bumping ocx_lib = bumping the external/ocx submodule pointer.
@@ -44,7 +34,7 @@ anyhow = "1.0.102"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml_ng = "0.10.0"
-schemars = { version = "1.2.1", optional = true }
+schemars = "1.2.1"
 chrono = "0.4.44"
 regex = "1.12.3"
 url = { version = "2.5.8", features = ["serde"] }
@@ -64,9 +54,6 @@ rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs
 sha2 = "0.11.0"
 hex = "0.4.3"
 tracing = "0.1.44"
-
-[dev-dependencies]
-tokio = { version = "1.52", features = ["full", "test-util"] }
 tempfile = "3.27.0"
 
 # ocx_lib is developed against the ocx-sh forks of oci-client and
@@ -84,8 +71,8 @@ tempfile = "3.27.0"
 oci-client = { path = "external/ocx/external/rust-oci-client" }
 docker_credential = { path = "external/ocx/external/docker_credential" }
 
-# Deny warnings for this package only. Cargo applies --cap-lints to registry
-# and git deps but NOT path deps; a blanket RUSTFLAGS=-D warnings would
-# promote the vendored forks' upstream warnings to hard errors.
-[lints.rust]
+# Deny warnings for workspace members only. Cargo applies --cap-lints to
+# registry and git deps but NOT path deps; a blanket RUSTFLAGS=-D warnings
+# would promote the vendored forks' upstream warnings to hard errors.
+[workspace.lints.rust]
 warnings = "deny"
