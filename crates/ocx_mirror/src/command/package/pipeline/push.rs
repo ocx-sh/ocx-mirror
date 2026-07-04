@@ -190,7 +190,9 @@ impl Push {
                         }
 
                         // ── Invoke `ocx package push --cascade` ──────────────
-                        let target_ref = format!("{}:{}", spec.target.repository, version);
+                        // Include the target registry explicitly — a bare
+                        // `repo:tag` defaults to ocx.sh, not the spec's registry.
+                        let target_ref = format!("{}/{}:{}", spec.target.registry, spec.target.repository, version);
                         let push_result = invoke_push(&spec, platform_str, &target_ref, &bundle_path).await;
 
                         match push_result {
@@ -413,7 +415,15 @@ impl Push {
                         all_test_failures.extend(test_failures);
                     }
                     VpDecision::Green => {
-                        let target_ref = format!("{}:{}", spec.target.repository, version);
+                        // The identifier MUST carry the target registry — a
+                        // bare `repo:tag` defaults to ocx.sh (the release
+                        // registry), not the spec's `dev.ocx.sh`.
+                        let target_ref = format!("{}/{}:{}", spec.target.registry, spec.target.repository, version);
+                        // ocx cascade derives rolling tags by parsing the
+                        // version as X.Y.Z; a PEP 440 version ocx cannot parse
+                        // (e.g. pycowsay's `0.0.0.2`) is pushed as the primary
+                        // tag only, without cascade.
+                        let cascade = Version::parse(version).is_some();
                         let layer_paths: Vec<PathBuf> =
                             env_entry.layers.iter().map(|layer| layer.path.clone()).collect();
 
@@ -422,6 +432,7 @@ impl Push {
                             &target_ref,
                             &env_entry.metadata_path,
                             &layer_paths,
+                            cascade,
                         )
                         .await;
 

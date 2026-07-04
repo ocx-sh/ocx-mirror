@@ -99,6 +99,7 @@ pub(crate) fn build_env_push_args(
     target_ref: &str,
     metadata_path: &Path,
     layer_paths: &[PathBuf],
+    cascade: bool,
 ) -> Result<Vec<String>, String> {
     let metadata_str = metadata_path
         .to_str()
@@ -109,15 +110,25 @@ pub(crate) fn build_env_push_args(
         "json".to_string(),
         "package".to_string(),
         "push".to_string(),
-        "--cascade".to_string(),
-        "--new".to_string(),
+    ];
+
+    // `--cascade` requires an ocx-parseable X.Y.Z version to derive rolling
+    // tags; the caller drops it for versions ocx cannot parse. `--new` only
+    // matters alongside cascade (it treats the first-publish tag-list 404 as an
+    // empty set), so the two travel together.
+    if cascade {
+        args.push("--cascade".to_string());
+        args.push("--new".to_string());
+    }
+
+    args.extend([
         "-p".to_string(),
         platform.to_string(),
         "-i".to_string(),
         target_ref.to_string(),
         "-m".to_string(),
         metadata_str.to_string(),
-    ];
+    ]);
 
     for layer_path in layer_paths {
         let layer_str = layer_path
@@ -142,8 +153,9 @@ pub(crate) async fn invoke_env_push(
     target_ref: &str,
     metadata_path: &Path,
     layer_paths: &[PathBuf],
+    cascade: bool,
 ) -> Result<EnvPushReport, String> {
-    let args = build_env_push_args(platform, target_ref, metadata_path, layer_paths)?;
+    let args = build_env_push_args(platform, target_ref, metadata_path, layer_paths, cascade)?;
 
     let ocx_binary = crate::pipeline::ocx_cli::resolve_ocx_binary()?;
     let mut cmd = tokio::process::Command::new(&ocx_binary);
@@ -174,11 +186,20 @@ mod tests {
         ];
         let metadata_path = PathBuf::from("/work/metadata.json");
 
-        let args = build_env_push_args("linux/amd64", "pycowsay:1.0.0", &metadata_path, &layers)
+        let args = build_env_push_args("linux/amd64", "pycowsay:1.0.0", &metadata_path, &layers, true)
             .expect("valid UTF-8 paths build cleanly");
 
         assert!(args.contains(&"--cascade".to_string()));
         assert!(args.contains(&"--new".to_string()));
+
+        // cascade=false (a version ocx cannot parse) drops both flags but keeps
+        // the identifier, metadata, and ordered layers.
+        let no_cascade = build_env_push_args("linux/amd64", "pycowsay:0.0.0.2", &metadata_path, &layers, false)
+            .expect("valid UTF-8 paths build cleanly");
+        assert!(!no_cascade.contains(&"--cascade".to_string()));
+        assert!(!no_cascade.contains(&"--new".to_string()));
+        assert!(no_cascade.contains(&"pycowsay:0.0.0.2".to_string()));
+        assert_eq!(no_cascade.iter().filter(|a| a.ends_with(".tar.zst")).count(), 2);
 
         let platform_flag = args.iter().position(|a| a == "-p").expect("-p flag present");
         assert_eq!(args[platform_flag + 1], "linux/amd64");
