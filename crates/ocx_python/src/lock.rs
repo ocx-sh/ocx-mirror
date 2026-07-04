@@ -69,8 +69,118 @@ pub struct LockedWheel {
 /// [`LockError::SdistOnly`] for a package that ships no wheels, and
 /// [`LockError::MissingHash`] for a wheel without a `sha256` hash.
 pub fn parse_pylock(input: &str) -> Result<Pylock, LockError> {
-    let _ = input;
-    unimplemented!("W1.1")
+    let raw: RawPylock = toml::from_str(input).map_err(LockError::Parse)?;
+
+    let packages = raw
+        .packages
+        .into_iter()
+        .map(convert_package)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Pylock {
+        lock_version: raw.lock_version,
+        requires_python: raw.requires_python,
+        extras: raw.extras,
+        packages,
+    })
+}
+
+/// Converts a raw package table, rejecting a package that ships no wheels
+/// (sdist-only) — whether or not the source TOML also carries an `[sdist]`
+/// table is irrelevant to this wheels-only subset.
+fn convert_package(raw: RawPackage) -> Result<LockedPackage, LockError> {
+    let RawPackage {
+        name,
+        version,
+        marker,
+        wheels,
+    } = raw;
+    if wheels.is_empty() {
+        return Err(LockError::SdistOnly { package: name });
+    }
+
+    let wheels = wheels
+        .into_iter()
+        .map(|wheel| convert_wheel(&name, wheel))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(LockedPackage {
+        name,
+        version,
+        marker,
+        wheels,
+    })
+}
+
+/// Converts a raw wheel table, resolving its filename (explicit `name` field
+/// takes precedence over the URL-derived basename — PEP 751 errata, March
+/// 2026) before that filename is used anywhere, including in a
+/// [`LockError::MissingHash`] message.
+fn convert_wheel(package: &str, wheel: RawWheel) -> Result<LockedWheel, LockError> {
+    let filename = wheel
+        .name
+        .or_else(|| wheel.url.as_deref().and_then(url_basename))
+        .ok_or_else(|| {
+            LockError::Parse(<toml::de::Error as serde::de::Error>::custom(format!(
+                "wheel for package '{package}' has neither a name nor a url"
+            )))
+        })?;
+
+    let sha256 = wheel
+        .hashes
+        .get("sha256")
+        .cloned()
+        .ok_or_else(|| LockError::MissingHash {
+            package: package.to_string(),
+            filename: filename.clone(),
+        })?;
+
+    Ok(LockedWheel {
+        filename,
+        url: wheel.url,
+        sha256,
+    })
+}
+
+/// The last `/`-separated segment of a wheel URL, or `None` for an empty
+/// segment (e.g. a URL ending in `/`).
+fn url_basename(url: &str) -> Option<String> {
+    url.rsplit('/')
+        .next()
+        .map(str::to_string)
+        .filter(|segment| !segment.is_empty())
+}
+
+/// Raw `pylock.toml` document shape for `toml`/`serde` deserialization.
+/// Unknown keys are ignored (no `deny_unknown_fields`), so newer lock fields
+/// this crate doesn't need still parse.
+#[derive(serde::Deserialize)]
+struct RawPylock {
+    #[serde(rename = "lock-version")]
+    lock_version: String,
+    #[serde(rename = "requires-python")]
+    requires_python: Option<String>,
+    #[serde(default)]
+    extras: Vec<String>,
+    #[serde(default)]
+    packages: Vec<RawPackage>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPackage {
+    name: String,
+    version: String,
+    marker: Option<String>,
+    #[serde(default)]
+    wheels: Vec<RawWheel>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawWheel {
+    name: Option<String>,
+    url: Option<String>,
+    #[serde(default)]
+    hashes: std::collections::HashMap<String, String>,
 }
 
 /// Errors from parsing a `pylock.toml`.
@@ -95,4 +205,144 @@ pub enum LockError {
         /// The wheel filename.
         filename: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_multi_wheel_lock() {
+        let toml = r#"
+lock-version = "1.0"
+requires-python = ">=3.9"
+
+[[packages]]
+name = "example"
+version = "1.0.0"
+
+[[packages.wheels]]
+url = "https://files.pythonhosted.org/example-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+
+[[packages.wheels]]
+url = "https://files.pythonhosted.org/example-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"
+hashes = { sha256 = "bbbb" }
+"#;
+
+        let lock = parse_pylock(toml).expect("valid lock parses");
+        assert_eq!(lock.lock_version, "1.0");
+        assert_eq!(lock.requires_python.as_deref(), Some(">=3.9"));
+        assert_eq!(lock.packages.len(), 1);
+
+        let package = &lock.packages[0];
+        assert_eq!(package.name, "example");
+        assert_eq!(package.wheels.len(), 2);
+        assert_eq!(package.wheels[0].filename, "example-1.0.0-py3-none-any.whl");
+        assert_eq!(package.wheels[0].sha256, "aaaa");
+        assert_eq!(package.wheels[1].sha256, "bbbb");
+    }
+
+    #[test]
+    fn rejects_sdist_only_package() {
+        let toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "no-wheels-here"
+version = "1.0.0"
+"#;
+
+        let error = parse_pylock(toml).expect_err("sdist-only package must be rejected");
+        match error {
+            LockError::SdistOnly { package } => assert_eq!(package, "no-wheels-here"),
+            other => panic!("expected SdistOnly, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_wheel_missing_hash() {
+        let toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "unverifiable"
+version = "1.0.0"
+
+[[packages.wheels]]
+url = "https://files.pythonhosted.org/unverifiable-1.0.0-py3-none-any.whl"
+"#;
+
+        let error = parse_pylock(toml).expect_err("wheel without a sha256 hash must be rejected");
+        match error {
+            LockError::MissingHash { package, filename } => {
+                assert_eq!(package, "unverifiable");
+                assert_eq!(filename, "unverifiable-1.0.0-py3-none-any.whl");
+            }
+            other => panic!("expected MissingHash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_name_field_takes_precedence_over_url_basename() {
+        let toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "renamed"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "renamed-1.0.0-py3-none-any.whl"
+url = "https://files.pythonhosted.org/redirect/download?id=1234"
+hashes = { sha256 = "cccc" }
+"#;
+
+        let lock = parse_pylock(toml).expect("valid lock parses");
+        assert_eq!(lock.packages[0].wheels[0].filename, "renamed-1.0.0-py3-none-any.whl");
+    }
+
+    #[test]
+    fn parses_top_level_extras() {
+        let toml = r#"
+lock-version = "1.0"
+extras = ["dev", "test"]
+
+[[packages]]
+name = "example"
+version = "1.0.0"
+
+[[packages.wheels]]
+url = "https://files.pythonhosted.org/example-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#;
+
+        let lock = parse_pylock(toml).expect("valid lock parses");
+        assert_eq!(lock.extras, vec!["dev".to_string(), "test".to_string()]);
+    }
+
+    #[test]
+    fn preserves_marker_string() {
+        let toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+marker = "sys_platform == 'win32'"
+
+[[packages.wheels]]
+url = "https://files.pythonhosted.org/colorama-0.4.6-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#;
+
+        let lock = parse_pylock(toml).expect("valid lock parses");
+        assert_eq!(lock.packages[0].marker.as_deref(), Some("sys_platform == 'win32'"));
+    }
+
+    #[test]
+    fn rejects_malformed_toml() {
+        let error = parse_pylock("this is not valid toml [[[").expect_err("malformed toml must be rejected");
+        assert!(matches!(error, LockError::Parse(_)));
+    }
 }
