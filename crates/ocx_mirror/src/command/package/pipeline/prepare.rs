@@ -10,12 +10,15 @@ use std::path::PathBuf;
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
-use crate::command::package::pipeline::plan::PlanReport;
+use crate::command::package::pipeline::plan::{
+    PlanReport, pylock_interpreter_pin, pylock_target_platform, pylock_variants,
+};
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
 use crate::normalizer;
 use crate::pipeline::mirror_task::{MirrorTask, VariantContext};
 use crate::pipeline::orchestrator::{self, ConcurrencyParams};
+use crate::pipeline::python_prepare::{self, SelectedWheel, WheelEnvTask};
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
 use crate::spec::{self, MirrorSpec};
@@ -56,6 +59,14 @@ impl Prepare {
             .work_dir
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".ocx-mirror"));
+
+        // pylock sources take a parallel env-prepare path: wheels are
+        // re-selected locally from the committed lock (deterministic, no source
+        // re-crawl — issue #160) and composed into env packages. The
+        // archive/binary path below is untouched.
+        if matches!(spec.source, spec::Source::Pylock { .. }) {
+            return self.execute_pylock(&spec, &spec_dir, &work_dir).await;
+        }
 
         let tasks = match &self.plan {
             Some(plan_path) => {
@@ -108,6 +119,222 @@ impl Prepare {
 
         Ok(())
     }
+
+    /// Env-prepare path for `source.type: pylock` specs — the parallel to the
+    /// archive/binary path in [`execute`](Self::execute).
+    ///
+    /// Builds one env task per applicable platform of the requested variant tag
+    /// from the committed lock, then downloads + repacks + composes them into
+    /// `{work_dir}/{version}/env-manifest.json`.
+    async fn execute_pylock(
+        &self,
+        spec: &MirrorSpec,
+        spec_dir: &std::path::Path,
+        work_dir: &std::path::Path,
+    ) -> Result<(), MirrorError> {
+        let client =
+            ocx_lib::oci::ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let python = spec.python.as_ref().ok_or_else(|| {
+            MirrorError::SpecInvalid(vec!["python config is required for source.type 'pylock'".to_string()])
+        })?;
+        // The interpreter digest is the one network dependency of task building;
+        // resolving it here keeps `build_env_tasks` a pure (hermetically
+        // testable) local re-selection.
+        let interpreter_dependency = build_interpreter_dependency(python, &client).await?;
+        let tasks = build_env_tasks(spec, spec_dir, &self.version, interpreter_dependency).await?;
+
+        if tasks.is_empty() {
+            return Err(MirrorError::SpecInvalid(vec![format!(
+                "version '{}' not found in pylock source or no platforms resolved",
+                self.version
+            )]));
+        }
+
+        log::info!(
+            "[{}] Preparing pylock env version {} ({} platforms)",
+            spec.name,
+            self.version,
+            tasks.len()
+        );
+
+        tokio::fs::create_dir_all(work_dir)
+            .await
+            .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
+
+        let http_client = reqwest::Client::new();
+        let concurrency = ConcurrencyParams {
+            max_downloads: spec.concurrency.max_downloads,
+            max_bundles: spec.concurrency.max_bundles,
+            compression_threads: spec::resolve_compression_threads(
+                spec.concurrency.compression_threads,
+                spec.concurrency.max_bundles,
+            ),
+        };
+
+        let manifest =
+            python_prepare::prepare_env_version(&self.version, &tasks, work_dir, &http_client, &concurrency).await?;
+
+        let manifest_path = work_dir.join(&self.version).join("env-manifest.json");
+        println!("{}", manifest_path.display());
+
+        log::debug!(
+            "[{}] Prepared {} env packages for version {}",
+            spec.name,
+            manifest.envs.len(),
+            self.version
+        );
+
+        Ok(())
+    }
+}
+
+/// Build [`WheelEnvTask`]s for `version` from the committed pylock.
+///
+/// Pure local re-selection (no source re-crawl — issue #160): for the variant
+/// whose prefixed tag equals `version`, resolves a `PythonTarget` per declared,
+/// applicable platform and runs `ocx_python::select_wheels`. The private
+/// interpreter dependency is resolved by the caller (its digest needs the
+/// registry) and threaded onto every task, keeping this function network-free
+/// and unit-testable.
+async fn build_env_tasks(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+    interpreter_dependency: ocx_lib::package::metadata::dependency::Dependency,
+) -> Result<Vec<WheelEnvTask>, MirrorError> {
+    let spec::Source::Pylock { path } = &spec.source else {
+        return Ok(Vec::new());
+    };
+
+    let lock = crate::source::pylock::load(spec_dir, path)
+        .await
+        .map_err(|e| MirrorError::PylockError(format!("failed to load pylock source: {e}")))?;
+    let app_version =
+        crate::source::pylock::app_version(&lock, &spec.name).map_err(|e| MirrorError::PylockError(e.to_string()))?;
+
+    let python = spec
+        .python
+        .as_ref()
+        .expect("validated: python required for source.type 'pylock'");
+    let interpreter_pin = pylock_interpreter_pin(python)?;
+
+    let scope = ocx_python::WheelScope::new(spec.wheel_scope.clone());
+    let declared_extras = lock.extras.clone();
+
+    // The default variant (matched by name) drives cascade aliasing in push.
+    let default_variant_name: Option<&str> = spec
+        .variants
+        .as_ref()
+        .and_then(|variants| variants.iter().find(|variant| variant.default))
+        .and_then(|variant| variant.name.as_deref());
+
+    let mut platform_keys: Vec<&str> = spec
+        .platforms
+        .as_ref()
+        .map_or_else(Vec::new, |platforms| platforms.keys().map(String::as_str).collect());
+    platform_keys.sort_unstable();
+
+    let mut tasks = Vec::new();
+    for (variant_name, constraints) in pylock_variants(spec) {
+        // One prepare leg = one variant tag; a separate leg prepares each other
+        // variant, mirroring the archive path's per-version legs.
+        let tagged = match variant_name {
+            Some(name) => format!("{name}-{app_version}"),
+            None => app_version.clone(),
+        };
+        if tagged != version {
+            continue;
+        }
+        let is_default = variant_name == default_variant_name;
+
+        for &platform_key in &platform_keys {
+            if !spec.platform_applies(&app_version, platform_key) {
+                continue;
+            }
+            let platform: ocx_lib::oci::Platform = platform_key
+                .parse()
+                .map_err(|e| MirrorError::PylockError(format!("invalid platform key '{platform_key}': {e}")))?;
+
+            let python_target = ocx_python::PythonTarget {
+                platform: pylock_target_platform(&platform, platform_key)?,
+                variant: constraints.clone(),
+                interpreter: interpreter_pin.clone(),
+            };
+
+            let selected = ocx_python::select_wheels(&lock, &python_target).map_err(|e| {
+                MirrorError::PylockError(format!("wheel selection failed for platform '{platform_key}': {e}"))
+            })?;
+
+            let mut wheels = Vec::with_capacity(selected.len());
+            for wheel in &selected {
+                let url_str = wheel.url.as_deref().ok_or_else(|| {
+                    MirrorError::PylockError(format!(
+                        "wheel '{}' for package '{}' selected with no download URL",
+                        wheel.filename, wheel.name
+                    ))
+                })?;
+                let url = url::Url::parse(url_str)
+                    .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
+                let wheel_repository = ocx_python::wheel_reference(&scope, wheel).repository;
+                wheels.push(SelectedWheel {
+                    package_name: wheel.name.clone(),
+                    version: wheel.version.clone(),
+                    filename: wheel.filename.clone(),
+                    url,
+                    sha256: wheel.sha256.clone(),
+                    wheel_repository,
+                });
+            }
+
+            tasks.push(WheelEnvTask {
+                normalized_version: tagged.clone(),
+                source_version: app_version.clone(),
+                platform,
+                variant: variant_name.map(|name| VariantContext {
+                    name: name.to_string(),
+                    is_default,
+                }),
+                target: spec.target.clone(),
+                cascade: spec.cascade,
+                spec_dir: spec_dir.to_path_buf(),
+                wheels,
+                interpreter: interpreter_dependency.clone(),
+                requested_extras: Vec::new(), // W3: spec does not yet encode a per-app extras request
+                declared_extras: declared_extras.clone(),
+                python_target,
+                wheel_scope: scope.clone(),
+            });
+        }
+    }
+
+    Ok(tasks)
+}
+
+/// Resolves the private interpreter dependency: parses `interpreter_package`,
+/// resolves its manifest digest, and pins it with `PRIVATE` visibility.
+async fn build_interpreter_dependency(
+    python: &spec::PythonConfig,
+    client: &ocx_lib::oci::Client,
+) -> Result<ocx_lib::package::metadata::dependency::Dependency, MirrorError> {
+    let identifier = ocx_lib::oci::Identifier::parse(&python.interpreter_package).map_err(|e| {
+        MirrorError::PylockError(format!(
+            "invalid python.interpreter_package '{}': {e}",
+            python.interpreter_package
+        ))
+    })?;
+    let digest = client.fetch_manifest_digest(&identifier).await.map_err(|e| {
+        MirrorError::TargetError(format!(
+            "failed to resolve interpreter digest for '{}': {e:#}",
+            python.interpreter_package
+        ))
+    })?;
+    let pinned = ocx_lib::oci::PinnedIdentifier::try_from(identifier.clone_with_digest(digest))
+        .map_err(|e| MirrorError::TargetError(format!("interpreter identifier not pinnable: {e}")))?;
+    Ok(ocx_lib::package::metadata::dependency::Dependency {
+        identifier: pinned,
+        visibility: ocx_lib::package::metadata::visibility::Visibility::PRIVATE,
+        name: None,
+    })
 }
 
 /// Read and parse a `plan.json` document written by `pipeline plan`.
@@ -745,5 +972,70 @@ build_timestamp: none
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();
         assert_eq!(platforms_of(&tasks), vec!["linux/amd64".to_string()]);
+    }
+
+    // ── W2.3: pylock env task building (network-free — interpreter dep injected) ──
+
+    /// A stand-in interpreter dependency with a fixed digest, so `build_env_tasks`
+    /// runs without resolving a real registry manifest.
+    fn fake_interpreter_dependency() -> ocx_lib::package::metadata::dependency::Dependency {
+        let json = format!(r#"{{"identifier":"ocx.sh/cpython:3.13@sha256:{}"}}"#, "a".repeat(64));
+        serde_json::from_str(&json).expect("interpreter dependency parses")
+    }
+
+    fn pylock_fixture_spec_path() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_selects_wheels_per_applicable_platform() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", fake_interpreter_dependency())
+            .await
+            .expect("build_env_tasks succeeds");
+
+        // One default (unnamed) variant × two declared platforms.
+        assert_eq!(tasks.len(), 2, "1 default variant × 2 platforms");
+        let mut platforms: Vec<String> = tasks.iter().map(|task| task.platform.to_string()).collect();
+        platforms.sort();
+        assert_eq!(platforms, vec!["linux/amd64".to_string(), "linux/arm64".to_string()]);
+
+        for task in &tasks {
+            assert_eq!(task.normalized_version, "1.0.0");
+            assert_eq!(task.source_version, "1.0.0");
+            assert!(task.variant.is_none(), "the default variant carries no VariantContext");
+            // Both fixture wheels are `none-any` → both apply on every platform.
+            assert_eq!(task.wheels.len(), 2, "2 wheels per env leg");
+            let names: Vec<&str> = task.wheels.iter().map(|wheel| wheel.filename.as_str()).collect();
+            assert!(names.iter().any(|name| name.starts_with("pycowsay-")), "{names:?}");
+            assert!(names.iter().any(|name| name.starts_with("six-")), "{names:?}");
+            for wheel in &task.wheels {
+                assert!(
+                    wheel.wheel_repository.starts_with("pip-packages/"),
+                    "repo-relative wheel repository: {}",
+                    wheel.wheel_repository
+                );
+                assert_eq!(wheel.url.scheme(), "https");
+            }
+            assert!(
+                task.interpreter.identifier.to_string().contains("cpython"),
+                "the injected interpreter dependency is threaded onto every task"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_is_empty_for_unknown_version() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", fake_interpreter_dependency())
+            .await
+            .expect("build_env_tasks succeeds");
+        assert!(tasks.is_empty(), "no variant tag matches an unknown version");
     }
 }

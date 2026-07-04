@@ -425,7 +425,7 @@ async fn build_pylock_plan_entries(
 /// which filters pylock variants out (they carry no `assets`). Absent
 /// `variants:` is one implicit, unconstrained default variant (matches
 /// `select`'s own defaults: gnu libc + manylinux_2_28 floor).
-fn pylock_variants(spec: &MirrorSpec) -> Vec<(Option<&str>, VariantConstraints)> {
+pub(crate) fn pylock_variants(spec: &MirrorSpec) -> Vec<(Option<&str>, VariantConstraints)> {
     match &spec.variants {
         Some(variants) => variants
             .iter()
@@ -438,7 +438,7 @@ fn pylock_variants(spec: &MirrorSpec) -> Vec<(Option<&str>, VariantConstraints)>
 /// Maps a pylock `VariantSpec`'s constraint fields to `ocx_python`'s
 /// `VariantConstraints`. `VariantSpec::validate_python_constraints` already
 /// restricts `libc` to `"gnu"`/`"musl"`, so anything else defaults to `Gnu`.
-fn pylock_variant_constraints(variant: &VariantSpec) -> VariantConstraints {
+pub(crate) fn pylock_variant_constraints(variant: &VariantSpec) -> VariantConstraints {
     VariantConstraints {
         libc: variant.libc.as_deref().map(|libc| {
             if libc == "musl" {
@@ -454,7 +454,7 @@ fn pylock_variant_constraints(variant: &VariantSpec) -> VariantConstraints {
 }
 
 /// Builds the interpreter pin from the spec's `python:` block.
-fn pylock_interpreter_pin(python: &PythonConfig) -> Result<InterpreterPin, MirrorError> {
+pub(crate) fn pylock_interpreter_pin(python: &PythonConfig) -> Result<InterpreterPin, MirrorError> {
     let version = Version::parse(&python.version)
         .ok_or_else(|| MirrorError::PylockError(format!("invalid python.version '{}'", python.version)))?;
     let minor = version
@@ -471,7 +471,7 @@ fn pylock_interpreter_pin(python: &PythonConfig) -> Result<InterpreterPin, Mirro
 /// Maps a spec platform key's parsed `ocx_lib::oci::Platform` to
 /// `ocx_python`'s `TargetPlatform` (os/arch only — L2 v1 keeps libc/ABI in
 /// the variant prefix, not the platform key).
-fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPlatform, MirrorError> {
+pub(crate) fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPlatform, MirrorError> {
     let Platform::Specific { os, arch, .. } = platform else {
         return Err(MirrorError::PylockError(format!(
             "platform key '{key}' must be a concrete os/arch pair for pylock sources"
