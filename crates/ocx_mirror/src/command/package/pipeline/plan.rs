@@ -350,7 +350,19 @@ async fn build_pylock_plan_entries(
             Some(name) => format!("{name}-{app_version}"),
             None => app_version.clone(),
         };
-        let check_version = Version::parse(&tagged).expect("normalized pylock tag must be a valid version");
+        // The pylock app version is a PEP 440 string, which may carry more
+        // numeric components than `ocx_lib::Version` (a ≤3-component
+        // tool-release-tag semver parser) accepts — pycowsay's `0.0.0.2`, or a
+        // calendar version like `2024.1.1.1`. A tag that does not parse simply
+        // cannot be present in the `Version`-keyed `version_map`, so it is
+        // treated as outstanding work rather than panicking.
+        //
+        // ponytail: per-platform dedup of such non-semver versions is therefore
+        // a no-op — a re-run re-publishes the (identical, content-addressed)
+        // env, which the registry dedups. Precise PEP 440 dedup would need a
+        // PEP 440-aware `version_map`; deferred (not blocking — publishes are
+        // idempotent).
+        let check_version = Version::parse(&tagged);
 
         let mut missing_platforms = Vec::new();
         let mut assets = Vec::new();
@@ -362,7 +374,10 @@ async fn build_pylock_plan_entries(
             let platform: Platform = platform_key
                 .parse()
                 .map_err(|e| MirrorError::PylockError(format!("invalid platform key '{platform_key}': {e}")))?;
-            if version_map.has(&check_version, &platform) {
+            if check_version
+                .as_ref()
+                .is_some_and(|version| version_map.has(version, &platform))
+            {
                 continue; // already published for this (variant, platform)
             }
 
@@ -955,5 +970,69 @@ platforms:
 
         assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
         assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_accepts_pep440_version_beyond_three_components() {
+        // Regression (W3.2 first-green-loop blocker): a PyPI app version with
+        // more than three numeric components — pycowsay's real `0.0.0.2`, or a
+        // calendar version like `2024.1.1.1` — is a valid PEP 440 string but is
+        // NOT a parseable `ocx_lib::Version` (a ≤3-component tool-release-tag
+        // semver parser). The plan phase must not panic on it: an unparseable
+        // tag cannot be in the `Version`-keyed publish map, so it is simply
+        // treated as outstanding work.
+        let dir = tempfile::tempdir().unwrap();
+        let lock_toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "0.0.0.2"
+
+[[packages.wheels]]
+name = "pycowsay-0.0.0.2-py3-none-any.whl"
+url = "https://example.com/pycowsay-0.0.0.2-py3-none-any.whl"
+hashes = { sha256 = "5c03d8a9c7666ec102aaed4bbd6c7d35228489ce236f95f6e5d079529c6a5050" }
+"#;
+        tokio::fs::write(dir.path().join("pylock.toml"), lock_toml)
+            .await
+            .unwrap();
+
+        let spec_yaml = r#"
+name: pycowsay
+target:
+  registry: dev.ocx.sh
+  repository: ocx/pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/cpython:3.13.1"
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        let spec_path = dir.path().join("mirror.yml");
+        tokio::fs::write(&spec_path, spec_yaml).await.unwrap();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+
+        let upstream_versions = list_upstream_versions(&spec, dir.path()).await.unwrap();
+        assert_eq!(upstream_versions[0].version, "0.0.0.2");
+
+        let version_map = VersionPlatformMap::default();
+        let entries =
+            build_pylock_plan_entries(&spec, dir.path(), "pylock.toml", &upstream_versions, &[], &version_map)
+                .await
+                .expect("a >3-component PEP 440 version must plan without panicking");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].version, "0.0.0.2");
+        assert_eq!(entries[0].platforms, vec!["linux/amd64".to_string()]);
+        assert!(matches!(entries[0].kind, PlanVersionKind::New));
+        assert_eq!(entries[0].assets.len(), 1, "one pure-python wheel -> one asset");
     }
 }
