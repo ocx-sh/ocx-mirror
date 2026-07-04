@@ -141,7 +141,35 @@ impl Prepare {
         // resolving it here keeps `build_env_tasks` a pure (hermetically
         // testable) local re-selection.
         let interpreter_dependency = build_interpreter_dependency(python, &client).await?;
-        let tasks = build_env_tasks(spec, spec_dir, &self.version, interpreter_dependency).await?;
+
+        // When `--plan` is supplied (the CI path), restrict prepare to the
+        // platforms discover still needs for this version. discover emits a
+        // backfill-partial entry that lists only the outstanding platforms, so an
+        // already-published tile is not re-composed (and not later false-red at
+        // push for a missing JUnit). Without a plan (standalone prepare), fall
+        // back to every applicable spec platform.
+        let allowed_platforms: Option<std::collections::HashSet<String>> = match &self.plan {
+            Some(plan_path) => {
+                let plan = read_plan(plan_path).await?;
+                Some(
+                    plan.versions
+                        .iter()
+                        .find(|entry| entry.version == self.version)
+                        .map(|entry| entry.platforms.iter().cloned().collect())
+                        .unwrap_or_default(),
+                )
+            }
+            None => None,
+        };
+
+        let tasks = build_env_tasks(
+            spec,
+            spec_dir,
+            &self.version,
+            interpreter_dependency,
+            allowed_platforms.as_ref(),
+        )
+        .await?;
 
         if tasks.is_empty() {
             return Err(MirrorError::SpecInvalid(vec![format!(
@@ -201,6 +229,7 @@ async fn build_env_tasks(
     spec_dir: &std::path::Path,
     version: &str,
     interpreter_dependency: ocx_lib::package::metadata::dependency::Dependency,
+    allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
     let spec::Source::Pylock { path } = &spec.source else {
         return Ok(Vec::new());
@@ -249,6 +278,16 @@ async fn build_env_tasks(
 
         for &platform_key in &platform_keys {
             if !spec.platform_applies(&app_version, platform_key) {
+                continue;
+            }
+            // Restrict to the platforms the plan still needs. `discover` excludes
+            // already-published tiles (a backfill-partial run adds only the new
+            // platforms of an existing version); without this, prepare composes
+            // the already-published platform too, and push then false-reds it as
+            // `missing_junit` (its test leg was skipped, so it has no JUnit).
+            if let Some(allowed) = allowed_platforms
+                && !allowed.contains(platform_key)
+            {
                 continue;
             }
             let platform: ocx_lib::oci::Platform = platform_key
@@ -993,7 +1032,7 @@ build_timestamp: none
         let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
         let spec_dir = spec_path.parent().unwrap();
 
-        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", fake_interpreter_dependency())
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", fake_interpreter_dependency(), None)
             .await
             .expect("build_env_tasks succeeds");
 
@@ -1033,9 +1072,27 @@ build_timestamp: none
         let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
         let spec_dir = spec_path.parent().unwrap();
 
-        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", fake_interpreter_dependency())
+        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", fake_interpreter_dependency(), None)
             .await
             .expect("build_env_tasks succeeds");
         assert!(tasks.is_empty(), "no variant tag matches an unknown version");
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_restricts_to_plan_platforms() {
+        // Backfill-partial: the plan lists only the outstanding platform
+        // (linux/arm64), so prepare must compose that one alone — not the
+        // already-published linux/amd64 the spec also declares.
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let allowed: std::collections::HashSet<String> = ["linux/arm64".to_string()].into_iter().collect();
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", fake_interpreter_dependency(), Some(&allowed))
+            .await
+            .expect("build_env_tasks succeeds");
+
+        assert_eq!(tasks.len(), 1, "plan restricts to the single outstanding platform");
+        assert_eq!(tasks[0].platform.to_string(), "linux/arm64");
     }
 }
