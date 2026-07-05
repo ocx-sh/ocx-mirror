@@ -94,6 +94,11 @@ pub(crate) struct WheelEnvTask {
     pub python_target: ocx_python::PythonTarget,
     /// The maintainer-configured wheel repo scope.
     pub wheel_scope: ocx_python::WheelScope,
+    /// Which wheels' console scripts synthesize as entrypoints — resolved by
+    /// the caller (`PythonConfig::resolve_entrypoint_selection`) against this
+    /// leg's app version before the task is built, so this stays a plain
+    /// value here.
+    pub entrypoint_selection: ocx_python::EntrypointSelection,
 }
 
 /// A repacked wheel layer recorded in the env manifest.
@@ -346,6 +351,7 @@ async fn prepare_env_task(
         declared_extras: task.declared_extras.clone(),
         interpreter: task.interpreter.clone(),
         target: task.python_target.clone(),
+        entrypoint_selection: task.entrypoint_selection.clone(),
     };
     let composition = ocx_python::compose_env(&spec, &repacked)
         .map_err(|e| MirrorError::PylockError(format!("env composition failed: {e}")))?;
@@ -491,6 +497,10 @@ mod tests {
             declared_extras: Vec::new(),
             python_target: python_target(),
             wheel_scope: ocx_python::WheelScope::default(),
+            // `All` preserves this fixture's existing single-wheel assertion
+            // (its own "console-pkg" script must synthesize) unchanged — this
+            // helper isn't exercising selection-mode resolution.
+            entrypoint_selection: ocx_python::EntrypointSelection::All,
         }
     }
 

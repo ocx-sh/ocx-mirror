@@ -43,7 +43,7 @@ pub mod select;
 // ── Public entry points (re-exported at the crate root for ergonomics) ──────
 
 pub use collide::{CollisionError, check_collisions};
-pub use compose::{ComposeError, EnvComposition, EnvSpec, WheelLayer, compose_env};
+pub use compose::{ComposeError, EntrypointSelection, EnvComposition, EnvSpec, WheelLayer, compose_env};
 pub use lock::{LockError, LockedPackage, LockedWheel, Pylock, parse_pylock};
 pub use naming::{WheelReference, WheelScope, wheel_reference};
 pub use platform::{

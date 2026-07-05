@@ -31,8 +31,13 @@
 //! `python3` resolves via the private interpreter dependency on the composed
 //! `PATH`; ABI mismatch (parsed from [`RepackedWheel::filename`](crate::repack::RepackedWheel))
 //! fails here at compose, not at run.
+//!
+//! Which wheels' scripts synthesize is governed by
+//! [`EnvSpec::entrypoint_selection`] — see [`EntrypointSelection`] for the
+//! mode table, the fail-closed collision/miss errors, and the spawn-parity
+//! caveat on its `RootOnly` default.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use serde_json::json;
@@ -45,8 +50,56 @@ use ocx_lib::package::metadata::dependency::Dependencies;
 use ocx_lib::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 use ocx_lib::package::metadata::env::EnvBuilder;
 
+use crate::naming::normalize_package_name;
 use crate::platform::{PythonTarget, encode_l2};
 use crate::repack::RepackedWheel;
+
+/// Which wheels' `[console_scripts]` entries synthesize as entrypoints.
+///
+/// The mirror resolves any version-windowed `python.entrypoints:` config
+/// against the app version **before** calling [`compose_env`] — this crate
+/// stays version-agnostic (design decision C, `plan_python_mirror_v2`).
+///
+/// # Spawn-parity limitation
+///
+/// A synthesized entrypoint dispatches through OCX's launcher mechanism, and
+/// `plan_python_mirror_v2` W0.1 (finding V3) confirmed it IS spawnable like a
+/// normal executable (e.g. `subprocess.run([...])` inside the composed env
+/// finds it). Under [`RootOnly`](Self::RootOnly) — the default — an app that
+/// itself spawns a *dependency's* console script this way will no longer find
+/// it unless that script is admitted via [`All`](Self::All) or named
+/// explicitly via [`Explicit`](Self::Explicit): `RootOnly` only ever admits
+/// the root package's own scripts.
+#[derive(Debug, Clone)]
+pub enum EntrypointSelection {
+    /// Only the root package's own console scripts synthesize, matched by
+    /// PEP-503-normalized dist name against each wheel's parsed
+    /// [`WheelFilename`]. The default as of `plan_python_mirror_v2` —
+    /// previously every wheel's scripts synthesized unconditionally (see
+    /// [`All`](Self::All)).
+    RootOnly {
+        /// The root package's dist name (`source.package`/spec name); this
+        /// crate normalizes it before comparing, so the caller need not.
+        root_package: String,
+    },
+    /// Every wheel's console scripts synthesize — the pre-`plan_python_mirror_v2`
+    /// behavior.
+    All,
+    /// Only the listed console-script names synthesize. A name listed here
+    /// that no admitted wheel provides is a
+    /// [`ComposeError::MissingEntrypoint`].
+    Explicit(Vec<String>),
+}
+
+/// Returns whether `script_name` should synthesize an entrypoint under
+/// `selection`, given the owning wheel's PEP-503-normalized dist name.
+fn entrypoint_admitted(selection: &EntrypointSelection, wheel_dist_name: &str, script_name: &str) -> bool {
+    match selection {
+        EntrypointSelection::All => true,
+        EntrypointSelection::RootOnly { root_package } => wheel_dist_name == normalize_package_name(root_package),
+        EntrypointSelection::Explicit(names) => names.iter().any(|name| name == script_name),
+    }
+}
 
 /// Consumer-declared inputs to composition.
 #[derive(Debug, Clone)]
@@ -72,6 +125,11 @@ pub struct EnvSpec {
     /// The selection target — supplies the L2 platform encoding and the ABI
     /// the wheel set is checked against.
     pub target: PythonTarget,
+    /// Which wheels' console scripts synthesize as entrypoints (design
+    /// decision C, `plan_python_mirror_v2`). The mirror resolves this from
+    /// `python.entrypoints:` plus the app version before calling
+    /// [`compose_env`] — this crate stays version-agnostic.
+    pub entrypoint_selection: EntrypointSelection,
 }
 
 /// A single wheel layer descriptor: its source layer plus placement.
@@ -148,15 +206,37 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         check_abi(&wheel.filename, interpreter_abi)?;
     }
 
-    // 3. Entrypoint synthesis: one entrypoint per gated console script.
+    // 3. Entrypoint synthesis: one entrypoint per gated console script the
+    //    selection mode admits (`EntrypointSelection`). Fails closed on a
+    //    genuine cross-wheel name clash (`ComposeError::EntrypointCollision`,
+    //    replacing a silent last-write-wins `BTreeMap` insert) and on an
+    //    `Explicit` name no wheel provides (`ComposeError::MissingEntrypoint`).
     let mut entries: BTreeMap<EntrypointName, Entrypoint> = BTreeMap::new();
+    let mut claimed_by: BTreeMap<EntrypointName, String> = BTreeMap::new();
+    let mut matched_explicit_names: HashSet<&str> = HashSet::new();
     for wheel in wheels {
+        // `check_abi` (step 2, above) already parsed every wheel's filename to
+        // check its ABI tag, so re-parsing here to read the dist name cannot
+        // fail.
+        let wheel_dist_name = wheel
+            .filename
+            .parse::<WheelFilename>()
+            .expect("check_abi already validated this wheel's filename parses")
+            .name
+            .to_string();
+
         for script in &wheel.entry_points {
             // Extras gating: synthesize only when every extra the script is
             // gated on was requested (empty = always). Never inferred from
             // dependency presence.
             if !script.extras.iter().all(|extra| spec.requested_extras.contains(extra)) {
                 continue;
+            }
+            if !entrypoint_admitted(&spec.entrypoint_selection, &wheel_dist_name, &script.name) {
+                continue;
+            }
+            if let EntrypointSelection::Explicit(_) = &spec.entrypoint_selection {
+                matched_explicit_names.insert(script.name.as_str());
             }
             // Validate the entrypoint name first so it is a known-safe slug
             // (`^[a-z0-9][a-z0-9_-]*$`) before it is embedded in the shim's
@@ -165,6 +245,13 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
                 name: script.name.clone(),
                 reference: script.reference.clone(),
             })?;
+            if let Some(first_wheel) = claimed_by.get(&name) {
+                return Err(ComposeError::EntrypointCollision {
+                    name: script.name.clone(),
+                    first_wheel: first_wheel.clone(),
+                    second_wheel: wheel.filename.clone(),
+                });
+            }
             let shim = synthesize_shim(script.name.as_str(), &script.reference).ok_or_else(|| {
                 ComposeError::InvalidEntryPoint {
                     name: script.name.clone(),
@@ -178,7 +265,19 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
                 "args": ["-c", shim],
             }))
             .expect("python3 is a valid entrypoint command and the shim args are strings");
+            claimed_by.insert(name.clone(), wheel.filename.clone());
             entries.insert(name, entrypoint);
+        }
+    }
+
+    // An `Explicit` name no admitted wheel's console scripts provided fails
+    // closed rather than silently composing an env missing a requested
+    // launcher.
+    if let EntrypointSelection::Explicit(names) = &spec.entrypoint_selection {
+        for name in names {
+            if !matched_explicit_names.contains(name.as_str()) {
+                return Err(ComposeError::MissingEntrypoint { name: name.clone() });
+            }
         }
     }
 
@@ -386,6 +485,25 @@ pub enum ComposeError {
         /// The malformed object reference.
         reference: String,
     },
+    /// Two different wheels registered a console script under the same
+    /// entrypoint name and the selection mode admitted both — fails closed
+    /// rather than silently keeping whichever wheel was composed last.
+    #[error("entrypoint '{name}' is registered by both '{first_wheel}' and '{second_wheel}'")]
+    EntrypointCollision {
+        /// The colliding entrypoint name.
+        name: String,
+        /// The wheel filename that first claimed `name`.
+        first_wheel: String,
+        /// The wheel filename that claimed `name` again.
+        second_wheel: String,
+    },
+    /// An [`EntrypointSelection::Explicit`] name matched no admitted wheel's
+    /// console script.
+    #[error("entrypoint '{name}' was requested but not found in any wheel")]
+    MissingEntrypoint {
+        /// The requested-but-absent entrypoint name.
+        name: String,
+    },
     /// L2 platform encoding failed for the target.
     #[error("platform encoding error during composition")]
     Platform(#[from] crate::platform::PlatformError),
@@ -424,12 +542,16 @@ mod tests {
         }
     }
 
+    /// Builds an [`EnvSpec`] with [`EntrypointSelection::All`] — the prior
+    /// unconditional-synthesis behavior — so tests that don't exercise
+    /// selection modes keep asserting on every wheel's scripts, unchanged.
     fn env_spec(requested: &[&str], declared: &[&str], abi: &str) -> EnvSpec {
         EnvSpec {
             requested_extras: requested.iter().map(ToString::to_string).collect(),
             declared_extras: declared.iter().map(ToString::to_string).collect(),
             interpreter: interpreter_dependency(),
             target: python_target(abi),
+            entrypoint_selection: EntrypointSelection::All,
         }
     }
 
@@ -731,5 +853,125 @@ mod tests {
 
         let composition = compose_env(&spec, &wheels).expect("composition succeeds");
         assert_eq!(composition.platform.to_string(), "linux/amd64");
+    }
+
+    // ── Entrypoint selection modes ──────────────────────────────────────────
+
+    #[test]
+    fn root_only_admits_only_the_root_packages_own_scripts() {
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::RootOnly {
+            root_package: "root-pkg".to_string(),
+        };
+        let wheels = vec![
+            wheel(
+                "root_pkg-1.0.0-py3-none-any.whl",
+                vec![console_script("roottool", "root_pkg:main", &[])],
+            ),
+            wheel(
+                "dep_pkg-2.0.0-py3-none-any.whl",
+                vec![console_script("deptool", "dep_pkg:main", &[])],
+            ),
+        ];
+
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
+        assert!(
+            entrypoints.iter().any(|(name, _)| name.as_str() == "roottool"),
+            "the root package's own script must synthesize"
+        );
+        assert!(
+            !entrypoints.iter().any(|(name, _)| name.as_str() == "deptool"),
+            "a dependency's script must NOT synthesize under RootOnly (the new default)"
+        );
+        assert_python3_entrypoint(&composition);
+    }
+
+    #[test]
+    fn root_only_normalizes_the_configured_root_package_name() {
+        // The spec's root_package is a raw, un-normalized string; compose must
+        // PEP-503-normalize it before comparing against the wheel's parsed
+        // (already-normalized) dist name.
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::RootOnly {
+            root_package: "Root.PKG".to_string(),
+        };
+        let wheels = vec![wheel(
+            "root_pkg-1.0.0-py3-none-any.whl",
+            vec![console_script("roottool", "root_pkg:main", &[])],
+        )];
+
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
+        assert!(
+            entrypoints.iter().any(|(name, _)| name.as_str() == "roottool"),
+            "a differently-cased/separated root_package must still normalize-match the wheel"
+        );
+    }
+
+    #[test]
+    fn explicit_admits_only_named_scripts() {
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::Explicit(vec!["foo".to_string()]);
+        let wheels = vec![wheel(
+            PURE_WHEEL,
+            vec![
+                console_script("foo", "mod:foo", &[]),
+                console_script("bar", "mod:bar", &[]),
+            ],
+        )];
+
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
+        assert!(entrypoints.iter().any(|(name, _)| name.as_str() == "foo"));
+        assert!(
+            !entrypoints.iter().any(|(name, _)| name.as_str() == "bar"),
+            "an unlisted script must not synthesize under Explicit"
+        );
+    }
+
+    #[test]
+    fn explicit_name_absent_from_every_wheel_is_missing_entrypoint_error() {
+        let mut spec = env_spec(&[], &[], "cp313");
+        spec.entrypoint_selection = EntrypointSelection::Explicit(vec!["ghost".to_string()]);
+        let wheels = vec![wheel(PURE_WHEEL, vec![console_script("foo", "mod:foo", &[])])];
+
+        let error = compose_env(&spec, &wheels).expect_err("a requested-but-absent name must fail closed");
+        assert!(
+            matches!(error, ComposeError::MissingEntrypoint { ref name } if name == "ghost"),
+            "got {error:?}"
+        );
+    }
+
+    #[test]
+    fn cross_wheel_name_collision_is_entrypoint_collision_error() {
+        // Two different wheels registering the same console-script name under
+        // an admitting mode (`All`) must fail closed, not silently keep
+        // whichever wheel composed last.
+        let spec = env_spec(&[], &[], "cp313");
+        let wheels = vec![
+            wheel(
+                "first_pkg-1.0.0-py3-none-any.whl",
+                vec![console_script("same", "first_pkg:main", &[])],
+            ),
+            wheel(
+                "second_pkg-1.0.0-py3-none-any.whl",
+                vec![console_script("same", "second_pkg:main", &[])],
+            ),
+        ];
+
+        let error = compose_env(&spec, &wheels).expect_err("a cross-wheel name clash must fail closed");
+        match error {
+            ComposeError::EntrypointCollision {
+                name,
+                first_wheel,
+                second_wheel,
+            } => {
+                assert_eq!(name, "same");
+                assert_eq!(first_wheel, "first_pkg-1.0.0-py3-none-any.whl");
+                assert_eq!(second_wheel, "second_pkg-1.0.0-py3-none-any.whl");
+            }
+            other => panic!("expected EntrypointCollision, got {other:?}"),
+        }
     }
 }

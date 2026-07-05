@@ -290,6 +290,12 @@ fn build_env_tasks_from_lock(
 
     let scope = ocx_python::WheelScope::new(spec.wheel_scope.clone());
     let declared_extras = lock.extras.clone();
+    // Root = `source.package`/spec name (design decision C); resolved once per
+    // version, same as `app_version` in the caller — `entrypoints:` windows
+    // are resolved against this version here so `ocx_python::compose_env`
+    // stays version-agnostic.
+    let root_package = spec.source.pylock_app_name(&spec.name);
+    let entrypoint_selection = python.resolve_entrypoint_selection(app_version, root_package);
 
     // The default variant (matched by name) drives cascade aliasing in push.
     let default_variant_name: Option<&str> = spec
@@ -401,6 +407,7 @@ fn build_env_tasks_from_lock(
                 declared_extras: declared_extras.clone(),
                 python_target,
                 wheel_scope: scope.clone(),
+                entrypoint_selection: entrypoint_selection.clone(),
             });
         }
     }
