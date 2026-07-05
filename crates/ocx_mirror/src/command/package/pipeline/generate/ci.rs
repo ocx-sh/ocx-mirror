@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use ocx_lib::cli::DataInterface;
 
 use crate::command::package::options::OutputFormat;
+use crate::command::package::pipeline::push;
 use crate::error::MirrorError;
 use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
 
@@ -255,10 +256,13 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
             // the image (see `render_test_run_steps`).
             Some(containers) => {
                 for container in containers {
+                    // Default id MUST come from push's canonical slug rule:
+                    // this value names the uploaded junit file, and the push
+                    // job rebuilds the same id from the spec to find it.
                     let container_id = container
                         .id
                         .clone()
-                        .unwrap_or_else(|| container.image.replace([':', '/'], "_"));
+                        .unwrap_or_else(|| push::image_to_container_id(&container.image));
                     let shell = container
                         .shell
                         .clone()
@@ -1164,6 +1168,34 @@ mod tests {
         assert!(
             content.contains("/etc/ssl/certs/ca-certificates.crt:ro"),
             "the runner CA bundle is mounted so the gnu ocx can verify TLS in a minimal image"
+        );
+    }
+
+    #[test]
+    fn container_junit_slug_matches_push_lookup() {
+        // W4 live regression: the test job names its JUnit upload
+        // `junit-{V}-{platform_slug}-{container_id}.xml` from the matrix
+        // `container_id`, and `pipeline push` rebuilds the same filename from
+        // the spec via `image_to_container_id`. The two sides MUST share one
+        // slug rule — the renderer previously kept dots (`alpine_3.20`) while
+        // push replaced them (`alpine_3_20`), so every dotted-tag container
+        // leg red with `missing junit` even when its tests passed.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-multi-container.yml", dir.path()).expect("container spec renders");
+        let content =
+            std::fs::read_to_string(dir.path().join(".github/workflows/shfmt.yml")).expect("workflow written");
+
+        for image in ["alpine:3.20", "ubuntu:24.04", "fedora:40"] {
+            let expected = push::image_to_container_id(image);
+            assert!(
+                content.contains(&format!("container_id: {expected}\n")),
+                "matrix container_id for {image} must equal push's junit lookup slug '{expected}':\n{content}"
+            );
+        }
+        // The dotted (renderer-only) forms must be gone.
+        assert!(
+            !content.contains("container_id: alpine_3.20") && !content.contains("container_id: ubuntu_24.04"),
+            "renderer must not emit the dotted container_id forms push cannot find:\n{content}"
         );
     }
 

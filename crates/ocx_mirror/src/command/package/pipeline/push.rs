@@ -715,7 +715,15 @@ fn container_ids_from_config(config: &PlatformConfig) -> Vec<String> {
 /// (which can arise from registry paths containing `/`) are collapsed to one.
 ///
 /// e.g. `ubuntu:24.04` → `ubuntu_24_04`, `alpine:3.20` → `alpine_3_20`.
-fn image_to_container_id(image: &str) -> String {
+///
+/// This is the CANONICAL container-id slug rule: the workflow renderer
+/// (`generate/ci.rs::build_matrix`) calls it for the matrix `container_id`
+/// values that name the uploaded `junit-{V}-{slug}-{container_id}.xml` files,
+/// and the push job's junit lookup (above) rebuilds the same ids from the
+/// spec. Two independently written rules here previously disagreed on `.`
+/// (renderer kept it, lookup replaced it), redding every dotted-tag container
+/// leg (e.g. `alpine:3.20`) with `missing junit for container alpine_3_20`.
+pub(crate) fn image_to_container_id(image: &str) -> String {
     image
         .replace([':', '/', '.'], "_")
         // Collapse consecutive underscores (e.g. "ghcr.io/org/img" → "ghcr_io_org_img"
