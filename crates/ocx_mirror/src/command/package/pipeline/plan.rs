@@ -12,7 +12,7 @@ use ocx_lib::oci::{Architecture, ClientBuilder, OperatingSystem, Platform};
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 use ocx_python::{
-    Implementation, InterpreterPin, LibcFamily, PythonTarget, TargetArchitecture, TargetOperatingSystem,
+    Implementation, InterpreterPin, LibcFamily, Pylock, PythonTarget, TargetArchitecture, TargetOperatingSystem,
     TargetPlatform, VariantConstraints,
 };
 use serde::{Deserialize, Serialize};
@@ -302,12 +302,10 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
 
 /// Builds the `PlanVersionEntry` list for a `pylock`-sourced spec.
 ///
-/// Bypasses `resolve_assets`/`filter::filter_versions` entirely (D1): for
-/// each declared platform key that `spec.platform_applies` accepts and is not
-/// already published (per `version_map`), resolves a `PythonTarget` per
-/// variant and calls `ocx_python::select_wheels` directly, emitting one
-/// `PlanAssetEntry` per selected wheel (N per platform — the shape the regex
-/// resolver cannot express).
+/// Thin wrapper: resolves the app version from the source adapter's
+/// already-listed `VersionInfo`, loads the committed lock, and delegates the
+/// actual per-platform wheel selection to the lock-agnostic
+/// [`build_env_plan_entries`].
 async fn build_pylock_plan_entries(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
@@ -331,6 +329,25 @@ async fn build_pylock_plan_entries(
         .await
         .map_err(|e| source::pylock::classify_error("failed to load pylock source", e))?;
 
+    build_env_plan_entries(spec, &lock, &app_version, all_tags, version_map)
+}
+
+/// Lock-agnostic core of [`build_pylock_plan_entries`].
+///
+/// Bypasses `resolve_assets`/`filter::filter_versions` entirely (D1): for
+/// each declared platform key that `spec.platform_applies` accepts and is not
+/// already published (per `version_map`), resolves a `PythonTarget` per
+/// variant and calls `ocx_python::select_wheels` directly, emitting one
+/// `PlanAssetEntry` per selected wheel (N per platform — the shape the regex
+/// resolver cannot express). Takes an already-parsed `lock`/`app_version` so
+/// it never touches the filesystem — network-free and directly unit-testable.
+fn build_env_plan_entries(
+    spec: &MirrorSpec,
+    lock: &Pylock,
+    app_version: &str,
+    all_tags: &[String],
+    version_map: &VersionPlatformMap,
+) -> Result<Vec<PlanVersionEntry>, MirrorError> {
     let python = spec
         .python
         .as_ref()
@@ -348,7 +365,7 @@ async fn build_pylock_plan_entries(
     for (variant_name, constraints) in pylock_variants(spec) {
         let tagged = match variant_name {
             Some(name) => format!("{name}-{app_version}"),
-            None => app_version.clone(),
+            None => app_version.to_string(),
         };
         // The pylock app version is a PEP 440 string, which may carry more
         // numeric components than `ocx_lib::Version` (a ≤3-component
@@ -368,7 +385,7 @@ async fn build_pylock_plan_entries(
         let mut assets = Vec::new();
 
         for &platform_key in &platform_keys {
-            if !spec.platform_applies(&app_version, platform_key) {
+            if !spec.platform_applies(app_version, platform_key) {
                 continue;
             }
             let platform: Platform = platform_key
@@ -387,7 +404,7 @@ async fn build_pylock_plan_entries(
                 interpreter: interpreter.clone(),
             };
 
-            let wheels = ocx_python::select_wheels(&lock, &target).map_err(|e| {
+            let wheels = ocx_python::select_wheels(lock, &target).map_err(|e| {
                 MirrorError::PylockError(format!("wheel selection failed for platform '{platform_key}': {e}"))
             })?;
 
@@ -417,7 +434,7 @@ async fn build_pylock_plan_entries(
         // bare (variant-prefixed, un-timestamped) tag already on the registry
         // means some platform was published before, so a shorter missing-set
         // than the declared count is a backfill, not a first publish.
-        let version_on_registry = Version::parse(&app_version)
+        let version_on_registry = Version::parse(app_version)
             .is_some_and(|v| all_tags.iter().any(|t| Version::parse(t).is_some_and(|tv| tv == v)));
         let kind = if version_on_registry && declared_platform_count > missing_platforms.len() {
             PlanVersionKind::BackfillPartial
@@ -429,7 +446,7 @@ async fn build_pylock_plan_entries(
             version: tagged,
             platforms: missing_platforms,
             kind,
-            source_version: app_version.clone(),
+            source_version: app_version.to_string(),
             variant: variant_name.map(str::to_string),
             assets,
         });

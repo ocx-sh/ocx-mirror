@@ -221,14 +221,8 @@ impl Prepare {
 
 /// Build [`WheelEnvTask`]s for `version` from the committed pylock.
 ///
-/// Pure local re-selection (no source re-crawl — issue #160): for the variant
-/// whose prefixed tag equals `version`, resolves a `PythonTarget` per declared,
-/// applicable platform and runs `ocx_python::select_wheels`. Private
-/// interpreter dependencies are resolved by the caller (their digests need
-/// the registry) and looked up per variant — a variant's own
-/// `interpreter_package` override wins over the spec-wide
-/// `python.interpreter_package` default — keeping this function network-free
-/// and unit-testable.
+/// Thin wrapper: loads the committed lock and resolves the app version, then
+/// delegates task construction to the lock-agnostic [`build_env_tasks_from_lock`].
 async fn build_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
@@ -246,6 +240,37 @@ async fn build_env_tasks(
     let app_version = crate::source::pylock::app_version(&lock, spec.source.pylock_app_name(&spec.name))
         .map_err(|e| MirrorError::PylockError(e.to_string()))?;
 
+    build_env_tasks_from_lock(
+        spec,
+        spec_dir,
+        version,
+        &lock,
+        &app_version,
+        interpreter_dependencies,
+        allowed_platforms,
+    )
+}
+
+/// Lock-agnostic core of [`build_env_tasks`].
+///
+/// Pure local re-selection (no source re-crawl — issue #160): for the variant
+/// whose prefixed tag equals `version`, resolves a `PythonTarget` per declared,
+/// applicable platform and runs `ocx_python::select_wheels`. Private
+/// interpreter dependencies are resolved by the caller (their digests need
+/// the registry) and looked up per variant — a variant's own
+/// `interpreter_package` override wins over the spec-wide
+/// `python.interpreter_package` default. Takes an already-parsed
+/// `lock`/`app_version` so it never touches the filesystem — network-free and
+/// directly unit-testable.
+fn build_env_tasks_from_lock(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+    lock: &ocx_python::Pylock,
+    app_version: &str,
+    interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
+    allowed_platforms: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<WheelEnvTask>, MirrorError> {
     let python = spec
         .python
         .as_ref()
@@ -274,7 +299,7 @@ async fn build_env_tasks(
         // variant, mirroring the archive path's per-version legs.
         let tagged = match variant_name {
             Some(name) => format!("{name}-{app_version}"),
-            None => app_version.clone(),
+            None => app_version.to_string(),
         };
         if tagged != version {
             continue;
@@ -300,7 +325,7 @@ async fn build_env_tasks(
             })?;
 
         for &platform_key in &platform_keys {
-            if !spec.platform_applies(&app_version, platform_key) {
+            if !spec.platform_applies(app_version, platform_key) {
                 continue;
             }
             // Restrict to the platforms the plan still needs. `discover` excludes
@@ -323,7 +348,7 @@ async fn build_env_tasks(
                 interpreter: interpreter_pin.clone(),
             };
 
-            let selected = ocx_python::select_wheels(&lock, &python_target).map_err(|e| {
+            let selected = ocx_python::select_wheels(lock, &python_target).map_err(|e| {
                 MirrorError::PylockError(format!("wheel selection failed for platform '{platform_key}': {e}"))
             })?;
 
@@ -350,7 +375,7 @@ async fn build_env_tasks(
 
             tasks.push(WheelEnvTask {
                 normalized_version: tagged.clone(),
-                source_version: app_version.clone(),
+                source_version: app_version.to_string(),
                 platform,
                 variant: variant_name.map(|name| VariantContext {
                     name: name.to_string(),
