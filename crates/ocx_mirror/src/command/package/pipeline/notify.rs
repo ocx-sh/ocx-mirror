@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use crate::discord::colors;
     use crate::run_summary::{
-        ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
+        ExcludedPlatform, LayerReuse, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
     };
 
     // ── §3.9 S9: notify subcommand tests ──────────────────────────────────
@@ -380,6 +380,7 @@ mod tests {
             cascade_tags_written: vec![],
             test_failures: vec![],
             platforms_excluded: vec![],
+            layer_reuse: LayerReuse::default(),
         }
     }
 

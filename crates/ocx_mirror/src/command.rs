@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-mod package;
+// `pub(crate)`: `pipeline::python_push` (outside this subtree) reaches
+// `command::package::target_registry`'s fail-safe tag-listing helper for the
+// wheel-registration tag-exists check.
+pub(crate) mod package;
 // Reserved namespace — registry-to-registry mirroring. Documented placeholder
 // only; no `Registry` arm on `Command` until the first subcommand lands.
 // See .claude/artifacts/adr_cli_namespace_restructure.md.

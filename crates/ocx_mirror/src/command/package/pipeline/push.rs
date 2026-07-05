@@ -10,14 +10,18 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
+use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
+use ocx_lib::publisher::Publisher;
 
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
 use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
 use crate::pipeline::python_prepare::EnvManifest;
 use crate::pipeline::python_push;
-use crate::run_summary::{ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary};
+use crate::run_summary::{
+    ExcludedPlatform, LayerReuse, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
+};
 use crate::spec::{self, MirrorSpec, PlatformConfig, Severity};
 
 /// `ocx-mirror package pipeline push` subcommand.
@@ -254,6 +258,8 @@ impl Push {
                 cascade_tags_written: cascade_tags,
                 test_failures: all_test_failures,
                 platforms_excluded: collect_excluded_platforms(&spec, version),
+                // Archive/binary pushes have no shared-layer concept.
+                layer_reuse: LayerReuse::default(),
             });
         }
 
@@ -333,12 +339,15 @@ impl Push {
     /// go/no-go per `(version, platform)` with the same `evaluate_junit`
     /// AND-across-containers logic as the archive loop, and pushes each
     /// green leg via `ocx package push` with the ordered wheel layers as
-    /// positional args and the composed `metadata.json` via `-m`.
+    /// positional args (each carrying a `:from=<wheel_repository>` mount
+    /// tail) and the composed `metadata.json` via `-m`.
     ///
-    /// Stage 2 (deferred): wheel-repo upload-if-missing (content-addressed
-    /// layer reuse across packages) is not implemented — every push
-    /// re-uploads its full layer set. The env package is self-contained
-    /// either way, so `ocx package test` works without it.
+    /// Shared wheel layers (Decision D): before each leg's push,
+    /// `python_push::register_wheel_layers` registers any not-yet-published
+    /// wheel with the target registry, so the leg's own push can
+    /// cross-repository mount it instead of re-uploading. Registration
+    /// failures are warn-only; a miss falls back to a full upload, so the
+    /// push always succeeds either way.
     ///
     /// W3 (deferred): named-default-variant bare-tag aliasing (a second push
     /// under the unprefixed tag) is not implemented — the current corpus
@@ -375,6 +384,14 @@ impl Push {
 
         let mut version_summaries: Vec<VersionSummary> = Vec::new();
 
+        // Read-only registry access for the wheel-registration tag-exists
+        // check (Decision D, shared wheel layers). `registered_wheels` dedupes
+        // `wheel_repository:wheel_sha256` pairs across the whole run so a
+        // wheel shared by multiple legs is checked/pushed at most once.
+        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let publisher = Publisher::new(client);
+        let mut registered_wheels: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for manifest in &manifests {
             let version = &manifest.version;
 
@@ -391,6 +408,7 @@ impl Push {
             let mut all_test_failures: Vec<TestFailure> = Vec::new();
             let mut cascade_tags: Vec<String> = Vec::new();
             let mut all_skipped_existing = true;
+            let mut layer_reuse = LayerReuse::default();
 
             for env_entry in &sorted_envs {
                 let platform_str = &env_entry.platform;
@@ -424,14 +442,25 @@ impl Push {
                         // (e.g. pycowsay's `0.0.0.2`) is pushed as the primary
                         // tag only, without cascade.
                         let cascade = Version::parse(version).is_some();
-                        let layer_paths: Vec<PathBuf> =
-                            env_entry.layers.iter().map(|layer| layer.path.clone()).collect();
+
+                        // Register any not-yet-published wheel layers so this
+                        // leg's push can `:from=` mount them instead of
+                        // re-uploading (Decision D). Failures are warn-only
+                        // inside `register_wheel_layers` — never abort here.
+                        python_push::register_wheel_layers(
+                            &publisher,
+                            &spec.target.registry,
+                            platform_str,
+                            &env_entry.layers,
+                            &mut registered_wheels,
+                        )
+                        .await;
 
                         let push_result = python_push::invoke_env_push(
                             platform_str,
                             &target_ref,
                             &env_entry.metadata_path,
-                            &layer_paths,
+                            &env_entry.layers,
                             cascade,
                         )
                         .await;
@@ -443,6 +472,9 @@ impl Push {
                                     // Don't flip all_skipped_existing to false
                                 } else {
                                     all_skipped_existing = false;
+                                    layer_reuse.mounted += report.layers.mounted;
+                                    layer_reuse.uploaded += report.layers.uploaded;
+                                    layer_reuse.verified += report.layers.verified;
                                     platforms_pushed.push(platform_str.clone());
                                     cascade_tags.extend(report.cascade_tags_written);
                                 }
@@ -493,6 +525,7 @@ impl Push {
                 cascade_tags_written: cascade_tags,
                 test_failures: all_test_failures,
                 platforms_excluded: collect_excluded_platforms(spec, version),
+                layer_reuse,
             });
         }
 
