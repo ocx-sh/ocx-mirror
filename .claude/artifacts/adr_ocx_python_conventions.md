@@ -166,10 +166,74 @@ ${installPath}/lib/site-packages` (**required**), `PATH = ${installPath}/bin`
 scripts ships no `bin/`), and `PYTHONDONTWRITEBYTECODE = 1` (keeps CPython from
 writing `__pycache__/` into read-only package content).
 
-### Convention 4 — Entrypoint synthesis
+### Convention 4 — Entrypoint synthesis + selection
 
-`compose_env` synthesizes one entrypoint per **gated** `[console_scripts]` entry,
-each `{ command: "python3", args: ["-c", <shim>] }` (argv array, no shell). The
+**Which wheels' scripts are eligible (selection mode).** Which wheels'
+`[console_scripts]` entries may synthesize is governed by `python.entrypoints:`
+(mirror spec, `spec/python_config.rs`), resolved into
+`ocx_python::EntrypointSelection` before `compose_env` runs — the crate itself
+stays version-agnostic; the mirror resolves any version-windowed config against
+the concrete app version first (`PythonConfig::resolve_entrypoint_selection`).
+
+| Mode | Spec value | `EntrypointSelection` | Admits |
+|---|---|---|---|
+| `auto` (**default**, `plan_python_mirror_v2`) | `entrypoints: auto` or omitted | `RootOnly { root_package }` | Only the root package's own console scripts, matched by PEP-503-normalized dist name against the wheel's parsed filename |
+| `all` | `entrypoints: all` | `All` | Every wheel's console scripts — the pre-`plan_python_mirror_v2` behavior |
+| explicit list | `entrypoints: [{name, min_version?, max_version?}, …]` | `Explicit(names)` | Only the listed names; each entry optionally windowed to an app-version range (`min_version` inclusive / `max_version` exclusive — same convention as `versions:` and per-platform `min_version`/`max_version`) |
+
+`auto` is the new default: previously every wheel's scripts synthesized
+unconditionally (now the `all` mode). Rationale: a transitive dependency
+shipping its own CLI (e.g. a linter dependency's `foo-lint` script) is rarely
+something the *published app* wants surfaced as one of its own entrypoints.
+
+**Fail-closed collision + miss (replaces silent last-write-wins).** Synthesized
+entrypoints previously landed in a plain `BTreeMap`, so two wheels providing the
+same script name silently resolved to whichever inserted last. This is now
+fail-closed:
+
+- **`ComposeError::EntrypointCollision { name, first_wheel, second_wheel }`** —
+  a genuine cross-wheel name clash (two *admitted* wheels providing the same
+  console-script name) aborts composition, naming both wheels, instead of
+  silently keeping one.
+- **`ComposeError::MissingEntrypoint { name }`** — under `Explicit`, a listed
+  name that no admitted wheel actually provides aborts composition, instead of
+  silently composing an env missing a requested launcher.
+
+**V3 finding — spawn-parity and the `RootOnly` caveat.** `plan_python_mirror_v2`
+W0.1 (finding V3, `.claude/state/plans/notes_v1v2v3_python_mirror_v2.md`)
+verified that a synthesized entrypoint is **not** metadata-only: OCX
+materializes a real, executable POSIX-shell launcher shim per entrypoint under
+the composed package's `entrypoints/` directory, and that directory sits on
+`PATH` in every composed env (`ocx run`, `ocx package exec`, `ocx package
+test`) — identical to `content/bin/*`. Concretely: `subprocess.run(["pycowsay",
+"moo"])` from inside a composed env's `python3` succeeds exactly as it would
+against a normally pip-installed console script (verified end-to-end via `ocx
+package test`: a Starlark script asserting the spawn *fails* had its own
+assertion fail, because the spawn succeeded).
+
+Consequence for `RootOnly` (the new default): an application that itself spawns
+a **dependency's** console script by name (e.g. a wrapper CLI shelling out to a
+bundled linter) will no longer find it under `auto`, because `RootOnly` only
+ever admits the root package's own scripts. Such an app needs `all` or an
+explicit entry naming the dependency's script — `auto`'s root-only default is a
+behavior change for this (narrow) class of app, not just a metadata-visibility
+change.
+
+**The previously mooted `bin_shims` knob is REJECTED.** A separate
+configuration knob to keep launcher shims for non-admitted dependency scripts
+on `PATH` (without registering them as full OCX entrypoints) was floated during
+planning as a middle ground for the `RootOnly` default. V3 refutes its premise:
+a *registered* entrypoint already gets a real, spawnable `PATH` shim — there is
+no metadata-only tier to add a knob for. The actual gap `RootOnly` creates is
+entrypoint **admission** (does compose synthesize a launcher at all), not
+launcher **mechanism** (how the launcher dispatches once synthesized) — and
+`all`/`Explicit` already close the admission gap. `bin_shims` would have added
+a second, redundant way to admit a script's launcher without registering it as
+an entrypoint, solving a problem V3 showed does not exist.
+
+**Shim synthesis mechanics.** `compose_env` synthesizes one entrypoint per
+**gated and admitted** `[console_scripts]` entry, each
+`{ command: "python3", args: ["-c", <shim>] }` (argv array, no shell). The
 shim (`synthesize_shim`) is:
 
 ```python
@@ -367,7 +431,8 @@ private interpreter is pulled — anonymously — from the registry.
 
 - [x] Unit tests cover each convention: `golden_digest_is_stable_across_runs`
   (repack), `parse_*` / `encode_l2_*` / `marker_env_*` (platform), `select_*`
-  (select), `*_collision*` (collide), shim/extras/ABI tests (compose),
+  (select), `*_collision*` (collide), shim/extras/ABI/selection tests incl.
+  `EntrypointCollision`/`MissingEntrypoint` (compose),
   `normalizes_package_names_per_pep_503` (naming).
 - [x] Security guards tested: `zip_slip_entry_is_rejected`,
   `zip_bomb_decompressed_size_is_capped`.
@@ -378,8 +443,10 @@ private interpreter is pulled — anonymously — from the registry.
 
 - [design_spec_ocx_python.md](./design_spec_ocx_python.md) — component design spec (primary source)
 - [adr_ocx_python_crate.md](./adr_ocx_python_crate.md) — the workspace/boundary decision
+- [adr_pypi_lock_derivation.md](./adr_pypi_lock_derivation.md) — the corpus interpreter model + V1c/V3 evidence Convention 4's revision cites
 - [research_python_wheel_oci.md](./research_python_wheel_oci.md) — background research
 - [subsystem-mirror.md](../rules/subsystem-mirror.md) — module map + error model
+- `.claude/state/plans/notes_v1v2v3_python_mirror_v2.md` — V3 spawn-parity evidence record; gitignored, cited by path
 
 ---
 
@@ -389,3 +456,4 @@ private interpreter is pulled — anonymously — from the registry.
 |------|--------|--------|
 | 2026-07-04 | pylock-mirror swarm | Initial draft — seven implemented conventions |
 | 2026-07-04 | pylock-mirror swarm | Convention 8 — libc-variant interpreter provisioning (separate `cpython-musl` repo, per-variant `interpreter_package`) + container test-leg validation (alpine/musl, debian/glibc floor) |
+| 2026-07-05 | pylock-mirror swarm (w3-adr) | Convention 4 revision — entrypoint selection modes (`auto`/`all`/explicit windowed list), fail-closed `EntrypointCollision`/`MissingEntrypoint` replacing silent last-write-wins, V3 spawn-parity finding + `RootOnly` caveat, `bin_shims` knob rejected |

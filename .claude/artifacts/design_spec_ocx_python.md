@@ -8,9 +8,9 @@ contracts, not implementation.
 
 ## Metadata
 
-**Status:** Proposed (rev 2 — platform mapping, selection, testing added)
+**Status:** Proposed (rev 3 — `EntrypointSelection`, `wheel_priority` ranking, wheel-layer push/reuse surface added)
 **Date:** 2026-07-04
-**Related ADR:** [adr_ocx_python_crate.md](./adr_ocx_python_crate.md)
+**Related ADR:** [adr_ocx_python_crate.md](./adr_ocx_python_crate.md) (workspace/boundary), [adr_ocx_python_conventions.md](./adr_ocx_python_conventions.md) (the conventions this spec details), [adr_pypi_lock_derivation.md](./adr_pypi_lock_derivation.md) (lock derivation for `source.type: pypi`)
 **Research:** [research_python_wheel_oci.md](./research_python_wheel_oci.md)
 
 ## Purpose
@@ -67,7 +67,18 @@ variants:
   default: { libc: gnu, min_manylinux: "2_28" }    # unadorned tag chain
   musl:    { libc: musl, min_musllinux: "1_2" }    # musl-<ver>_<TS> chain
   cp313t:  { abi: cp313t }                         # free-threaded ABI
+  static:  { wheel_priority: ["any"] }             # force pure wheels to
+                                                    # outrank compiled ones
 ```
+
+`VariantConstraints.wheel_priority: Option<Vec<String>>` is an ordered wheel
+platform-tag-prefix ranking list layered **over** the libc/floor constraints
+above — it can never re-admit a wheel those already excluded, it only reorders
+survivors. Absent/empty ranks every wheel identically (today's tag-priority-only
+ordering, unchanged — backcompat). **Mandatory for fully-static interpreters**
+(`adr_pypi_lock_derivation.md`): such a build cannot `dlopen` a compiled
+extension, so `wheel_priority: ["any"]` is required to make a pure wheel
+outrank a compiled musllinux/manylinux one that tag-priority alone would pick.
 
 Both libc families are dynamic-link families with versioned floors
 (PEP 600: glibc ≥ X.Y; PEP 656: musl ≥ X.Y — musllinux is NOT static
@@ -103,9 +114,16 @@ Per (variant, platform key):
    `py2.py3-none-any` (union tags), `any` — compat semantics, never string
    equality.
 4. **Candidate pick**: parse each wheel filename
-   (`uv-distribution-filename`), keep those intersecting the target set,
-   rank by tag priority; tiebreak by build tag (PEP 427), then filename
-   (deterministic). Zero candidates → `SelectError` naming package, triple,
+   (`uv-distribution-filename`), keep those intersecting the target set, rank
+   by the key `(class_rank, TagPriority, build_tag, filename)` — descending,
+   highest wins. `class_rank` is the `wheel_priority` ranking tier (position of
+   the wheel's highest-priority matching platform-tag prefix, inverted so the
+   first-listed prefix ranks highest; unmatched/no-`wheel_priority` = `0` for
+   every wheel, i.e. today's ordering). `TagPriority` (from
+   `uv-platform-tags`), `build_tag` (PEP 427), and `filename` are the
+   pre-existing tiebreak axes, applied in that order only when `class_rank`
+   ties — `wheel_priority` is a ranking layer *over* tag-compatibility, never a
+   replacement for it. Zero candidates → `SelectError` naming package, triple,
    variant, and the tags that WERE available (actionable: psycopg2-style
    "no Linux wheel" vs uwsgi-style "no wheel anywhere" distinguished).
 5. **Set validation**: all binary wheels ABI-consistent with the
@@ -151,6 +169,18 @@ pub fn check_collisions(wheels: &[RepackedWheel]) -> Result<(), CollisionError>;
 
 pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel])
     -> Result<EnvComposition, ComposeError>;
+// EnvSpec.entrypoint_selection: EntrypointSelection — which wheels' console
+//   scripts are eligible to synthesize; resolved by the mirror against the
+//   concrete app version before this call (crate stays version-agnostic):
+//   enum EntrypointSelection {
+//     RootOnly { root_package: String },  // default; root package's own scripts only
+//     All,                                 // every wheel's scripts (pre-selection behavior)
+//     Explicit(Vec<String>),               // only the listed names
+//   }
+//   Errors: ComposeError::EntrypointCollision{name,first_wheel,second_wheel}
+//   (two admitted wheels claim the same name) and ::MissingEntrypoint{name}
+//   (an Explicit name no admitted wheel provides) — both fail closed, no
+//   silent last-write-wins.
 // EnvComposition {                               // TARGET-AGNOSTIC — no registry host
 //   metadata: ocx_lib::package::metadata::Metadata, // Bundle: entrypoints
 //               // (command=python3, args=["-c",shim]), env (PYTHONPATH,
@@ -166,6 +196,20 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel])
 
 ### Entrypoint synthesis rules
 
+- **Selection (`EntrypointSelection`)** — which wheels' scripts are eligible at
+  all, resolved by the mirror's `python.entrypoints:` against the concrete app
+  version before `compose_env` runs (crate stays version-agnostic):
+
+  | Mode | Admits |
+  |---|---|
+  | `RootOnly { root_package }` (**default**) | Only the root package's own console scripts, matched by PEP-503-normalized dist name |
+  | `All` | Every wheel's console scripts (pre-selection behavior) |
+  | `Explicit(names)` | Only the listed names, each optionally version-windowed by the mirror before this call |
+
+  Fail-closed: `ComposeError::EntrypointCollision{name,first_wheel,second_wheel}`
+  when two *admitted* wheels claim the same name (replaces a prior silent
+  last-write-wins insert); `ComposeError::MissingEntrypoint{name}` when an
+  `Explicit` name no admitted wheel provides.
 - `[console_scripts]` object references use the FULL grammar
   `module[:attr[.attr…]]` (dotted attribute chains; module-only refs
   valid) → entrypoint `name`, `command: python3`, `args: ["-c", <shim>]`
@@ -181,6 +225,12 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel])
   at first run otherwise.
 - `python3` resolves via the private interpreter dependency on the composed
   PATH; ABI mismatch fails at compose, not at run.
+- **Spawn-parity caveat (V1c/V3 evidence, `adr_pypi_lock_derivation.md`,
+  `adr_ocx_python_conventions.md` Convention 4)**: a synthesized entrypoint is a
+  real, executable launcher shim on the composed `PATH`, not metadata-only — an
+  app that spawns a *dependency's* console script by name needs `All` or an
+  explicit entry naming it, since `RootOnly` never admits a non-root wheel's
+  scripts.
 
 ### Runtime-write mitigation (read-only hardlink CAS)
 
@@ -222,6 +272,13 @@ no lock (verified — F9); derive one per target via
 (uv as build-time tool; reproducible via upload-time cutoff), persist the
 generated pylock in the mirror repo. Not in v1.
 
+**Now implemented** (`adr_pypi_lock_derivation.md`): derivation runs once per
+version in the PLAN phase (not per-leg), against the maintainer's
+`python.interpreter_package` materialized via `ocx package pull` — the
+`--python-platform`/per-target derivation sketched above was superseded by a
+single universal-lock derivation shared by every leg (Decision A,
+`plan_python_mirror_v2`); `--exclude-newer` remains future work.
+
 Lock-derivation platform mapping (verified against `uv pip compile
 --python-platform` possible values, uv 0.11.19): variant constraints render
 to **explicit** values — `{libc:gnu, min_manylinux:2_28, arch:amd64}` →
@@ -240,6 +297,41 @@ that toolchain rather than a second install mechanism. Verify at plan time
 whether `uv pip compile` with explicit `--python-version`/`--python-platform`
 resolves without a host interpreter — moot operationally, since the
 OCX-bootstrapped interpreter is present either way.
+
+### Wheel-layer push flow (cross-repo mount, layer reuse)
+
+Env push (`pipeline/python_push.rs`) is a two-step flow per version, both
+consuming `EnvLayer.wheel_repository` (the repo-relative wheel reference from
+`ocx_python::wheel_reference`, mirror-side, not part of the crate's public
+`WheelLayer` — the crate stays target/registry-agnostic; `wheel_repository` is
+the mirror's own resolved value):
+
+1. **`register_wheel_layers`** pushes each not-yet-published wheel standalone
+   to its content-addressed `<wheel_repository>:<wheel_sha256>` repo first (a
+   minimal version-only Bundle, no env/entrypoints — it exists only as a
+   cross-repo mount source), deduping `wheel_repository:wheel_sha256` pairs
+   across the whole `pipeline push` run so a wheel shared across platforms or
+   app versions is checked/pushed once. A registration failure (tag-exists
+   check or the push itself) is logged and skipped, never propagated — a miss
+   just means the next step falls back to a full upload.
+2. **The app's own env push** (`build_env_push_args`) passes each wheel layer
+   as `{path}:from=<wheel_repository>` — `ocx package push`'s existing
+   cross-repository blob-mount syntax — so the layer is *mounted* from the
+   step-1 registration instead of re-uploaded, when the target registry
+   supports it.
+
+Both steps go through the same `ocx package push` subprocess shape as the
+archive push path (`pipeline::ocx_cli`); step 1's push carries no
+env/entrypoints metadata since it is never installed directly.
+
+**Layer-reuse counters surface end to end**: `ocx package push --format json`
+reports `layers: {mounted, uploaded, verified}` per leg
+(`EnvPushReport.layers`, `#[serde(default)]` so an `ocx` binary built before the
+mount capability still parses); `pipeline push` accumulates these into
+`RunSummary.versions[].layer_reuse` (`LayerReuse`, `run_summary.rs`) — additive
+across every pushed platform for that version, `#[serde(default)]` so an
+older `run-summary.json` still parses with all-zero counts. Zero for
+archive/binary mirrors, which have no shared-layer concept.
 
 ### Mirror vs ocx-dist boundary
 
@@ -360,6 +452,13 @@ determinism, analogous to ocx's manifest byte-golden test.
    self-contained (all layers present in the env repo), so `ocx run` /
    `ocx package test` never depend on the wheel repos. Cross-mount is a v2
    storage optimization, gated on a future `Publisher` mount API.
+   **SUPERSEDED (Decision D, `plan_python_mirror_v2`)**: that mount API has
+   since shipped — `ocx_lib`'s `feat/layer-mount` adds cross-repo blob mount
+   with a *mandatory* upload-fallback (any mount error → re-upload, not a
+   failure; ponytail-marked interim shim, not the typed `BlobMountResponse`
+   follow-up parked on the fork). See "Wheel-layer push flow", above, for the
+   mirror-side flow this enables; no dedicated ADR yet covers the mount API
+   itself — tracked in `.claude/state/plans/plan_python_mirror_v2.md`.
 2. `VersionInfo` multi-asset extension — option (a) vs (b) above.
 3. Interpreter package pipeline: mirror python-build-standalone via
    existing `github_release` source type — sequencing vs PR 3.
