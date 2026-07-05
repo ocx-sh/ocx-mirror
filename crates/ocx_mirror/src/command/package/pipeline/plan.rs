@@ -504,6 +504,7 @@ pub(crate) fn pylock_variant_constraints(variant: &VariantSpec) -> VariantConstr
         min_manylinux: variant.min_manylinux.clone(),
         min_musllinux: variant.min_musllinux.clone(),
         abi: variant.abi.clone(),
+        wheel_priority: variant.wheel_priority.clone(),
     }
 }
 
@@ -1084,5 +1085,42 @@ platforms:
         assert_eq!(entries[0].platforms, vec!["linux/amd64".to_string()]);
         assert!(matches!(entries[0].kind, PlanVersionKind::New));
         assert_eq!(entries[0].assets.len(), 1, "one pure-python wheel -> one asset");
+    }
+
+    // ── Decision B: wheel_priority threading ────────────────────────────────
+
+    #[test]
+    fn pylock_variant_constraints_threads_wheel_priority() {
+        let variant: VariantSpec = serde_yaml_ng::from_str(
+            r#"
+name: default
+default: true
+libc: gnu
+min_manylinux: "2_28"
+wheel_priority: ["any"]
+"#,
+        )
+        .unwrap();
+
+        let constraints = pylock_variant_constraints(&variant);
+        assert_eq!(constraints.wheel_priority, Some(vec!["any".to_string()]));
+    }
+
+    #[test]
+    fn pylock_variant_constraints_defaults_wheel_priority_to_none() {
+        // Backcompat: a variant with no `wheel_priority:` key must thread
+        // `None` through, not an empty list — `select_wheels` treats both the
+        // same, but this locks the absent-key shape.
+        let variant: VariantSpec = serde_yaml_ng::from_str(
+            r#"
+name: default
+default: true
+libc: gnu
+min_manylinux: "2_28"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(pylock_variant_constraints(&variant).wheel_priority, None);
     }
 }

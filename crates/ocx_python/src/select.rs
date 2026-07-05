@@ -75,6 +75,9 @@ pub fn select_wheels(lock: &Pylock, target: &PythonTarget) -> Result<Vec<WheelRe
     let variant_label = variant_label(&target.variant);
     let interpreter_abi = target.effective_abi().to_string();
     let free_threaded = is_free_threaded(target);
+    // Decision B (wheel_priority): absent/empty ranks every wheel identically
+    // — today's TagPriority-only ordering, unchanged.
+    let wheel_priority = target.variant.wheel_priority.as_deref().unwrap_or(&[]);
 
     let mut selected = Vec::new();
     for package in &lock.packages {
@@ -84,7 +87,7 @@ pub fn select_wheels(lock: &Pylock, target: &PythonTarget) -> Result<Vec<WheelRe
         }
 
         // Step 4: pick the highest-priority compatible wheel.
-        let wheel = pick_wheel(package, &tags, &target_label, &variant_label)?;
+        let wheel = pick_wheel(package, &tags, &target_label, &variant_label, wheel_priority)?;
 
         // A wheel with no URL is not mirrorable — reject it so the downstream
         // naming convention's URL assumption holds.
@@ -177,31 +180,57 @@ fn build_target_tags(target: &PythonTarget) -> Result<Tags, SelectError> {
     .map_err(|error| model_error("platform tag set", error))
 }
 
-/// A ranked wheel candidate for a package: its tag priority plus the tiebreak
-/// axes (PEP 427 build tag, then filename), highest wins.
+/// A ranked wheel candidate for a package: the `wheel_priority` class rank
+/// (decision B), then tag priority, then the tiebreak axes (PEP 427 build
+/// tag, then filename), highest wins.
 struct Candidate<'a> {
+    class_rank: usize,
     priority: TagPriority,
     build_tag: Option<BuildTag>,
     wheel: &'a LockedWheel,
 }
 
 impl Candidate<'_> {
-    /// The descending sort key: higher tag priority, then higher build tag,
-    /// then greater filename (deterministic final tiebreak).
-    fn key(&self) -> (TagPriority, &Option<BuildTag>, &str) {
-        (self.priority, &self.build_tag, self.wheel.filename.as_str())
+    /// The descending sort key: higher class rank first, then higher tag
+    /// priority, then higher build tag, then greater filename (deterministic
+    /// final tiebreak).
+    fn key(&self) -> (usize, TagPriority, &Option<BuildTag>, &str) {
+        (
+            self.class_rank,
+            self.priority,
+            &self.build_tag,
+            self.wheel.filename.as_str(),
+        )
     }
 }
 
-/// Step 4: ranks a package's candidate wheels by tag priority (build tag then
-/// filename as deterministic tiebreakers) and returns the best. Zero compatible
-/// wheels is [`SelectError::NoCompatibleWheel`], whose `available_tags` names the
+/// The `wheel_priority` class rank of a wheel: the position of its
+/// highest-priority matching prefix among `priority`, inverted so the
+/// first-listed prefix ranks highest (`priority.len()`); an unmatched tag
+/// contributes nothing. An empty `priority` (or a wheel matching none of it)
+/// ranks `0` for every wheel — today's ordering, unchanged (backcompat).
+/// Matching is a prefix match against each of the wheel's platform tags
+/// (a wheel may carry a compressed multi-tag set), never re-admitting a wheel
+/// that tag-compatibility already excluded — this only reorders survivors.
+fn class_rank<'a>(platform_tags: impl Iterator<Item = &'a str>, priority: &[String]) -> usize {
+    platform_tags
+        .filter_map(|tag| priority.iter().position(|prefix| tag.starts_with(prefix.as_str())))
+        .map(|position| priority.len() - position)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Step 4: ranks a package's candidate wheels by `wheel_priority` class rank,
+/// then tag priority (build tag then filename as deterministic tiebreakers),
+/// and returns the best. Zero compatible wheels is
+/// [`SelectError::NoCompatibleWheel`], whose `available_tags` names the
 /// platform tags that WERE present on the (incompatible) candidates.
 fn pick_wheel<'a>(
     package: &'a LockedPackage,
     tags: &Tags,
     target_label: &str,
     variant_label: &str,
+    wheel_priority: &[String],
 ) -> Result<&'a LockedWheel, SelectError> {
     let mut best: Option<Candidate<'a>> = None;
     let mut available: BTreeSet<String> = BTreeSet::new();
@@ -212,11 +241,11 @@ fn pick_wheel<'a>(
             // platform tag to the diagnostic set.
             continue;
         };
-        for platform_tag in parsed.platform_tags() {
-            available.insert(platform_tag.to_string());
-        }
+        let wheel_tags: Vec<String> = parsed.platform_tags().iter().map(ToString::to_string).collect();
+        available.extend(wheel_tags.iter().cloned());
         if let TagCompatibility::Compatible(priority) = parsed.compatibility(tags) {
             let candidate = Candidate {
+                class_rank: class_rank(wheel_tags.iter().map(String::as_str), wheel_priority),
                 priority,
                 build_tag: parsed.build_tag().cloned(),
                 wheel,
@@ -458,6 +487,7 @@ mod tests {
                 libc: Some(LibcFamily::Gnu),
                 min_manylinux: Some("2_28".to_string()),
                 min_musllinux: None,
+                wheel_priority: None,
                 abi: None,
             },
             interpreter: InterpreterPin {
@@ -710,5 +740,79 @@ mod tests {
             "numpy-2.1.3-cp313-cp313t-manylinux_2_28_x86_64.whl"
         );
         assert_eq!(selected[0].sha256, "tttt");
+    }
+
+    // ── Decision B: wheel_priority ranking ───────────────────────────────────
+
+    #[test]
+    fn wheel_priority_flips_the_default_tag_priority_order() {
+        // Same fixture as `selects_highest_priority_wheel_from_multi_wheel_package`,
+        // where the exact manylinux wheel normally outranks the pure `any`
+        // wheel — `wheel_priority: ["any"]` must flip that (mandatory for a
+        // fully-static interpreter, which cannot dlopen the compiled wheel).
+        let lock = lock_of(vec![package(
+            "numpy",
+            "2.1.3",
+            None,
+            vec![
+                wheel("numpy-2.1.3-py3-none-any.whl", "aaaa"),
+                wheel("numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl", "bbbb"),
+            ],
+        )]);
+        let mut target = linux_amd64();
+        target.variant.wheel_priority = Some(vec!["any".to_string()]);
+
+        let selected = select_wheels(&lock, &target).expect("selection succeeds");
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].filename, "numpy-2.1.3-py3-none-any.whl");
+        assert_eq!(selected[0].sha256, "aaaa");
+    }
+
+    #[test]
+    fn wheel_priority_absent_matches_default_tag_priority_order() {
+        // Backcompat lock: no `wheel_priority` set is the same fixture as above,
+        // asserting the class rank is uniform (0) for every candidate, so the
+        // exact manylinux wheel still wins on tag priority alone — unchanged
+        // from `selects_highest_priority_wheel_from_multi_wheel_package`.
+        let lock = lock_of(vec![package(
+            "numpy",
+            "2.1.3",
+            None,
+            vec![
+                wheel("numpy-2.1.3-py3-none-any.whl", "aaaa"),
+                wheel("numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl", "bbbb"),
+            ],
+        )]);
+        assert!(linux_amd64().variant.wheel_priority.is_none());
+
+        let selected = select_wheels(&lock, &linux_amd64()).expect("selection succeeds");
+        assert_eq!(
+            selected[0].filename,
+            "numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl"
+        );
+    }
+
+    #[test]
+    fn wheel_priority_cannot_readmit_a_floor_excluded_wheel() {
+        // A gnu/manylinux target ranking `musllinux` first still can't select
+        // a musllinux-only package — ranking only reorders wheels that already
+        // passed tag-compatibility, it never re-admits a floor-excluded one.
+        let lock = lock_of(vec![package(
+            "cryptography",
+            "43.0.0",
+            None,
+            vec![wheel(
+                "cryptography-43.0.0-cp313-cp313-musllinux_1_2_x86_64.whl",
+                "eeee",
+            )],
+        )]);
+        let mut target = linux_amd64();
+        target.variant.wheel_priority = Some(vec!["musllinux".to_string()]);
+
+        let error = select_wheels(&lock, &target).expect_err("musllinux wheel is not gnu-compatible");
+        assert!(
+            matches!(error, SelectError::NoCompatibleWheel { .. }),
+            "expected NoCompatibleWheel, got {error:?}"
+        );
     }
 }

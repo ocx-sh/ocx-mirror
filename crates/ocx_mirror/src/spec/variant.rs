@@ -45,6 +45,18 @@ pub struct VariantSpec {
     /// Required CPython ABI tag, e.g. `"cp313t"` for the free-threaded build.
     #[serde(default)]
     pub abi: Option<String>,
+    /// Ordered wheel platform-tag-prefix ranking list for `pylock`/`pypi`
+    /// wheel selection (e.g. `["any"]`, `["musllinux", "manylinux_2_28"]`):
+    /// earlier entries outrank later ones; unlisted tags rank lowest. A
+    /// ranking layer over the `libc`/floor constraints above — it can never
+    /// re-admit a wheel those already excluded. **Mandatory for fully-static
+    /// interpreters**: such a build cannot `dlopen` a compiled extension, so
+    /// `wheel_priority: ["any"]` is required to make a pure wheel outrank a
+    /// compiled musllinux/manylinux one that tag-priority alone would pick.
+    /// No magic default — absent list is today's tag-priority-only ordering,
+    /// unchanged.
+    #[serde(default)]
+    pub wheel_priority: Option<Vec<String>>,
 
     /// Per-variant OCX interpreter package override for `pylock` (e.g. a
     /// musl-libc CPython build for a `libc: musl` variant). Falls back to
@@ -57,11 +69,18 @@ static MANYLINUX_FLOOR_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^\d+_\d+$").unwrap());
 static ABI_TAG_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^cp\d+t?$").unwrap());
+static WHEEL_PRIORITY_TAG_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z][a-z0-9_.]*$").unwrap());
 
 impl VariantSpec {
-    /// Whether this variant declares any `pylock` constraint field.
+    /// Whether this variant declares any `pylock`/`pypi` constraint or
+    /// ranking field.
     pub fn has_python_constraints(&self) -> bool {
-        self.libc.is_some() || self.min_manylinux.is_some() || self.min_musllinux.is_some() || self.abi.is_some()
+        self.libc.is_some()
+            || self.min_manylinux.is_some()
+            || self.min_musllinux.is_some()
+            || self.abi.is_some()
+            || self.wheel_priority.is_some()
     }
 
     /// Validate the `pylock` constraint fields' format. Cross-field
@@ -93,6 +112,19 @@ impl VariantSpec {
             errors.push(format!(
                 "variants: abi '{abi}' is not a valid CPython ABI tag (expected e.g. 'cp313' or 'cp313t')"
             ));
+        }
+        if let Some(priority) = &self.wheel_priority {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for tag in priority {
+                if !WHEEL_PRIORITY_TAG_RE.is_match(tag) {
+                    errors.push(format!(
+                        "variants: wheel_priority entry '{tag}' must match '^[a-z][a-z0-9_.]*$'"
+                    ));
+                }
+                if !seen.insert(tag.as_str()) {
+                    errors.push(format!("variants: wheel_priority has duplicate entry '{tag}'"));
+                }
+            }
         }
     }
 }

@@ -119,6 +119,19 @@ pub struct VariantConstraints {
     /// A required ABI override (e.g. `"cp313t"` for free-threaded CPython).
     /// `None` means the interpreter pin's primary ABI.
     pub abi: Option<String>,
+    /// Ordered wheel platform-tag-prefix ranking list (e.g. `["any"]`,
+    /// `["musllinux", "manylinux_2_28"]`). `select`'s `pick_wheel` ranks each
+    /// package's tag-compatible candidate wheels by the position of their
+    /// highest-priority matching prefix (first-listed = most preferred)
+    /// *before* falling back to `uv-platform-tags`' own `TagPriority` —
+    /// letting a maintainer force e.g. a pure `any` wheel to outrank a
+    /// compiled musllinux/manylinux one (mandatory for fully-static
+    /// interpreters, which cannot `dlopen` compiled extensions). Ranking never
+    /// re-admits a wheel excluded by the variant's own libc/floor constraints
+    /// above — it only reorders wheels that already passed tag-compatibility.
+    /// `None`/empty ranks every wheel identically: today's ordering,
+    /// unchanged (backcompat).
+    pub wheel_priority: Option<Vec<String>>,
 }
 
 /// The interpreter pin: the `python`/`abi` axes of the target.

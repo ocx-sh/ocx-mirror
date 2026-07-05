@@ -409,7 +409,7 @@ impl MirrorSpec {
                 if v.has_python_constraints() {
                     errors.push(variant_error(
                         &v.name,
-                        "constraint fields (libc/min_manylinux/min_musllinux/abi) are only supported for source.type 'pylock'/'pypi'",
+                        "constraint fields (libc/min_manylinux/min_musllinux/abi/wheel_priority) are only supported for source.type 'pylock'/'pypi'",
                     ));
                 }
             }
@@ -1404,6 +1404,104 @@ variants:
                 .iter()
                 .any(|e| e.contains("variant 'debug'") && e.contains("must specify 'assets'")),
             "Expected missing-assets error for non-pylock variant, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_pylock_variant_with_wheel_priority() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    wheel_priority: ["any"]
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(errors.is_empty(), "valid wheel_priority should validate: {errors:?}");
+        assert_eq!(
+            spec.variants.as_ref().unwrap()[0].wheel_priority,
+            Some(vec!["any".to_string()])
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_wheel_priority_bad_format_and_dup() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    wheel_priority: ["Any", "musllinux", "musllinux"]
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("wheel_priority entry 'Any'")),
+            "Expected bad-format error, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("wheel_priority has duplicate entry 'musllinux'")),
+            "Expected duplicate error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_non_pylock_variant_with_wheel_priority() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    wheel_priority: ["any"]
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("variant 'debug'") && e.contains("only supported for source.type 'pylock'")),
+            "Expected wheel_priority-on-non-pylock error, got: {errors:?}"
         );
     }
 
