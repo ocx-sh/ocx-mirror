@@ -618,6 +618,15 @@ fn classify_lock_derive_error(err: String) -> MirrorError {
     }
 }
 
+/// The on-disk filename for a derived PEP 751 lock. `uv pip compile` REJECTS
+/// output filenames that do not start with `pylock.` and end with `.toml`
+/// (its own example shape: `pylock.dev.toml`) — found by the live W4 pypi
+/// pilot; shared by the plan-phase candidate loop and `prepare.rs`'s
+/// standalone re-derivation so the two sites cannot drift.
+pub(crate) fn derived_lock_filename(package: &str, version: &str) -> String {
+    format!("pylock.{package}-{version}.toml")
+}
+
 /// `python.lock`'s defaults, applied when a `pypi` spec omits the `lock:`
 /// block entirely (zero-config: universal lock, no excludes, 300s timeout).
 fn default_lock_options() -> LockOptions {
@@ -707,7 +716,7 @@ async fn build_pypi_plan_entries(
 
     let mut entries = Vec::new();
     for version_info in candidates {
-        let output_path = locks_dir.join(format!("{package}-{}.pylock.toml", version_info.version));
+        let output_path = locks_dir.join(derived_lock_filename(package, &version_info.version));
         let lock = derive_one_pypi_lock(spec, &interpreter_path, &version_info.version, &output_path).await?;
 
         let mut version_entries = build_env_plan_entries(spec, &lock, &version_info.version, all_tags, version_map)?;
@@ -1390,7 +1399,11 @@ min_manylinux: "2_28"
     }
 
     /// Writes a stub `uv` that consumes stdin and writes `body` to the `-o`
-    /// argument — same shape as `pipeline::lock_derive`'s own test stub.
+    /// argument — same shape as `pipeline::lock_derive`'s own test stub, plus
+    /// real uv's pylock output-filename rule: a `-o` basename that does not
+    /// start with `pylock.` and end with `.toml` is rejected with uv's own
+    /// message (regression guard for the live W4 pilot failure — the earlier,
+    /// laxer stub let a non-conforming name through that real uv rejects).
     fn write_uv_stub(path: &std::path::Path, body: &str, exit_code: u32) {
         let script = format!(
             "#!/bin/sh\n\
@@ -1401,7 +1414,13 @@ min_manylinux: "2_28"
              \x20 if [ \"$prev\" = \"-o\" ]; then outfile=\"$arg\"; fi\n\
              \x20 prev=\"$arg\"\n\
              done\n\
-             if [ -n \"$outfile\" ]; then cat > \"$outfile\" <<'LOCKEOF'\n{body}LOCKEOF\n\
+             if [ -n \"$outfile\" ]; then\n\
+             \x20 base=${{outfile##*/}}\n\
+             \x20 case \"$base\" in\n\
+             \x20   pylock.toml|pylock.*.toml) ;;\n\
+             \x20   *) echo 'error: Expected the output filename to start with `pylock.` and end with `.toml` (e.g., `pylock.toml`, `pylock.dev.toml`)' >&2; exit 2 ;;\n\
+             \x20 esac\n\
+             \x20 cat > \"$outfile\" <<'LOCKEOF'\n{body}LOCKEOF\n\
              fi\n\
              exit {exit_code}\n"
         );
@@ -1599,6 +1618,38 @@ hashes = { sha256 = "aaaa" }
         let err = result.expect_err("an unparseable derived lock must fail, not silently succeed");
         assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
         assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn build_pypi_plan_entries_derived_lock_filename_follows_uv_naming_rule() {
+        // Regression (live W4 pilot): real `uv pip compile` REJECTS `-o`
+        // filenames that do not start with `pylock.` and end with `.toml`
+        // ("Expected the output filename to start with `pylock.` ..."). The
+        // earlier `{package}-{version}.pylock.toml` shape passed the (then
+        // laxer) stub but failed live CI — the stub now enforces the rule, and
+        // this locks the emitted shape explicitly.
+        let _guard = pypi_env_lock().await;
+        let _stubs = install_pypi_stubs(PYPI_STUB_LOCK_BODY, 0);
+
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir).await;
+        remove_pypi_stubs();
+
+        let entries = result.expect("derivation must succeed with a uv-conforming output filename");
+        let pylock_path = entries[0].pylock.as_deref().expect("entry carries a pylock path");
+        let filename = std::path::Path::new(pylock_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("pylock path has a UTF-8 filename");
+        assert!(
+            filename.starts_with("pylock.") && filename.ends_with(".toml"),
+            "derived lock filename must match uv's `pylock.*.toml` rule, got: {filename}"
+        );
     }
 
     #[tokio::test]

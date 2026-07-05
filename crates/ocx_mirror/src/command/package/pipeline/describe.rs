@@ -410,7 +410,7 @@ name = "acme_app-1.0.0-py3-none-any.whl"
 url = "https://example.com/acme_app-1.0.0-py3-none-any.whl"
 hashes = { sha256 = "aaaa" }
 "#;
-        std::fs::write(locks_dir.join("acme-app-1.0.0.pylock.toml"), lock_toml).unwrap();
+        std::fs::write(locks_dir.join("pylock.acme-app-1.0.0.toml"), lock_toml).unwrap();
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(pypi_yaml()).unwrap();
         let lock = find_any_derived_pypi_lock(tmp.path())

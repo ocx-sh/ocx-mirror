@@ -11,7 +11,8 @@ use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
 use crate::command::package::pipeline::plan::{
-    PlanReport, derive_one_pypi_lock, pylock_interpreter_pin, pylock_target_platform, pylock_variants,
+    PlanReport, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin, pylock_target_platform,
+    pylock_variants,
 };
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
@@ -502,7 +503,7 @@ async fn build_pypi_env_tasks(
                 .await
                 .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
             let package = spec.source.pylock_app_name(&spec.name);
-            let output_path = work_dir.join(format!("{package}-{app_version}.pylock.toml"));
+            let output_path = work_dir.join(derived_lock_filename(package, &app_version));
             let lock = derive_one_pypi_lock(spec, &interpreter_path, &app_version, &output_path).await?;
             (lock, app_version)
         }
@@ -1501,7 +1502,7 @@ hashes = { sha256 = "aaaa" }
         let plan_dir = tempdir().unwrap();
         let locks_dir = plan_dir.path().join("locks");
         std::fs::create_dir_all(&locks_dir).unwrap();
-        std::fs::write(locks_dir.join("pycowsay-1.0.0.pylock.toml"), PYPI_DERIVED_LOCK_BODY).unwrap();
+        std::fs::write(locks_dir.join("pylock.pycowsay-1.0.0.toml"), PYPI_DERIVED_LOCK_BODY).unwrap();
 
         let plan = PlanReport {
             schema_version: 2,
@@ -1513,7 +1514,7 @@ hashes = { sha256 = "aaaa" }
                 source_version: "1.0.0".to_string(),
                 variant: None,
                 assets: vec![],
-                pylock: Some("locks/pycowsay-1.0.0.pylock.toml".to_string()),
+                pylock: Some("locks/pylock.pycowsay-1.0.0.toml".to_string()),
             }],
             target: "ocx.sh/pycowsay".to_string(),
             ocx_mirror_rev: None,
@@ -1550,7 +1551,7 @@ hashes = { sha256 = "aaaa" }
         let locks_dir = plan_dir.path().join("locks");
         std::fs::create_dir_all(&locks_dir).unwrap();
         let bad_body = "lock-version = \"1.0\"\n\n[[packages]]\nname = \"pycowsay\"\nversion = \"1.0.0\"\n";
-        std::fs::write(locks_dir.join("pycowsay-1.0.0.pylock.toml"), bad_body).unwrap();
+        std::fs::write(locks_dir.join("pylock.pycowsay-1.0.0.toml"), bad_body).unwrap();
 
         let plan = PlanReport {
             schema_version: 2,
@@ -1562,7 +1563,7 @@ hashes = { sha256 = "aaaa" }
                 source_version: "1.0.0".to_string(),
                 variant: None,
                 assets: vec![],
-                pylock: Some("locks/pycowsay-1.0.0.pylock.toml".to_string()),
+                pylock: Some("locks/pylock.pycowsay-1.0.0.toml".to_string()),
             }],
             target: "ocx.sh/pycowsay".to_string(),
             ocx_mirror_rev: None,
