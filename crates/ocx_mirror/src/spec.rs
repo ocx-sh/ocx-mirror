@@ -205,14 +205,23 @@ impl MirrorSpec {
 
         self.source.validate(&mut errors);
 
-        let is_pylock = matches!(self.source, Source::Pylock { .. });
-        self.validate_assets_or_variants(is_pylock, spec_dir, &mut errors);
+        let is_env = self.source.is_env();
+        self.validate_assets_or_variants(is_env, spec_dir, &mut errors);
 
-        if is_pylock && self.python.is_none() {
-            errors.push("python: required when source.type is 'pylock'".to_string());
+        if is_env && self.python.is_none() {
+            errors.push("python: required when source.type is 'pylock' or 'pypi'".to_string());
         }
         if let Some(python) = &self.python {
             python.validate(&mut errors);
+            // A `pylock` source already resolves its own lock from the
+            // committed file; `python.lock` only configures *derivation* of a
+            // lock, which is meaningless without something to derive it from.
+            if python.lock.is_some() && matches!(self.source, Source::Pylock { .. }) {
+                errors.push(
+                    "python.lock: only supported for source.type 'pypi' (a committed lock is already resolved)"
+                        .to_string(),
+                );
+            }
         }
 
         if let Some(metadata) = &self.metadata {
@@ -306,15 +315,15 @@ impl MirrorSpec {
     ///
     /// `github_release` / `url_index` sources resolve assets via regex
     /// patterns — exactly one of top-level `assets` xor per-variant `assets`
-    /// must be present. `pylock` sources select wheels via variant constraint
-    /// fields instead (`libc`, `min_manylinux`, `min_musllinux`, `abi`); any
-    /// asset pattern on a `pylock` spec is meaningless and rejected outright
-    /// rather than silently ignored.
-    fn validate_assets_or_variants(&self, is_pylock: bool, spec_dir: &Path, errors: &mut Vec<String>) {
-        if is_pylock {
+    /// must be present. `pylock`/`pypi` (env-package) sources select wheels
+    /// via variant constraint fields instead (`libc`, `min_manylinux`,
+    /// `min_musllinux`, `abi`); any asset pattern on such a spec is
+    /// meaningless and rejected outright rather than silently ignored.
+    fn validate_assets_or_variants(&self, is_env: bool, spec_dir: &Path, errors: &mut Vec<String>) {
+        if is_env {
             if self.assets.is_some() {
                 errors.push(
-                    "assets: not supported for source.type 'pylock' (use variant constraint fields instead)"
+                    "assets: not supported for source.type 'pylock'/'pypi' (use variant constraint fields instead)"
                         .to_string(),
                 );
             }
@@ -340,7 +349,7 @@ impl MirrorSpec {
         }
     }
 
-    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, is_pylock: bool, errors: &mut Vec<String>) {
+    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, is_env: bool, errors: &mut Vec<String>) {
         if variants.is_empty() {
             errors.push("variants: must declare at least one variant".to_string());
             return;
@@ -384,11 +393,11 @@ impl MirrorSpec {
             }
 
             // Per-variant asset / constraint validation — source-aware.
-            if is_pylock {
+            if is_env {
                 if v.assets.is_some() {
                     errors.push(variant_error(
                         &v.name,
-                        "cannot specify 'assets' for source.type 'pylock' (use constraint fields instead)",
+                        "cannot specify 'assets' for source.type 'pylock'/'pypi' (use constraint fields instead)",
                     ));
                 }
                 v.validate_python_constraints(errors);
@@ -400,7 +409,7 @@ impl MirrorSpec {
                 if v.has_python_constraints() {
                     errors.push(variant_error(
                         &v.name,
-                        "constraint fields (libc/min_manylinux/min_musllinux/abi) are only supported for source.type 'pylock'",
+                        "constraint fields (libc/min_manylinux/min_musllinux/abi) are only supported for source.type 'pylock'/'pypi'",
                     ));
                 }
             }
@@ -1181,6 +1190,127 @@ assets:
                 .iter()
                 .any(|e| e.contains("assets") && e.contains("not supported for source.type 'pylock'")),
             "Expected asset-patterns-on-pylock error, got: {errors:?}"
+        );
+    }
+
+    // ── pypi source ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pypi_fixture_spec_loads_and_validates() {
+        let spec_path =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml"));
+        let spec = load_spec(&spec_path)
+            .await
+            .expect("pypi fixture spec must load and validate");
+        assert!(matches!(spec.source, Source::Pypi { .. }));
+    }
+
+    #[test]
+    fn validate_reject_pypi_missing_python_block() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("python: required")),
+            "Expected missing python block error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_with_top_level_assets() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+assets:
+  linux/amd64:
+    - "should-not-be-here\\.whl"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("assets") && e.contains("not supported for source.type") && e.contains("pypi")),
+            "Expected asset-patterns-on-pypi error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_bad_index_url() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+  index: "ftp://pypi.example.com"
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - default: true
+    libc: gnu
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("source.index") && e.contains("http(s)")),
+            "Expected bad index URL error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_with_python_lock_field() {
+        // `python.lock` configures lock *derivation*, which only makes sense
+        // for `source.type: pypi` — a `pylock` source already resolves its
+        // own committed lock.
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+  lock: {}
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("python.lock") && e.contains("only supported for source.type 'pypi'")),
+            "Expected python.lock-on-pylock error, got: {errors:?}"
         );
     }
 

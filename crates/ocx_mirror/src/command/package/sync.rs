@@ -346,5 +346,12 @@ pub(crate) async fn list_upstream_versions(
                 .await
                 .map_err(|e| source::pylock::classify_error("failed to read pylock source", e))
         }
+        // Discovery against the PyPI JSON API and per-version lock derivation
+        // land in plan_python_mirror_v2 W1/W2 — an honest placeholder instead
+        // of silently falling through to an empty version list.
+        spec::Source::Pypi { .. } => Err(MirrorError::ExecutionFailed(vec![
+            "source.type 'pypi': discovery and lock derivation not implemented yet (plan_python_mirror_v2 W1/W2)"
+                .to_string(),
+        ])),
     }
 }

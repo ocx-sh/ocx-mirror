@@ -345,17 +345,18 @@ fn render_workflow(spec: &MirrorSpec, spec_file: &str, workflow_file: &str) -> S
         .map(|id| format!("\n          OCX_MIRROR_DISCORD_USER_ID: \"{id}\""))
         .unwrap_or_default();
 
-    // pylock sources produce env packages (multi-layer + composed metadata),
-    // not per-platform archive bundles, so the prepare-job artifact gathering
-    // and the test-job package target differ. Everything else in the workflow
-    // is source-agnostic. Archive/binary output stays byte-identical.
-    let is_pylock = matches!(spec.source, spec::Source::Pylock { .. });
+    // Env-package sources (`pylock`, `pypi`) produce env packages (multi-layer
+    // + composed metadata), not per-platform archive bundles, so the
+    // prepare-job artifact gathering and the test-job package target differ.
+    // Everything else in the workflow is source-agnostic. Archive/binary
+    // output stays byte-identical.
+    let is_env = spec.source.is_env();
 
     let matrix = build_matrix(spec);
     let matrix_entries = render_matrix_entries(&matrix);
-    let prepare_flatten = prepare_flatten_script(is_pylock);
-    let test_target_resolve = test_target_resolve_script(is_pylock);
-    let test_run_steps = render_test_run_steps(&matrix, is_pylock);
+    let prepare_flatten = prepare_flatten_script(is_env);
+    let test_target_resolve = test_target_resolve_script(is_env);
+    let test_run_steps = render_test_run_steps(&matrix, is_env);
     let target_identifier = format!("{}/{}", spec.target.registry, spec.target.repository);
 
     WORKFLOW_TEMPLATE

@@ -60,11 +60,12 @@ impl Prepare {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".ocx-mirror"));
 
-        // pylock sources take a parallel env-prepare path: wheels are
-        // re-selected locally from the committed lock (deterministic, no source
-        // re-crawl — issue #160) and composed into env packages. The
+        // Env-package sources (`pylock`, `pypi`) take a parallel env-prepare
+        // path: wheels are re-selected from a lock (committed for `pylock`,
+        // derived in-pipeline for `pypi` — not yet implemented, see
+        // `build_env_tasks`) and composed into env packages. The
         // archive/binary path below is untouched.
-        if matches!(spec.source, spec::Source::Pylock { .. }) {
+        if spec.source.is_env() {
             return self.execute_pylock(&spec, &spec_dir, &work_dir).await;
         }
 
@@ -230,8 +231,18 @@ async fn build_env_tasks(
     interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
-    let spec::Source::Pylock { path, .. } = &spec.source else {
-        return Ok(Vec::new());
+    let path = match &spec.source {
+        spec::Source::Pylock { path, .. } => path,
+        // Discovery against the PyPI JSON API and per-version lock derivation
+        // land in plan_python_mirror_v2 W1/W2 — an honest placeholder instead
+        // of silently returning no tasks.
+        spec::Source::Pypi { .. } => {
+            return Err(MirrorError::ExecutionFailed(vec![
+                "source.type 'pypi': discovery and lock derivation not implemented yet (plan_python_mirror_v2 W1/W2)"
+                    .to_string(),
+            ]));
+        }
+        _ => return Ok(Vec::new()),
     };
 
     let lock = crate::source::pylock::load(spec_dir, path)
@@ -999,6 +1010,7 @@ build_timestamp: none
                 asset_entry("linux/amd64", "tool-linux-amd64"),
                 asset_entry("darwin/arm64", "tool-darwin-arm64"),
             ],
+            pylock: None,
         }]);
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap();
@@ -1037,6 +1049,7 @@ build_timestamp: none
             source_version: String::new(),
             variant: None,
             assets: vec![],
+            pylock: None,
         }]);
 
         let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err();
@@ -1058,6 +1071,7 @@ build_timestamp: none
             source_version: "1.2.3".to_string(),
             variant: Some("slim".to_string()),
             assets: vec![asset_entry("linux/amd64", "tool-linux-amd64")],
+            pylock: None,
         }]);
 
         let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "slim-1.2.3").unwrap_err();
@@ -1083,6 +1097,7 @@ build_timestamp: none
                 // Below windows/arm64's min_version (0.11.7) → must be dropped.
                 asset_entry("windows/arm64", "tool-windows-arm64"),
             ],
+            pylock: None,
         }]);
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();

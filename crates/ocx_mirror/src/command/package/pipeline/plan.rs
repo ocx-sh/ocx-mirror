@@ -79,6 +79,10 @@ pub struct PlanVersionEntry {
     /// `prepare --plan` never re-runs the source generator (issue #160).
     #[serde(default)]
     pub assets: Vec<PlanAssetEntry>,
+    /// Relative path (from plan.json's directory) of the derived pylock this entry
+    /// was resolved from. Set only for `source.type: pypi`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pylock: Option<String>,
 }
 
 /// Structured output of `ocx-mirror package pipeline plan`.
@@ -211,18 +215,32 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
     // platform and errors (`AmbiguousAsset`) on 2+ — structurally incompatible
     // with wheel sets (D1, plan_pylock_mirror.md). The branch builds its own
     // `PlanVersionEntry` list directly rather than joining the regex path below.
-    if let Source::Pylock { path, .. } = &spec.source {
-        let versions =
-            build_pylock_plan_entries(spec, spec_dir, path, &upstream_versions, &all_tags, &version_map).await?;
-        let target = format!("{}/{}", spec.target.registry, spec.target.repository);
-        let ocx_mirror_rev = spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone());
-        return Ok(PlanReport {
-            schema_version: 2,
-            has_new: !versions.is_empty(),
-            versions,
-            target,
-            ocx_mirror_rev,
-        });
+    match &spec.source {
+        Source::Pylock { path, .. } => {
+            let versions =
+                build_pylock_plan_entries(spec, spec_dir, path, &upstream_versions, &all_tags, &version_map).await?;
+            let target = format!("{}/{}", spec.target.registry, spec.target.repository);
+            let ocx_mirror_rev = spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone());
+            return Ok(PlanReport {
+                schema_version: 2,
+                has_new: !versions.is_empty(),
+                versions,
+                target,
+                ocx_mirror_rev,
+            });
+        }
+        // Discovery against the PyPI JSON API and per-version lock derivation
+        // land in plan_python_mirror_v2 W1/W2 — an honest placeholder instead
+        // of silently falling through to the regex asset-resolution path
+        // below, which a `pypi` spec's `variants` (constraint fields, no
+        // `assets`) cannot satisfy anyway.
+        Source::Pypi { .. } => {
+            return Err(MirrorError::ExecutionFailed(vec![
+                "source.type 'pypi': discovery and lock derivation not implemented yet (plan_python_mirror_v2 W1/W2)"
+                    .to_string(),
+            ]));
+        }
+        _ => {}
     }
 
     // Resolve assets per effective variant — same logic as sync.rs.
@@ -449,6 +467,7 @@ fn build_env_plan_entries(
             source_version: app_version.to_string(),
             variant: variant_name.map(str::to_string),
             assets,
+            pylock: None,
         });
     }
 
@@ -575,6 +594,7 @@ fn build_version_entries(
                 source_version: rv.version.clone(),
                 variant: rv.variant.clone(),
                 assets,
+                pylock: None,
             }
         })
         .collect()
@@ -634,6 +654,7 @@ mod tests {
             source_version: version.to_string(),
             variant: None,
             assets: vec![],
+            pylock: None,
         }
     }
 
@@ -802,6 +823,18 @@ mod tests {
         .unwrap();
         let parsed: PlanReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.versions[0].assets[0].asset_name, "cpython-slim.tar.gz");
+    }
+
+    #[test]
+    fn plan_version_entry_omits_pylock_key_when_not_pypi_derived() {
+        // `pylock` is set only for `source.type: pypi` entries (the derived
+        // lock a version was resolved from); every other source type must
+        // leave it absent from the JSON entirely, not `null`.
+        let value = serde_json::to_value(entry("3.29.0", &["linux/amd64"], PlanVersionKind::New)).unwrap();
+        assert!(
+            value.as_object().unwrap().get("pylock").is_none(),
+            "expected no 'pylock' key, got: {value}"
+        );
     }
 
     #[test]

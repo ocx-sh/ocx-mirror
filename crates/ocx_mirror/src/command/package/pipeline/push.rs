@@ -583,6 +583,11 @@ fn compute_source_url(source: &spec::Source) -> Option<String> {
         spec::Source::GithubRelease { owner, repo, .. } => Some(format!("https://github.com/{owner}/{repo}")),
         spec::Source::UrlIndex(_) => None,
         spec::Source::Pylock { .. } => None,
+        // ponytail: a PyPI project page (https://pypi.org/project/<pkg>/) is
+        // derivable, but resolving the effective package name needs the
+        // mirror's `name` as a fallback, which this function doesn't receive.
+        // Add once push actually handles `pypi` mirrors.
+        spec::Source::Pypi { .. } => None,
     }
 }
 
