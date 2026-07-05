@@ -84,9 +84,10 @@ Both libc families are dynamic-link families with versioned floors
 (PEP 600: glibc ≥ X.Y; PEP 656: musl ≥ X.Y — musllinux is NOT static
 musl). Floors are per-family (`min_manylinux` / `min_musllinux`).
 Asymmetry note: uv's `--python-platform` offers explicit manylinux floors
-but only a floorless `*-unknown-linux-musl` value — v2 lock derivation for
-musl inherits uv's default floor; our own `select` honors `min_musllinux`
-exactly. The musl env additionally requires the musl-linked
+but only a floorless `*-unknown-linux-musl` value — moot for lock
+derivation (shipped derivation is universal, never platform-targeted; see
+"Now implemented" under Mirror integration); our own `select` honors
+`min_musllinux` exactly. The musl env additionally requires the musl-linked
 python-build-standalone interpreter variant (dynamic on both sides).
 
 Each variant × platform key = one env composition = one selection run.
@@ -272,31 +273,31 @@ no lock (verified — F9); derive one per target via
 (uv as build-time tool; reproducible via upload-time cutoff), persist the
 generated pylock in the mirror repo. Not in v1.
 
-**Now implemented** (`adr_pypi_lock_derivation.md`): derivation runs once per
-version in the PLAN phase (not per-leg), against the maintainer's
-`python.interpreter_package` materialized via `ocx package pull` — the
-`--python-platform`/per-target derivation sketched above was superseded by a
-single universal-lock derivation shared by every leg (Decision A,
-`plan_python_mirror_v2`); `--exclude-newer` remains future work.
-
-Lock-derivation platform mapping (verified against `uv pip compile
---python-platform` possible values, uv 0.11.19): variant constraints render
-to **explicit** values — `{libc:gnu, min_manylinux:2_28, arch:amd64}` →
-`x86_64-manylinux_2_28`; `{libc:musl}` → `x86_64-unknown-linux-musl`;
-darwin/windows → bare triples. Never emit bare `x86_64-unknown-linux-gnu`
-(that delegates the glibc floor to uv's default assumption instead of the
-spec's). `--python-version` comes from the spec's `python:` block. Same
-fixed-table discipline as L2: mapping lives in code, floor policy in spec.
+**Now implemented** (`adr_pypi_lock_derivation.md`, cc50eb4): derivation runs
+once per version in the PLAN phase (not per-leg, not per-target). The
+`UvPython` selector (`lock_derive.rs`), resolved once per run by
+`plan.rs::resolve_uv_python`, has two modes: the default
+(`python.lock.universal: true`) derives with `--python-version X.Y` and **no
+interpreter on disk at all** — uv's interpreter inspection cannot classify a
+fully-static build ("Could not detect a glibc or a musl libc", live W4), so
+the interpreter-less path is the only one compatible with the static corpus
+interpreter; only `universal: false` materializes the maintainer's exact
+`python.interpreter_package` via `ocx package pull` for a `--python <path>`
+resolution (structurally incompatible with fully-static interpreters, same
+inspection reason). The `--python-platform` per-target derivation sketched
+above — and an earlier per-variant platform-value mapping (`{libc:musl}` →
+`x86_64-unknown-linux-musl` etc.) — were never shipped; universal locks made
+them unnecessary. `--exclude-newer` remains future work.
 
 **Toolchain bootstrap**: the lock-derivation step (and acceptance CI) gets
-uv — and the pinned interpreter — from OCX itself: uv is already published
-as an OCX package; the python-build-standalone mirror spec (open question
-3) provides the interpreter package. Generated workflows already bootstrap
-via setup-ocx + `ocx run`; the python feature adds pinned uv/python deps to
-that toolchain rather than a second install mechanism. Verify at plan time
-whether `uv pip compile` with explicit `--python-version`/`--python-platform`
-resolves without a host interpreter — moot operationally, since the
-OCX-bootstrapped interpreter is present either way.
+uv — and, for `universal: false`, the pinned interpreter — from OCX itself:
+uv is already published as an OCX package; the python-build-standalone
+mirror spec (open question 3) provides the interpreter package. Generated
+workflows already bootstrap via setup-ocx + `ocx run`; the python feature
+adds pinned uv/python deps to that toolchain rather than a second install
+mechanism. (Resolved: universal `uv pip compile --python-version X.Y`
+derivation runs with no host interpreter present — that is the shipped
+default path.)
 
 ### Wheel-layer push flow (cross-repo mount, layer reuse)
 

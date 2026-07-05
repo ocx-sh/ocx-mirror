@@ -72,13 +72,15 @@ silently overridden by a mirror-owned interpreter.
 
 `pipeline plan` derives the PEP 751 lock for each newly discovered
 `(package, version)` exactly once, using `uv pip compile --format pylock.toml`
-against the interpreter materialized from the spec's `python.interpreter_package`,
-and ships the result to every PREPARE/PUSH leg alongside `plan.json`.
+against the Python the spec's `python:` block selects (interpreter-less
+`--python-version` by default; the materialized `python.interpreter_package`
+for `universal: false` — see Technical Details), and ships the result to every
+PREPARE/PUSH leg alongside `plan.json`.
 
 | Pros | Cons |
 |------|------|
 | One `uv` run per version — every platform/variant leg selects from the identical resolved lock, no cross-leg drift | PLAN phase is now non-trivially slower for a `pypi` source (a network resolve per newly discovered version) |
-| Preserves the existing PLAN → (asset URLs resolved) → PREPARE contract (issue #160: one crawl per run) | Requires the interpreter package to already be pullable at PLAN time |
+| Preserves the existing PLAN → (asset URLs resolved) → PREPARE contract (issue #160: one crawl per run) | Requires the interpreter package to be pullable at PLAN time — only when `universal: false`; the default derives interpreter-less (see Technical Details) |
 | Derived lock is an inspectable, retained artifact, not a black box | |
 
 ### Option 2: Derive per-leg, inside PREPARE (rejected)
@@ -116,16 +118,18 @@ version's lock exactly once, in-process, before any PREPARE leg starts
 - One resolver run per version, shared identically by every leg — cross-leg
   drift is structurally impossible, not just avoided by care.
 - The maintainer's `python.interpreter_package` is the *only* interpreter the
-  derivation ever sees — no mirror-owned interpreter, ever.
+  derivation ever sees — no mirror-owned interpreter, ever (and the default
+  universal mode sees none at all, `UvPython::Version`).
 - The derived lock is a retained, inspectable artifact (`derived-locks`, 90-day
   retention) — a CI wheel-selection failure is diagnosable after the run, not
   just from live logs.
 
 **Negative:**
 
-- PLAN-phase runtime for a `pypi` source now includes a real `uv` resolve
-  (network + `ocx package pull` for the interpreter) per newly discovered
-  version — previously PLAN was pure metadata/API work for every source type.
+- PLAN-phase runtime for a `pypi` source now includes a real `uv` resolve per
+  newly discovered version (plus an `ocx package pull` for the interpreter when
+  `universal: false`) — previously PLAN was pure metadata/API work for every
+  source type.
 - A derivation failure blocks every leg of that version (single point of
   failure) — accepted, because a leg silently proceeding on a *different* lock
   would be the strictly worse outcome (drift).
@@ -138,24 +142,39 @@ version's lock exactly once, in-process, before any PREPARE leg starts
 
 ## Technical Details
 
-### Interpreter: the maintainer's `python.interpreter_package`, materialized via `ocx package pull`
+### Python selector: `UvPython::{Version, Interpreter}` — universal derives interpreter-less
 
-Derivation never invents or substitutes an interpreter. `materialize_interpreter`
-(`lock_derive.rs`) shells `ocx --format json package pull <python.interpreter_package>`
-— the *exact* package the maintainer configured in the spec's `python:` block —
-and probes the pulled root for a `bin/python3` executable (`find_python3`,
-depth-first, symlink-safe) so `uv pip compile --python <path>` gets a concrete,
-runnable interpreter rather than a digest/tag reference it cannot invoke. This is
-the mirror-imposes-nothing principle applied to derivation specifically: the
-mirror provisions no interpreter of its own for resolution; it resolves against
-the one the maintainer is going to publish against anyway.
+Which Python `uv` resolves for is a two-mode selector
+(`lock_derive.rs::UvPython`), resolved **once per plan/prepare run** by
+`plan.rs::resolve_uv_python` and shared by every candidate version:
+
+| Mode | Spec trigger | `uv` flag | Interpreter on disk |
+|---|---|---|---|
+| `Version(X.Y)` (**default**) | `python.lock.universal: true`, or `lock:` omitted | `--python-version X.Y` (from `python.version`) | **None** — zero `ocx package pull` in the plan phase |
+| `Interpreter(path)` | `python.lock.universal: false` | `--python <path>` | The maintainer's exact `python.interpreter_package`, materialized via `ocx --format json package pull` (`materialize_interpreter` probes the pulled root for a `bin/python3` executable — a digest/tag reference alone is nothing `uv` can invoke) |
+
+The interpreter-less default is not just a cost win (no registry pull in PLAN):
+uv's interpreter inspection **cannot classify a fully-static python build** —
+it fails with "Could not detect a glibc or a musl libc" (found live in the W4
+pilot against the corpus's static interpreter, commit cc50eb4). Universal
+resolution with `--python-version` never inspects an interpreter, so it is the
+only derivation mode compatible with a fully-static
+`python.interpreter_package`. `universal: false` keeps the exact-interpreter
+resolution for maintainers who need it — and is documented as **structurally
+incompatible with fully-static interpreters** for the same inspection reason.
+
+Maintainer sovereignty holds in both modes: when derivation touches an
+interpreter at all (`universal: false`), it is the exact package the maintainer
+configured in the spec's `python:` block; the mirror never provisions an
+interpreter of its own for resolution.
 
 ### `uv pip compile --format pylock.toml`, once per version
 
 `derive_pylock` shells
-`uv pip compile <package>==<version> --format pylock.toml --python <materialized interpreter>`
-(plus `LockOptions`: `universal`, `extras`, `exclude`, `timeout_seconds` —
-`python.lock` in the spec), writes the raw output, then:
+`uv pip compile <package>==<version> --format pylock.toml` with the `UvPython`
+selector flag above (`--python-version X.Y` by default, `--python <path>` for
+`universal: false`; plus the remaining `LockOptions`: `extras`, `exclude`,
+`timeout_seconds` — `python.lock` in the spec), writes the raw output, then:
 
 1. **Relaxes `requires-python`** (uv#15995 workaround, below).
 2. **Stamps a provenance header** — a TOML comment block (`package`, `version`,
@@ -292,3 +311,4 @@ semantics into a published name.
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-07-05 | pylock-mirror swarm (w3-adr) | Initial draft — PEP 751 lock derivation decision, corpus interpreter model, persistence tiers |
+| 2026-07-05 | pylock-mirror swarm (w3-adr) | `UvPython` selector split (cc50eb4) — universal (default) derives interpreter-less via `--python-version` (uv inspection cannot classify fully-static builds: "Could not detect a glibc or a musl libc", live W4); `ocx package pull` materialization only for `universal: false`, structurally incompatible with fully-static interpreters |
