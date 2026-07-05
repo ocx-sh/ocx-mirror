@@ -73,6 +73,21 @@ pub struct ExcludedPlatform {
     pub reason: Option<String>,
 }
 
+/// Wheel-layer reuse counters for a version, aggregated across all pushed
+/// platforms: how many layers were cross-repository mounted (reused without
+/// re-upload) vs. freshly uploaded vs. already verified present.
+///
+/// Populated only for env-package (`source.type: pylock`/`pypi`) pushes, from
+/// each leg's `ocx package push` JSON `layers` field
+/// (`pipeline::python_push::EnvPushReport`). Archive mirrors have no
+/// shared-layer concept and stay at the zero default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct LayerReuse {
+    pub mounted: usize,
+    pub uploaded: usize,
+    pub verified: usize,
+}
+
 /// Per-version outcome in the run summary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionSummary {
@@ -92,6 +107,11 @@ pub struct VersionSummary {
     /// version — surfaced as 🔒 rows. Defaulted for backward-compatible reads.
     #[serde(default)]
     pub platforms_excluded: Vec<ExcludedPlatform>,
+    /// Cumulative wheel-layer reuse counters for this version (additive
+    /// field; `#[serde(default)]` so a run-summary.json written before this
+    /// field existed still parses). Zero for archive/binary mirrors.
+    #[serde(default)]
+    pub layer_reuse: LayerReuse,
 }
 
 /// Top-level `run-summary.json` schema (schema_version 1).
@@ -171,6 +191,7 @@ mod tests {
                 ],
                 test_failures: vec![],
                 platforms_excluded: vec![],
+                layer_reuse: LayerReuse::default(),
             }],
             any_red: false,
             any_new_green: true,
@@ -211,6 +232,7 @@ mod tests {
                     message: "arch -x86_64: binary not found".to_string(),
                 }],
                 platforms_excluded: vec![],
+                layer_reuse: LayerReuse::default(),
             }],
             any_red: true,
             any_new_green: true,
@@ -374,6 +396,42 @@ mod tests {
         }"#;
         let parsed: VersionSummary = serde_json::from_str(legacy).unwrap();
         assert!(parsed.platforms_excluded.is_empty());
+    }
+
+    #[test]
+    fn layer_reuse_defaults_to_zero_for_legacy_summaries() {
+        // A run-summary.json written before shared wheel layers landed must
+        // still parse; `layer_reuse` defaults to all-zero counts.
+        let legacy = r#"{
+            "version": "3.7.0",
+            "status": "published",
+            "platforms_pushed": ["linux/amd64"],
+            "platforms_failed": [],
+            "cascade_tags_written": ["3.7.0"],
+            "test_failures": []
+        }"#;
+        let parsed: VersionSummary = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.layer_reuse.mounted, 0);
+        assert_eq!(parsed.layer_reuse.uploaded, 0);
+        assert_eq!(parsed.layer_reuse.verified, 0);
+    }
+
+    #[test]
+    fn layer_reuse_roundtrips_nonzero_counts() {
+        let reuse = LayerReuse {
+            mounted: 4,
+            uploaded: 1,
+            verified: 2,
+        };
+        let value: serde_json::Value = serde_json::to_value(reuse).unwrap();
+        assert_eq!(value["mounted"].as_u64(), Some(4));
+        assert_eq!(value["uploaded"].as_u64(), Some(1));
+        assert_eq!(value["verified"].as_u64(), Some(2));
+
+        let back: LayerReuse = serde_json::from_value(value).unwrap();
+        assert_eq!(back.mounted, 4);
+        assert_eq!(back.uploaded, 1);
+        assert_eq!(back.verified, 2);
     }
 
     #[test]

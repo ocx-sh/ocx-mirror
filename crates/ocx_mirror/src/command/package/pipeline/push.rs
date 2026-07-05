@@ -10,14 +10,18 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
+use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
+use ocx_lib::publisher::Publisher;
 
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
 use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
 use crate::pipeline::python_prepare::EnvManifest;
 use crate::pipeline::python_push;
-use crate::run_summary::{ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary};
+use crate::run_summary::{
+    ExcludedPlatform, LayerReuse, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
+};
 use crate::spec::{self, MirrorSpec, PlatformConfig, Severity};
 
 /// `ocx-mirror package pipeline push` subcommand.
@@ -81,10 +85,12 @@ impl Push {
         // ── Load spec ────────────────────────────────────────────────────────
         let spec = spec::load_spec(&self.spec).await?;
 
-        // pylock sources take a parallel env-push path: env packages (wheel
-        // layers + composed metadata) instead of the archive/binary bundle.
-        // Mirrors `prepare.rs`'s early Pylock dispatch.
-        if matches!(spec.source, spec::Source::Pylock { .. }) {
+        // Env sources (pylock/pypi) take a parallel env-push path: env
+        // packages (wheel layers + composed metadata) instead of the
+        // archive/binary bundle. Mirrors `prepare.rs`'s `is_env()` dispatch —
+        // prepare writes env-manifest.json (never bundle-*.tar.xz) for both,
+        // so the archive loop below would silently find nothing.
+        if spec.source.is_env() {
             return self.execute_pylock_push(&spec).await;
         }
 
@@ -254,6 +260,8 @@ impl Push {
                 cascade_tags_written: cascade_tags,
                 test_failures: all_test_failures,
                 platforms_excluded: collect_excluded_platforms(&spec, version),
+                // Archive/binary pushes have no shared-layer concept.
+                layer_reuse: LayerReuse::default(),
             });
         }
 
@@ -333,12 +341,15 @@ impl Push {
     /// go/no-go per `(version, platform)` with the same `evaluate_junit`
     /// AND-across-containers logic as the archive loop, and pushes each
     /// green leg via `ocx package push` with the ordered wheel layers as
-    /// positional args and the composed `metadata.json` via `-m`.
+    /// positional args (each carrying a `:from=<wheel_repository>` mount
+    /// tail) and the composed `metadata.json` via `-m`.
     ///
-    /// Stage 2 (deferred): wheel-repo upload-if-missing (content-addressed
-    /// layer reuse across packages) is not implemented — every push
-    /// re-uploads its full layer set. The env package is self-contained
-    /// either way, so `ocx package test` works without it.
+    /// Shared wheel layers (Decision D): before each leg's push,
+    /// `python_push::register_wheel_layers` registers any not-yet-published
+    /// wheel with the target registry, so the leg's own push can
+    /// cross-repository mount it instead of re-uploading. Registration
+    /// failures are warn-only; a miss falls back to a full upload, so the
+    /// push always succeeds either way.
     ///
     /// W3 (deferred): named-default-variant bare-tag aliasing (a second push
     /// under the unprefixed tag) is not implemented — the current corpus
@@ -375,6 +386,14 @@ impl Push {
 
         let mut version_summaries: Vec<VersionSummary> = Vec::new();
 
+        // Read-only registry access for the wheel-registration tag-exists
+        // check (Decision D, shared wheel layers). `registered_wheels` dedupes
+        // `wheel_repository:wheel_sha256` pairs across the whole run so a
+        // wheel shared by multiple legs is checked/pushed at most once.
+        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let publisher = Publisher::new(client);
+        let mut registered_wheels: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         for manifest in &manifests {
             let version = &manifest.version;
 
@@ -391,6 +410,7 @@ impl Push {
             let mut all_test_failures: Vec<TestFailure> = Vec::new();
             let mut cascade_tags: Vec<String> = Vec::new();
             let mut all_skipped_existing = true;
+            let mut layer_reuse = LayerReuse::default();
 
             for env_entry in &sorted_envs {
                 let platform_str = &env_entry.platform;
@@ -424,14 +444,25 @@ impl Push {
                         // (e.g. pycowsay's `0.0.0.2`) is pushed as the primary
                         // tag only, without cascade.
                         let cascade = Version::parse(version).is_some();
-                        let layer_paths: Vec<PathBuf> =
-                            env_entry.layers.iter().map(|layer| layer.path.clone()).collect();
+
+                        // Register any not-yet-published wheel layers so this
+                        // leg's push can `:from=` mount them instead of
+                        // re-uploading (Decision D). Failures are warn-only
+                        // inside `register_wheel_layers` — never abort here.
+                        python_push::register_wheel_layers(
+                            &publisher,
+                            &spec.target.registry,
+                            platform_str,
+                            &env_entry.layers,
+                            &mut registered_wheels,
+                        )
+                        .await;
 
                         let push_result = python_push::invoke_env_push(
                             platform_str,
                             &target_ref,
                             &env_entry.metadata_path,
-                            &layer_paths,
+                            &env_entry.layers,
                             cascade,
                         )
                         .await;
@@ -443,6 +474,9 @@ impl Push {
                                     // Don't flip all_skipped_existing to false
                                 } else {
                                     all_skipped_existing = false;
+                                    layer_reuse.mounted += report.layers.mounted;
+                                    layer_reuse.uploaded += report.layers.uploaded;
+                                    layer_reuse.verified += report.layers.verified;
                                     platforms_pushed.push(platform_str.clone());
                                     cascade_tags.extend(report.cascade_tags_written);
                                 }
@@ -493,6 +527,7 @@ impl Push {
                 cascade_tags_written: cascade_tags,
                 test_failures: all_test_failures,
                 platforms_excluded: collect_excluded_platforms(spec, version),
+                layer_reuse,
             });
         }
 
@@ -583,6 +618,11 @@ fn compute_source_url(source: &spec::Source) -> Option<String> {
         spec::Source::GithubRelease { owner, repo, .. } => Some(format!("https://github.com/{owner}/{repo}")),
         spec::Source::UrlIndex(_) => None,
         spec::Source::Pylock { .. } => None,
+        // ponytail: a PyPI project page (https://pypi.org/project/<pkg>/) is
+        // derivable, but resolving the effective package name needs the
+        // mirror's `name` as a fallback, which this function doesn't receive.
+        // Add once push actually handles `pypi` mirrors.
+        spec::Source::Pypi { .. } => None,
     }
 }
 
@@ -675,7 +715,15 @@ fn container_ids_from_config(config: &PlatformConfig) -> Vec<String> {
 /// (which can arise from registry paths containing `/`) are collapsed to one.
 ///
 /// e.g. `ubuntu:24.04` → `ubuntu_24_04`, `alpine:3.20` → `alpine_3_20`.
-fn image_to_container_id(image: &str) -> String {
+///
+/// This is the CANONICAL container-id slug rule: the workflow renderer
+/// (`generate/ci.rs::build_matrix`) calls it for the matrix `container_id`
+/// values that name the uploaded `junit-{V}-{slug}-{container_id}.xml` files,
+/// and the push job's junit lookup (above) rebuilds the same ids from the
+/// spec. Two independently written rules here previously disagreed on `.`
+/// (renderer kept it, lookup replaced it), redding every dotted-tag container
+/// leg (e.g. `alpine:3.20`) with `missing junit for container alpine_3_20`.
+pub(crate) fn image_to_container_id(image: &str) -> String {
     image
         .replace([':', '/', '.'], "_")
         // Collapse consecutive underscores (e.g. "ghcr.io/org/img" → "ghcr_io_org_img"
@@ -2188,5 +2236,81 @@ platforms:
         for f in failures {
             assert_eq!(f["reason"], serde_json::json!("push_error"));
         }
+    }
+
+    /// Regression: a `source.type: pypi` spec must dispatch to the env-push
+    /// path exactly like `pylock`. The buggy dispatch matched only
+    /// `Source::Pylock`, so pypi fell through to the archive loop, found no
+    /// `bundle-*.tar.xz` (prepare writes env-manifest.json for env sources),
+    /// and silently succeeded with an empty summary.
+    #[test]
+    fn execute_routes_pypi_source_through_env_push() {
+        use crate::pipeline::python_prepare::{EnvEntry, EnvLayer, EnvManifest};
+
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "1.0.0";
+        let version_dir = bundles_dir.path().join(version);
+        std::fs::create_dir_all(&version_dir).unwrap();
+
+        let manifest = EnvManifest {
+            version: version.to_string(),
+            envs: vec![EnvEntry {
+                platform_slug: "linux_amd64".to_string(),
+                platform: "linux/amd64".to_string(),
+                variant: None,
+                metadata_path: version_dir.join("linux_amd64-metadata.json"),
+                layers: vec![EnvLayer {
+                    wheel_repository: "pip-packages/example.com/pycowsay/none-any".to_string(),
+                    digest: format!("sha256:{}", "0".repeat(64)),
+                    path: version_dir.join("pycowsay.tar.zst"),
+                    package_name: "pycowsay".to_string(),
+                    wheel_sha256: "1".repeat(64),
+                }],
+            }],
+        };
+        std::fs::write(
+            version_dir.join("env-manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+
+        let spec_path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml")).to_path_buf();
+
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        // Env path taken → green JUNIT reaches invoke_env_push, which fails
+        // in the test environment (no `ocx` on PATH) → push_error → any_red
+        // → ExecutionFailed. The archive-path bug instead returned Ok(())
+        // with an empty versions array (no bundle files to enumerate).
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "pypi source must take the env-push path (push_error expected), got {result:?}",
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let versions = summary["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "env manifest version must be processed");
+        assert_eq!(
+            versions[0]["platforms_failed"][0]["reason"],
+            serde_json::json!("push_error")
+        );
     }
 }

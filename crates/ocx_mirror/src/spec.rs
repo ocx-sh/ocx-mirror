@@ -28,7 +28,7 @@ pub use notify_config::{DiscordConfig, NotifyConfig};
 pub use ocx_mirror_config::OcxMirrorConfig;
 #[allow(unused_imports)]
 pub use platforms_config::{ContainerConfig, ExcludeEntry, PlatformConfig, Severity};
-pub use python_config::PythonConfig;
+pub use python_config::{LockOptions, PythonConfig};
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
@@ -205,18 +205,29 @@ impl MirrorSpec {
 
         self.source.validate(&mut errors);
 
-        let is_pylock = matches!(self.source, Source::Pylock { .. });
-        self.validate_assets_or_variants(is_pylock, spec_dir, &mut errors);
+        let is_env = self.source.is_env();
+        self.validate_assets_or_variants(is_env, spec_dir, &mut errors);
 
-        if is_pylock && self.python.is_none() {
-            errors.push("python: required when source.type is 'pylock'".to_string());
+        if is_env && self.python.is_none() {
+            errors.push("python: required when source.type is 'pylock' or 'pypi'".to_string());
         }
         if let Some(python) = &self.python {
             python.validate(&mut errors);
+            // A `pylock` source already resolves its own lock from the
+            // committed file; `python.lock` only configures *derivation* of a
+            // lock, which is meaningless without something to derive it from.
+            if python.lock.is_some() && matches!(self.source, Source::Pylock { .. }) {
+                errors.push(
+                    "python.lock: only supported for source.type 'pypi' (a committed lock is already resolved)"
+                        .to_string(),
+                );
+            }
         }
 
-        if let Some(metadata) = &self.metadata {
-            metadata.validate(spec_dir, &mut errors);
+        match (&self.metadata, self.source.env_type_name()) {
+            (Some(_), Some(source_type)) => errors.push(metadata_not_supported_error(source_type)),
+            (Some(metadata), None) => metadata.validate(spec_dir, &mut errors),
+            (None, _) => {}
         }
 
         if let Some(versions) = &self.versions {
@@ -306,15 +317,15 @@ impl MirrorSpec {
     ///
     /// `github_release` / `url_index` sources resolve assets via regex
     /// patterns — exactly one of top-level `assets` xor per-variant `assets`
-    /// must be present. `pylock` sources select wheels via variant constraint
-    /// fields instead (`libc`, `min_manylinux`, `min_musllinux`, `abi`); any
-    /// asset pattern on a `pylock` spec is meaningless and rejected outright
-    /// rather than silently ignored.
-    fn validate_assets_or_variants(&self, is_pylock: bool, spec_dir: &Path, errors: &mut Vec<String>) {
-        if is_pylock {
+    /// must be present. `pylock`/`pypi` (env-package) sources select wheels
+    /// via variant constraint fields instead (`libc`, `min_manylinux`,
+    /// `min_musllinux`, `abi`); any asset pattern on such a spec is
+    /// meaningless and rejected outright rather than silently ignored.
+    fn validate_assets_or_variants(&self, is_env: bool, spec_dir: &Path, errors: &mut Vec<String>) {
+        if is_env {
             if self.assets.is_some() {
                 errors.push(
-                    "assets: not supported for source.type 'pylock' (use variant constraint fields instead)"
+                    "assets: not supported for source.type 'pylock'/'pypi' (use variant constraint fields instead)"
                         .to_string(),
                 );
             }
@@ -340,7 +351,7 @@ impl MirrorSpec {
         }
     }
 
-    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, is_pylock: bool, errors: &mut Vec<String>) {
+    fn validate_variants(&self, variants: &[VariantSpec], spec_dir: &Path, is_env: bool, errors: &mut Vec<String>) {
         if variants.is_empty() {
             errors.push("variants: must declare at least one variant".to_string());
             return;
@@ -384,11 +395,11 @@ impl MirrorSpec {
             }
 
             // Per-variant asset / constraint validation — source-aware.
-            if is_pylock {
+            if is_env {
                 if v.assets.is_some() {
                     errors.push(variant_error(
                         &v.name,
-                        "cannot specify 'assets' for source.type 'pylock' (use constraint fields instead)",
+                        "cannot specify 'assets' for source.type 'pylock'/'pypi' (use constraint fields instead)",
                     ));
                 }
                 v.validate_python_constraints(errors);
@@ -400,14 +411,19 @@ impl MirrorSpec {
                 if v.has_python_constraints() {
                     errors.push(variant_error(
                         &v.name,
-                        "constraint fields (libc/min_manylinux/min_musllinux/abi) are only supported for source.type 'pylock'",
+                        "constraint fields (libc/min_manylinux/min_musllinux/abi/wheel_priority) are only supported for source.type 'pylock'/'pypi'",
                     ));
                 }
             }
 
-            // Per-variant metadata validation
-            if let Some(metadata) = &v.metadata {
-                metadata.validate(spec_dir, errors);
+            // Per-variant metadata validation — source-aware (same rejection
+            // as the top-level `metadata:` check above).
+            match (&v.metadata, self.source.env_type_name()) {
+                (Some(_), Some(source_type)) => {
+                    errors.push(variant_error(&v.name, &metadata_not_supported_error(source_type)));
+                }
+                (Some(metadata), None) => metadata.validate(spec_dir, errors),
+                (None, _) => {}
             }
         }
     }
@@ -454,6 +470,16 @@ fn variant_error(name: &Option<String>, message: &str) -> String {
         Some(name) => format!("variants: variant '{name}' {message}"),
         None => format!("variants: unnamed variant {message}"),
     }
+}
+
+/// The `metadata:` rejection message for an env source (`pylock`/`pypi`):
+/// env metadata is composed from the resolved wheel/lock, so a hand-authored
+/// `metadata.json` has nothing to attach to. Shared by the top-level and
+/// per-variant checks in [`MirrorSpec::validate`]/[`MirrorSpec::validate_variants`].
+fn metadata_not_supported_error(source_type: &str) -> String {
+    format!(
+        "metadata: not supported for source.type '{source_type}' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"
+    )
 }
 
 // ── Pipeline field validators ────────────────────────────────────────────────
@@ -1185,6 +1211,243 @@ assets:
     }
 
     #[test]
+    fn validate_reject_pylock_with_top_level_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+metadata:
+  default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "metadata: not supported for source.type 'pylock' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact metadata-not-supported-for-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_with_top_level_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+metadata:
+  default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "metadata: not supported for source.type 'pypi' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact metadata-not-supported-for-pypi error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_variant_with_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    metadata:
+      default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "variants: variant 'default' metadata: not supported for source.type 'pylock' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact per-variant metadata-not-supported-for-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_variant_with_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - default: true
+    libc: gnu
+    metadata:
+      default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "variants: unnamed variant metadata: not supported for source.type 'pypi' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact per-variant metadata-not-supported-for-pypi error, got: {errors:?}"
+        );
+    }
+
+    // ── pypi source ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pypi_fixture_spec_loads_and_validates() {
+        let spec_path =
+            std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml"));
+        let spec = load_spec(&spec_path)
+            .await
+            .expect("pypi fixture spec must load and validate");
+        assert!(matches!(spec.source, Source::Pypi { .. }));
+    }
+
+    #[test]
+    fn validate_reject_pypi_missing_python_block() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("python: required")),
+            "Expected missing python block error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_with_top_level_assets() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+assets:
+  linux/amd64:
+    - "should-not-be-here\\.whl"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("assets") && e.contains("not supported for source.type") && e.contains("pypi")),
+            "Expected asset-patterns-on-pypi error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_bad_index_url() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+  index: "ftp://pypi.example.com"
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - default: true
+    libc: gnu
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("source.index") && e.contains("http(s)")),
+            "Expected bad index URL error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_with_python_lock_field() {
+        // `python.lock` configures lock *derivation*, which only makes sense
+        // for `source.type: pypi` — a `pylock` source already resolves its
+        // own committed lock.
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+  lock: {}
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("python.lock") && e.contains("only supported for source.type 'pypi'")),
+            "Expected python.lock-on-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
     fn validate_reject_pylock_variant_with_assets() {
         let yaml = r#"
 name: acme-app
@@ -1274,6 +1537,104 @@ variants:
                 .iter()
                 .any(|e| e.contains("variant 'debug'") && e.contains("must specify 'assets'")),
             "Expected missing-assets error for non-pylock variant, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn parse_and_validate_pylock_variant_with_wheel_priority() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    wheel_priority: ["any"]
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(errors.is_empty(), "valid wheel_priority should validate: {errors:?}");
+        assert_eq!(
+            spec.variants.as_ref().unwrap()[0].wheel_priority,
+            Some(vec!["any".to_string()])
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_wheel_priority_bad_format_and_dup() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    wheel_priority: ["Any", "musllinux", "musllinux"]
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e.contains("wheel_priority entry 'Any'")),
+            "Expected bad-format error, got: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("wheel_priority has duplicate entry 'musllinux'")),
+            "Expected duplicate error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_non_pylock_variant_with_wheel_priority() {
+        let yaml = r#"
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    wheel_priority: ["any"]
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("variant 'debug'") && e.contains("only supported for source.type 'pylock'")),
+            "Expected wheel_priority-on-non-pylock error, got: {errors:?}"
         );
     }
 

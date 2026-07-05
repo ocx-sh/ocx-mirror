@@ -36,19 +36,54 @@ pub enum Source {
         #[serde(default)]
         package: Option<String>,
     },
+    /// PyPI-discovered Python application: versions come from the index's JSON API
+    /// and a PEP 751 lock is derived in-pipeline per version (see pipeline plan).
+    Pypi {
+        /// PEP 503 name of the PyPI package. Defaults to the mirror's `name`.
+        #[serde(default)]
+        package: Option<String>,
+        /// Warehouse-compatible index base URL (JSON API at `{index}/pypi/<pkg>/json`).
+        /// Default: https://pypi.org
+        #[serde(default)]
+        index: Option<String>,
+    },
 }
 
 impl Source {
-    /// The PEP 503 application-package name a `pylock` source resolves: the
-    /// source's `package` override when set, otherwise the mirror `name`.
-    /// Returns `spec_name` unchanged for non-`pylock` sources (never consulted
+    /// The PEP 503 application-package name a `pylock`/`pypi` source resolves:
+    /// the source's `package` override when set, otherwise the mirror `name`.
+    /// Returns `spec_name` unchanged for other source types (never consulted
     /// there).
     pub fn pylock_app_name<'a>(&'a self, spec_name: &'a str) -> &'a str {
         match self {
             Source::Pylock {
                 package: Some(package), ..
+            }
+            | Source::Pypi {
+                package: Some(package), ..
             } => package,
             _ => spec_name,
+        }
+    }
+
+    /// Whether this source resolves an application package into an env
+    /// package (wheel selection via variant constraint fields, `python:`
+    /// required) rather than per-platform archive/binary assets via regex
+    /// patterns: `pylock` (committed lock) or `pypi` (index-discovered, lock
+    /// derived in-pipeline).
+    pub fn is_env(&self) -> bool {
+        self.env_type_name().is_some()
+    }
+
+    /// The `source.type` discriminant string (`"pylock"`/`"pypi"`) for an env
+    /// source, `None` for any other source. Used to name the concrete source
+    /// type in validation errors that reject a field for env sources (e.g.
+    /// `metadata:` — env metadata is composed from the lock, not configured).
+    pub fn env_type_name(&self) -> Option<&'static str> {
+        match self {
+            Source::Pylock { .. } => Some("pylock"),
+            Source::Pypi { .. } => Some("pypi"),
+            _ => None,
         }
     }
 }
@@ -159,6 +194,20 @@ impl Source {
             Source::Pylock { path, .. } => {
                 if path.trim().is_empty() {
                     errors.push("source.path must not be empty".to_string());
+                }
+            }
+            Source::Pypi { package, index } => {
+                if let Some(package) = package
+                    && package.trim().is_empty()
+                {
+                    errors.push("source.package must not be empty".to_string());
+                }
+                if let Some(index) = index {
+                    match url::Url::parse(index) {
+                        Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {}
+                        Ok(_) => errors.push(format!("source.index '{index}' must be an http(s) URL")),
+                        Err(e) => errors.push(format!("source.index '{index}' is not a valid URL: {e}")),
+                    }
                 }
             }
         }

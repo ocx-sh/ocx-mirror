@@ -19,6 +19,10 @@ jsonschema = ["dep:schemars"]
 [dependencies]
 ocx_lib = { workspace = true }
 ocx_python = { workspace = true }
+# PEP 440 version parsing for `source.type: pypi` prerelease/dev-release
+# detection (upstream versions are real PEP 440, not the mirror's own
+# semver-ish `ocx_lib::package::version::Version`).
+uv-pep440 = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

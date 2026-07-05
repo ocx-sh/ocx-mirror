@@ -45,14 +45,7 @@ jobs:
           # via the plan artifact below, keeping the matrix JSON lean.
           echo "versions=$(jq -c '[.versions[] | {version, platforms, kind}]' plan.json)" >> "${GITHUB_OUTPUT}"
           echo "target=$(jq -r '.target' plan.json)" >> "${GITHUB_OUTPUT}"
-      # Ship the resolved plan (asset URLs included) to the prepare legs so
-      # they never re-run the source crawl — one crawl per run instead of N+1,
-      # which blew the shared GitHub GraphQL points budget (issue #160).
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: plan
-          path: plan.json
-          retention-days: 1
+{PLAN_ARTIFACT_STEPS}
 
   prepare:
     needs: discover

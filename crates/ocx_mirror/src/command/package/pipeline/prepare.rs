@@ -11,7 +11,8 @@ use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
 use crate::command::package::pipeline::plan::{
-    PlanReport, pylock_interpreter_pin, pylock_target_platform, pylock_variants,
+    PlanReport, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin, pylock_target_platform,
+    pylock_variants, resolve_uv_python,
 };
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
@@ -21,6 +22,7 @@ use crate::pipeline::orchestrator::{self, ConcurrencyParams};
 use crate::pipeline::python_prepare::{self, SelectedWheel, WheelEnvTask};
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
+use crate::source;
 use crate::spec::{self, MirrorSpec};
 
 /// `ocx-mirror package pipeline prepare` subcommand.
@@ -60,11 +62,12 @@ impl Prepare {
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".ocx-mirror"));
 
-        // pylock sources take a parallel env-prepare path: wheels are
-        // re-selected locally from the committed lock (deterministic, no source
-        // re-crawl — issue #160) and composed into env packages. The
+        // Env-package sources (`pylock`, `pypi`) take a parallel env-prepare
+        // path: wheels are re-selected from a lock (committed for `pylock`,
+        // derived in-pipeline for `pypi` — not yet implemented, see
+        // `build_env_tasks`) and composed into env packages. The
         // archive/binary path below is untouched.
-        if matches!(spec.source, spec::Source::Pylock { .. }) {
+        if spec.source.is_env() {
             return self.execute_pylock(&spec, &spec_dir, &work_dir).await;
         }
 
@@ -135,7 +138,9 @@ impl Prepare {
         let client =
             ocx_lib::oci::ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
         let python = spec.python.as_ref().ok_or_else(|| {
-            MirrorError::SpecInvalid(vec!["python config is required for source.type 'pylock'".to_string()])
+            MirrorError::SpecInvalid(vec![
+                "python config is required for source.type 'pylock'/'pypi'".to_string(),
+            ])
         })?;
         // The interpreter digest is the one network dependency of task building;
         // resolving it here keeps `build_env_tasks` a pure (hermetically
@@ -165,14 +170,35 @@ impl Prepare {
             None => None,
         };
 
-        let tasks = build_env_tasks(
-            spec,
-            spec_dir,
-            &self.version,
-            &interpreter_dependencies,
-            allowed_platforms.as_ref(),
-        )
-        .await?;
+        // `pypi` sources need their own task-building path (a plan-supplied
+        // derived lock to consume, or a from-scratch re-derivation when
+        // running standalone) — kept as a sibling function rather than
+        // widening `build_env_tasks`'s signature, so its existing
+        // committed-lock-only test suite stays untouched.
+        let tasks = match &spec.source {
+            spec::Source::Pypi { .. } => {
+                build_pypi_env_tasks(
+                    spec,
+                    spec_dir,
+                    &self.version,
+                    &interpreter_dependencies,
+                    allowed_platforms.as_ref(),
+                    self.plan.as_deref(),
+                    work_dir,
+                )
+                .await?
+            }
+            _ => {
+                build_env_tasks(
+                    spec,
+                    spec_dir,
+                    &self.version,
+                    &interpreter_dependencies,
+                    allowed_platforms.as_ref(),
+                )
+                .await?
+            }
+        };
 
         if tasks.is_empty() {
             return Err(MirrorError::SpecInvalid(vec![format!(
@@ -230,8 +256,13 @@ async fn build_env_tasks(
     interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
-    let spec::Source::Pylock { path, .. } = &spec.source else {
-        return Ok(Vec::new());
+    let path = match &spec.source {
+        spec::Source::Pylock { path, .. } => path,
+        // `pypi` sources are handled by the sibling `build_pypi_env_tasks`
+        // (its caller, `execute_pylock`, dispatches before ever reaching this
+        // function for that source type) — never reached in practice, but
+        // a graceful empty result rather than a panic if it ever is.
+        _ => return Ok(Vec::new()),
     };
 
     let lock = crate::source::pylock::load(spec_dir, path)
@@ -279,6 +310,12 @@ fn build_env_tasks_from_lock(
 
     let scope = ocx_python::WheelScope::new(spec.wheel_scope.clone());
     let declared_extras = lock.extras.clone();
+    // Root = `source.package`/spec name (design decision C); resolved once per
+    // version, same as `app_version` in the caller — `entrypoints:` windows
+    // are resolved against this version here so `ocx_python::compose_env`
+    // stays version-agnostic.
+    let root_package = spec.source.pylock_app_name(&spec.name);
+    let entrypoint_selection = python.resolve_entrypoint_selection(app_version, root_package);
 
     // The default variant (matched by name) drives cascade aliasing in push.
     let default_variant_name: Option<&str> = spec
@@ -390,11 +427,134 @@ fn build_env_tasks_from_lock(
                 declared_extras: declared_extras.clone(),
                 python_target,
                 wheel_scope: scope.clone(),
+                entrypoint_selection: entrypoint_selection.clone(),
             });
         }
     }
 
     Ok(tasks)
+}
+
+/// `source.type: pypi` env-prepare task building — the `pypi` counterpart to
+/// [`build_env_tasks`] (which only reads a committed `pylock` file).
+///
+/// When `plan_path` resolves to a plan entry carrying a `pylock` path (the
+/// lock `pipeline plan` already derived for this version), reads and parses
+/// it directly — no `uv`/`ocx` subprocess needed. Otherwise (no `--plan`, or
+/// a plan entry without a `pylock` path — e.g. a schema_version-1 plan)
+/// re-derives the lock from scratch via the same `pipeline::lock_derive`
+/// path `pipeline plan` uses ([`derive_one_pypi_lock`]), so a lone
+/// `pipeline prepare` invocation still works end to end without a prior
+/// `pipeline plan` run.
+async fn build_pypi_env_tasks(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+    interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
+    allowed_platforms: Option<&std::collections::HashSet<String>>,
+    plan_path: Option<&std::path::Path>,
+    work_dir: &std::path::Path,
+) -> Result<Vec<WheelEnvTask>, MirrorError> {
+    let pylock_relative = match plan_path {
+        Some(path) => {
+            let plan = read_plan(path).await?;
+            plan.versions
+                .iter()
+                .find(|entry| entry.version == version)
+                .and_then(|entry| entry.pylock.clone())
+        }
+        None => None,
+    };
+
+    let (lock, app_version) = match pylock_relative {
+        Some(relative) => {
+            // The plan carries a path relative to plan.json's own directory
+            // (the same directory `--locks-dir` was written under) — resolve
+            // it against `plan_path`'s parent, not `spec_dir`.
+            let lock_path = plan_path
+                .and_then(std::path::Path::parent)
+                .unwrap_or(std::path::Path::new("."))
+                .join(&relative);
+            let contents = tokio::fs::read_to_string(&lock_path).await.map_err(|e| {
+                MirrorError::PlanError(format!("failed to read derived lock '{}': {e}", lock_path.display()))
+            })?;
+            let lock = ocx_python::parse_pylock(&contents).map_err(|e| {
+                MirrorError::PylockError(format!(
+                    "derived lock '{}' failed to re-parse: {e}",
+                    lock_path.display()
+                ))
+            })?;
+            let app_version = crate::source::pylock::app_version(&lock, spec.source.pylock_app_name(&spec.name))
+                .map_err(|e| MirrorError::PylockError(e.to_string()))?;
+            (lock, app_version)
+        }
+        None => {
+            let app_version = resolve_pypi_app_version(spec, spec_dir, version).await?;
+            let python = spec
+                .python
+                .as_ref()
+                .expect("validated: python required for source.type 'pypi'");
+            let uv_python = resolve_uv_python(python).await?;
+
+            tokio::fs::create_dir_all(work_dir)
+                .await
+                .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
+            let package = spec.source.pylock_app_name(&spec.name);
+            let output_path = work_dir.join(derived_lock_filename(package, &app_version));
+            let lock = derive_one_pypi_lock(spec, &uv_python, &app_version, &output_path).await?;
+            (lock, app_version)
+        }
+    };
+
+    build_env_tasks_from_lock(
+        spec,
+        spec_dir,
+        version,
+        &lock,
+        &app_version,
+        interpreter_dependencies,
+        allowed_platforms,
+    )
+}
+
+/// Standalone-prepare (no `--plan`) resolution for a `pypi` source: finds the
+/// upstream PyPI version whose (variant-prefixed) tag equals `version` — the
+/// same lookup `build_tasks_for_version` does for the archive/binary path,
+/// needed here because a `pypi` source (unlike `pylock`) has no committed
+/// lock to read the app version from directly.
+async fn resolve_pypi_app_version(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+) -> Result<String, MirrorError> {
+    let upstream_versions = list_upstream_versions(spec, spec_dir).await?;
+    let variants = pylock_variants(spec);
+
+    find_matching_upstream_version(&variants, &upstream_versions, version)
+        .ok_or_else(|| MirrorError::SpecInvalid(vec![format!("version '{version}' not found in pypi source")]))
+}
+
+/// Pure tag-matching core of [`resolve_pypi_app_version`]: the upstream
+/// version whose (variant-prefixed) tag equals `version` — split out from its
+/// caller so the matching logic is unit-testable without a network-backed
+/// `list_upstream_versions` call.
+fn find_matching_upstream_version(
+    variants: &[(Option<&str>, ocx_python::VariantConstraints)],
+    upstream_versions: &[source::VersionInfo],
+    version: &str,
+) -> Option<String> {
+    upstream_versions
+        .iter()
+        .find(|info| {
+            variants.iter().any(|(variant_name, _)| {
+                let tagged = match variant_name {
+                    Some(name) => format!("{name}-{}", info.version),
+                    None => info.version.clone(),
+                };
+                tagged == version
+            })
+        })
+        .map(|info| info.version.clone())
 }
 
 /// Resolves one interpreter [`Dependency`](ocx_lib::package::metadata::dependency::Dependency)
@@ -999,6 +1159,7 @@ build_timestamp: none
                 asset_entry("linux/amd64", "tool-linux-amd64"),
                 asset_entry("darwin/arm64", "tool-darwin-arm64"),
             ],
+            pylock: None,
         }]);
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap();
@@ -1037,6 +1198,7 @@ build_timestamp: none
             source_version: String::new(),
             variant: None,
             assets: vec![],
+            pylock: None,
         }]);
 
         let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err();
@@ -1058,6 +1220,7 @@ build_timestamp: none
             source_version: "1.2.3".to_string(),
             variant: Some("slim".to_string()),
             assets: vec![asset_entry("linux/amd64", "tool-linux-amd64")],
+            pylock: None,
         }]);
 
         let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "slim-1.2.3").unwrap_err();
@@ -1083,6 +1246,7 @@ build_timestamp: none
                 // Below windows/arm64's min_version (0.11.7) → must be dropped.
                 asset_entry("windows/arm64", "tool-windows-arm64"),
             ],
+            pylock: None,
         }]);
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();
@@ -1262,5 +1426,164 @@ build_timestamp: none
                 task.interpreter.identifier
             );
         }
+    }
+
+    // ── plan_python_mirror_v2 W2.A3: pypi env-prepare dispatch ───────────────
+
+    fn pypi_fixture_spec() -> MirrorSpec {
+        let yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pypi
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    fn version_info(version: &str) -> crate::source::VersionInfo {
+        crate::source::VersionInfo {
+            version: version.to_string(),
+            assets: std::collections::HashMap::new(),
+            is_prerelease: false,
+        }
+    }
+
+    #[test]
+    fn find_matching_upstream_version_matches_bare_tag() {
+        let spec = pypi_fixture_spec();
+        let variants = pylock_variants(&spec);
+        let upstream = vec![version_info("1.0.0"), version_info("2.0.0")];
+
+        assert_eq!(
+            find_matching_upstream_version(&variants, &upstream, "1.0.0"),
+            Some("1.0.0".to_string())
+        );
+    }
+
+    #[test]
+    fn find_matching_upstream_version_returns_none_for_unknown_tag() {
+        let spec = pypi_fixture_spec();
+        let variants = pylock_variants(&spec);
+        let upstream = vec![version_info("1.0.0")];
+
+        assert_eq!(find_matching_upstream_version(&variants, &upstream, "9.9.9"), None);
+    }
+
+    const PYPI_DERIVED_LOCK_BODY: &str = r#"lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-py3-none-any.whl"
+url = "https://example.com/pycowsay-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#;
+
+    #[tokio::test]
+    async fn build_pypi_env_tasks_consumes_plan_provided_lock_without_deriving() {
+        // No OCX_BINARY_PIN/OCX_MIRROR_UV stub is installed for this test: if
+        // the plan-provided-lock path fell through to re-derivation, it would
+        // try to spawn a real `ocx`/`uv` binary and fail — proving this path
+        // never touches them.
+        let plan_dir = tempdir().unwrap();
+        let locks_dir = plan_dir.path().join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        std::fs::write(locks_dir.join("pylock.pycowsay-1.0.0.toml"), PYPI_DERIVED_LOCK_BODY).unwrap();
+
+        let plan = PlanReport {
+            schema_version: 2,
+            has_new: true,
+            versions: vec![PlanVersionEntry {
+                version: "1.0.0".to_string(),
+                platforms: vec!["linux/amd64".to_string()],
+                kind: PlanVersionKind::New,
+                source_version: "1.0.0".to_string(),
+                variant: None,
+                assets: vec![],
+                pylock: Some("locks/pylock.pycowsay-1.0.0.toml".to_string()),
+            }],
+            target: "ocx.sh/pycowsay".to_string(),
+            ocx_mirror_rev: None,
+        };
+        let plan_path = plan_dir.path().join("plan.json");
+        std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+
+        let spec = pypi_fixture_spec();
+        let dependencies = default_interpreter_dependencies(&spec);
+
+        let tasks = build_pypi_env_tasks(
+            &spec,
+            Path::new("."),
+            "1.0.0",
+            &dependencies,
+            None,
+            Some(&plan_path),
+            Path::new("."),
+        )
+        .await
+        .expect("consuming a plan-provided lock never spawns uv/ocx");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].source_version, "1.0.0");
+        assert_eq!(tasks[0].platform.to_string(), "linux/amd64");
+    }
+
+    #[tokio::test]
+    async fn build_pypi_env_tasks_errors_on_unparseable_plan_provided_lock() {
+        // A sdist-only package (no [[packages.wheels]]) is valid TOML but
+        // fails ocx_python::parse_pylock's fail-closed re-parse — must
+        // surface as PylockError (exit 65), not a panic or silent skip.
+        let plan_dir = tempdir().unwrap();
+        let locks_dir = plan_dir.path().join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        let bad_body = "lock-version = \"1.0\"\n\n[[packages]]\nname = \"pycowsay\"\nversion = \"1.0.0\"\n";
+        std::fs::write(locks_dir.join("pylock.pycowsay-1.0.0.toml"), bad_body).unwrap();
+
+        let plan = PlanReport {
+            schema_version: 2,
+            has_new: true,
+            versions: vec![PlanVersionEntry {
+                version: "1.0.0".to_string(),
+                platforms: vec!["linux/amd64".to_string()],
+                kind: PlanVersionKind::New,
+                source_version: "1.0.0".to_string(),
+                variant: None,
+                assets: vec![],
+                pylock: Some("locks/pylock.pycowsay-1.0.0.toml".to_string()),
+            }],
+            target: "ocx.sh/pycowsay".to_string(),
+            ocx_mirror_rev: None,
+        };
+        let plan_path = plan_dir.path().join("plan.json");
+        std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+
+        let spec = pypi_fixture_spec();
+        let dependencies = default_interpreter_dependencies(&spec);
+
+        let err = build_pypi_env_tasks(
+            &spec,
+            Path::new("."),
+            "1.0.0",
+            &dependencies,
+            None,
+            Some(&plan_path),
+            Path::new("."),
+        )
+        .await
+        .expect_err("an unparseable plan-provided lock must fail, not silently succeed");
+
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
     }
 }

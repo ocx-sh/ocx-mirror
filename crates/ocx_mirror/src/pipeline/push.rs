@@ -32,10 +32,13 @@ pub async fn push_and_cascade(
 ) -> Result<MirrorResult> {
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
-    // ponytail: default layout (no strip/prefix) preserves pre-bump behavior exactly.
+    // ponytail: default layout (no strip/prefix) preserves pre-bump behavior
+    // exactly. Archive/binary pushes never cross-repository mount — only the
+    // pylock env-push path's wheel layers carry `mount_from`.
     let layers = [LayerRef::File {
         path: bundle_path.to_path_buf(),
         layout: LayerLayoutSpec::default(),
+        mount_from: None,
     }];
 
     if cascade {

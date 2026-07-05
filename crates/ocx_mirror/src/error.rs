@@ -52,6 +52,12 @@ pub enum MirrorError {
     /// (`LockError`/`SelectError`/`CollisionError`/`ComposeError`) is a
     /// separate follow-up.
     PylockError(String),
+    /// A `source.type: pypi` discovery failure classified as malformed
+    /// input: the PyPI JSON API returned 404 (package name not found on this
+    /// index). Same exit class as `PylockError`/`SpecInvalid` — a genuinely
+    /// unreachable index (connection refused, timeout, 5xx, malformed JSON
+    /// body) stays `SourceError` (69). See `source::pypi::classify_error`.
+    PypiError(String),
 }
 
 impl MirrorError {
@@ -79,6 +85,7 @@ impl MirrorError {
             Self::WebhookUnavailable(_) => ExitCode::Unavailable,
             Self::WebhookPermissionDenied(_) => ExitCode::PermissionDenied,
             Self::PylockError(_) => ExitCode::DataError,
+            Self::PypiError(_) => ExitCode::DataError,
         }
     }
 }
@@ -119,6 +126,7 @@ impl std::fmt::Display for MirrorError {
             Self::WebhookUnavailable(msg) => write!(f, "webhook unavailable: {msg}"),
             Self::WebhookPermissionDenied(msg) => write!(f, "webhook permission denied: {msg}"),
             Self::PylockError(msg) => write!(f, "pylock error: {msg}"),
+            Self::PypiError(msg) => write!(f, "pypi error: {msg}"),
         }
     }
 }
@@ -174,6 +182,15 @@ mod tests {
         // PylockError → DataError (65) — malformed lock/spec content, not a
         // transient resource.
         let err = MirrorError::PylockError("no compatible wheel for 'numpy' on linux/amd64".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn pypi_error_maps_to_data_error() {
+        // plan_python_mirror_v2 W1.A1: a 404 from the PyPI JSON API (unknown
+        // package name) is malformed input, not a transient resource — same
+        // exit class as PylockError.
+        let err = MirrorError::PypiError("package 'nonexistent' not found (404)".into());
         assert_eq!(err.kind_exit_code(), ExitCode::DataError);
     }
 
