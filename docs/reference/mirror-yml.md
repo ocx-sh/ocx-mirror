@@ -8,9 +8,11 @@
 |-----|------|----------|---------|
 | `name` | string | Yes | Tool name, used in log output and notify messages |
 | `target` | object | Yes | OCI registry and repository to push to |
-| `source` | object | Yes | Upstream release source ([GitHub Releases][github-releases] or URL index) |
-| `assets` | object | Yes | Platform → regex list mapping for selecting upstream release archives |
-| `asset_type` | string | No | `Archive` (default) or `Binary` |
+| `source` | object | Yes | Upstream release source: [GitHub Releases][github-releases], URL index, or a [PEP 751 `pylock.toml`](#pylock) (Python apps) |
+| `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. Not used by `source.type: pylock`. |
+| `asset_type` | string | No | `Archive` (default) or `Binary`. Not used by `source.type: pylock`. |
+| `python` | object | No* | Interpreter version/ABI + `interpreter_package`. **Required** for `source.type: pylock`. See [Python apps](#pylock). |
+| `variants` | array | No* | Wheel-selection variants (libc, manylinux floor). Used by `source.type: pylock`. See [Python apps](#pylock). |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
@@ -54,6 +56,85 @@ assets:
 ```
 
 `libc.glibc` and `libc.musl` are the recognized flavors. The two keys are distinct platforms — each needs its own regex list, and each publishes as its own image-index entry. A key with no `+libc.` tag carries no libc requirement and resolves for any host (the pre-libc behavior). Quote keys containing `+` so YAML parses them as strings.
+## Python apps (`source.type: pylock`) {#pylock}
+
+A `pylock` source mirrors a [PEP 751](https://peps.python.org/pep-0751/) `pylock.toml`-locked Python **application** into a runnable OCX **environment package** — the union of every locked wheel plus a private interpreter, composed so it runs via `ocx run` on a clean machine with **no pip, uv, or venv at runtime**. This replaces the `assets`/`asset_type` archive model (a pylock source ignores both).
+
+```yaml
+name: black                       # PEP 503-normalized to match the app package in the lock
+target:
+  registry: dev.ocx.sh
+  repository: ocx/black
+source:
+  type: pylock
+  path: black.pylock.toml         # repo-relative path to the PEP 751 lock
+python:
+  version: "3.14.6"               # interpreter version
+  abi: cp314                      # target ABI tag
+  interpreter_package: "ocx.sh/cpython:3.14.6"   # OCX package providing python3
+variants:
+  - default: true                 # the unnamed default variant → bare tags
+    libc: gnu                     # gnu | musl
+    min_manylinux: "2_28"         # manylinux floor for compiled wheels
+tests:
+  - name: smoke
+    script: tests/black.smoke.star
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+```
+
+### How the app is resolved
+
+The lock lists every package in the resolved environment; `ocx-mirror` picks the one whose name **PEP 503-normalizes** (lowercase, runs of `-_.` → `-`) to the spec's `name` as *the app*, and mirrors its locked version. So a `[full]`-extras distribution keeps its distribution name: `name: google-cloud-aiplatform` (not `aiplatform`). A `name` that matches no locked package fails with exit 65.
+
+Set `source.package` to resolve a *different* app name than the mirror `name` — e.g. a `pycowsay-musl` mirror (distinct target repo + workflow) that resolves the `pycowsay` package from a shared lock:
+
+```yaml
+source:
+  type: pylock
+  path: pycowsay.pylock.toml
+  package: pycowsay               # resolve this package; defaults to the mirror name
+```
+
+### `python` block
+
+Required for `source.type: pylock`. Fields:
+
+| Key | Purpose |
+|-----|---------|
+| `version` | Interpreter version (e.g. `3.14.6`). Feeds the PEP 508 marker environment used for wheel selection. |
+| `abi` | Target ABI tag (e.g. `cp314`). Every compiled wheel's ABI must match this (or be `abi3`/`none`), checked fail-closed at compose. |
+| `interpreter_package` | An OCX package that provides `python3` (a [python-build-standalone](https://github.com/astral-sh/python-build-standalone) build). Pulled in as a **private dependency** and pinned by digest; its platform-agnostic index digest is resolved per-platform at materialize. |
+
+### `variants`
+
+Each variant is a wheel-selection axis. The **default** variant (`default: true`, unnamed) publishes to bare tags. `libc` (`gnu`/`musl`), `min_manylinux`, and `min_musllinux` gate which compiled Linux wheels are eligible. For a pure `py3-none-any` app the variant does not change wheel selection (the pure wheel matches any target).
+
+A variant may also carry its own `interpreter_package`, overriding the top-level `python.interpreter_package` for that variant's env. This is how a `libc: musl` variant depends on a **musl-libc CPython** while the default variant keeps the glibc one:
+
+```yaml
+python:
+  interpreter_package: "ocx.sh/cpython:3.14.6"          # glibc default
+variants:
+  - default: true
+    libc: musl
+    min_musllinux: "1_2"
+    interpreter_package: "dev.ocx.sh/ocx/cpython-musl:3.14.6"   # musl override
+```
+
+The musl interpreter lives in a **separate repository** (`…/cpython-musl`), not a musl candidate inside the glibc `cpython` index: OCX index candidates are keyed by `os/arch` only, so musl and glibc `linux/amd64` cannot coexist under one tag — libc is the variant axis. Publish one by mirroring a python-build-standalone `…-unknown-linux-musl-install_only.tar.gz` as a single-layer archive (`strip=1`, `PATH=${installPath}/bin`). Pair a `libc: musl` variant with an [`alpine` container test leg](#platforms) to validate it end-to-end.
+
+### What is published
+
+Each app version becomes an environment package: one content-addressed `tar.zst` layer per wheel (deterministic repack — see the [conventions ADR](https://github.com/ocx-sh/ocx-mirror/blob/main/.claude/artifacts/adr_ocx_python_conventions.md)), a composed `metadata.json` (private interpreter dependency, `PYTHONPATH`/`PATH` env, and a synthesized entrypoint per `[console_scripts]` entry), and an always-present **`python3` entrypoint** so even a *library* env (no console script of its own — e.g. `google-cloud-aiplatform`) is runnable and importable: `ocx run <env> -- python3 -c "import pkg"`.
+
+### Multi-platform
+
+Add `linux/arm64`, `darwin/arm64`, etc. to `platforms`. A **pure** app reuses one lock across all platforms. A **compiled** app needs a *universal* lock (`uv pip compile … --universal`) so each per-platform leg selects the right wheel (`manylinux_2_28_aarch64`, `macosx_11_0_arm64`, …); where no compiled wheel exists for a platform the `py3-none-any` fallback is selected.
+
+!!! note "Overlap-free layer union"
+    OCX composes the env as an overlap-free prefix-layer union, so two wheels must never install the *same* file. A valid resolved lock is collision-free by construction; a pathological `[extras]` closure that pulls mutually-exclusive distributions sharing a file (e.g. `mlflow` + `mlflow-skinny` + `mlflow-tracing`, which each ship an identical `mlflow/__init__.py`) is rejected with exit 65 — curate the lock (`uv --no-emit-package <redundant>`) to keep the superset.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
@@ -113,8 +194,8 @@ tests:
 
 Declares the GHA runner and container matrix for the generated workflow. Each key is a platform slug in `<os>/<arch>` form.
 
-!!! warning "Container legs are currently rejected by the renderer"
-    `pipeline generate ci` is native-only after the setup-ocx migration: a spec that declares `containers:` is rejected with exit 64. The `containers` fields below remain part of the spec schema but cannot be used with the current renderer.
+!!! note "Container test legs"
+    A platform with `containers:` runs its tests inside each listed image (Linux only) instead of on the runner directly. The job still runs on the host runner — GitHub mounts a glibc `node` for JS actions, which Alpine's musl userland cannot execute — and only `ocx package test` is wrapped in `docker run <image>` with a statically-linked, **libc-matched** `ocx` release binary mounted in (musl for `alpine*` images, gnu otherwise). The runner's CA bundle is mounted so the gnu `ocx` can verify TLS in a minimal image. Use an `alpine` leg to validate a `libc: musl` env end-to-end and a `debian` leg to sanity-check the glibc floor. The env under test is self-contained (local wheel layers); only its private interpreter is pulled from the registry.
 
 ```yaml
 platforms:
