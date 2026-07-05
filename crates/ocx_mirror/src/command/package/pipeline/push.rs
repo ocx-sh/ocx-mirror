@@ -85,10 +85,12 @@ impl Push {
         // ── Load spec ────────────────────────────────────────────────────────
         let spec = spec::load_spec(&self.spec).await?;
 
-        // pylock sources take a parallel env-push path: env packages (wheel
-        // layers + composed metadata) instead of the archive/binary bundle.
-        // Mirrors `prepare.rs`'s early Pylock dispatch.
-        if matches!(spec.source, spec::Source::Pylock { .. }) {
+        // Env sources (pylock/pypi) take a parallel env-push path: env
+        // packages (wheel layers + composed metadata) instead of the
+        // archive/binary bundle. Mirrors `prepare.rs`'s `is_env()` dispatch —
+        // prepare writes env-manifest.json (never bundle-*.tar.xz) for both,
+        // so the archive loop below would silently find nothing.
+        if spec.source.is_env() {
             return self.execute_pylock_push(&spec).await;
         }
 
@@ -2226,5 +2228,81 @@ platforms:
         for f in failures {
             assert_eq!(f["reason"], serde_json::json!("push_error"));
         }
+    }
+
+    /// Regression: a `source.type: pypi` spec must dispatch to the env-push
+    /// path exactly like `pylock`. The buggy dispatch matched only
+    /// `Source::Pylock`, so pypi fell through to the archive loop, found no
+    /// `bundle-*.tar.xz` (prepare writes env-manifest.json for env sources),
+    /// and silently succeeded with an empty summary.
+    #[test]
+    fn execute_routes_pypi_source_through_env_push() {
+        use crate::pipeline::python_prepare::{EnvEntry, EnvLayer, EnvManifest};
+
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "1.0.0";
+        let version_dir = bundles_dir.path().join(version);
+        std::fs::create_dir_all(&version_dir).unwrap();
+
+        let manifest = EnvManifest {
+            version: version.to_string(),
+            envs: vec![EnvEntry {
+                platform_slug: "linux_amd64".to_string(),
+                platform: "linux/amd64".to_string(),
+                variant: None,
+                metadata_path: version_dir.join("linux_amd64-metadata.json"),
+                layers: vec![EnvLayer {
+                    wheel_repository: "pip-packages/example.com/pycowsay/none-any".to_string(),
+                    digest: format!("sha256:{}", "0".repeat(64)),
+                    path: version_dir.join("pycowsay.tar.zst"),
+                    package_name: "pycowsay".to_string(),
+                    wheel_sha256: "1".repeat(64),
+                }],
+            }],
+        };
+        std::fs::write(
+            version_dir.join("env-manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+
+        let spec_path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml")).to_path_buf();
+
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        // Env path taken → green JUNIT reaches invoke_env_push, which fails
+        // in the test environment (no `ocx` on PATH) → push_error → any_red
+        // → ExecutionFailed. The archive-path bug instead returned Ok(())
+        // with an empty versions array (no bundle files to enumerate).
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "pypi source must take the env-push path (push_error expected), got {result:?}",
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let versions = summary["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "env manifest version must be processed");
+        assert_eq!(
+            versions[0]["platforms_failed"][0]["reason"],
+            serde_json::json!("push_error")
+        );
     }
 }
