@@ -127,7 +127,7 @@ platforms:
 - Prerelease detection is PEP 440-aware (`uv_pep440`), not the mirror's own semver-ish version parser — a `2.0.0.dev0` release is correctly flagged as a prerelease and respects the existing `skip_prereleases`/`versions` bounds the same as any other source.
 - An index that returns 404 for the package name is a data error (malformed input — the package doesn't exist on that index, exit code 65), not an availability failure; any other failure (connection refused, timeout, 5xx, malformed JSON) stays a source-unavailable error (exit code 69).
 
-Per-version lock derivation (running `uv pip compile` against the pinned interpreter) happens later, in `pipeline plan` — see [`python.lock`](#python-lock) and [`--locks-dir`](#python-lock).
+Per-version lock derivation (running `uv pip compile`) happens later, in `pipeline plan` — see [`python.lock`](#python-lock) and [`--locks-dir`](#python-lock). A universal lock (the default) resolves via `--python-version` alone; only `universal: false` materializes the pinned `interpreter_package` on disk to resolve against it.
 
 ### How the app is resolved
 

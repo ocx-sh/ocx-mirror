@@ -87,6 +87,7 @@ ocx-mirror package pipeline plan [OPTIONS]
 |------|---------|-------------|
 | `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
 | `--format <FMT>` | auto | `plain` or `json`. Without the flag, JSON is selected automatically when `GITHUB_ACTIONS=true`. |
+| `--locks-dir <DIR>` | `./locks` | Directory derived PEP 751 locks are written to (`source.type: pypi` only; unused for other source types). Each pypi plan entry's `pylock` field carries a path relative to this command's working directory — the same directory `plan.json` is written to. See the [`python.lock` reference](./mirror-yml.md#python-lock). |
 
 ### `package pipeline prepare` {#pipeline-prepare}
 
