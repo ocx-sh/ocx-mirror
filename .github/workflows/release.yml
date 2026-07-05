@@ -39,7 +39,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          v="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          v="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ocx_mirror") | .version')"
           if [[ "v${v}" != "${GITHUB_REF_NAME}" ]]; then
             echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${v}"
             exit 1

@@ -1,0 +1,21 @@
+# Mirror spec for the sdist-only negative test (W2.6). `target.registry` is a
+# placeholder the test substitutes with the local 404-stub's `host:port` —
+# `pipeline plan` reads the target registry before the source, so a real
+# address (even a stub) is required to reach the pylock parse error at all.
+name: uwsgi
+target:
+  registry: STUB_REGISTRY
+  repository: uwsgi
+
+source:
+  type: pylock
+  path: pylock-uwsgi.toml
+
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest

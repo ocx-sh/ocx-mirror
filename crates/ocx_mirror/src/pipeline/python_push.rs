@@ -1,0 +1,303 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+//! Env-package push phase for `source.type: pylock` mirrors (W2.4 Stage 1).
+//!
+//! A parallel path to the archive/binary push loop in
+//! `command::package::pipeline::push::Push::execute`: reads the
+//! `env-manifest.json` per version written by
+//! [`prepare_env_version`](super::python_prepare::prepare_env_version), then
+//! pushes each green `(version, platform)` env package via
+//! `ocx package push` with the ordered wheel layers as positional layer args
+//! and the composed `metadata.json` via `-m`.
+//!
+//! Stage 2 (deferred): wheel-repo upload-if-missing (content-addressed wheel
+//! layer reuse across packages) is not implemented here — every push
+//! re-uploads its full layer set, which is correct but not maximally
+//! efficient. See the `// W2.4 Stage 2` marker in `push.rs`.
+
+use std::path::{Path, PathBuf};
+
+use super::python_prepare::EnvManifest;
+
+/// Parsed JSON output from `ocx package push --cascade --format json`.
+///
+/// Same shape as `command::package::pipeline::push::PushReport` — re-declared
+/// here rather than shared because the archive push path's struct is private
+/// to that module and the two push legs (archive bundle vs. env layers)
+/// evolve independently (Two Hats: no shared refactor across the split).
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct EnvPushReport {
+    /// SHA-256 manifest digest of the pushed image. Captured for parity with
+    /// the archive `PushReport` but not surfaced in run-summary.json.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub manifest_digest: Option<String>,
+    #[serde(default)]
+    pub cascade_tags_written: Vec<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Enumerate env manifests under `bundles_dir`: one per version directory
+/// carrying an `env-manifest.json`, as written by
+/// `prepare_env_version` (`{version_dir}/env-manifest.json`).
+///
+/// `prepare_env_version` records each manifest's layer/metadata paths relative
+/// to its version directory, so this function re-anchors them against the
+/// directory the manifest was actually found in. That makes the paths portable
+/// across the CI prepare→push job split, where the artifact is downloaded to a
+/// different absolute location than prepare wrote it.
+pub(crate) async fn enumerate_env_manifests(bundles_dir: &Path) -> Result<Vec<EnvManifest>, String> {
+    let mut manifests = Vec::new();
+
+    let mut read_dir = tokio::fs::read_dir(bundles_dir)
+        .await
+        .map_err(|e| format!("failed to read bundles directory {}: {e}", bundles_dir.display()))?;
+
+    while let Some(entry) = read_dir
+        .next_entry()
+        .await
+        .map_err(|e| format!("failed to iterate bundles directory: {e}"))?
+    {
+        let manifest_path = entry.path().join("env-manifest.json");
+        if !tokio::fs::try_exists(&manifest_path).await.unwrap_or(false) {
+            continue;
+        }
+
+        let content = tokio::fs::read_to_string(&manifest_path)
+            .await
+            .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+        let mut manifest: EnvManifest =
+            serde_json::from_str(&content).map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))?;
+
+        // Re-anchor the version-dir-relative layer/metadata paths onto this
+        // manifest's actual directory so they resolve after a CI artifact
+        // download landed them at a different absolute location. (An
+        // already-absolute path from an older/local manifest is left as-is:
+        // `Path::join` with an absolute component discards the base.)
+        let version_dir = entry.path();
+        for env in &mut manifest.envs {
+            env.metadata_path = version_dir.join(&env.metadata_path);
+            for layer in &mut env.layers {
+                layer.path = version_dir.join(&layer.path);
+            }
+        }
+
+        manifests.push(manifest);
+    }
+
+    Ok(manifests)
+}
+
+/// Build the `ocx package push` argv for one env-package leg: `--cascade
+/// --new` with the composed `metadata.json` via `-m` and the ordered wheel
+/// layers as positional args. Pure and unit-testable — locks the multi-layer
+/// + metadata invocation shape without spawning a subprocess.
+pub(crate) fn build_env_push_args(
+    platform: &str,
+    target_ref: &str,
+    metadata_path: &Path,
+    layer_paths: &[PathBuf],
+    cascade: bool,
+) -> Result<Vec<String>, String> {
+    let metadata_str = metadata_path
+        .to_str()
+        .ok_or_else(|| format!("metadata path is not valid UTF-8: {}", metadata_path.display()))?;
+
+    let mut args = vec![
+        "--format".to_string(),
+        "json".to_string(),
+        "package".to_string(),
+        "push".to_string(),
+    ];
+
+    // `--cascade` requires an ocx-parseable X.Y.Z version to derive rolling
+    // tags; the caller drops it for versions ocx cannot parse. `--new` only
+    // matters alongside cascade (it treats the first-publish tag-list 404 as an
+    // empty set), so the two travel together.
+    if cascade {
+        args.push("--cascade".to_string());
+        args.push("--new".to_string());
+    }
+
+    args.extend([
+        "-p".to_string(),
+        platform.to_string(),
+        "-i".to_string(),
+        target_ref.to_string(),
+        "-m".to_string(),
+        metadata_str.to_string(),
+    ]);
+
+    for layer_path in layer_paths {
+        let layer_str = layer_path
+            .to_str()
+            .ok_or_else(|| format!("layer path is not valid UTF-8: {}", layer_path.display()))?;
+        args.push(layer_str.to_string());
+    }
+
+    Ok(args)
+}
+
+/// Invoke `ocx package push` for one env-package leg and parse the JSON
+/// report. Mirrors `push::invoke_push`'s subprocess shape — binary
+/// resolution + `OCX_*` env forwarding — with the multi-layer argv from
+/// [`build_env_push_args`] instead of the archive path's single bundle file.
+///
+/// Returns a descriptive error string on subprocess failure (caller records
+/// as `push_error` without aborting the run), matching `invoke_push`'s
+/// contract.
+pub(crate) async fn invoke_env_push(
+    platform: &str,
+    target_ref: &str,
+    metadata_path: &Path,
+    layer_paths: &[PathBuf],
+    cascade: bool,
+) -> Result<EnvPushReport, String> {
+    let args = build_env_push_args(platform, target_ref, metadata_path, layer_paths, cascade)?;
+
+    let ocx_binary = crate::pipeline::ocx_cli::resolve_ocx_binary()?;
+    let mut cmd = tokio::process::Command::new(&ocx_binary);
+    cmd.args(&args);
+    crate::pipeline::ocx_cli::forward_ocx_env(&mut cmd);
+
+    let output = cmd.output().await.map_err(|e| format!("failed to spawn ocx: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ocx package push exited {}: {}", output.status, stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim())
+        .map_err(|e| format!("failed to parse push JSON output: {e}\nstdout: {}", stdout.trim()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_env_push_args_orders_flags_and_layers() {
+        let layers = vec![
+            PathBuf::from("/work/layers/pycowsay.tar.zst"),
+            PathBuf::from("/work/layers/six.tar.zst"),
+        ];
+        let metadata_path = PathBuf::from("/work/metadata.json");
+
+        let args = build_env_push_args("linux/amd64", "pycowsay:1.0.0", &metadata_path, &layers, true)
+            .expect("valid UTF-8 paths build cleanly");
+
+        assert!(args.contains(&"--cascade".to_string()));
+        assert!(args.contains(&"--new".to_string()));
+
+        // cascade=false (a version ocx cannot parse) drops both flags but keeps
+        // the identifier, metadata, and ordered layers.
+        let no_cascade = build_env_push_args("linux/amd64", "pycowsay:0.0.0.2", &metadata_path, &layers, false)
+            .expect("valid UTF-8 paths build cleanly");
+        assert!(!no_cascade.contains(&"--cascade".to_string()));
+        assert!(!no_cascade.contains(&"--new".to_string()));
+        assert!(no_cascade.contains(&"pycowsay:0.0.0.2".to_string()));
+        assert_eq!(no_cascade.iter().filter(|a| a.ends_with(".tar.zst")).count(), 2);
+
+        let platform_flag = args.iter().position(|a| a == "-p").expect("-p flag present");
+        assert_eq!(args[platform_flag + 1], "linux/amd64");
+
+        let identifier_flag = args.iter().position(|a| a == "-i").expect("-i flag present");
+        assert_eq!(args[identifier_flag + 1], "pycowsay:1.0.0");
+
+        let metadata_flag = args.iter().position(|a| a == "-m").expect("-m flag present");
+        assert_eq!(args[metadata_flag + 1], "/work/metadata.json");
+
+        // Layers are ordered positionals appended after the flags, in input order.
+        let layer_start = metadata_flag + 2;
+        assert_eq!(args[layer_start], "/work/layers/pycowsay.tar.zst");
+        assert_eq!(args[layer_start + 1], "/work/layers/six.tar.zst");
+        assert_eq!(args.len(), layer_start + 2, "no trailing args beyond the two layers");
+    }
+
+    #[tokio::test]
+    async fn enumerate_env_manifests_reads_per_version_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let version_dir = temp.path().join("1.0.0");
+        tokio::fs::create_dir_all(&version_dir)
+            .await
+            .expect("create version dir");
+
+        let manifest = EnvManifest {
+            version: "1.0.0".to_string(),
+            envs: vec![],
+        };
+        let json = serde_json::to_string(&manifest).expect("serialize manifest");
+        tokio::fs::write(version_dir.join("env-manifest.json"), json)
+            .await
+            .expect("write manifest");
+
+        let manifests = enumerate_env_manifests(temp.path()).await.expect("reads manifest");
+        assert_eq!(manifests.len(), 1);
+        assert_eq!(manifests[0].version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn enumerate_env_manifests_resolves_relative_paths() {
+        use crate::pipeline::python_prepare::{EnvEntry, EnvLayer};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let version_dir = temp.path().join("1.0.0");
+        let layers_dir = version_dir.join("linux_amd64/layers");
+        tokio::fs::create_dir_all(&layers_dir).await.expect("create dirs");
+        // The referenced files must exist so the resolved absolute paths do.
+        tokio::fs::write(version_dir.join("linux_amd64/metadata.json"), "{}")
+            .await
+            .expect("write metadata");
+        tokio::fs::write(layers_dir.join("wheel.tar.zst"), "x")
+            .await
+            .expect("write layer");
+
+        // Manifest carries version-dir-relative paths, as prepare_env_version writes.
+        let manifest = EnvManifest {
+            version: "1.0.0".to_string(),
+            envs: vec![EnvEntry {
+                platform_slug: "linux_amd64".to_string(),
+                platform: "linux/amd64".to_string(),
+                variant: None,
+                metadata_path: PathBuf::from("linux_amd64/metadata.json"),
+                layers: vec![EnvLayer {
+                    wheel_repository: "pip-packages/example".to_string(),
+                    digest: "sha256:aaa".to_string(),
+                    path: PathBuf::from("linux_amd64/layers/wheel.tar.zst"),
+                    package_name: "example".to_string(),
+                    wheel_sha256: "aa".to_string(),
+                }],
+            }],
+        };
+        tokio::fs::write(
+            version_dir.join("env-manifest.json"),
+            serde_json::to_string(&manifest).expect("serialize"),
+        )
+        .await
+        .expect("write manifest");
+
+        let manifests = enumerate_env_manifests(temp.path()).await.expect("enumerate");
+        assert_eq!(manifests.len(), 1);
+        let env = &manifests[0].envs[0];
+
+        // Paths are re-anchored onto the version dir → absolute and existing.
+        assert_eq!(env.metadata_path, version_dir.join("linux_amd64/metadata.json"));
+        assert!(env.metadata_path.exists(), "resolved metadata path must exist");
+        assert_eq!(env.layers[0].path, version_dir.join("linux_amd64/layers/wheel.tar.zst"));
+        assert!(env.layers[0].path.exists(), "resolved layer path must exist");
+    }
+
+    #[tokio::test]
+    async fn enumerate_env_manifests_skips_directories_without_manifest() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        tokio::fs::create_dir_all(temp.path().join("not-a-version"))
+            .await
+            .expect("create dir");
+
+        let manifests = enumerate_env_manifests(temp.path()).await.expect("empty ok");
+        assert!(manifests.is_empty());
+    }
+}
