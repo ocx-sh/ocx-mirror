@@ -351,9 +351,14 @@ fn render_workflow(spec: &MirrorSpec, spec_file: &str, workflow_file: &str) -> S
     // Everything else in the workflow is source-agnostic. Archive/binary
     // output stays byte-identical.
     let is_env = spec.source.is_env();
+    // `pypi` additionally derives a PEP 751 lock per version during the plan
+    // phase (unlike `pylock`, whose lock is committed upfront) — only that
+    // source needs the plan-job artifact upload widened to carry `locks/`.
+    let is_pypi = matches!(spec.source, spec::Source::Pypi { .. });
 
     let matrix = build_matrix(spec);
     let matrix_entries = render_matrix_entries(&matrix);
+    let plan_artifact_steps = plan_artifact_upload_steps(is_pypi);
     let prepare_flatten = prepare_flatten_script(is_env);
     let test_target_resolve = test_target_resolve_script(is_env);
     let test_run_steps = render_test_run_steps(&matrix, is_env);
@@ -366,6 +371,7 @@ fn render_workflow(spec: &MirrorSpec, spec_file: &str, workflow_file: &str) -> S
         .replace("{WORKFLOW_FILE}", workflow_file)
         .replace("{MIRROR_NAME}", &spec.name)
         .replace("{SCHEDULE_BLOCK}", &schedule_block)
+        .replace("{PLAN_ARTIFACT_STEPS}", &plan_artifact_steps)
         .replace("{PREPARE_FLATTEN}", &prepare_flatten)
         .replace("{TEST_MATRIX_ENTRIES}", &matrix_entries)
         .replace("{TEST_TARGET_RESOLVE}", &test_target_resolve)
@@ -572,6 +578,56 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
         .replace("{OCX_TEST}", ocx_test)
         .replace("{TEST_TARGET}", test_target)
         .replace("{OCX_CLI_TAG}", OCX_CONTAINER_CLI_TAG)
+}
+
+/// The `discover` job's plan-artifact upload step(s), source-dependent.
+///
+/// Every source uploads `plan.json` in a `plan` artifact so the `prepare` legs
+/// consume the already-resolved plan without re-crawling. A `pypi` source
+/// additionally derives a PEP 751 lock per discovered version during this same
+/// phase (`pipeline plan` writes to `./locks` by default, W2.A3) — that lock
+/// must travel to `prepare` alongside `plan.json`, so the `plan` artifact's
+/// `path:` widens to also carry `locks/`. A second `derived-locks` artifact
+/// (90-day retention, `if-no-files-found: ignore` since a no-new-work run
+/// leaves it empty) keeps the locks around for audit after the 1-day `plan`
+/// artifact expires (`adr_pypi_lock_derivation.md`). Every other source keeps
+/// today's single-path, single-artifact upload byte-identical. Emitted into
+/// the `discover` job's step list at a 6-space indent.
+fn plan_artifact_upload_steps(is_pypi: bool) -> String {
+    if is_pypi {
+        r#"      # Ship the resolved plan (asset URLs included) to the prepare legs so
+      # they never re-run the source crawl — one crawl per run instead of N+1,
+      # which blew the shared GitHub GraphQL points budget (issue #160). The
+      # pypi source also derives a PEP 751 lock per discovered version during
+      # this phase (`pipeline plan` writes to `./locks` by default); ship it
+      # alongside plan.json so prepare never re-derives.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: plan
+          path: |
+            plan.json
+            locks/
+          retention-days: 1
+      # Long-retention copy of the derived locks for audit/debugging after the
+      # 1-day plan artifact expires (see adr_pypi_lock_derivation.md).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: derived-locks
+          path: locks/
+          retention-days: 90
+          if-no-files-found: ignore"#
+            .to_string()
+    } else {
+        r#"      # Ship the resolved plan (asset URLs included) to the prepare legs so
+      # they never re-run the source crawl — one crawl per run instead of N+1,
+      # which blew the shared GitHub GraphQL points budget (issue #160).
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: plan
+          path: plan.json
+          retention-days: 1"#
+            .to_string()
+    }
 }
 
 /// The prepare-job artifact-gathering script, source-dependent.
@@ -976,6 +1032,19 @@ mod tests {
             !content.contains(r#""${BUNDLE}""#),
             "pylock test job must not reference the archive BUNDLE var:\n{content}"
         );
+
+        // HARD REGRESSION LOCK: a committed-lock pylock spec is `is_env()` but
+        // NOT pypi — the plan artifact must stay the single-path, single-
+        // artifact upload (only pypi's in-pipeline lock derivation needs the
+        // widened `locks/` path + second `derived-locks` artifact).
+        assert!(
+            content.contains("          path: plan.json\n"),
+            "pylock plan artifact must keep the single-path upload byte-identical:\n{content}"
+        );
+        assert!(
+            !content.contains("derived-locks"),
+            "pylock workflow must not carry the pypi derived-locks artifact:\n{content}"
+        );
     }
 
     #[test]
@@ -1000,6 +1069,51 @@ mod tests {
         assert!(
             !content.contains("env-manifest.json"),
             "archive workflow must not carry pylock env-manifest logic:\n{content}"
+        );
+
+        // HARD REGRESSION LOCK: same plan-artifact byte-identity as pylock.
+        assert!(
+            content.contains("          path: plan.json\n"),
+            "archive plan artifact must keep the single-path upload byte-identical:\n{content}"
+        );
+        assert!(
+            !content.contains("derived-locks"),
+            "archive workflow must not carry the pypi derived-locks artifact:\n{content}"
+        );
+    }
+
+    #[test]
+    fn render_pypi_spec_widens_plan_artifact_and_adds_derived_locks() {
+        // A `source.type: pypi` spec derives its PEP 751 lock in-pipeline
+        // during the plan phase (unlike `pylock`'s committed lock), so the
+        // `locks/` directory the plan step writes must travel to `prepare`
+        // alongside `plan.json`, and a second long-retention `derived-locks`
+        // artifact preserves it for audit after the 1-day plan artifact
+        // expires.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-pypi.yml", dir.path()).expect("pypi fixture renders");
+
+        let workflow = dir.path().join(".github/workflows/pycowsay.yml");
+        let content = std::fs::read_to_string(&workflow).expect("workflow written");
+
+        // The `plan` artifact widens to a multi-line path carrying both
+        // plan.json and locks/, retention unchanged at 1 day.
+        assert!(
+            content.contains("      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1\n        with:\n          name: plan\n          path: |\n            plan.json\n            locks/\n          retention-days: 1\n"),
+            "pypi plan artifact must carry both plan.json and locks/:\n{content}"
+        );
+
+        // The second `derived-locks` artifact: 90-day retention, tolerant of
+        // an empty locks/ directory on a no-new-work run.
+        assert!(
+            content.contains("          name: derived-locks\n          path: locks/\n          retention-days: 90\n          if-no-files-found: ignore"),
+            "pypi workflow must carry a 90-day derived-locks artifact:\n{content}"
+        );
+
+        // Env-package shape (is_env()) still applies — pypi is an env source.
+        assert!(
+            content.contains("env-manifest.json"),
+            "pypi test job must read the env manifest (env source, like pylock):\n{content}"
         );
     }
 
