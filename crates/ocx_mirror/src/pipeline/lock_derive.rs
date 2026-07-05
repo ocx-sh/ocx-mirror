@@ -4,17 +4,16 @@
 //! In-pipeline PEP 751 lock derivation for `source.type: pypi` mirrors
 //! (plan_python_mirror_v2 decision A, W1.A2).
 //!
-//! Two phases, run once per (package, version) in the plan phase:
-//!
-//! 1. [`materialize_interpreter`] — `ocx package pull`s the pinned
-//!    `python.interpreter_package` onto disk and probes the materialized
-//!    root for a `bin/python3` executable, so `uv` gets a concrete
-//!    `--python` path (a digest/tag reference alone is not something `uv`
-//!    can invoke).
-//! 2. [`derive_pylock`] — shells `uv pip compile` against that interpreter
-//!    into a PEP 751 `pylock.toml`, then relaxes the `requires-python` floor
-//!    (uv#15995), stamps a provenance header, and fail-closed re-parses the
-//!    result through [`ocx_python::parse_pylock`] before trusting it.
+//! [`derive_pylock`] shells `uv pip compile` into a PEP 751 `pylock.toml`,
+//! then relaxes the `requires-python` floor (uv#15995), stamps a provenance
+//! header, and fail-closed re-parses the result through
+//! [`ocx_python::parse_pylock`] before trusting it. Which Python it resolves
+//! for is a [`UvPython`] selector: universal locks (the default) pass
+//! `--python-version X.Y` and never need an interpreter on disk;
+//! non-universal locks pass `--python <path>` against an interpreter
+//! materialized once per run via [`materialize_interpreter`] (`ocx package
+//! pull` + a `bin/python3` probe — a digest/tag reference alone is not
+//! something `uv` can invoke).
 //!
 //! Wired into `pipeline plan` (per-candidate invocation, `--locks-dir`
 //! persistence — plan_python_mirror_v2 W2.A3) and into `pipeline prepare`'s
@@ -99,13 +98,29 @@ fn find_python3(dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// How `uv pip compile` is told which Python to resolve for.
+///
+/// Universal locks (the default) resolve with `--python-version X.Y` — no
+/// concrete interpreter needed, which also sidesteps uv's interpreter
+/// inspection failing on fully-static python builds ("Could not detect a
+/// glibc or a musl libc", live W4 pilot). Non-universal locks resolve
+/// against the exact materialized interpreter via `--python <path>` — note
+/// that mode is structurally incompatible with a fully-static
+/// `interpreter_package` for the same inspection reason.
+pub(crate) enum UvPython {
+    /// `--python-version X.Y` (universal resolution's requires-python floor).
+    Version(String),
+    /// `--python <materialized interpreter path>`.
+    Interpreter(PathBuf),
+}
+
 /// Inputs for one [`derive_pylock`] invocation: the target package/version,
-/// the mirror-authored [`LockOptions`], and the materialized interpreter
-/// path to resolve against. Kept a plain params struct (not a builder) —
-/// every field is required and there is exactly one call site
-/// (`pipeline plan`, W2.A3).
+/// the mirror-authored [`LockOptions`], and the Python selector to resolve
+/// against. Kept a plain params struct (not a builder) — every field is
+/// required and there is exactly one call site
+/// (`pipeline plan`'s `derive_one_pypi_lock`, W2.A3).
 pub(crate) struct DeriveLockRequest<'a> {
-    pub interpreter: &'a Path,
+    pub python: &'a UvPython,
     pub package: &'a str,
     pub version: &'a str,
     pub index: Option<&'a str>,
@@ -132,10 +147,6 @@ fn resolve_uv_binary() -> PathBuf {
 /// Builds the `uv pip compile` argv for one lock derivation. Pure and
 /// unit-testable — locks the flag shape without spawning a subprocess.
 fn build_uv_compile_args(request: &DeriveLockRequest<'_>) -> Result<Vec<String>, String> {
-    let interpreter_str = request
-        .interpreter
-        .to_str()
-        .ok_or_else(|| format!("interpreter path is not valid UTF-8: {}", request.interpreter.display()))?;
     let output_str = request
         .output_path
         .to_str()
@@ -149,9 +160,21 @@ fn build_uv_compile_args(request: &DeriveLockRequest<'_>) -> Result<Vec<String>,
         "pylock.toml".to_string(),
         "-o".to_string(),
         output_str.to_string(),
-        "--python".to_string(),
-        interpreter_str.to_string(),
     ];
+
+    match request.python {
+        UvPython::Version(version) => {
+            args.push("--python-version".to_string());
+            args.push(version.clone());
+        }
+        UvPython::Interpreter(path) => {
+            let interpreter_str = path
+                .to_str()
+                .ok_or_else(|| format!("interpreter path is not valid UTF-8: {}", path.display()))?;
+            args.push("--python".to_string());
+            args.push(interpreter_str.to_string());
+        }
+    }
 
     if request.options.universal {
         args.push("--universal".to_string());
@@ -479,7 +502,7 @@ mod tests {
             timeout_seconds: 60,
         };
         let request = DeriveLockRequest {
-            interpreter: Path::new("/opt/python/bin/python3"),
+            python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
             index: Some("https://example.com/pypi/"),
@@ -516,7 +539,7 @@ mod tests {
             timeout_seconds: 60,
         };
         let request = DeriveLockRequest {
-            interpreter: Path::new("/opt/python/bin/python3"),
+            python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
             index: None,
@@ -529,6 +552,38 @@ mod tests {
 
         assert!(!args.contains(&"--universal".to_string()));
         assert!(!args.contains(&"--index-url".to_string()));
+    }
+
+    #[test]
+    fn build_uv_compile_args_universal_uses_python_version_not_interpreter() {
+        // Regression (live W4 pilot, static-python bug): `--python <path>`
+        // against a fully-static interpreter fails uv's libc inspection
+        // ("Could not detect a glibc or a musl libc"). Universal locks must
+        // resolve via `--python-version X.Y` and never pass `--python`.
+        let options = sample_options();
+        let python = UvPython::Version("3.13".to_string());
+        let request = DeriveLockRequest {
+            python: &python,
+            package: "pycowsay",
+            version: "1.0.0",
+            index: None,
+            options: &options,
+            output_path: Path::new("/work/pylock.toml"),
+            generated_at: "2026-07-05T00:00:00Z",
+        };
+
+        let args = build_uv_compile_args(&request).unwrap();
+
+        let version_flag = args
+            .iter()
+            .position(|a| a == "--python-version")
+            .expect("--python-version present");
+        assert_eq!(args[version_flag + 1], "3.13");
+        assert!(
+            !args.contains(&"--python".to_string()),
+            "universal mode must never pass --python, got: {args:?}"
+        );
+        assert!(args.contains(&"--universal".to_string()));
     }
 
     #[test]
@@ -607,7 +662,7 @@ hashes = { sha256 = "aaaa" }
         let output_path = work_dir.path().join("pylock.toml");
         let options = sample_options();
         let request = DeriveLockRequest {
-            interpreter: Path::new("/opt/python/bin/python3"),
+            python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
             index: None,
@@ -651,7 +706,7 @@ hashes = { sha256 = "aaaa" }
         let output_path = work_dir.path().join("pylock.toml");
         let options = sample_options();
         let request = DeriveLockRequest {
-            interpreter: Path::new("/opt/python/bin/python3"),
+            python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
             index: None,
@@ -688,7 +743,7 @@ hashes = { sha256 = "aaaa" }
         let output_path = work_dir.path().join("pylock.toml");
         let options = sample_options();
         let request = DeriveLockRequest {
-            interpreter: Path::new("/opt/python/bin/python3"),
+            python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "uwsgi",
             version: "2.0.24",
             index: None,
@@ -726,7 +781,7 @@ hashes = { sha256 = "aaaa" }
             timeout_seconds: 1,
         };
         let request = DeriveLockRequest {
-            interpreter: Path::new("/opt/python/bin/python3"),
+            python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
             index: None,

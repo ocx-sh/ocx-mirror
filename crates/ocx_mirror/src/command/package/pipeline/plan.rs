@@ -638,14 +638,38 @@ fn default_lock_options() -> LockOptions {
     }
 }
 
-/// Derives a single PEP 751 lock for one already-materialized interpreter and
+/// Resolves the [`lock_derive::UvPython`] selector for this spec's lock
+/// derivations — ONCE per plan/prepare run, shared by every candidate.
+///
+/// Universal locks (the default) resolve via `--python-version X.Y` (from
+/// `python.version`) with no interpreter materialization at all — cheaper
+/// (no `ocx package pull` in the plan phase) and, critically, compatible
+/// with fully-static interpreter builds that defeat uv's libc inspection
+/// (live W4 pilot: "Could not detect a glibc or a musl libc"). Only
+/// `universal: false` materializes the pinned `interpreter_package` for an
+/// exact-interpreter resolution.
+pub(crate) async fn resolve_uv_python(python: &PythonConfig) -> Result<lock_derive::UvPython, MirrorError> {
+    let universal = python.lock.as_ref().is_none_or(|lock| lock.universal);
+    if universal {
+        Ok(lock_derive::UvPython::Version(
+            pylock_interpreter_pin(python)?.python_version,
+        ))
+    } else {
+        let interpreter_path = lock_derive::materialize_interpreter(&python.interpreter_package)
+            .await
+            .map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
+        Ok(lock_derive::UvPython::Interpreter(interpreter_path))
+    }
+}
+
+/// Derives a single PEP 751 lock for one already-resolved Python selector and
 /// one already-known `app_version`. Shared plumbing between the plan-phase
 /// candidate loop ([`build_pypi_plan_entries`]) and `prepare.rs`'s standalone
 /// (no `--plan`) re-derivation path, both of which otherwise repeat the same
 /// `python.lock` defaulting + provenance-timestamp + request assembly.
 pub(crate) async fn derive_one_pypi_lock(
     spec: &MirrorSpec,
-    interpreter_path: &Path,
+    uv_python: &lock_derive::UvPython,
     app_version: &str,
     output_path: &Path,
 ) -> Result<Pylock, MirrorError> {
@@ -661,7 +685,7 @@ pub(crate) async fn derive_one_pypi_lock(
     let generated_at = Utc::now().to_rfc3339();
 
     let request = lock_derive::DeriveLockRequest {
-        interpreter: interpreter_path,
+        python: uv_python,
         package,
         version: app_version,
         index: index.as_deref(),
@@ -678,12 +702,13 @@ pub(crate) async fn derive_one_pypi_lock(
 /// decision A, `plan_python_mirror_v2`).
 ///
 /// [`select_pypi_candidates`] picks the versions worth deriving a lock for
-/// (cheap, no subprocess spawns); the pinned interpreter is then materialized
-/// ONCE for the whole plan run (every candidate resolves against the same
-/// interpreter/index), and each candidate's lock is derived in turn and
-/// written under `locks_dir`. The lock-agnostic `build_env_plan_entries`
-/// (shared with the `pylock` branch above) does the actual per-(variant,
-/// platform) wheel selection once a lock is in hand.
+/// (cheap, no subprocess spawns); the Python selector is then resolved ONCE
+/// for the whole plan run via [`resolve_uv_python`] (every candidate
+/// resolves against the same version/interpreter and index), and each
+/// candidate's lock is derived in turn and written under `locks_dir`. The
+/// lock-agnostic `build_env_plan_entries` (shared with the `pylock` branch
+/// above) does the actual per-(variant, platform) wheel selection once a
+/// lock is in hand.
 async fn build_pypi_plan_entries(
     spec: &MirrorSpec,
     upstream_versions: &[source::VersionInfo],
@@ -708,16 +733,14 @@ async fn build_pypi_plan_entries(
         )])
     })?;
 
-    let interpreter_path = lock_derive::materialize_interpreter(&python.interpreter_package)
-        .await
-        .map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
+    let uv_python = resolve_uv_python(python).await?;
 
     let package = spec.source.pylock_app_name(&spec.name);
 
     let mut entries = Vec::new();
     for version_info in candidates {
         let output_path = locks_dir.join(derived_lock_filename(package, &version_info.version));
-        let lock = derive_one_pypi_lock(spec, &interpreter_path, &version_info.version, &output_path).await?;
+        let lock = derive_one_pypi_lock(spec, &uv_python, &version_info.version, &output_path).await?;
 
         let mut version_entries = build_env_plan_entries(spec, &lock, &version_info.version, all_tags, version_map)?;
         let pylock_path = output_path.to_string_lossy().into_owned();
@@ -1618,6 +1641,44 @@ hashes = { sha256 = "aaaa" }
         let err = result.expect_err("an unparseable derived lock must fail, not silently succeed");
         assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
         assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn build_pypi_plan_entries_universal_mode_never_invokes_ocx() {
+        // Regression (live W4 pilot, static-python bug): `uv pip compile
+        // --python <path>` fails against a fully-static interpreter ("Could
+        // not detect a glibc or a musl libc"). Universal locks (the default)
+        // must resolve via `--python-version X.Y` instead — which means the
+        // plan phase must NOT materialize the interpreter at all. The ocx
+        // stub here hard-fails if invoked, so any reintroduced
+        // `materialize_interpreter` call in the universal path turns this red.
+        let _guard = pypi_env_lock().await;
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let ocx_stub = scripts_dir.path().join("ocx");
+        write_executable_script(
+            &ocx_stub,
+            "#!/bin/sh\necho 'ocx must not be invoked for universal lock derivation' >&2\nexit 1\n",
+        );
+        let uv_stub = scripts_dir.path().join("uv");
+        write_uv_stub(&uv_stub, PYPI_STUB_LOCK_BODY, 0);
+        // SAFETY: test-only env vars, serialized by `pypi_env_lock()`.
+        unsafe {
+            std::env::set_var("OCX_BINARY_PIN", &ocx_stub);
+            std::env::set_var("OCX_MIRROR_UV", &uv_stub);
+        }
+
+        let spec = pypi_fixture_spec(); // no lock: block -> universal defaults to true
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir).await;
+        remove_pypi_stubs();
+
+        let entries = result.expect("universal derivation must succeed without touching ocx");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].pylock.is_some());
     }
 
     #[tokio::test]

@@ -12,12 +12,11 @@ use ocx_lib::log;
 
 use crate::command::package::pipeline::plan::{
     PlanReport, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin, pylock_target_platform,
-    pylock_variants,
+    pylock_variants, resolve_uv_python,
 };
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
 use crate::normalizer;
-use crate::pipeline::lock_derive;
 use crate::pipeline::mirror_task::{MirrorTask, VariantContext};
 use crate::pipeline::orchestrator::{self, ConcurrencyParams};
 use crate::pipeline::python_prepare::{self, SelectedWheel, WheelEnvTask};
@@ -495,16 +494,14 @@ async fn build_pypi_env_tasks(
                 .python
                 .as_ref()
                 .expect("validated: python required for source.type 'pypi'");
-            let interpreter_path = lock_derive::materialize_interpreter(&python.interpreter_package)
-                .await
-                .map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
+            let uv_python = resolve_uv_python(python).await?;
 
             tokio::fs::create_dir_all(work_dir)
                 .await
                 .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
             let package = spec.source.pylock_app_name(&spec.name);
             let output_path = work_dir.join(derived_lock_filename(package, &app_version));
-            let lock = derive_one_pypi_lock(spec, &interpreter_path, &app_version, &output_path).await?;
+            let lock = derive_one_pypi_lock(spec, &uv_python, &app_version, &output_path).await?;
             (lock, app_version)
         }
     };
