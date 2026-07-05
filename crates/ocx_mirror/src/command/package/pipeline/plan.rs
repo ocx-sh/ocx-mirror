@@ -593,23 +593,25 @@ fn select_pypi_candidates<'a>(
     candidates
 }
 
-/// Maps a [`lock_derive`] `String` error to the mirror's error taxonomy.
+/// Maps a [`lock_derive`] `String` error to the mirror's error taxonomy
+/// (plan_python_mirror_v2 W3 acceptance contract: uv-fail→65, uv-missing→1).
 ///
-/// `derive_pylock`'s fail-closed re-parse (the derived lock fails
-/// `ocx_python::parse_pylock`) is malformed lock content — the same class
-/// `select_wheels` failures use elsewhere in the env pipeline
-/// ([`MirrorError::PylockError`], exit 65). Every other failure mode
-/// (interpreter materialization, `uv` spawn/exit/timeout/I-O) is a
-/// subprocess execution failure ([`MirrorError::ExecutionFailed`], exit 1) —
-/// the same convention `describe.rs::invoke_describe` uses for `ocx package
-/// describe` subprocess failures.
+/// Data errors — this version cannot produce a trustworthy lock — map to
+/// [`MirrorError::PylockError`] (exit 65, same class as `select_wheels`
+/// failures): `uv`'s nonzero exit (unsolvable requirements, bad package
+/// metadata; the message carries uv's stderr tail) and `derive_pylock`'s
+/// fail-closed re-parse rejection. Everything else — `uv` binary
+/// missing/spawn failure, timeout, interpreter materialization, lock-file
+/// I/O — is a subprocess execution failure ([`MirrorError::ExecutionFailed`],
+/// exit 1), the same convention `describe.rs::invoke_describe` uses for
+/// `ocx package describe` subprocess failures.
 ///
-/// ponytail: string-sniffs the one reparse-failure marker rather than a
+/// ponytail: string-sniffs the two data-error markers rather than a
 /// structured `lock_derive::Error` enum — `lock_derive.rs` is out of scope
 /// for this wiring task (dead-code removal only); promote to a real error
 /// type if another call site needs to distinguish more sub-failures.
 fn classify_lock_derive_error(err: String) -> MirrorError {
-    if err.contains("failed to re-parse") {
+    if err.contains("failed to re-parse") || err.contains("uv pip compile exited") {
         MirrorError::PylockError(err)
     } else {
         MirrorError::ExecutionFailed(vec![err])
@@ -1597,6 +1599,38 @@ hashes = { sha256 = "aaaa" }
         let err = result.expect_err("an unparseable derived lock must fail, not silently succeed");
         assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
         assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn build_pypi_plan_entries_uv_resolution_failure_maps_to_data_error_exit_65() {
+        // W3 acceptance contract: uv-fail→65. A nonzero uv exit (unsolvable
+        // requirements, bad package metadata) means this version cannot
+        // produce a lock — a data error (PylockError, 65), NOT a generic
+        // ExecutionFailed (1), which stays reserved for uv-missing/spawn/
+        // timeout failures. The surfaced message must carry uv's stderr.
+        let _guard = pypi_env_lock().await;
+        let (_interpreter_root, scripts_dir) = install_pypi_stubs("", 0);
+        write_executable_script(
+            &scripts_dir.path().join("uv"),
+            "#!/bin/sh\ncat > /dev/null\necho 'no solution found for pycowsay==1.0.0' >&2\nexit 1\n",
+        );
+
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir).await;
+        remove_pypi_stubs();
+
+        let err = result.expect_err("a nonzero uv exit must fail the plan");
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+        assert!(
+            err.to_string().contains("no solution found"),
+            "the error must carry uv's stderr, got: {err}"
+        );
     }
 
     #[tokio::test]
