@@ -27,12 +27,14 @@ pub struct PythonConfig {
 }
 
 /// How `pipeline plan`/`prepare` derive the per-version PEP 751 lock for a
-/// `source.type: pypi` mirror (discovery + lock derivation land in
-/// plan_python_mirror_v2 W1/W2 — this struct only carries the parsed config
-/// today).
+/// `source.type: pypi` mirror. Its fields are read by
+/// `pipeline::lock_derive` (W1.A2), but that module has no call site yet —
+/// wiring it into `pipeline plan` itself (per-candidate invocation,
+/// `--locks-dir` persistence) is plan_python_mirror_v2 W2.A3. Remove the
+/// `allow` once that lands and the reads become reachable.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // read from YAML spec; consumed once lock derivation (W1/W2) wires it up
+#[allow(dead_code)]
 pub struct LockOptions {
     /// Resolve a platform/interpreter-agnostic universal lock rather than one
     /// pinned to the resolving host. Default: `true`.

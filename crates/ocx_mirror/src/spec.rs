@@ -28,7 +28,7 @@ pub use notify_config::{DiscordConfig, NotifyConfig};
 pub use ocx_mirror_config::OcxMirrorConfig;
 #[allow(unused_imports)]
 pub use platforms_config::{ContainerConfig, ExcludeEntry, PlatformConfig, Severity};
-pub use python_config::PythonConfig;
+pub use python_config::{LockOptions, PythonConfig};
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
