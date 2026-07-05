@@ -51,5 +51,7 @@ pub use platform::{
     OcxPlatformEncoding, PlatformError, PlatformFacts, PythonTarget, TargetArchitecture, TargetOperatingSystem,
     TargetPlatform, VariantConstraints, encode_l2, marker_environment, parse_platform_tag,
 };
-pub use repack::{ConsoleScript, REPACK_VERSION, RepackError, RepackedWheel, repack_wheel};
+pub use repack::{
+    ConsoleScript, REPACK_VERSION, RepackError, RepackedWheel, WheelDescription, read_wheel_description, repack_wheel,
+};
 pub use select::{SelectError, WheelRef, select_wheels};

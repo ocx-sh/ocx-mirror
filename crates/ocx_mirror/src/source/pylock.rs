@@ -15,7 +15,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use ocx_lib::package::version::Version;
-use ocx_python::{LockError, Pylock};
+use ocx_python::{LockError, LockedPackage, Pylock};
 
 use super::VersionInfo;
 use crate::error::MirrorError;
@@ -89,11 +89,22 @@ pub async fn list_versions(spec_dir: &Path, path: &str, app_name: &str) -> anyho
 ///
 /// Returns an error when no locked package normalizes to `app_name`.
 pub fn app_version(lock: &Pylock, app_name: &str) -> anyhow::Result<String> {
+    Ok(find_app_package(lock, app_name)?.version.clone())
+}
+
+/// Finds the locked package matching `app_name` (PEP 503 normalized).
+///
+/// Shared by [`app_version`] and the describe-phase catalog autogen (which
+/// also needs the package's wheel list, not just its version).
+///
+/// # Errors
+///
+/// Returns an error when no locked package normalizes to `app_name`.
+pub fn find_app_package<'a>(lock: &'a Pylock, app_name: &str) -> anyhow::Result<&'a LockedPackage> {
     let normalized_app_name = normalize_package_name(app_name);
     lock.packages
         .iter()
         .find(|package| normalize_package_name(&package.name) == normalized_app_name)
-        .map(|package| package.version.clone())
         .ok_or_else(|| {
             let locked: Vec<&str> = lock.packages.iter().map(|p| p.name.as_str()).collect();
             anyhow::anyhow!("app package '{app_name}' not found in pylock.toml (locked packages: {locked:?})")

@@ -72,7 +72,19 @@ impl Source {
     /// patterns: `pylock` (committed lock) or `pypi` (index-discovered, lock
     /// derived in-pipeline).
     pub fn is_env(&self) -> bool {
-        matches!(self, Source::Pylock { .. } | Source::Pypi { .. })
+        self.env_type_name().is_some()
+    }
+
+    /// The `source.type` discriminant string (`"pylock"`/`"pypi"`) for an env
+    /// source, `None` for any other source. Used to name the concrete source
+    /// type in validation errors that reject a field for env sources (e.g.
+    /// `metadata:` — env metadata is composed from the lock, not configured).
+    pub fn env_type_name(&self) -> Option<&'static str> {
+        match self {
+            Source::Pylock { .. } => Some("pylock"),
+            Source::Pypi { .. } => Some("pypi"),
+            _ => None,
+        }
     }
 }
 

@@ -224,8 +224,10 @@ impl MirrorSpec {
             }
         }
 
-        if let Some(metadata) = &self.metadata {
-            metadata.validate(spec_dir, &mut errors);
+        match (&self.metadata, self.source.env_type_name()) {
+            (Some(_), Some(source_type)) => errors.push(metadata_not_supported_error(source_type)),
+            (Some(metadata), None) => metadata.validate(spec_dir, &mut errors),
+            (None, _) => {}
         }
 
         if let Some(versions) = &self.versions {
@@ -414,9 +416,14 @@ impl MirrorSpec {
                 }
             }
 
-            // Per-variant metadata validation
-            if let Some(metadata) = &v.metadata {
-                metadata.validate(spec_dir, errors);
+            // Per-variant metadata validation — source-aware (same rejection
+            // as the top-level `metadata:` check above).
+            match (&v.metadata, self.source.env_type_name()) {
+                (Some(_), Some(source_type)) => {
+                    errors.push(variant_error(&v.name, &metadata_not_supported_error(source_type)));
+                }
+                (Some(metadata), None) => metadata.validate(spec_dir, errors),
+                (None, _) => {}
             }
         }
     }
@@ -463,6 +470,16 @@ fn variant_error(name: &Option<String>, message: &str) -> String {
         Some(name) => format!("variants: variant '{name}' {message}"),
         None => format!("variants: unnamed variant {message}"),
     }
+}
+
+/// The `metadata:` rejection message for an env source (`pylock`/`pypi`):
+/// env metadata is composed from the resolved wheel/lock, so a hand-authored
+/// `metadata.json` has nothing to attach to. Shared by the top-level and
+/// per-variant checks in [`MirrorSpec::validate`]/[`MirrorSpec::validate_variants`].
+fn metadata_not_supported_error(source_type: &str) -> String {
+    format!(
+        "metadata: not supported for source.type '{source_type}' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"
+    )
 }
 
 // ── Pipeline field validators ────────────────────────────────────────────────
@@ -1190,6 +1207,122 @@ assets:
                 .iter()
                 .any(|e| e.contains("assets") && e.contains("not supported for source.type 'pylock'")),
             "Expected asset-patterns-on-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_with_top_level_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+metadata:
+  default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "metadata: not supported for source.type 'pylock' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact metadata-not-supported-for-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_with_top_level_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+metadata:
+  default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "metadata: not supported for source.type 'pypi' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact metadata-not-supported-for-pypi error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pylock_variant_with_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - name: default
+    default: true
+    libc: gnu
+    min_manylinux: "2_28"
+    metadata:
+      default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "variants: variant 'default' metadata: not supported for source.type 'pylock' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact per-variant metadata-not-supported-for-pylock error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_reject_pypi_variant_with_metadata() {
+        let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+variants:
+  - default: true
+    libc: gnu
+    metadata:
+      default: metadata.json
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yaml"));
+        assert!(
+            errors.iter().any(|e| e
+                == "variants: unnamed variant metadata: not supported for source.type 'pypi' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)"),
+            "Expected exact per-variant metadata-not-supported-for-pypi error, got: {errors:?}"
         );
     }
 

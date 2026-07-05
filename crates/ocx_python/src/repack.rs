@@ -195,6 +195,92 @@ async fn repack_wheel_with_budget(
     })
 }
 
+/// Distribution metadata extracted from a wheel's `*.dist-info/METADATA`
+/// (PEP 566 core metadata), for catalog-description autogeneration when a
+/// mirror has no hand-authored `CATALOG.md` for an env source (`pylock`/
+/// `pypi` — see `ocx-mirror`'s `pipeline describe`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WheelDescription {
+    /// The `Summary` header (one-line project description), when present.
+    pub summary: Option<String>,
+    /// The `Keywords` header (comma-separated), when present.
+    pub keywords: Option<String>,
+    /// The `License` header, when present.
+    pub license: Option<String>,
+}
+
+/// Decompressed-byte budget for a single `*.dist-info/METADATA` entry (CWE-409
+/// zip-bomb guard, mirroring [`MAX_TOTAL_DECOMPRESSED_BYTES`] but scoped to
+/// one small text file rather than the whole wheel).
+const MAX_METADATA_BYTES: u64 = 1 << 20;
+
+/// Reads a wheel zip and extracts its `*.dist-info/METADATA` file's
+/// `Summary`/`Keywords`/`License` header fields.
+///
+/// Performs its own minimal zip walk — reusing the same dist-info entry
+/// detection as [`repack_wheel`] — rather than a full repack, since catalog
+/// synthesis only needs three header lines, not the relocated tree,
+/// entry-points, or `RECORD`. Returns a default (all-`None`) description when
+/// the wheel carries no `METADATA` file.
+///
+/// # Errors
+///
+/// Returns [`RepackError::Io`] on a filesystem failure and [`RepackError::Zip`]
+/// when the wheel is not a readable zip.
+pub fn read_wheel_description(wheel_path: &Path) -> Result<WheelDescription, RepackError> {
+    let wheel_bytes = std::fs::read(wheel_path).map_err(RepackError::Io)?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(wheel_bytes.as_slice())).map_err(RepackError::Zip)?;
+
+    for index in 0..zip.len() {
+        let mut entry = zip.by_index(index).map_err(RepackError::Zip)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let Some(enclosed) = entry.enclosed_name() else {
+            continue;
+        };
+        let components = path_components(&enclosed);
+        if let [dist_info, leaf] = components.as_slice()
+            && dist_info.ends_with(".dist-info")
+            && leaf == "METADATA"
+        {
+            let data = read_entry_capped(&mut entry, MAX_METADATA_BYTES, MAX_METADATA_BYTES)?;
+            return Ok(parse_wheel_metadata(&String::from_utf8_lossy(&data)));
+        }
+    }
+    Ok(WheelDescription::default())
+}
+
+/// Parses the PEP 566 core-metadata header fields relevant to catalog
+/// synthesis: `Summary`, `Keywords`, `License`. Only single-line header
+/// values are read; the long-form `Description` body (after the blank-line
+/// header/body separator) is intentionally not parsed here. A value of
+/// `UNKNOWN` (setuptools' historical placeholder for an unset field) is
+/// treated the same as an absent header.
+fn parse_wheel_metadata(text: &str) -> WheelDescription {
+    let mut description = WheelDescription::default();
+    for line in text.lines() {
+        // The blank line separates headers from the free-text description body.
+        if line.is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() || value == "UNKNOWN" {
+            continue;
+        }
+        match key.trim() {
+            "Summary" => description.summary = Some(value.to_string()),
+            "Keywords" => description.keywords = Some(value.to_string()),
+            "License" => description.license = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    description
+}
+
 /// Reads a zip entry, capping actual decompressed bytes at `remaining_budget`
 /// — reading one byte over aborts as [`RepackError::WheelTooLarge`] rather
 /// than trusting the entry's declared (attacker-controlled) size, before an
@@ -618,5 +704,65 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    /// Writes a minimal wheel zip carrying only a `*.dist-info/METADATA` entry
+    /// with the given raw content, for exercising [`read_wheel_description`]
+    /// without a full wheel fixture.
+    fn write_metadata_only_wheel(output_dir: &Path, name: &str, metadata: &str) -> PathBuf {
+        use std::io::Write as _;
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file(format!("{name}-1.0.0.dist-info/METADATA"), options)
+            .expect("start METADATA entry");
+        writer.write_all(metadata.as_bytes()).expect("write METADATA entry");
+        let cursor = writer.finish().expect("finish zip");
+
+        let wheel_path = output_dir.join(format!("{name}-1.0.0-py3-none-any.whl"));
+        std::fs::write(&wheel_path, cursor.into_inner()).expect("write wheel");
+        wheel_path
+    }
+
+    #[test]
+    fn read_wheel_description_extracts_summary_keywords_license() {
+        let output_dir = scratch_dir("description-full");
+        let wheel = write_metadata_only_wheel(
+            &output_dir,
+            "pkg",
+            "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0.0\nSummary: A tiny test package\nKeywords: test,fixture\nLicense: MIT\n\nLong-form description body, not parsed.\n",
+        );
+
+        let description = read_wheel_description(&wheel).expect("read description");
+        assert_eq!(description.summary.as_deref(), Some("A tiny test package"));
+        assert_eq!(description.keywords.as_deref(), Some("test,fixture"));
+        assert_eq!(description.license.as_deref(), Some("MIT"));
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn read_wheel_description_treats_unknown_placeholder_as_absent() {
+        let output_dir = scratch_dir("description-unknown");
+        let wheel = write_metadata_only_wheel(
+            &output_dir,
+            "pkg",
+            "Metadata-Version: 2.1\nName: pkg\nVersion: 1.0.0\nSummary: UNKNOWN\nLicense: UNKNOWN\n",
+        );
+
+        let description = read_wheel_description(&wheel).expect("read description");
+        assert_eq!(description, WheelDescription::default());
+
+        std::fs::remove_dir_all(&output_dir).ok();
+    }
+
+    #[test]
+    fn read_wheel_description_defaults_when_no_optional_fields_present() {
+        // Reuses the shared purelib fixture — its METADATA has no
+        // Summary/Keywords/License, only the always-present core fields.
+        let description =
+            read_wheel_description(&fixture_wheel("purelib_pkg-1.0.0-py3-none-any.whl")).expect("read description");
+        assert_eq!(description, WheelDescription::default());
     }
 }
