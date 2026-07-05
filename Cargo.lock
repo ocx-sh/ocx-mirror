@@ -2356,6 +2356,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uv-pep440",
 ]
 
 [[package]]
