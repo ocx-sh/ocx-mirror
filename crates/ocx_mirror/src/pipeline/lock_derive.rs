@@ -16,14 +16,10 @@
 //!    (uv#15995), stamps a provenance header, and fail-closed re-parses the
 //!    result through [`ocx_python::parse_pylock`] before trusting it.
 //!
-//! Wiring this into `pipeline plan` (per-candidate invocation, `--locks-dir`
-//! persistence) is a separate task (plan_python_mirror_v2 W2.A3) — this
-//! module only owns the derivation mechanics.
-//!
-//! No call site exists yet outside this module's own tests, so the binary's
-//! dead-code analysis cannot see any of this as reachable; remove the
-//! `allow` once W2.A3 wires a live call path through `pipeline plan`.
-#![allow(dead_code)]
+//! Wired into `pipeline plan` (per-candidate invocation, `--locks-dir`
+//! persistence — plan_python_mirror_v2 W2.A3) and into `pipeline prepare`'s
+//! standalone (no `--plan`) re-derivation path; this module only owns the
+//! derivation mechanics.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
