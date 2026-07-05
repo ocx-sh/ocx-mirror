@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -53,6 +54,24 @@ def ocx_binary() -> Path:
             p = p.with_suffix(".exe")
     assert p.exists(), f"ocx binary not found at {p}"
     return p
+
+
+@pytest.fixture(scope="session")
+def real_ocx_binary() -> Path:
+    """`ocx` built directly from the `external/ocx` submodule pin.
+
+    Cross-repository blob-mount support (the `:from=` layer tail on
+    `package push`, and the JSON `layers` push-report field it produces) is
+    recent enough that whatever `ocx` resolves from `OCX_COMMAND`/`PATH` in
+    this environment may predate it — build straight from the pinned
+    submodule so mount-dependent tests exercise the real feature.
+    """
+    ocx_dir = PROJECT_ROOT / "external" / "ocx"
+    binary = ocx_dir / "target" / "release" / "ocx"
+    if not binary.exists():
+        subprocess.run(["cargo", "build", "--release", "--bin", "ocx"], cwd=ocx_dir, check=True)
+    assert binary.exists(), f"ocx binary not found at {binary} after build"
+    return binary
 
 
 # ---------------------------------------------------------------------------
