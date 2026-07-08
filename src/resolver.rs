@@ -158,6 +158,49 @@ mod tests {
     }
 
     #[test]
+    fn libc_variants_resolve_independently() {
+        // Two libc variants share os/arch but are distinct Platform keys, each
+        // with its own pattern list — they resolve to their own asset with no
+        // ambiguity.
+        let mut assets = HashMap::new();
+        assets.insert(
+            "cpython-3.12-gnu.tar.zst".to_string(),
+            url("https://example.com/cpython-3.12-gnu.tar.zst"),
+        );
+        assets.insert(
+            "cpython-3.12-musl.tar.zst".to_string(),
+            url("https://example.com/cpython-3.12-musl.tar.zst"),
+        );
+
+        let mut patterns = HashMap::new();
+        patterns.insert(
+            platform("linux/amd64+libc.glibc"),
+            vec![re(r"cpython-.*-gnu\.tar\.zst")],
+        );
+        patterns.insert(
+            platform("linux/amd64+libc.musl"),
+            vec![re(r"cpython-.*-musl\.tar\.zst")],
+        );
+
+        match resolve_assets(&assets, &patterns) {
+            AssetResolution::Resolved(resolved) => {
+                assert_eq!(resolved.len(), 2);
+                let glibc = resolved
+                    .iter()
+                    .find(|r| r.platform == platform("linux/amd64+libc.glibc"))
+                    .unwrap();
+                assert_eq!(glibc.asset_name, "cpython-3.12-gnu.tar.zst");
+                let musl = resolved
+                    .iter()
+                    .find(|r| r.platform == platform("linux/amd64+libc.musl"))
+                    .unwrap();
+                assert_eq!(musl.asset_name, "cpython-3.12-musl.tar.zst");
+            }
+            AssetResolution::Ambiguous(_) => panic!("Expected resolved"),
+        }
+    }
+
+    #[test]
     fn zero_matches_platform_absent() {
         let mut assets = HashMap::new();
         assets.insert(
