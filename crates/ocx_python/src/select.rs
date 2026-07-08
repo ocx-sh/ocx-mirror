@@ -75,8 +75,11 @@ pub fn select_wheels(lock: &Pylock, target: &PythonTarget) -> Result<Vec<WheelRe
     let variant_label = variant_label(&target.variant);
     let interpreter_abi = target.effective_abi().to_string();
     let free_threaded = is_free_threaded(target);
-    // Decision B (wheel_priority): absent/empty ranks every wheel identically
-    // — today's TagPriority-only ordering, unchanged.
+    // `wheel_priority` semantics: a NON-empty list is an admissibility filter
+    // + ranking — a tag-compatible wheel whose platform tags match no listed
+    // prefix is EXCLUDED, and survivors rank by first-listed-prefix-wins.
+    // Absent/empty keeps today's TagPriority-only ordering, unchanged
+    // (lib backcompat; the mirror always passes a non-empty derived filter).
     let wheel_priority = target.variant.wheel_priority.as_deref().unwrap_or(&[]);
 
     let mut selected = Vec::new();
@@ -207,11 +210,13 @@ impl Candidate<'_> {
 /// The `wheel_priority` class rank of a wheel: the position of its
 /// highest-priority matching prefix among `priority`, inverted so the
 /// first-listed prefix ranks highest (`priority.len()`); an unmatched tag
-/// contributes nothing. An empty `priority` (or a wheel matching none of it)
-/// ranks `0` for every wheel — today's ordering, unchanged (backcompat).
-/// Matching is a prefix match against each of the wheel's platform tags
-/// (a wheel may carry a compressed multi-tag set), never re-admitting a wheel
-/// that tag-compatibility already excluded — this only reorders survivors.
+/// contributes nothing. Rank `0` means no prefix matched — with a non-empty
+/// `priority` the caller EXCLUDES such wheels (admissibility filter); with an
+/// empty `priority` every wheel ranks `0` and today's TagPriority-only
+/// ordering applies unchanged (backcompat). Matching is a prefix match
+/// against each of the wheel's platform tags (a wheel may carry a compressed
+/// multi-tag set), never re-admitting a wheel that tag-compatibility already
+/// excluded.
 fn class_rank<'a>(platform_tags: impl Iterator<Item = &'a str>, priority: &[String]) -> usize {
     platform_tags
         .filter_map(|tag| priority.iter().position(|prefix| tag.starts_with(prefix.as_str())))
@@ -220,11 +225,13 @@ fn class_rank<'a>(platform_tags: impl Iterator<Item = &'a str>, priority: &[Stri
         .unwrap_or(0)
 }
 
-/// Step 4: ranks a package's candidate wheels by `wheel_priority` class rank,
-/// then tag priority (build tag then filename as deterministic tiebreakers),
-/// and returns the best. Zero compatible wheels is
-/// [`SelectError::NoCompatibleWheel`], whose `available_tags` names the
-/// platform tags that WERE present on the (incompatible) candidates.
+/// Step 4: filters a package's tag-compatible wheels through the non-empty
+/// `wheel_priority` admissibility list (a wheel matching no listed prefix is
+/// excluded), ranks survivors by class rank then tag priority (build tag then
+/// filename as deterministic tiebreakers), and returns the best. Zero
+/// admissible wheels is [`SelectError::NoCompatibleWheel`], whose
+/// `available_tags` names the platform tags that WERE present on the
+/// (excluded or incompatible) candidates.
 fn pick_wheel<'a>(
     package: &'a LockedPackage,
     tags: &Tags,
@@ -244,8 +251,15 @@ fn pick_wheel<'a>(
         let wheel_tags: Vec<String> = parsed.platform_tags().iter().map(ToString::to_string).collect();
         available.extend(wheel_tags.iter().cloned());
         if let TagCompatibility::Compatible(priority) = parsed.compatibility(tags) {
+            let class_rank = class_rank(wheel_tags.iter().map(String::as_str), wheel_priority);
+            // Admissibility: a non-empty priority list excludes wheels whose
+            // platform tags match none of its prefixes (rank 0). Its tags stay
+            // in `available` so the NoCompatibleWheel diagnostic names them.
+            if !wheel_priority.is_empty() && class_rank == 0 {
+                continue;
+            }
             let candidate = Candidate {
-                class_rank: class_rank(wheel_tags.iter().map(String::as_str), wheel_priority),
+                class_rank,
                 priority,
                 build_tag: parsed.build_tag().cloned(),
                 wheel,
@@ -786,6 +800,60 @@ mod tests {
         assert!(linux_amd64().variant.wheel_priority.is_none());
 
         let selected = select_wheels(&lock, &linux_amd64()).expect("selection succeeds");
+        assert_eq!(
+            selected[0].filename,
+            "numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl"
+        );
+    }
+
+    #[test]
+    fn wheel_priority_excludes_wheels_matching_no_listed_prefix() {
+        // Admissibility: `["any"]` on a package shipping ONLY a compiled
+        // manylinux wheel must EXCLUDE it (fail closed: the maintainer's
+        // filter admits no binary wheel), not silently fall back to it.
+        let lock = lock_of(vec![package(
+            "numpy",
+            "2.1.3",
+            None,
+            vec![wheel("numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl", "bbbb")],
+        )]);
+        let mut target = linux_amd64();
+        target.variant.wheel_priority = Some(vec!["any".to_string()]);
+
+        let error = select_wheels(&lock, &target).expect_err("filter admits no wheel of this package");
+        match error {
+            SelectError::NoCompatibleWheel {
+                package,
+                available_tags,
+                ..
+            } => {
+                assert_eq!(package, "numpy");
+                assert!(
+                    available_tags.contains(&"manylinux_2_28_x86_64".to_string()),
+                    "the excluded wheel's tags must stay in the diagnostic set, got {available_tags:?}"
+                );
+            }
+            other => panic!("expected NoCompatibleWheel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wheel_priority_ranks_within_admitted_set() {
+        // `["manylinux", "any"]` admits both wheels; the first-listed prefix
+        // (manylinux) outranks the pure wheel even though both are admitted.
+        let lock = lock_of(vec![package(
+            "numpy",
+            "2.1.3",
+            None,
+            vec![
+                wheel("numpy-2.1.3-py3-none-any.whl", "aaaa"),
+                wheel("numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl", "bbbb"),
+            ],
+        )]);
+        let mut target = linux_amd64();
+        target.variant.wheel_priority = Some(vec!["manylinux".to_string(), "any".to_string()]);
+
+        let selected = select_wheels(&lock, &target).expect("selection succeeds");
         assert_eq!(
             selected[0].filename,
             "numpy-2.1.3-cp313-cp313-manylinux_2_28_x86_64.whl"

@@ -16,8 +16,8 @@
 //! The composition is **not** a fully-formed [`Info`](ocx_lib::package::info::Info):
 //! `Info` requires a concrete [`Identifier`](ocx_lib::oci::Identifier) carrying
 //! a registry host, which this crate never knows. Instead it emits the two
-//! target-agnostic thirds of an `Info` — the composed [`Metadata`] and the L2
-//! [`Platform`] — and [`EnvComposition::into_info`] assembles the final `Info`
+//! target-agnostic thirds of an `Info` — the composed [`Metadata`] and the base
+//! os/arch [`Platform`] — and [`EnvComposition::into_info`] assembles the final `Info`
 //! once the consumer supplies the `Identifier`.
 //!
 //! # Entrypoint synthesis
@@ -51,7 +51,7 @@ use ocx_lib::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypo
 use ocx_lib::package::metadata::env::EnvBuilder;
 
 use crate::naming::normalize_package_name;
-use crate::platform::{PythonTarget, encode_l2};
+use crate::platform::{PythonTarget, TargetArchitecture, TargetOperatingSystem, TargetPlatform};
 use crate::repack::RepackedWheel;
 
 /// Which wheels' `[console_scripts]` entries synthesize as entrypoints.
@@ -122,7 +122,7 @@ pub struct EnvSpec {
     /// (python-build-standalone package). Its `python3` on the composed `PATH`
     /// is the dispatch target for every synthesized entrypoint.
     pub interpreter: ocx_lib::package::metadata::dependency::Dependency,
-    /// The selection target — supplies the L2 platform encoding and the ABI
+    /// The selection target — supplies the base os/arch platform and the ABI
     /// the wheel set is checked against.
     pub target: PythonTarget,
     /// Which wheels' console scripts synthesize as entrypoints (design
@@ -159,7 +159,8 @@ pub struct EnvComposition {
     /// (`PYTHONPATH`, `PATH`, `PYTHONDONTWRITEBYTECODE=1`), and the private
     /// interpreter dependency.
     pub metadata: Metadata,
-    /// The L2-encoded OCX platform for the Image Index entry.
+    /// The featureless base os/arch OCX platform (the mirror's push `-p`
+    /// flag owns the published, possibly `+libc.*`-suffixed, platform key).
     pub platform: Platform,
     /// The ordered wheel layer descriptors (source + placement).
     pub layers: Vec<WheelLayer>,
@@ -186,9 +187,8 @@ impl EnvComposition {
 ///
 /// Returns [`ComposeError::UnknownExtra`] for a requested extra absent from the
 /// lock, [`ComposeError::AbiMismatch`] when a wheel's ABI is inconsistent with
-/// the interpreter pin, [`ComposeError::InvalidEntryPoint`] for a malformed
-/// `[console_scripts]` object reference, and [`ComposeError::Platform`] when L2
-/// platform encoding fails.
+/// the interpreter pin, and [`ComposeError::InvalidEntryPoint`] for a malformed
+/// `[console_scripts]` object reference.
 pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvComposition, ComposeError> {
     // 1. Every requested extra must be one the lock declares. A typo fails
     //    closed here rather than silently registering an unresolvable launcher.
@@ -321,9 +321,11 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
     let dependencies = Dependencies::new(vec![spec.interpreter.clone()])
         .expect("a single interpreter dependency cannot duplicate an identifier or name");
 
-    // 6. L2 platform encoding (os/arch → OCX platform). The variant prefix is
-    //    the consumer's tag concern, not baked into the Image Index platform.
-    let platform = encode_l2(&spec.target)?.platform;
+    // 6. Base os/arch platform (featureless). The consumer (the mirror) owns
+    //    the published platform key — including any `+libc.*` os.features
+    //    suffix — via its push `-p` flag; this composed value is the
+    //    target-agnostic default.
+    let platform = base_platform(&spec.target.platform);
 
     // 7. Layers: one per wheel, applied at the content root with an empty
     //    layout — `repack` already emitted the final relocated tree.
@@ -504,9 +506,31 @@ pub enum ComposeError {
         /// The requested-but-absent entrypoint name.
         name: String,
     },
-    /// L2 platform encoding failed for the target.
-    #[error("platform encoding error during composition")]
-    Platform(#[from] crate::platform::PlatformError),
+}
+
+/// Maps a target's os/arch key to a featureless OCX [`Platform`] — the
+/// target-agnostic default carried in the composed metadata; the mirror's push
+/// `-p` flag owns the published (possibly `+libc.*`-suffixed) platform.
+fn base_platform(platform: &TargetPlatform) -> Platform {
+    use ocx_lib::oci::{Architecture, OperatingSystem};
+
+    let os = match platform.operating_system {
+        TargetOperatingSystem::Linux => OperatingSystem::Linux,
+        TargetOperatingSystem::Darwin => OperatingSystem::Darwin,
+        TargetOperatingSystem::Windows => OperatingSystem::Windows,
+    };
+    let arch = match platform.architecture {
+        TargetArchitecture::Amd64 => Architecture::Amd64,
+        TargetArchitecture::Arm64 => Architecture::Arm64,
+    };
+    Platform::Specific {
+        os,
+        arch,
+        variant: None,
+        os_version: None,
+        os_features: Vec::new(),
+        features: None,
+    }
 }
 
 #[cfg(test)]

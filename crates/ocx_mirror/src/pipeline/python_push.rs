@@ -382,6 +382,19 @@ mod tests {
         let platform_flag = args.iter().position(|a| a == "-p").expect("-p flag present");
         assert_eq!(args[platform_flag + 1], "linux/amd64");
 
+        // A full wheels key travels to `-p` verbatim — ocx parses the
+        // `+libc.*` suffix into the index entry's `os.features`.
+        let libc_args = build_env_push_args(
+            "linux/amd64+libc.glibc",
+            "pycowsay:1.0.0",
+            &metadata_path,
+            &layers,
+            true,
+        )
+        .expect("valid UTF-8 paths build cleanly");
+        let libc_flag = libc_args.iter().position(|a| a == "-p").expect("-p flag present");
+        assert_eq!(libc_args[libc_flag + 1], "linux/amd64+libc.glibc");
+
         let identifier_flag = args.iter().position(|a| a == "-i").expect("-i flag present");
         assert_eq!(args[identifier_flag + 1], "pycowsay:1.0.0");
 
@@ -446,7 +459,6 @@ mod tests {
             envs: vec![EnvEntry {
                 platform_slug: "linux_amd64".to_string(),
                 platform: "linux/amd64".to_string(),
-                variant: None,
                 metadata_path: PathBuf::from("linux_amd64/metadata.json"),
                 layers: vec![EnvLayer {
                     wheel_repository: "pip-packages/example".to_string(),

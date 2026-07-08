@@ -12,7 +12,7 @@ use ocx_lib::log;
 
 use crate::command::package::pipeline::plan::{
     PlanReport, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin, pylock_target_platform,
-    pylock_variants, resolve_uv_python,
+    resolve_uv_python, wheel_target_constraints,
 };
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
@@ -22,7 +22,6 @@ use crate::pipeline::orchestrator::{self, ConcurrencyParams};
 use crate::pipeline::python_prepare::{self, SelectedWheel, WheelEnvTask};
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
-use crate::source;
 use crate::spec::{self, MirrorSpec};
 
 /// `ocx-mirror package pipeline prepare` subcommand.
@@ -142,20 +141,21 @@ impl Prepare {
                 "python config is required for source.type 'pylock'/'pypi'".to_string(),
             ])
         })?;
-        // The interpreter digest is the one network dependency of task building;
-        // resolving it here keeps `build_env_tasks` a pure (hermetically
-        // testable) local re-selection. A variant may override
-        // `python.interpreter_package` (e.g. a musl-libc build for a
-        // `libc: musl` variant), so each distinct reference in play is
-        // resolved once, keyed by the reference string.
-        let interpreter_dependencies = resolve_interpreter_dependencies(spec, python, &client).await?;
+        // The interpreter digest is the one network dependency of task
+        // building; resolving it here keeps `build_env_tasks` a pure
+        // (hermetically testable) local re-selection. One spec-wide
+        // `python.interpreter_package` — no per-key override.
+        let interpreter_dependency = build_interpreter_dependency(&python.interpreter_package, &client).await?;
 
         // When `--plan` is supplied (the CI path), restrict prepare to the
-        // platforms discover still needs for this version. discover emits a
-        // backfill-partial entry that lists only the outstanding platforms, so an
+        // wheels keys discover still needs for this version. discover emits a
+        // backfill-partial entry that lists only the outstanding work, so an
         // already-published tile is not re-composed (and not later false-red at
-        // push for a missing JUnit). Without a plan (standalone prepare), fall
-        // back to every applicable spec platform.
+        // push for a missing JUnit). The allowed set is the FULL key strings
+        // from the entry's resolved assets (they carry `+libc.*` suffixes;
+        // `entry.platforms` holds only deduped base os/arch strings), falling
+        // back to `entry.platforms` for an assets-less legacy plan. Without a
+        // plan (standalone prepare), fall back to every applicable wheels key.
         let allowed_platforms: Option<std::collections::HashSet<String>> = match &self.plan {
             Some(plan_path) => {
                 let plan = read_plan(plan_path).await?;
@@ -163,7 +163,13 @@ impl Prepare {
                     plan.versions
                         .iter()
                         .find(|entry| entry.version == self.version)
-                        .map(|entry| entry.platforms.iter().cloned().collect())
+                        .map(|entry| {
+                            if entry.assets.is_empty() {
+                                entry.platforms.iter().cloned().collect()
+                            } else {
+                                entry.assets.iter().map(|asset| asset.platform.clone()).collect()
+                            }
+                        })
                         .unwrap_or_default(),
                 )
             }
@@ -181,7 +187,7 @@ impl Prepare {
                     spec,
                     spec_dir,
                     &self.version,
-                    &interpreter_dependencies,
+                    &interpreter_dependency,
                     allowed_platforms.as_ref(),
                     self.plan.as_deref(),
                     work_dir,
@@ -193,7 +199,7 @@ impl Prepare {
                     spec,
                     spec_dir,
                     &self.version,
-                    &interpreter_dependencies,
+                    &interpreter_dependency,
                     allowed_platforms.as_ref(),
                 )
                 .await?
@@ -253,7 +259,7 @@ async fn build_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
+    interpreter_dependency: &ocx_lib::package::metadata::dependency::Dependency,
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
     let path = match &spec.source {
@@ -277,36 +283,43 @@ async fn build_env_tasks(
         version,
         &lock,
         &app_version,
-        interpreter_dependencies,
+        interpreter_dependency,
         allowed_platforms,
     )
 }
 
 /// Lock-agnostic core of [`build_env_tasks`].
 ///
-/// Pure local re-selection (no source re-crawl — issue #160): for the variant
-/// whose prefixed tag equals `version`, resolves a `PythonTarget` per declared,
-/// applicable platform and runs `ocx_python::select_wheels`. Private
-/// interpreter dependencies are resolved by the caller (their digests need
-/// the registry) and looked up per variant — a variant's own
-/// `interpreter_package` override wins over the spec-wide
-/// `python.interpreter_package` default. Takes an already-parsed
-/// `lock`/`app_version` so it never touches the filesystem — network-free and
-/// directly unit-testable.
+/// Pure local re-selection (no source re-crawl — issue #160): when the bare
+/// env tag equals `version`, resolves a `PythonTarget` per declared,
+/// applicable `wheels:` key and runs `ocx_python::select_wheels`. The private
+/// interpreter dependency is resolved by the caller (its digest needs the
+/// registry). Takes an already-parsed `lock`/`app_version` so it never
+/// touches the filesystem — network-free and directly unit-testable.
 fn build_env_tasks_from_lock(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
     lock: &ocx_python::Pylock,
     app_version: &str,
-    interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
+    interpreter_dependency: &ocx_lib::package::metadata::dependency::Dependency,
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
+    // Env tags are bare: a leg whose requested version is not this lock's app
+    // version has no work here.
+    if app_version != version {
+        return Ok(Vec::new());
+    }
+
     let python = spec
         .python
         .as_ref()
         .expect("validated: python required for source.type 'pylock'");
     let interpreter_pin = pylock_interpreter_pin(python)?;
+    let wheels_map = spec
+        .wheels
+        .as_ref()
+        .expect("validated: wheels required for env sources");
 
     let scope = ocx_python::WheelScope::new(spec.wheel_scope.clone());
     let declared_extras = lock.extras.clone();
@@ -317,119 +330,68 @@ fn build_env_tasks_from_lock(
     let root_package = spec.source.pylock_app_name(&spec.name);
     let entrypoint_selection = python.resolve_entrypoint_selection(app_version, root_package);
 
-    // The default variant (matched by name) drives cascade aliasing in push.
-    let default_variant_name: Option<&str> = spec
-        .variants
-        .as_ref()
-        .and_then(|variants| variants.iter().find(|variant| variant.default))
-        .and_then(|variant| variant.name.as_deref());
-
-    let mut platform_keys: Vec<&str> = spec
-        .platforms
-        .as_ref()
-        .map_or_else(Vec::new, |platforms| platforms.keys().map(String::as_str).collect());
-    platform_keys.sort_unstable();
-
     let mut tasks = Vec::new();
-    for (variant_name, constraints) in pylock_variants(spec) {
-        // One prepare leg = one variant tag; a separate leg prepares each other
-        // variant, mirroring the archive path's per-version legs.
-        let tagged = match variant_name {
-            Some(name) => format!("{name}-{app_version}"),
-            None => app_version.to_string(),
-        };
-        if tagged != version {
+    for platform in wheels_map.sorted_platforms() {
+        let key = platform.to_string();
+        if !spec.platform_applies(app_version, &spec::base_platform_key(platform)) {
             continue;
         }
-        let is_default = variant_name == default_variant_name;
+        // Restrict to the wheels keys the plan still needs. `discover` excludes
+        // already-published tiles (a backfill-partial run adds only the new
+        // keys of an existing version); without this, prepare composes the
+        // already-published key too, and push then false-reds it as
+        // `missing_junit` (its test leg was skipped, so it has no JUnit).
+        if let Some(allowed) = allowed_platforms
+            && !allowed.contains(&key)
+        {
+            continue;
+        }
 
-        // A variant's own `interpreter_package` override (e.g. a musl-libc
-        // CPython build for a `libc: musl` variant) takes precedence over the
-        // spec-wide `python.interpreter_package` default.
-        let interpreter_package_ref = spec
-            .variants
-            .as_ref()
-            .and_then(|variants| variants.iter().find(|variant| variant.name.as_deref() == variant_name))
-            .and_then(|variant| variant.interpreter_package.as_deref())
-            .unwrap_or(python.interpreter_package.as_str());
-        let interpreter_dependency = interpreter_dependencies
-            .get(interpreter_package_ref)
-            .cloned()
-            .ok_or_else(|| {
+        let python_target = ocx_python::PythonTarget {
+            platform: pylock_target_platform(platform, &key)?,
+            variant: wheel_target_constraints(wheels_map, platform),
+            interpreter: interpreter_pin.clone(),
+        };
+
+        let selected = ocx_python::select_wheels(lock, &python_target)
+            .map_err(|e| MirrorError::PylockError(format!("wheel selection failed for platform '{key}': {e}")))?;
+
+        let mut wheels = Vec::with_capacity(selected.len());
+        for wheel in &selected {
+            let url_str = wheel.url.as_deref().ok_or_else(|| {
                 MirrorError::PylockError(format!(
-                    "no resolved interpreter dependency for reference '{interpreter_package_ref}'"
+                    "wheel '{}' for package '{}' selected with no download URL",
+                    wheel.filename, wheel.name
                 ))
             })?;
-
-        for &platform_key in &platform_keys {
-            if !spec.platform_applies(app_version, platform_key) {
-                continue;
-            }
-            // Restrict to the platforms the plan still needs. `discover` excludes
-            // already-published tiles (a backfill-partial run adds only the new
-            // platforms of an existing version); without this, prepare composes
-            // the already-published platform too, and push then false-reds it as
-            // `missing_junit` (its test leg was skipped, so it has no JUnit).
-            if let Some(allowed) = allowed_platforms
-                && !allowed.contains(platform_key)
-            {
-                continue;
-            }
-            let platform: ocx_lib::oci::Platform = platform_key
-                .parse()
-                .map_err(|e| MirrorError::PylockError(format!("invalid platform key '{platform_key}': {e}")))?;
-
-            let python_target = ocx_python::PythonTarget {
-                platform: pylock_target_platform(&platform, platform_key)?,
-                variant: constraints.clone(),
-                interpreter: interpreter_pin.clone(),
-            };
-
-            let selected = ocx_python::select_wheels(lock, &python_target).map_err(|e| {
-                MirrorError::PylockError(format!("wheel selection failed for platform '{platform_key}': {e}"))
-            })?;
-
-            let mut wheels = Vec::with_capacity(selected.len());
-            for wheel in &selected {
-                let url_str = wheel.url.as_deref().ok_or_else(|| {
-                    MirrorError::PylockError(format!(
-                        "wheel '{}' for package '{}' selected with no download URL",
-                        wheel.filename, wheel.name
-                    ))
-                })?;
-                let url = url::Url::parse(url_str)
-                    .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
-                let wheel_repository = ocx_python::wheel_reference(&scope, wheel).repository;
-                wheels.push(SelectedWheel {
-                    package_name: wheel.name.clone(),
-                    version: wheel.version.clone(),
-                    filename: wheel.filename.clone(),
-                    url,
-                    sha256: wheel.sha256.clone(),
-                    wheel_repository,
-                });
-            }
-
-            tasks.push(WheelEnvTask {
-                normalized_version: tagged.clone(),
-                source_version: app_version.to_string(),
-                platform,
-                variant: variant_name.map(|name| VariantContext {
-                    name: name.to_string(),
-                    is_default,
-                }),
-                target: spec.target.clone(),
-                cascade: spec.cascade,
-                spec_dir: spec_dir.to_path_buf(),
-                wheels,
-                interpreter: interpreter_dependency.clone(),
-                requested_extras: Vec::new(), // W3: spec does not yet encode a per-app extras request
-                declared_extras: declared_extras.clone(),
-                python_target,
-                wheel_scope: scope.clone(),
-                entrypoint_selection: entrypoint_selection.clone(),
+            let url = url::Url::parse(url_str)
+                .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
+            let wheel_repository = ocx_python::wheel_reference(&scope, wheel).repository;
+            wheels.push(SelectedWheel {
+                package_name: wheel.name.clone(),
+                version: wheel.version.clone(),
+                filename: wheel.filename.clone(),
+                url,
+                sha256: wheel.sha256.clone(),
+                wheel_repository,
             });
         }
+
+        tasks.push(WheelEnvTask {
+            normalized_version: version.to_string(),
+            source_version: app_version.to_string(),
+            platform: platform.clone(),
+            target: spec.target.clone(),
+            cascade: spec.cascade,
+            spec_dir: spec_dir.to_path_buf(),
+            wheels,
+            interpreter: interpreter_dependency.clone(),
+            requested_extras: Vec::new(), // W3: spec does not yet encode a per-app extras request
+            declared_extras: declared_extras.clone(),
+            python_target,
+            wheel_scope: scope.clone(),
+            entrypoint_selection: entrypoint_selection.clone(),
+        });
     }
 
     Ok(tasks)
@@ -450,7 +412,7 @@ async fn build_pypi_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_dependencies: &std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>,
+    interpreter_dependency: &ocx_lib::package::metadata::dependency::Dependency,
     allowed_platforms: Option<&std::collections::HashSet<String>>,
     plan_path: Option<&std::path::Path>,
     work_dir: &std::path::Path,
@@ -512,83 +474,33 @@ async fn build_pypi_env_tasks(
         version,
         &lock,
         &app_version,
-        interpreter_dependencies,
+        interpreter_dependency,
         allowed_platforms,
     )
 }
 
 /// Standalone-prepare (no `--plan`) resolution for a `pypi` source: finds the
-/// upstream PyPI version whose (variant-prefixed) tag equals `version` — the
-/// same lookup `build_tasks_for_version` does for the archive/binary path,
-/// needed here because a `pypi` source (unlike `pylock`) has no committed
-/// lock to read the app version from directly.
+/// upstream PyPI version whose (bare) tag equals `version` — the same lookup
+/// `build_tasks_for_version` does for the archive/binary path, needed here
+/// because a `pypi` source (unlike `pylock`) has no committed lock to read
+/// the app version from directly.
 async fn resolve_pypi_app_version(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
 ) -> Result<String, MirrorError> {
     let upstream_versions = list_upstream_versions(spec, spec_dir).await?;
-    let variants = pylock_variants(spec);
 
-    find_matching_upstream_version(&variants, &upstream_versions, version)
-        .ok_or_else(|| MirrorError::SpecInvalid(vec![format!("version '{version}' not found in pypi source")]))
-}
-
-/// Pure tag-matching core of [`resolve_pypi_app_version`]: the upstream
-/// version whose (variant-prefixed) tag equals `version` — split out from its
-/// caller so the matching logic is unit-testable without a network-backed
-/// `list_upstream_versions` call.
-fn find_matching_upstream_version(
-    variants: &[(Option<&str>, ocx_python::VariantConstraints)],
-    upstream_versions: &[source::VersionInfo],
-    version: &str,
-) -> Option<String> {
     upstream_versions
         .iter()
-        .find(|info| {
-            variants.iter().any(|(variant_name, _)| {
-                let tagged = match variant_name {
-                    Some(name) => format!("{name}-{}", info.version),
-                    None => info.version.clone(),
-                };
-                tagged == version
-            })
-        })
+        .find(|info| info.version == version)
         .map(|info| info.version.clone())
-}
-
-/// Resolves one interpreter [`Dependency`](ocx_lib::package::metadata::dependency::Dependency)
-/// per distinct OCX reference in play for this spec — `python.interpreter_package`
-/// plus any per-variant `interpreter_package` override (e.g. a musl-libc
-/// CPython build for a `libc: musl` variant) — keyed by the reference string.
-/// Each distinct reference hits the registry at most once.
-async fn resolve_interpreter_dependencies(
-    spec: &MirrorSpec,
-    python: &spec::PythonConfig,
-    client: &ocx_lib::oci::Client,
-) -> Result<std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency>, MirrorError> {
-    let mut interpreter_package_refs: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    interpreter_package_refs.insert(python.interpreter_package.as_str());
-    if let Some(variants) = &spec.variants {
-        for variant in variants {
-            if let Some(interpreter_package) = &variant.interpreter_package {
-                interpreter_package_refs.insert(interpreter_package.as_str());
-            }
-        }
-    }
-
-    let mut dependencies = std::collections::HashMap::with_capacity(interpreter_package_refs.len());
-    for interpreter_package_ref in interpreter_package_refs {
-        let dependency = build_interpreter_dependency(interpreter_package_ref, client).await?;
-        dependencies.insert(interpreter_package_ref.to_string(), dependency);
-    }
-    Ok(dependencies)
+        .ok_or_else(|| MirrorError::SpecInvalid(vec![format!("version '{version}' not found in pypi source")]))
 }
 
 /// Resolves the private interpreter dependency for a single OCX reference:
 /// parses it, resolves its manifest digest, and pins it with `PRIVATE`
-/// visibility. Called once per distinct reference by
-/// [`resolve_interpreter_dependencies`].
+/// visibility.
 async fn build_interpreter_dependency(
     interpreter_package: &str,
     client: &ocx_lib::oci::Client,
@@ -1256,44 +1168,14 @@ build_timestamp: none
     // ── W2.3: pylock env task building (network-free — interpreter dep injected) ──
 
     /// A stand-in interpreter dependency with a fixed digest, so `build_env_tasks`
-    /// runs without resolving a real registry manifest. `identifier` lets tests
-    /// tell apart the spec-wide default from a per-variant override.
-    fn fake_interpreter_dependency(
-        identifier: &str,
-        digest_fill: char,
-    ) -> ocx_lib::package::metadata::dependency::Dependency {
-        let json = format!(
-            r#"{{"identifier":"{identifier}@sha256:{}"}}"#,
-            digest_fill.to_string().repeat(64)
-        );
+    /// runs without resolving a real registry manifest.
+    fn fake_interpreter_dependency() -> ocx_lib::package::metadata::dependency::Dependency {
+        let json = format!(r#"{{"identifier":"ocx.sh/cpython:3.13@sha256:{}"}}"#, "a".repeat(64));
         serde_json::from_str(&json).expect("interpreter dependency parses")
-    }
-
-    /// Resolves `spec.python.interpreter_package` alone — the map a spec with
-    /// no per-variant `interpreter_package` override needs.
-    fn default_interpreter_dependencies(
-        spec: &MirrorSpec,
-    ) -> std::collections::HashMap<String, ocx_lib::package::metadata::dependency::Dependency> {
-        let python = spec.python.as_ref().expect("fixture spec has a python config");
-        std::collections::HashMap::from([(
-            python.interpreter_package.clone(),
-            fake_interpreter_dependency("ocx.sh/cpython:3.13", 'a'),
-        )])
     }
 
     fn pylock_fixture_spec_path() -> PathBuf {
         PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
-    }
-
-    /// Fixture with a second, named `musl` variant carrying its own
-    /// `interpreter_package` override — kept separate from
-    /// [`pylock_fixture_spec_path`] so its extra variant doesn't perturb the
-    /// entry counts `plan.rs`'s tests assert against that shared fixture.
-    fn pylock_musl_variant_fixture_spec_path() -> PathBuf {
-        PathBuf::from(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-pylock-musl-variant.yml"
-        ))
     }
 
     #[tokio::test]
@@ -1302,13 +1184,13 @@ build_timestamp: none
         let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
         let spec_dir = spec_path.parent().unwrap();
 
-        let dependencies = default_interpreter_dependencies(&spec);
-        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependencies, None)
+        let dependency = fake_interpreter_dependency();
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependency, None)
             .await
             .expect("build_env_tasks succeeds");
 
-        // One default (unnamed) variant × two declared platforms.
-        assert_eq!(tasks.len(), 2, "1 default variant × 2 platforms");
+        // Two declared wheels keys → two env legs.
+        assert_eq!(tasks.len(), 2, "2 wheels keys → 2 env legs");
         let mut platforms: Vec<String> = tasks.iter().map(|task| task.platform.to_string()).collect();
         platforms.sort();
         assert_eq!(platforms, vec!["linux/amd64".to_string(), "linux/arm64".to_string()]);
@@ -1316,7 +1198,6 @@ build_timestamp: none
         for task in &tasks {
             assert_eq!(task.normalized_version, "1.0.0");
             assert_eq!(task.source_version, "1.0.0");
-            assert!(task.variant.is_none(), "the default variant carries no VariantContext");
             // Both fixture wheels are `none-any` → both apply on every platform.
             assert_eq!(task.wheels.len(), 2, "2 wheels per env leg");
             let names: Vec<&str> = task.wheels.iter().map(|wheel| wheel.filename.as_str()).collect();
@@ -1343,11 +1224,11 @@ build_timestamp: none
         let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
         let spec_dir = spec_path.parent().unwrap();
 
-        let dependencies = default_interpreter_dependencies(&spec);
-        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", &dependencies, None)
+        let dependency = fake_interpreter_dependency();
+        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", &dependency, None)
             .await
             .expect("build_env_tasks succeeds");
-        assert!(tasks.is_empty(), "no variant tag matches an unknown version");
+        assert!(tasks.is_empty(), "no bare env tag matches an unknown version");
     }
 
     #[tokio::test]
@@ -1360,72 +1241,13 @@ build_timestamp: none
         let spec_dir = spec_path.parent().unwrap();
 
         let allowed: std::collections::HashSet<String> = ["linux/arm64".to_string()].into_iter().collect();
-        let dependencies = default_interpreter_dependencies(&spec);
-        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependencies, Some(&allowed))
+        let dependency = fake_interpreter_dependency();
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependency, Some(&allowed))
             .await
             .expect("build_env_tasks succeeds");
 
         assert_eq!(tasks.len(), 1, "plan restricts to the single outstanding platform");
         assert_eq!(tasks[0].platform.to_string(), "linux/arm64");
-    }
-
-    // ── per-variant `interpreter_package` override (musl-libc CPython) ──────
-
-    #[tokio::test]
-    async fn build_env_tasks_resolves_variant_interpreter_override() {
-        // The fixture's "musl" variant declares its own `interpreter_package`
-        // — its tasks must carry that override, not the spec-wide default.
-        let spec_path = pylock_musl_variant_fixture_spec_path();
-        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
-        let spec_dir = spec_path.parent().unwrap();
-
-        let mut dependencies = default_interpreter_dependencies(&spec);
-        dependencies.insert(
-            "ocx.sh/python/cpython-musl:3.13.1".to_string(),
-            fake_interpreter_dependency("ocx.sh/cpython-musl:3.13", 'b'),
-        );
-
-        let tasks = build_env_tasks(&spec, spec_dir, "musl-1.0.0", &dependencies, None)
-            .await
-            .expect("build_env_tasks succeeds");
-
-        assert!(!tasks.is_empty(), "the musl variant produces env tasks");
-        for task in &tasks {
-            assert!(
-                task.interpreter.identifier.to_string().contains("cpython-musl"),
-                "the musl variant resolves its own interpreter_package override, got {}",
-                task.interpreter.identifier
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn build_env_tasks_falls_back_to_python_interpreter_package_without_override() {
-        // Same multi-variant fixture as the override test above: the default
-        // variant declares no `interpreter_package` of its own, so even
-        // alongside a sibling "musl" variant that does, its tasks must fall
-        // back to `python.interpreter_package`.
-        let spec_path = pylock_musl_variant_fixture_spec_path();
-        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
-        let spec_dir = spec_path.parent().unwrap();
-
-        let mut dependencies = default_interpreter_dependencies(&spec);
-        dependencies.insert(
-            "ocx.sh/python/cpython-musl:3.13.1".to_string(),
-            fake_interpreter_dependency("ocx.sh/cpython-musl:3.13", 'b'),
-        );
-        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &dependencies, None)
-            .await
-            .expect("build_env_tasks succeeds");
-
-        assert!(!tasks.is_empty());
-        for task in &tasks {
-            assert!(
-                !task.interpreter.identifier.to_string().contains("musl"),
-                "the default variant (no override) falls back to python.interpreter_package, got {}",
-                task.interpreter.identifier
-            );
-        }
     }
 
     // ── plan_python_mirror_v2 W2.A3: pypi env-prepare dispatch ───────────────
@@ -1442,40 +1264,13 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
 platforms:
   linux/amd64:
     runner: ubuntu-latest
 "#;
         serde_yaml_ng::from_str(yaml).unwrap()
-    }
-
-    fn version_info(version: &str) -> crate::source::VersionInfo {
-        crate::source::VersionInfo {
-            version: version.to_string(),
-            assets: std::collections::HashMap::new(),
-            is_prerelease: false,
-        }
-    }
-
-    #[test]
-    fn find_matching_upstream_version_matches_bare_tag() {
-        let spec = pypi_fixture_spec();
-        let variants = pylock_variants(&spec);
-        let upstream = vec![version_info("1.0.0"), version_info("2.0.0")];
-
-        assert_eq!(
-            find_matching_upstream_version(&variants, &upstream, "1.0.0"),
-            Some("1.0.0".to_string())
-        );
-    }
-
-    #[test]
-    fn find_matching_upstream_version_returns_none_for_unknown_tag() {
-        let spec = pypi_fixture_spec();
-        let variants = pylock_variants(&spec);
-        let upstream = vec![version_info("1.0.0")];
-
-        assert_eq!(find_matching_upstream_version(&variants, &upstream, "9.9.9"), None);
     }
 
     const PYPI_DERIVED_LOCK_BODY: &str = r#"lock-version = "1.0"
@@ -1520,13 +1315,13 @@ hashes = { sha256 = "aaaa" }
         std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
 
         let spec = pypi_fixture_spec();
-        let dependencies = default_interpreter_dependencies(&spec);
+        let dependency = fake_interpreter_dependency();
 
         let tasks = build_pypi_env_tasks(
             &spec,
             Path::new("."),
             "1.0.0",
-            &dependencies,
+            &dependency,
             None,
             Some(&plan_path),
             Path::new("."),
@@ -1569,13 +1364,13 @@ hashes = { sha256 = "aaaa" }
         std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
 
         let spec = pypi_fixture_spec();
-        let dependencies = default_interpreter_dependencies(&spec);
+        let dependency = fake_interpreter_dependency();
 
         let err = build_pypi_env_tasks(
             &spec,
             Path::new("."),
             "1.0.0",
-            &dependencies,
+            &dependency,
             None,
             Some(&plan_path),
             Path::new("."),

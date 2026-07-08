@@ -12,7 +12,7 @@ use ocx_lib::cli::DataInterface;
 use crate::command::package::options::OutputFormat;
 use crate::command::package::pipeline::push;
 use crate::error::MirrorError;
-use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
+use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry, container_libc_for_image};
 
 // ── Renderer (native + container legs) ───────────────────────────────────────
 //
@@ -146,17 +146,6 @@ fn policy_check_notify(spec: &MirrorSpec) -> Result<(), MirrorError> {
         return Ok(());
     };
     spec::policy_check_notify(notify)
-}
-
-/// The libc family for a container image, driving which statically-linked ocx
-/// release binary the test leg mounts. Inferred from the image name: Alpine is
-/// musl, everything else (Debian, Ubuntu, Fedora, …) is gnu.
-///
-// ponytail: name-prefix inference, not a spec field — the corpus needs exactly
-// alpine(musl) + debian(gnu). Add an explicit `containers[].libc` to
-// `ContainerConfig` if a musl image that isn't Alpine ever shows up.
-fn container_libc_for_image(image: &str) -> &'static str {
-    if image.starts_with("alpine") { "musl" } else { "gnu" }
 }
 
 /// The default shell inside a container image when the config omits one:
@@ -687,11 +676,19 @@ fn prepare_flatten_script(is_pylock: bool) -> String {
 ///
 /// Archive/binary legs set `BUNDLE` (+ its `METADATA_SIBLING`) so
 /// `ocx package test` receives a single bundle path. Pylock legs read the
-/// version's `env-manifest.json`, select this leg's platform entry, and set
-/// `METADATA` + `LAYERS` (version-dir-relative paths joined back onto the
-/// downloaded artifact root) for the `-m <metadata> <layers…>` form.
+/// version's `env-manifest.json`, select this leg's env entry by base
+/// platform + libc compatibility, and set `METADATA` + `LAYERS`
+/// (version-dir-relative paths joined back onto the downloaded artifact root)
+/// for the `-m <metadata> <layers…>` form.
 fn test_target_resolve_script(is_pylock: bool) -> String {
     if is_pylock {
+        // Entry selection per leg: prefer the `+libc.<flavor>`-suffixed entry
+        // matching the leg's container libc (gnu → libc.glibc, musl →
+        // libc.musl; native legs carry no `container_libc` → "" → glibc),
+        // falling back to the featureless base entry. A musl container leg
+        // therefore tests the musl env of a dual-libc package while both legs
+        // test the single featureless env of a plain one.
+        //
         // The jq resolution is guarded (`2>/dev/null || true`, `// empty`) so a
         // genuine miss — a version whose prepare leg failed and never uploaded
         // its env-manifest.json — reds THIS version attributably via the
@@ -701,7 +698,7 @@ fn test_target_resolve_script(is_pylock: bool) -> String {
         // the loop with no JUnit written. Mirrors the archive path's
         // "genuine miss still reds" invariant.
         r#"            VERSION_DIR="bundles/${VERSION}"
-            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" '.envs[] | select(.platform == $p)' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
+            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" --arg libc "${{ matrix.container_libc }}" '(if $libc == "musl" then "libc.musl" else "libc.glibc" end) as $feat | ([.envs[] | select(.platform == ($p + "+" + $feat))] + [.envs[] | select(.platform == $p)]) | first // empty' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
             METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null || true)"
             LAYERS=""
             for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null || true); do

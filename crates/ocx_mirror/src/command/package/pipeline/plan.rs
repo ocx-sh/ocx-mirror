@@ -28,7 +28,7 @@ use crate::pipeline::lock_derive;
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
 use crate::source;
-use crate::spec::{self, BackfillOrder, LockOptions, MirrorSpec, PythonConfig, Source, VariantSpec};
+use crate::spec::{self, BackfillOrder, LockOptions, MirrorSpec, PythonConfig, Source, WheelPatterns};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// Default `--locks-dir` for `pipeline plan` — where derived PEP 751 locks
@@ -65,12 +65,15 @@ pub struct PlanAssetEntry {
 /// A single version entry in the plan output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanVersionEntry {
-    /// Variant-prefixed normalized tag the pipeline publishes (e.g. `3.29.0`
-    /// for the default variant, `slim-3.29.0` for the `slim` variant). The
-    /// whole prepare → test → push chain keys off this string, so each variant
-    /// must carry its own tag here.
+    /// Normalized tag the pipeline publishes. Archive sources may carry a
+    /// variant prefix (`slim-3.29.0`); env sources always emit the bare app
+    /// version (libc is a platform `os.features` axis there, never a tag
+    /// prefix). The whole prepare → test → push chain keys off this string.
     pub version: String,
-    /// Platform slugs that require work (e.g. `["linux/amd64", "darwin/arm64"]`).
+    /// Base `os/arch` platform strings that require work (e.g.
+    /// `["linux/amd64", "darwin/arm64"]`) — matches the CI matrix legs. Env
+    /// entries dedupe `+libc.*` wheels keys onto their base here; the full
+    /// keys live in [`assets`](Self::assets).
     pub platforms: Vec<String>,
     /// Kind of work needed.
     pub kind: PlanVersionKind,
@@ -387,12 +390,15 @@ async fn build_pylock_plan_entries(
 /// Lock-agnostic core of [`build_pylock_plan_entries`].
 ///
 /// Bypasses `resolve_assets`/`filter::filter_versions` entirely (D1): for
-/// each declared platform key that `spec.platform_applies` accepts and is not
-/// already published (per `version_map`), resolves a `PythonTarget` per
-/// variant and calls `ocx_python::select_wheels` directly, emitting one
-/// `PlanAssetEntry` per selected wheel (N per platform — the shape the regex
-/// resolver cannot express). Takes an already-parsed `lock`/`app_version` so
-/// it never touches the filesystem — network-free and directly unit-testable.
+/// each declared `wheels:` platform key whose BASE os/arch
+/// `spec.platform_applies` accepts and whose FULL key (os_features included)
+/// is not already published (per `version_map`), resolves a `PythonTarget`
+/// from the key + its effective filter and calls `ocx_python::select_wheels`
+/// directly, emitting one `PlanAssetEntry` per selected wheel carrying the
+/// full key. `platforms` dedupes onto base strings so the CI matrix gate
+/// keeps matching `matrix.platform`. Takes an already-parsed
+/// `lock`/`app_version` so it never touches the filesystem — network-free and
+/// directly unit-testable.
 fn build_env_plan_entries(
     spec: &MirrorSpec,
     lock: &Pylock,
@@ -405,116 +411,106 @@ fn build_env_plan_entries(
         .as_ref()
         .expect("validated: python required for source.type 'pylock'");
     let interpreter = pylock_interpreter_pin(python)?;
-
-    let mut platform_keys: Vec<&str> = spec
-        .platforms
+    let wheels_map = spec
+        .wheels
         .as_ref()
-        .map_or_else(Vec::new, |platforms| platforms.keys().map(String::as_str).collect());
-    platform_keys.sort_unstable();
-    let declared_platform_count = platform_keys.len();
+        .expect("validated: wheels required for env sources");
 
-    let mut entries = Vec::new();
-    for (variant_name, constraints) in pylock_variants(spec) {
-        let tagged = match variant_name {
-            Some(name) => format!("{name}-{app_version}"),
-            None => app_version.to_string(),
+    let declared_platform_count = spec.platforms.as_ref().map_or(0, |platforms| platforms.len());
+
+    // The pylock app version is a PEP 440 string, which may carry more
+    // numeric components than `ocx_lib::Version` (a ≤3-component
+    // tool-release-tag semver parser) accepts — pycowsay's `0.0.0.2`, or a
+    // calendar version like `2024.1.1.1`. A tag that does not parse simply
+    // cannot be present in the `Version`-keyed `version_map`, so it is
+    // treated as outstanding work rather than panicking.
+    //
+    // ponytail: per-platform dedup of such non-semver versions is therefore
+    // a no-op — a re-run re-publishes the (identical, content-addressed)
+    // env, which the registry dedups. Precise PEP 440 dedup would need a
+    // PEP 440-aware `version_map`; deferred (not blocking — publishes are
+    // idempotent).
+    let check_version = Version::parse(app_version);
+
+    let mut missing_platforms: Vec<String> = Vec::new();
+    let mut assets = Vec::new();
+
+    for platform in wheels_map.sorted_platforms() {
+        let key = platform.to_string();
+        let base = spec::base_platform_key(platform);
+        if !spec.platform_applies(app_version, &base) {
+            continue;
+        }
+        if check_version
+            .as_ref()
+            .is_some_and(|version| version_map.has(version, platform))
+        {
+            continue; // already published for this full key (os_features included)
+        }
+
+        let target = PythonTarget {
+            platform: pylock_target_platform(platform, &key)?,
+            variant: wheel_target_constraints(wheels_map, platform),
+            interpreter: interpreter.clone(),
         };
-        // The pylock app version is a PEP 440 string, which may carry more
-        // numeric components than `ocx_lib::Version` (a ≤3-component
-        // tool-release-tag semver parser) accepts — pycowsay's `0.0.0.2`, or a
-        // calendar version like `2024.1.1.1`. A tag that does not parse simply
-        // cannot be present in the `Version`-keyed `version_map`, so it is
-        // treated as outstanding work rather than panicking.
-        //
-        // ponytail: per-platform dedup of such non-semver versions is therefore
-        // a no-op — a re-run re-publishes the (identical, content-addressed)
-        // env, which the registry dedups. Precise PEP 440 dedup would need a
-        // PEP 440-aware `version_map`; deferred (not blocking — publishes are
-        // idempotent).
-        let check_version = Version::parse(&tagged);
 
-        let mut missing_platforms = Vec::new();
-        let mut assets = Vec::new();
+        let wheels = ocx_python::select_wheels(lock, &target)
+            .map_err(|e| MirrorError::PylockError(format!("wheel selection failed for platform '{key}': {e}")))?;
 
-        for &platform_key in &platform_keys {
-            if !spec.platform_applies(app_version, platform_key) {
-                continue;
-            }
-            let platform: Platform = platform_key
-                .parse()
-                .map_err(|e| MirrorError::PylockError(format!("invalid platform key '{platform_key}': {e}")))?;
-            if check_version
-                .as_ref()
-                .is_some_and(|version| version_map.has(version, &platform))
-            {
-                continue; // already published for this (variant, platform)
-            }
-
-            let target = PythonTarget {
-                platform: pylock_target_platform(&platform, platform_key)?,
-                variant: constraints.clone(),
-                interpreter: interpreter.clone(),
-            };
-
-            let wheels = ocx_python::select_wheels(lock, &target).map_err(|e| {
-                MirrorError::PylockError(format!("wheel selection failed for platform '{platform_key}': {e}"))
+        if !missing_platforms.contains(&base) {
+            missing_platforms.push(base.clone());
+        }
+        for wheel in wheels {
+            let url_str = wheel.url.ok_or_else(|| {
+                MirrorError::PylockError(format!(
+                    "wheel '{}' for package '{}' selected with no download URL",
+                    wheel.filename, wheel.name
+                ))
             })?;
-
-            missing_platforms.push(platform_key.to_string());
-            for wheel in wheels {
-                let url_str = wheel.url.ok_or_else(|| {
-                    MirrorError::PylockError(format!(
-                        "wheel '{}' for package '{}' selected with no download URL",
-                        wheel.filename, wheel.name
-                    ))
-                })?;
-                let url = url::Url::parse(&url_str)
-                    .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
-                assets.push(PlanAssetEntry {
-                    platform: platform_key.to_string(),
-                    asset_name: wheel.filename,
-                    url,
-                });
-            }
+            let url = url::Url::parse(&url_str)
+                .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
+            assets.push(PlanAssetEntry {
+                platform: key.clone(),
+                asset_name: wheel.filename,
+                url,
+            });
         }
-
-        if missing_platforms.is_empty() {
-            continue; // this variant has no outstanding work for any declared platform
-        }
-
-        // Same New/BackfillPartial convention as build_version_entries: the
-        // bare (variant-prefixed, un-timestamped) tag already on the registry
-        // means some platform was published before, so a shorter missing-set
-        // than the declared count is a backfill, not a first publish.
-        let version_on_registry = Version::parse(app_version)
-            .is_some_and(|v| all_tags.iter().any(|t| Version::parse(t).is_some_and(|tv| tv == v)));
-        let kind = if version_on_registry && declared_platform_count > missing_platforms.len() {
-            PlanVersionKind::BackfillPartial
-        } else {
-            PlanVersionKind::New
-        };
-
-        entries.push(PlanVersionEntry {
-            version: tagged,
-            platforms: missing_platforms,
-            kind,
-            source_version: app_version.to_string(),
-            variant: variant_name.map(str::to_string),
-            assets,
-            pylock: None,
-        });
     }
 
-    Ok(entries)
+    if missing_platforms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Same New/BackfillPartial convention as build_version_entries: the bare
+    // (un-timestamped) tag already on the registry means some platform was
+    // published before, so a shorter missing-set than the declared count is a
+    // backfill, not a first publish.
+    let version_on_registry = Version::parse(app_version)
+        .is_some_and(|v| all_tags.iter().any(|t| Version::parse(t).is_some_and(|tv| tv == v)));
+    let kind = if version_on_registry && declared_platform_count > missing_platforms.len() {
+        PlanVersionKind::BackfillPartial
+    } else {
+        PlanVersionKind::New
+    };
+
+    Ok(vec![PlanVersionEntry {
+        version: app_version.to_string(),
+        platforms: missing_platforms,
+        kind,
+        source_version: app_version.to_string(),
+        variant: None,
+        assets,
+        pylock: None,
+    }])
 }
 
 /// Cheap pre-filter for `source.type: pypi` lock-derivation candidates:
 /// `versions:` bounds, `skip_prereleases`, an already-published dedup check
-/// (at least one declared platform still outstanding for at least one
-/// variant's tag), and `new_per_run`/`backfill` — all applied BEFORE any
-/// `uv`/`ocx` subprocess spawns, so [`build_pypi_plan_entries`] only pays the
-/// derivation cost (interpreter materialization + `uv pip compile`) for
-/// versions that actually have outstanding work.
+/// (at least one declared `wheels:` key still outstanding), and
+/// `new_per_run`/`backfill` — all applied BEFORE any `uv`/`ocx` subprocess
+/// spawns, so [`build_pypi_plan_entries`] only pays the derivation cost
+/// (interpreter materialization + `uv pip compile`) for versions that
+/// actually have outstanding work.
 ///
 /// Deliberately does not reuse `filter::filter_versions`: its already-
 /// published dedup step `.expect()`s every tag to parse as `ocx_lib::Version`,
@@ -529,13 +525,11 @@ fn select_pypi_candidates<'a>(
     upstream_versions: &'a [source::VersionInfo],
     version_map: &VersionPlatformMap,
 ) -> Vec<&'a source::VersionInfo> {
-    let mut platform_keys: Vec<&str> = spec
-        .platforms
+    let wheels_keys: Vec<&Platform> = spec
+        .wheels
         .as_ref()
-        .map_or_else(Vec::new, |platforms| platforms.keys().map(String::as_str).collect());
-    platform_keys.sort_unstable();
+        .map_or_else(Vec::new, WheelPatterns::sorted_platforms);
 
-    let variants = pylock_variants(spec);
     let versions_config = spec.versions.as_ref();
     let min = versions_config
         .and_then(|c| c.min.as_ref())
@@ -554,21 +548,15 @@ fn select_pypi_candidates<'a>(
             !(min.as_ref().is_some_and(|m| parsed < *m) || max.as_ref().is_some_and(|m| parsed >= *m))
         })
         .filter(|info| {
-            variants.iter().any(|(variant_name, _)| {
-                let tagged = match variant_name {
-                    Some(name) => format!("{name}-{}", info.version),
-                    None => info.version.clone(),
-                };
-                let tag_version = Version::parse(&tagged);
-                platform_keys.iter().any(|&platform_key| {
-                    spec.platform_applies(&info.version, platform_key)
-                        && match (&tag_version, platform_key.parse::<Platform>()) {
-                            (Some(v), Ok(platform)) => !version_map.has(v, &platform),
-                            // Unparseable tag or platform key: cannot be in the
-                            // Version-keyed map, so treat as outstanding.
-                            _ => true,
-                        }
-                })
+            let tag_version = Version::parse(&info.version);
+            wheels_keys.iter().any(|&platform| {
+                spec.platform_applies(&info.version, &spec::base_platform_key(platform))
+                    && match &tag_version {
+                        Some(v) => !version_map.has(v, platform),
+                        // Unparseable tag: cannot be in the Version-keyed
+                        // map, so treat as outstanding.
+                        None => true,
+                    }
             })
         })
         .collect();
@@ -753,37 +741,34 @@ async fn build_pypi_plan_entries(
     Ok(entries)
 }
 
-/// Enumerates `pylock` variants directly from `VariantSpec`'s constraint
-/// fields — unlike `effective_variants()` (the regex asset-pattern path),
-/// which filters pylock variants out (they carry no `assets`). Absent
-/// `variants:` is one implicit, unconstrained default variant (matches
-/// `select`'s own defaults: gnu libc + manylinux_2_28 floor).
-pub(crate) fn pylock_variants(spec: &MirrorSpec) -> Vec<(Option<&str>, VariantConstraints)> {
-    match &spec.variants {
-        Some(variants) => variants
-            .iter()
-            .map(|variant| (variant.name.as_deref(), pylock_variant_constraints(variant)))
-            .collect(),
-        None => vec![(None, VariantConstraints::default())],
-    }
-}
-
-/// Maps a pylock `VariantSpec`'s constraint fields to `ocx_python`'s
-/// `VariantConstraints`. `VariantSpec::validate_python_constraints` already
-/// restricts `libc` to `"gnu"`/`"musl"`, so anything else defaults to `Gnu`.
-pub(crate) fn pylock_variant_constraints(variant: &VariantSpec) -> VariantConstraints {
-    VariantConstraints {
-        libc: variant.libc.as_deref().map(|libc| {
-            if libc == "musl" {
+/// Derives the `ocx_python` selection constraints for one `wheels:` platform
+/// key: the key's declared libc (or the filter-implied one for plain linux
+/// keys — musl iff the effective filter carries `musllinux*` prefixes and no
+/// `manylinux*` ones, else gnu) plus the effective filter as the
+/// admissibility/ranking list. Floors stay `None` — `select` applies its
+/// defaults (`manylinux_2_28`/`musllinux_1_2`); `python.abi` remains the one
+/// ABI pin (no per-key override).
+pub(crate) fn wheel_target_constraints(wheels: &WheelPatterns, platform: &Platform) -> VariantConstraints {
+    let filter = wheels.effective_filter(platform);
+    let libc = match spec::libc_feature(platform) {
+        Some("libc.musl") => LibcFamily::Musl,
+        Some("libc.glibc") => LibcFamily::Gnu,
+        _ => {
+            let has_musllinux = filter.iter().any(|entry| entry.starts_with("musllinux"));
+            let has_manylinux = filter.iter().any(|entry| entry.starts_with("manylinux"));
+            if has_musllinux && !has_manylinux {
                 LibcFamily::Musl
             } else {
                 LibcFamily::Gnu
             }
-        }),
-        min_manylinux: variant.min_manylinux.clone(),
-        min_musllinux: variant.min_musllinux.clone(),
-        abi: variant.abi.clone(),
-        wheel_priority: variant.wheel_priority.clone(),
+        }
+    };
+    VariantConstraints {
+        libc: Some(libc),
+        min_manylinux: None,
+        min_musllinux: None,
+        abi: None,
+        wheel_priority: Some(filter),
     }
 }
 
@@ -802,9 +787,9 @@ pub(crate) fn pylock_interpreter_pin(python: &PythonConfig) -> Result<Interprete
     })
 }
 
-/// Maps a spec platform key's parsed `ocx_lib::oci::Platform` to
-/// `ocx_python`'s `TargetPlatform` (os/arch only — L2 v1 keeps libc/ABI in
-/// the variant prefix, not the platform key).
+/// Maps a wheels key's parsed `ocx_lib::oci::Platform` to `ocx_python`'s
+/// `TargetPlatform` (os/arch only — the key's `+libc.*` os_features travel
+/// through [`wheel_target_constraints`], not this mapping).
 pub(crate) fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPlatform, MirrorError> {
     let Platform::Specific { os, arch, .. } = platform else {
         return Err(MirrorError::PylockError(format!(
@@ -1282,6 +1267,8 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
 platforms:
   linux/amd64:
     runner: ubuntu-latest
@@ -1341,6 +1328,8 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "ocx.sh/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
 platforms:
   linux/amd64:
     runner: ubuntu-latest
@@ -1367,41 +1356,168 @@ platforms:
         assert_eq!(entries[0].assets.len(), 1, "one pure-python wheel -> one asset");
     }
 
-    // ── Decision B: wheel_priority threading ────────────────────────────────
+    // ── dual-libc wheels keys: one entry, full keys in assets ────────────────
 
-    #[test]
-    fn pylock_variant_constraints_threads_wheel_priority() {
-        let variant: VariantSpec = serde_yaml_ng::from_str(
-            r#"
-name: default
-default: true
-libc: gnu
-min_manylinux: "2_28"
-wheel_priority: ["any"]
-"#,
-        )
-        .unwrap();
+    const DUAL_LIBC_LOCK: &str = r#"
+lock-version = "1.0"
 
-        let constraints = pylock_variant_constraints(&variant);
-        assert_eq!(constraints.wheel_priority, Some(vec!["any".to_string()]));
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"
+url = "https://example.com/pycowsay-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"
+hashes = { sha256 = "aaaa" }
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"
+url = "https://example.com/pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"
+hashes = { sha256 = "bbbb" }
+"#;
+
+    fn dual_libc_spec() -> MirrorSpec {
+        let yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        serde_yaml_ng::from_str(yaml).unwrap()
     }
 
     #[test]
-    fn pylock_variant_constraints_defaults_wheel_priority_to_none() {
-        // Backcompat: a variant with no `wheel_priority:` key must thread
-        // `None` through, not an empty list — `select_wheels` treats both the
-        // same, but this locks the absent-key shape.
-        let variant: VariantSpec = serde_yaml_ng::from_str(
-            r#"
-name: default
-default: true
-libc: gnu
-min_manylinux: "2_28"
-"#,
-        )
-        .unwrap();
+    fn build_env_plan_entries_dual_libc_keys_share_one_entry_and_base_platform() {
+        let spec = dual_libc_spec();
+        let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
+        let version_map = VersionPlatformMap::default();
 
-        assert_eq!(pylock_variant_constraints(&variant).wheel_priority, None);
+        let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &[], &version_map).unwrap();
+
+        assert_eq!(entries.len(), 1, "env sources emit ONE bare-tag entry");
+        let entry = &entries[0];
+        assert_eq!(entry.version, "1.0.0", "bare tag, no variant prefix");
+        assert_eq!(entry.variant, None);
+        assert_eq!(
+            entry.platforms,
+            vec!["linux/amd64".to_string()],
+            "platforms dedupes full keys onto the base CI matrix leg"
+        );
+
+        // Each full key selected its libc's wheel; assets carry the FULL key.
+        let glibc: Vec<&str> = entry
+            .assets
+            .iter()
+            .filter(|asset| asset.platform == "linux/amd64+libc.glibc")
+            .map(|asset| asset.asset_name.as_str())
+            .collect();
+        assert_eq!(glibc, vec!["pycowsay-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"]);
+        let musl: Vec<&str> = entry
+            .assets
+            .iter()
+            .filter(|asset| asset.platform == "linux/amd64+libc.musl")
+            .map(|asset| asset.asset_name.as_str())
+            .collect();
+        assert_eq!(musl, vec!["pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"]);
+    }
+
+    #[test]
+    fn build_env_plan_entries_published_dedup_honors_os_features() {
+        // The glibc key is already published — only the musl key remains
+        // outstanding; the published sibling must NOT mask it.
+        let spec = dual_libc_spec();
+        let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
+        let mut version_map = VersionPlatformMap::default();
+        version_map.add(
+            Version::parse("1.0.0").unwrap(),
+            "linux/amd64+libc.glibc".parse().unwrap(),
+        );
+
+        let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &["1.0.0".to_string()], &version_map).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.platforms, vec!["linux/amd64".to_string()]);
+        assert_eq!(entry.assets.len(), 1, "only the musl key's wheel is planned");
+        assert_eq!(entry.assets[0].platform, "linux/amd64+libc.musl");
+    }
+
+    // ── wheels-key → selection-constraint derivation ─────────────────────────
+
+    #[test]
+    fn wheel_target_constraints_derives_libc_and_filter_per_key() {
+        let wheels: WheelPatterns = serde_yaml_ng::from_str(concat!(
+            "linux/amd64: ~\n",
+            "\"linux/arm64+libc.glibc\": ~\n",
+            "\"linux/arm64+libc.musl\": ~\n",
+            "windows/amd64: ~\n",
+        ))
+        .unwrap();
+        let by_string = |wanted: &str| {
+            wheels
+                .filters
+                .keys()
+                .find(|platform| platform.to_string() == wanted)
+                .expect("key present")
+        };
+
+        // Plain linux key: default `["any"]` filter, gnu libc (no musllinux
+        // prefix in the filter), always a NON-empty wheel_priority.
+        let plain = wheel_target_constraints(&wheels, by_string("linux/amd64"));
+        assert_eq!(plain.libc, Some(LibcFamily::Gnu));
+        assert_eq!(plain.wheel_priority, Some(vec!["any".to_string()]));
+        assert_eq!(plain.min_manylinux, None, "floors stay select-defaulted");
+        assert_eq!(plain.abi, None, "python.abi remains the one ABI pin");
+
+        let glibc = wheel_target_constraints(&wheels, by_string("linux/arm64+libc.glibc"));
+        assert_eq!(glibc.libc, Some(LibcFamily::Gnu));
+        assert_eq!(
+            glibc.wheel_priority,
+            Some(vec!["manylinux".to_string(), "any".to_string()])
+        );
+
+        let musl = wheel_target_constraints(&wheels, by_string("linux/arm64+libc.musl"));
+        assert_eq!(musl.libc, Some(LibcFamily::Musl));
+        assert_eq!(
+            musl.wheel_priority,
+            Some(vec!["musllinux".to_string(), "any".to_string()])
+        );
+
+        let windows = wheel_target_constraints(&wheels, by_string("windows/amd64"));
+        assert_eq!(
+            windows.libc,
+            Some(LibcFamily::Gnu),
+            "libc is a linux axis; gnu is inert elsewhere"
+        );
+        assert_eq!(windows.wheel_priority, Some(vec!["win".to_string(), "any".to_string()]));
+    }
+
+    #[test]
+    fn wheel_target_constraints_plain_key_with_musllinux_filter_selects_musl_tag_set() {
+        // A plain key whose EXPLICIT filter admits only musllinux wheels
+        // selects against the musl uv tag set (gnu would exclude them all).
+        let wheels: WheelPatterns = serde_yaml_ng::from_str("linux/amd64: [musllinux, any]\n").unwrap();
+        let platform = wheels.filters.keys().next().unwrap();
+
+        let constraints = wheel_target_constraints(&wheels, platform);
+        assert_eq!(constraints.libc, Some(LibcFamily::Musl));
+        assert_eq!(
+            constraints.wheel_priority,
+            Some(vec!["musllinux".to_string(), "any".to_string()])
+        );
     }
 
     // ── Decision A: pypi source — plan-phase candidate selection + lock derivation ──
@@ -1462,6 +1578,8 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
 platforms:
   linux/amd64:
     runner: ubuntu-latest
