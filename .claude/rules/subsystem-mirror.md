@@ -34,7 +34,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
 | `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex) |
 | `spec/target.rs` | `Target` (registry + repository) |
-| `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping) |
+| `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping). Keys are `os/arch[/variant][/os_version][+libc.<flavor>]` parsed via `ocx_lib` `Platform::from_str`; a `+libc.glibc`/`+libc.musl` suffix lands in `os_features` and publishes as an OCI `os.features` entry |
 | `spec/asset_type.rs` | `AssetTypeConfig` (Archive vs Binary) |
 | `spec/versions_config.rs` | Version filter (min/max bounds, new_per_run, backfill order) |
 | `spec/verify_config.rs` | Checksum verify options |
@@ -83,7 +83,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 
 ## Spec Format (YAML)
 
-Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`.
+Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`.
 
 Source types:
 - `github_release`: `{owner, repo, tag_pattern}` — regex with `(?P<version>...)` capture

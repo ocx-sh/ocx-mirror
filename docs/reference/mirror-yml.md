@@ -23,6 +23,38 @@
 
 The `tests`, `platforms`, `ocx_mirror`, and `notify` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
 
+## `assets` {#assets}
+
+Maps a **platform key** to an ordered list of regexes. Each regex is matched against upstream asset filenames; the first platform with exactly one distinct match resolves to that asset (zero matches = platform absent for that version, two or more = ambiguous error).
+
+A platform key is `<os>/<arch>` with optional suffixes:
+
+```
+<os>/<arch>[/<variant>][/<os_version>][+libc.<flavor>...]
+```
+
+```yaml
+assets:
+  linux/amd64:
+    - "tool-.*-linux-x86_64\\.tar\\.gz"
+  darwin/arm64:
+    - "tool-.*-darwin-arm64\\.tar\\.gz"
+```
+
+### libc variants {#assets-libc}
+
+When a tool ships separate builds for different C libraries on the same `os/arch` (e.g. glibc and musl on `linux/amd64`), append a `+libc.<flavor>` tag to the key. The tag is published into the OCI image index as an `os.features` entry, so a client (`ocx install`) selects the build matching its host libc:
+
+```yaml
+assets:
+  "linux/amd64+libc.glibc":
+    - "cpython-.*-x86_64-unknown-linux-gnu.*\\.tar\\.zst"
+  "linux/amd64+libc.musl":
+    - "cpython-.*-x86_64-unknown-linux-musl.*\\.tar\\.zst"
+```
+
+`libc.glibc` and `libc.musl` are the recognized flavors. The two keys are distinct platforms — each needs its own regex list, and each publishes as its own image-index entry. A key with no `+libc.` tag carries no libc requirement and resolves for any host (the pre-libc behavior). Quote keys containing `+` so YAML parses them as strings.
+
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
 `build_timestamp` controls the tag a mirrored version is published under. Each `(version, platform)` push writes a **primary tag** for that version; with `cascade: true` (the default) it also re-points the **rolling tags** `X.Y`, `X`, and `latest` to the newest build.
