@@ -37,6 +37,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/target.rs` | `Target` (registry + repository) |
 | `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping). Keys are `os/arch[/variant][/os_version][+libc.<flavor>]` parsed via `ocx_lib` `Platform::from_str`; a `+libc.glibc`/`+libc.musl` suffix lands in `os_features` and publishes as an OCI `os.features` entry |
 | `spec/asset_type.rs` | `AssetTypeConfig` (Archive vs Binary) |
+| `spec/wheels.rs` | `WheelPatterns` (`wheels:` map, env sources only): platform key (optional single `+libc.glibc`/`+libc.musl` os_feature) → ordered wheel-tag prefix filter (admissibility + ranking); `effective_filter` derives per-key defaults (`["any"]` plain linux, `["manylinux","any"]` glibc, `["musllinux","any"]` musl, macosx/win elsewhere); key published verbatim as the image-index platform entry; `base_platform_key`/`libc_feature` helpers |
 | `spec/versions_config.rs` | Version filter (min/max bounds, new_per_run, backfill order) |
 | `spec/verify_config.rs` | Checksum verify options |
 | `spec/metadata_config.rs` | Metadata.json path config |
@@ -52,7 +53,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/orchestrator.rs` | `execute_mirror()`: prepare (concurrent) + push (sequential) |
 | `pipeline/download.rs` | HTTP download; "resume" = a task whose asset file already exists on disk skips re-download (task-level skip, NOT HTTP byte-range resumption) |
 | `pipeline/lock_derive.rs` | `pipeline plan`'s per-candidate PEP 751 lock derivation for `source.type: pypi`: shells `uv pip compile` — universal locks (the default) via `--python-version X.Y`, no interpreter on disk; only `universal: false` materializes the pinned interpreter via `ocx package pull` (`--python <path>`) — relaxes the `requires-python` floor (uv#15995), stamps a provenance header, fail-closed re-parses via `ocx_python::parse_pylock` |
-| `pipeline/python_prepare.rs` | pylock/pypi env-prepare path (parallel to the archive `orchestrator::prepare_version`): per (version, platform, variant) download wheels → verify(sha256==lock) → repack → collide → `compose_env` → write `metadata.json` + N `tar.zst` layers + `env-manifest.json` |
+| `pipeline/python_prepare.rs` | pylock/pypi env-prepare path (parallel to the archive `orchestrator::prepare_version`): per (version, wheels key) download wheels → verify(sha256==lock) → repack → collide → `compose_env` → write `metadata.json` + N `tar.zst` layers + `env-manifest.json`; entry `platform` = full wheels key (push `-p` verbatim), `platform_slug` = base slug (JUnit naming) |
 | `pipeline/python_push.rs` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade --new -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
 | `pipeline/ocx_cli.rs` | shared `ocx` subprocess helpers (`resolve_ocx_binary`, `forward_ocx_env`) used by both the archive push/describe legs and `python_push` |
 | `pipeline/verify.rs` | Checksum verify |
@@ -90,7 +91,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 
 ## Spec Format (YAML)
 
-Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`.
+Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc entries sharing one os/arch), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`. Env sources (`pylock`/`pypi`) replace `assets`/`asset_type`/`variants` with the required `wheels:` map (`spec/wheels.rs`); libc is an `os.features` platform axis there — bare tags, one image index, per-key entries; push gates each entry's JUnit by libc-compatible container legs (`container_libc_for_image`, shared from `spec/platforms_config.rs`).
 
 Source types:
 - `github_release`: `{owner, repo, tag_pattern}` — regex with `(?P<version>...)` capture

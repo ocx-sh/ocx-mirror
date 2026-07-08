@@ -85,7 +85,7 @@ public error types map to consumer exit codes (`error.rs`, and
 ### Convention 1 — Naming (PEP 503 normalization + conventional repo path)
 
 `naming::wheel_reference(scope, wheel)` renders the repo-relative, host-free
-reference `<scope>/<index-host>/<package>/<slug>:<sha256>`:
+reference `<scope>/<index-host>/<package>:<sha256>`:
 
 - **Package segment** — `naming::normalize_package_name` (`naming.rs`): lowercase,
   and collapse runs of `-` / `_` / `.` to a single `-` (equivalent to
@@ -96,10 +96,13 @@ reference `<scope>/<index-host>/<package>/<slug>:<sha256>`:
 - **Index-host** — the URL authority via a hand-rolled `extract_host` (no `url`
   dep in this crate); folds `.`/`..` to the `unknown-index-host` fallback as a
   CWE-22 path-traversal guard.
-- **Slug** — `wheel_slug`: the wheel's build tag (if any) plus its **ABI and
-  platform tags**, deliberately **not** the Python tag — the slug disambiguates
-  build/variant, not interpreter.
-- **Tag** — the wheel's `sha256` (hex, no `sha256:` prefix): content-addressed.
+- **Tag** — the wheel's `sha256` (hex, no `sha256:` prefix): content-addressed,
+  and therefore the *sole* disambiguator. Wheels of one package that differ by
+  build tag / ABI / platform share the `<package>` repo as distinct tags;
+  byte-identical wheels (e.g. an `abi3` wheel shared across CPython minors)
+  dedupe onto one tag. An earlier revision carried an extra `<slug>` path
+  segment (ABI+platform tags) for this — dropped as redundant with the content
+  hash, which already distinguishes every distinct wheel.
 
 The reference carries **no registry host**; the consumer prepends the registry
 when it builds the final `ocx_lib::oci::Identifier`.
@@ -274,6 +277,18 @@ unresolvable launcher. Gating is never inferred from dependency presence.
 
 ### Convention 5 — Platform / axis encoding
 
+> **Amended 2026-07-09 — L2 superseded by `os.features` platform keys.** The L2
+> facts→variant-prefix encoding below (`encode_l2` / `encode_platform_key` /
+> `encode_variant_prefix`, grammar `L2_GRAMMAR_VERSION = 1`) is **deleted**. The
+> published platform is now the maintainer's declared `wheels:` key — the spec
+> surface, verbatim, including an optional `+libc.glibc`/`+libc.musl`
+> `os.features` suffix (ocx ≥ 0.4.2 `can_run` subset matching). Env packages
+> publish bare tags with one image index whose entries differ by `os.features`;
+> the variant tag prefix no longer exists for env sources. `wheel_priority` on
+> `VariantConstraints` is now an admissibility filter + ranking (non-empty list
+> excludes non-matching wheels), derived per key from the `wheels:` filter. L1
+> (`parse_platform_tag`) is unchanged and remains the frozen fact table.
+
 A Python target is 5-axis `(os, arch, libc{family,floor}, python, abi)`; an OCX
 `Platform` carries os/arch only. `platform.rs` layers the mapping:
 
@@ -367,8 +382,18 @@ respecting OCX's model, not fighting it with a merge/dedupe special case.
 
 ### Convention 8 — libc-variant interpreter provisioning & container validation
 
-Convention 5 encodes libc as a **variant** (a tag prefix), never an `os/arch`
-platform key. Its mirror-side realization pins two one-way-door registry
+> **Amended 2026-07-09 — variant axis superseded.** Env packages no longer have
+> variants: libc is declared on `wheels:` platform keys and published as OCI
+> `os.features`. The per-variant `interpreter_package` override is **deleted** —
+> a single `python.interpreter_package` serves every key (a dual-libc app needs
+> an interpreter whose own index resolves per-libc, or a musl/static build that
+> runs on both). Container validation below still stands, now realized as
+> libc-compatible JUnit *gating*: a `+libc.musl` entry is gated by musl (alpine)
+> legs only, `+libc.glibc` by gnu legs, and a featureless entry by ALL legs of
+> its base platform.
+
+Convention 5 encoded libc as a **variant** (a tag prefix), never an `os/arch`
+platform key. Its mirror-side realization pinned two one-way-door registry
 conventions:
 
 **Interpreter provisioning.** An env's private interpreter dependency is resolved
@@ -457,3 +482,4 @@ private interpreter is pulled — anonymously — from the registry.
 | 2026-07-04 | pylock-mirror swarm | Initial draft — seven implemented conventions |
 | 2026-07-04 | pylock-mirror swarm | Convention 8 — libc-variant interpreter provisioning (separate `cpython-musl` repo, per-variant `interpreter_package`) + container test-leg validation (alpine/musl, debian/glibc floor) |
 | 2026-07-05 | pylock-mirror swarm (w3-adr) | Convention 4 revision — entrypoint selection modes (`auto`/`all`/explicit windowed list), fail-closed `EntrypointCollision`/`MissingEntrypoint` replacing silent last-write-wins, V3 spawn-parity finding + `RootOnly` caveat, `bin_shims` knob rejected |
+| 2026-07-09 | python-mirror-v2 | Conventions 5/8 amended — variant axis superseded by `wheels:` platform keys with `os.features` libc (v0.4.2 `can_run`); L2 encode surface deleted; `wheel_priority` promoted to admissibility filter + ranking; single `python.interpreter_package` (per-variant override deleted); libc-compatible JUnit gating at push |

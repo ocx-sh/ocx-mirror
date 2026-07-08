@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use super::download;
-use super::mirror_task::VariantContext;
 use super::orchestrator::{ConcurrencyParams, task_dir};
 use super::progress;
 use crate::error::MirrorError;
@@ -58,22 +57,21 @@ pub(crate) struct SelectedWheel {
 }
 
 /// A single env-package work unit: download + repack + compose one
-/// `(version, platform, variant)`.
+/// `(version, wheels key)`.
 ///
 /// Several fields (`source_version`, `cascade`, `spec_dir`, `wheel_scope`) are
 /// carried for the W2.4 push leg rather than consumed by W2.3 prepare.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields carried for the W2.4 push leg
 pub(crate) struct WheelEnvTask {
-    /// Variant-prefixed normalized tag the pipeline publishes (e.g. `3.29.0`,
-    /// `slim-3.29.0`).
+    /// Bare normalized tag the pipeline publishes (e.g. `3.29.0` — env tags
+    /// carry no variant prefix).
     pub normalized_version: String,
     /// Raw upstream (app) version, pre-tag.
     pub source_version: String,
-    /// The concrete OCX platform for this leg.
+    /// The full wheels-key OCX platform for this leg (`+libc.*` os_features
+    /// intact — published verbatim as the image-index platform entry).
     pub platform: Platform,
-    /// Variant context (`None` = the unnamed default variant).
-    pub variant: Option<VariantContext>,
     /// The publish target (registry + repository).
     pub target: Target,
     /// Whether cascade tags are published.
@@ -119,12 +117,14 @@ pub(crate) struct EnvLayer {
 /// One prepared env package: its metadata plus ordered wheel layers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct EnvEntry {
-    /// Platform slug (e.g. `linux_amd64`).
+    /// BASE os/arch platform slug (e.g. `linux_amd64` — os_features dropped
+    /// by `ascii_segments`). Names the JUnit files the push job gates on:
+    /// CI matrix legs are keyed by base platform, so a `+libc.*` entry shares
+    /// its base leg's slug.
     pub platform_slug: String,
-    /// Platform string (e.g. `linux/amd64`).
+    /// Full wheels-key platform string (e.g. `linux/amd64+libc.glibc`) —
+    /// round-trips `+libc.*` and becomes the push `-p` value verbatim.
     pub platform: String,
-    /// Variant name (`None` = default variant).
-    pub variant: Option<String>,
     /// Path to the composed `metadata.json`.
     pub metadata_path: PathBuf,
     /// The ordered wheel layers.
@@ -216,12 +216,6 @@ pub(crate) async fn prepare_env_version(
     // job with this version dir downloaded to a different absolute location;
     // relative paths let `enumerate_env_manifests` re-anchor them against
     // wherever the artifact landed (see `python_push`).
-    //
-    // ponytail: `strip_prefix` works because the default variant's task_dir is
-    // `{version_dir}/{platform_slug}`. A named-variant leg (normalized tag ≠
-    // version) lives in a sibling dir and won't strip — its path stays
-    // absolute and fails loudly in push rather than resolving wrong. Named
-    // variants are deferred (W4).
     for env in &mut envs {
         env.metadata_path = relativize_to(&env.metadata_path, &version_dir);
         for layer in &mut env.layers {
@@ -384,9 +378,11 @@ async fn prepare_env_task(
         .collect();
 
     Ok(EnvEntry {
+        // BASE slug: `ascii_segments` drops os_features, so a `+libc.*` entry
+        // shares its base CI leg's JUnit naming (the work dir, by contrast,
+        // is the os_features-aware `task_dir` slug).
         platform_slug: task.platform.ascii_segments().join("_"),
         platform: task.platform.to_string(),
-        variant: task.variant.as_ref().map(|ctx| ctx.name.clone()),
         metadata_path,
         layers,
     })
@@ -477,7 +473,6 @@ mod tests {
             normalized_version: "1.0.0".to_string(),
             source_version: "1.0.0".to_string(),
             platform: "linux/amd64".parse().expect("valid platform"),
-            variant: None,
             target: Target {
                 registry: "ocx.sh".to_string(),
                 repository: "acme-app".to_string(),
@@ -490,7 +485,7 @@ mod tests {
                 filename: FIXTURE_FILENAME.to_string(),
                 url: url::Url::parse("https://example.com/wheel.whl").expect("valid url"),
                 sha256: sha256.to_string(),
-                wheel_repository: "pip-packages/example.com/console-pkg/none-any".to_string(),
+                wheel_repository: "pip-packages/example.com/console-pkg".to_string(),
             }],
             interpreter: interpreter_dependency(),
             requested_extras: Vec::new(),

@@ -28,8 +28,8 @@
 //! ```
 //!
 //! `wheel_reference` (naming) renders the conventional repo path for each
-//! selected wheel; `platform` holds the L1 wheel-tag→facts and L2 facts→OCX
-//! encoding model that `select` and `compose` share.
+//! selected wheel; `platform` holds the L1 wheel-tag→facts model that
+//! `select` and `compose` share.
 
 pub mod collide;
 pub mod compose;
@@ -47,9 +47,9 @@ pub use compose::{ComposeError, EntrypointSelection, EnvComposition, EnvSpec, Wh
 pub use lock::{LockError, LockedPackage, LockedWheel, Pylock, parse_pylock};
 pub use naming::{WheelReference, WheelScope, wheel_reference};
 pub use platform::{
-    Implementation, InterpreterPin, L2_GRAMMAR_VERSION, LibcConstraint, LibcFamily, MarkerEnvironment,
-    OcxPlatformEncoding, PlatformError, PlatformFacts, PythonTarget, TargetArchitecture, TargetOperatingSystem,
-    TargetPlatform, VariantConstraints, encode_l2, marker_environment, parse_platform_tag,
+    Implementation, InterpreterPin, LibcConstraint, LibcFamily, MarkerEnvironment, PlatformError, PlatformFacts,
+    PythonTarget, TargetArchitecture, TargetOperatingSystem, TargetPlatform, VariantConstraints, marker_environment,
+    parse_platform_tag,
 };
 pub use repack::{
     ConsoleScript, REPACK_VERSION, RepackError, RepackedWheel, WheelDescription, read_wheel_description, repack_wheel,

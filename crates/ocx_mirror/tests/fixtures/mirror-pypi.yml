@@ -20,10 +20,9 @@ python:
     extras:
       - cli
 
-variants:
-  - default: true
-    libc: gnu
-    min_manylinux: "2_28"
+wheels:
+  linux/amd64: ~
+  linux/arm64: ~
 
 platforms:
   linux/amd64:

@@ -12,7 +12,7 @@ use ocx_lib::cli::DataInterface;
 use crate::command::package::options::OutputFormat;
 use crate::command::package::pipeline::push;
 use crate::error::MirrorError;
-use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
+use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry, container_libc_for_image};
 
 // ── Renderer (native + container legs) ───────────────────────────────────────
 //
@@ -146,17 +146,6 @@ fn policy_check_notify(spec: &MirrorSpec) -> Result<(), MirrorError> {
         return Ok(());
     };
     spec::policy_check_notify(notify)
-}
-
-/// The libc family for a container image, driving which statically-linked ocx
-/// release binary the test leg mounts. Inferred from the image name: Alpine is
-/// musl, everything else (Debian, Ubuntu, Fedora, …) is gnu.
-///
-// ponytail: name-prefix inference, not a spec field — the corpus needs exactly
-// alpine(musl) + debian(gnu). Add an explicit `containers[].libc` to
-// `ContainerConfig` if a musl image that isn't Alpine ever shows up.
-fn container_libc_for_image(image: &str) -> &'static str {
-    if image.starts_with("alpine") { "musl" } else { "gnu" }
 }
 
 /// The default shell inside a container image when the config omits one:
@@ -450,8 +439,9 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
 /// The ocx CLI release whose statically-linked binary is mounted into a
 /// container test leg. Pinned (not `latest`) for reproducible generated
 /// workflows; Renovate can bump it via the same customManager that pins the
-/// baked action refs.
-const OCX_CONTAINER_CLI_TAG: &str = "v0.4.1";
+/// baked action refs. Floor: >= v0.4.2 — the `os.features` (`+libc.*`)
+/// subset matcher env packages' per-libc interpreter indexes rely on.
+const OCX_CONTAINER_CLI_TAG: &str = "v0.4.2";
 
 /// Render per-test shell commands for the `test` job's run step.
 ///
@@ -475,6 +465,20 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
         r#"-m "${METADATA}" ${LAYERS}"#
     } else {
         r#""${BUNDLE}""#
+    };
+
+    // The `--platform` a test invocation declares. Env container legs append
+    // the container's libc as an os_feature (`+libc.glibc`/`+libc.musl`):
+    // `ocx package test` threads the flag verbatim into DEPENDENCY resolution
+    // (`pull_local` → setup), and an env's interpreter index may carry only
+    // per-libc entries — a bare `linux/amd64` request would match none of
+    // them. The leg runs inside exactly that libc's userland, so declaring it
+    // is a statement of fact, not an override. Archive legs keep the bare
+    // matrix platform (byte-identical output for the existing corpus).
+    let test_platform = if is_pylock {
+        r#""${TEST_PLATFORM}""#
+    } else {
+        r#""${{ matrix.platform }}""#
     };
 
     // Emit the container wrapper only when a leg actually declares an image, so
@@ -540,15 +544,15 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
-                {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
+                {OCX_TEST} --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
-                {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
+                {OCX_TEST} --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
-                printf '%s' "${TEST_INLINE}" | {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
+                printf '%s' "${TEST_INLINE}" | {OCX_TEST} --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script - || RC=$?
               fi
               END=$(date +%s)
@@ -581,6 +585,7 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
     body.replace("{CONTAINER_PRELUDE}", container_prelude)
         .replace("{OCX_TEST}", ocx_test)
         .replace("{TEST_TARGET}", test_target)
+        .replace("{TEST_PLATFORM}", test_platform)
         .replace("{OCX_CLI_TAG}", OCX_CONTAINER_CLI_TAG)
 }
 
@@ -687,11 +692,19 @@ fn prepare_flatten_script(is_pylock: bool) -> String {
 ///
 /// Archive/binary legs set `BUNDLE` (+ its `METADATA_SIBLING`) so
 /// `ocx package test` receives a single bundle path. Pylock legs read the
-/// version's `env-manifest.json`, select this leg's platform entry, and set
-/// `METADATA` + `LAYERS` (version-dir-relative paths joined back onto the
-/// downloaded artifact root) for the `-m <metadata> <layers…>` form.
+/// version's `env-manifest.json`, select this leg's env entry by base
+/// platform + libc compatibility, and set `METADATA` + `LAYERS`
+/// (version-dir-relative paths joined back onto the downloaded artifact root)
+/// for the `-m <metadata> <layers…>` form.
 fn test_target_resolve_script(is_pylock: bool) -> String {
     if is_pylock {
+        // Entry selection per leg: prefer the `+libc.<flavor>`-suffixed entry
+        // matching the leg's container libc (gnu → libc.glibc, musl →
+        // libc.musl; native legs carry no `container_libc` → "" → glibc),
+        // falling back to the featureless base entry. A musl container leg
+        // therefore tests the musl env of a dual-libc package while both legs
+        // test the single featureless env of a plain one.
+        //
         // The jq resolution is guarded (`2>/dev/null || true`, `// empty`) so a
         // genuine miss — a version whose prepare leg failed and never uploaded
         // its env-manifest.json — reds THIS version attributably via the
@@ -701,7 +714,15 @@ fn test_target_resolve_script(is_pylock: bool) -> String {
         // the loop with no JUnit written. Mirrors the archive path's
         // "genuine miss still reds" invariant.
         r#"            VERSION_DIR="bundles/${VERSION}"
-            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" '.envs[] | select(.platform == $p)' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
+            # The leg's own libc, declared on `--platform` as an os_feature so
+            # dependency resolution (the env's interpreter) can select a
+            # per-libc index entry. Native legs carry no container_libc → bare.
+            TEST_PLATFORM="${{ matrix.platform }}"
+            case "${{ matrix.container_libc }}" in
+              musl) TEST_PLATFORM="${TEST_PLATFORM}+libc.musl" ;;
+              gnu) TEST_PLATFORM="${TEST_PLATFORM}+libc.glibc" ;;
+            esac
+            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" --arg libc "${{ matrix.container_libc }}" '(if $libc == "musl" then "libc.musl" else "libc.glibc" end) as $feat | ([.envs[] | select(.platform == ($p + "+" + $feat))] + [.envs[] | select(.platform == $p)]) | first // empty' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
             METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null || true)"
             LAYERS=""
             for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null || true); do
@@ -1037,6 +1058,18 @@ mod tests {
             "pylock test job must not reference the archive BUNDLE var:\n{content}"
         );
 
+        // Env legs declare the container's libc on --platform (os_feature) so
+        // dependency resolution can select a per-libc interpreter index entry;
+        // a bare `linux/amd64` request matches no `+libc.*`-only index.
+        assert!(
+            content.contains(r#"--platform "${TEST_PLATFORM}""#),
+            "env test invocations must use the libc-declared TEST_PLATFORM:\n{content}"
+        );
+        assert!(
+            content.contains(r#"musl) TEST_PLATFORM="${TEST_PLATFORM}+libc.musl" ;;"#),
+            "musl container legs must append +libc.musl to the test platform:\n{content}"
+        );
+
         // HARD REGRESSION LOCK: a committed-lock pylock spec is `is_env()` but
         // NOT pypi — the plan artifact must stay the single-path, single-
         // artifact upload (only pypi's in-pipeline lock derivation needs the
@@ -1158,7 +1191,9 @@ mod tests {
             "test calls route through ocx_test"
         );
         assert!(
-            content.contains("releases/download/v0.4.1/ocx-${OCX_TRIPLE}.tar.xz"),
+            content.contains(&format!(
+                "releases/download/{OCX_CONTAINER_CLI_TAG}/ocx-${{OCX_TRIPLE}}.tar.xz"
+            )),
             "pinned libc-matched ocx binary is provisioned"
         );
         assert!(

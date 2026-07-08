@@ -1,34 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Platform & axis model: L1 wheel-tag→facts, L2 facts→OCX encoding, and
-//! marker-environment derivation.
+//! Platform & axis model: L1 wheel-tag→facts and marker-environment
+//! derivation.
 //!
 //! A Python target is 5-axis — `(os, arch, libc{family,floor}, python, abi)` —
-//! but an OCX platform carries only os/arch. The mapping is layered
-//! (design spec, "Platform & axis model"):
+//! but an OCX platform carries only os/arch (+ an optional `libc.*`
+//! `os.features` entry, owned by the consumer's platform key):
 //!
 //! - **L1** ([`parse_platform_tag`]): a PEP 425/600/656 wheel platform tag →
 //!   [`PlatformFacts`]. Frozen in code, identical across every namespace
 //!   writer — this is what the crate protects.
-//! - **L2** ([`encode_l2`]): [`PlatformFacts`]-derived target → an OCX
-//!   [`Platform`](ocx_lib::oci::Platform) plus a variant tag prefix.
-//!   Grammar-versioned in code ([`L2_GRAMMAR_VERSION`]), never user config.
-//! - **L3**: the user-facing spec surface (platform keys + variant
-//!   constraints) — lives in the mirror, not here.
+//! - The published platform is the consumer's (the mirror's) declared key —
+//!   the spec `wheels:` map, including any `+libc.glibc`/`+libc.musl`
+//!   `os.features` suffix. This crate never computes it from wheel contents.
 //!
 //! [`marker_environment`] derives the PEP 508 evaluation environment from the
 //! L1 facts and the interpreter pin; `select` feeds it to `uv-pep508`.
-
-use ocx_lib::oci::{Architecture, OperatingSystem, Platform};
-
-/// The grammar version of the L2 facts→OCX encoding.
-///
-/// v1 encodes os/arch into the OCX platform key and libc/ABI into a mirror
-/// variant tag prefix. The planned v2 (`+libc.gnu` platform grammar) moves
-/// libc into the platform key itself; a v1→v2 migration is a republish. L1
-/// facts are stable across both.
-pub const L2_GRAMMAR_VERSION: u32 = 1;
 
 /// The operating-system axis of a Python target.
 ///
@@ -119,18 +107,18 @@ pub struct VariantConstraints {
     /// A required ABI override (e.g. `"cp313t"` for free-threaded CPython).
     /// `None` means the interpreter pin's primary ABI.
     pub abi: Option<String>,
-    /// Ordered wheel platform-tag-prefix ranking list (e.g. `["any"]`,
-    /// `["musllinux", "manylinux_2_28"]`). `select`'s `pick_wheel` ranks each
-    /// package's tag-compatible candidate wheels by the position of their
-    /// highest-priority matching prefix (first-listed = most preferred)
-    /// *before* falling back to `uv-platform-tags`' own `TagPriority` —
-    /// letting a maintainer force e.g. a pure `any` wheel to outrank a
-    /// compiled musllinux/manylinux one (mandatory for fully-static
-    /// interpreters, which cannot `dlopen` compiled extensions). Ranking never
-    /// re-admits a wheel excluded by the variant's own libc/floor constraints
-    /// above — it only reorders wheels that already passed tag-compatibility.
-    /// `None`/empty ranks every wheel identically: today's ordering,
-    /// unchanged (backcompat).
+    /// Ordered wheel platform-tag-prefix list (e.g. `["any"]`,
+    /// `["manylinux", "any"]`). A NON-empty list is an **admissibility
+    /// filter plus ranking**: `select`'s `pick_wheel` excludes any
+    /// tag-compatible wheel
+    /// whose platform tags match no listed prefix, and ranks survivors by the
+    /// position of their highest-priority matching prefix (first-listed =
+    /// most preferred) before falling back to `uv-platform-tags`' own
+    /// `TagPriority`. The filter never re-admits a wheel excluded by the
+    /// libc/floor constraints above — it only narrows and reorders wheels
+    /// that already passed tag-compatibility. `None`/empty keeps today's
+    /// TagPriority-only ordering, unchanged (backcompat; the mirror always
+    /// passes a non-empty filter derived from its `wheels:` platform key).
     pub wheel_priority: Option<Vec<String>>,
 }
 
@@ -211,16 +199,6 @@ pub struct MarkerEnvironment {
     pub implementation_name: String,
     /// `platform_python_implementation` (`"CPython"`).
     pub platform_python_implementation: String,
-}
-
-/// The L2 v1 encoding of a target: the OCX platform plus a variant tag prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OcxPlatformEncoding {
-    /// The OCX platform (os/arch) for the Image Index entry.
-    pub platform: Platform,
-    /// The mirror variant tag prefix, or `None` for the default (unadorned)
-    /// chain. `Some("musl")` / `Some("cp313t")` etc. for non-default variants.
-    pub variant_prefix: Option<String>,
 }
 
 /// **L1**: parses a concrete wheel platform tag into [`PlatformFacts`].
@@ -369,25 +347,7 @@ pub fn marker_environment(facts: &PlatformFacts, interpreter: &InterpreterPin) -
     }
 }
 
-/// **L2**: encodes a target into its OCX [`Platform`] and variant tag prefix.
-///
-/// v1 ([`L2_GRAMMAR_VERSION`]) maps os/arch to the platform key and libc/ABI to
-/// the variant prefix (default = glibc + primary ABI, unadorned).
-///
-/// # Errors
-///
-/// Returns [`PlatformError::InvalidVariant`] when the variant constraints are
-/// internally inconsistent (e.g. `libc: musl` with a `min_manylinux` floor).
-pub fn encode_l2(target: &PythonTarget) -> Result<OcxPlatformEncoding, PlatformError> {
-    let variant_prefix = encode_variant_prefix(&target.variant)?;
-    let platform = encode_platform_key(&target.platform);
-    Ok(OcxPlatformEncoding {
-        platform,
-        variant_prefix,
-    })
-}
-
-// ── L1/L2 helpers (frozen table) ────────────────────────────────────────────
+// ── L1 helpers (frozen table) ───────────────────────────────────────────────
 
 /// Splits a `${major}_${minor}_${arch}` remainder (post-prefix) into its three
 /// parts, keeping the arch intact even though it may itself contain `_`
@@ -450,63 +410,7 @@ fn platform_machine(os: TargetOperatingSystem, arch: TargetArchitecture) -> &'st
     }
 }
 
-/// L2 v1: os/arch → OCX [`Platform`]. libc/ABI live in the variant prefix, not
-/// the platform key (the planned v2 `+libc` grammar moves libc here).
-fn encode_platform_key(platform: &TargetPlatform) -> Platform {
-    let os = match platform.operating_system {
-        TargetOperatingSystem::Linux => OperatingSystem::Linux,
-        TargetOperatingSystem::Darwin => OperatingSystem::Darwin,
-        TargetOperatingSystem::Windows => OperatingSystem::Windows,
-    };
-    let arch = match platform.architecture {
-        TargetArchitecture::Amd64 => Architecture::Amd64,
-        TargetArchitecture::Arm64 => Architecture::Arm64,
-    };
-    Platform::Specific {
-        os,
-        arch,
-        variant: None,
-        os_version: None,
-        os_features: None,
-        features: None,
-    }
-}
-
-/// L2 v1: derives the mirror variant tag prefix from the variant's L1-fact
-/// constraints. Default (glibc + primary ABI) → `None` (unadorned chain);
-/// `musl` libc → `musl`; an ABI override (e.g. free-threaded `cp313t`) → that
-/// ABI. Composed deterministically (`musl-cp313t`) if both non-default axes are
-/// set.
-///
-/// Validates internal consistency: a `musl` libc cannot carry a `manylinux`
-/// floor, and a `musllinux` floor requires a `musl` libc.
-fn encode_variant_prefix(variant: &VariantConstraints) -> Result<Option<String>, PlatformError> {
-    if variant.libc == Some(LibcFamily::Musl) && variant.min_manylinux.is_some() {
-        return Err(PlatformError::InvalidVariant {
-            reason: "musl libc constrained by a manylinux floor".to_string(),
-        });
-    }
-    if variant.libc != Some(LibcFamily::Musl) && variant.min_musllinux.is_some() {
-        return Err(PlatformError::InvalidVariant {
-            reason: "musllinux floor without a musl libc".to_string(),
-        });
-    }
-
-    let mut components: Vec<String> = Vec::new();
-    if variant.libc == Some(LibcFamily::Musl) {
-        components.push("musl".to_string());
-    }
-    if let Some(abi) = &variant.abi {
-        components.push(abi.clone());
-    }
-    if components.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(components.join("-")))
-    }
-}
-
-/// Errors from platform-tag parsing and L2 encoding.
+/// Errors from platform-tag parsing.
 ///
 /// Internal source type: never surfaced to the consumer directly — always
 /// wrapped inside [`SelectError`](crate::select::SelectError) or
@@ -536,12 +440,6 @@ pub enum PlatformError {
     AgnosticTag {
         /// The agnostic or non-platform-axis tag.
         tag: String,
-    },
-    /// The variant constraints are internally inconsistent.
-    #[error("invalid variant constraints: {reason}")]
-    InvalidVariant {
-        /// A short explanation of the inconsistency.
-        reason: String,
     },
 }
 
@@ -792,127 +690,5 @@ mod tests {
             ),
             ("darwin", "Darwin", "posix")
         );
-    }
-
-    // ── L2: encode_l2 ───────────────────────────────────────────────────────
-
-    fn target(os: TargetOperatingSystem, arch: TargetArchitecture, variant: VariantConstraints) -> PythonTarget {
-        PythonTarget {
-            platform: TargetPlatform {
-                operating_system: os,
-                architecture: arch,
-            },
-            variant,
-            interpreter: cpython("3.13", "3.13.1", "cp313"),
-        }
-    }
-
-    #[test]
-    fn encode_l2_maps_os_arch_to_platform_key() {
-        let cases = [
-            (TargetOperatingSystem::Linux, TargetArchitecture::Amd64, "linux/amd64"),
-            (TargetOperatingSystem::Linux, TargetArchitecture::Arm64, "linux/arm64"),
-            (TargetOperatingSystem::Darwin, TargetArchitecture::Arm64, "darwin/arm64"),
-            (
-                TargetOperatingSystem::Windows,
-                TargetArchitecture::Amd64,
-                "windows/amd64",
-            ),
-        ];
-        for (os, arch, expected) in cases {
-            let encoding = encode_l2(&target(os, arch, VariantConstraints::default())).unwrap();
-            assert_eq!(encoding.platform.to_string(), expected);
-        }
-    }
-
-    #[test]
-    fn encode_l2_default_variant_is_unadorned() {
-        let encoding = encode_l2(&target(
-            TargetOperatingSystem::Linux,
-            TargetArchitecture::Amd64,
-            VariantConstraints {
-                libc: Some(LibcFamily::Gnu),
-                min_manylinux: Some("2_28".to_string()),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-        assert_eq!(encoding.variant_prefix, None);
-    }
-
-    #[test]
-    fn encode_l2_musl_variant_prefix() {
-        let encoding = encode_l2(&target(
-            TargetOperatingSystem::Linux,
-            TargetArchitecture::Arm64,
-            VariantConstraints {
-                libc: Some(LibcFamily::Musl),
-                min_musllinux: Some("1_2".to_string()),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-        assert_eq!(encoding.variant_prefix.as_deref(), Some("musl"));
-    }
-
-    #[test]
-    fn encode_l2_free_threaded_abi_prefix() {
-        let encoding = encode_l2(&target(
-            TargetOperatingSystem::Linux,
-            TargetArchitecture::Amd64,
-            VariantConstraints {
-                abi: Some("cp313t".to_string()),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-        assert_eq!(encoding.variant_prefix.as_deref(), Some("cp313t"));
-    }
-
-    #[test]
-    fn encode_l2_composes_musl_and_abi_deterministically() {
-        let encoding = encode_l2(&target(
-            TargetOperatingSystem::Linux,
-            TargetArchitecture::Amd64,
-            VariantConstraints {
-                libc: Some(LibcFamily::Musl),
-                abi: Some("cp313t".to_string()),
-                ..Default::default()
-            },
-        ))
-        .unwrap();
-        assert_eq!(encoding.variant_prefix.as_deref(), Some("musl-cp313t"));
-    }
-
-    #[test]
-    fn encode_l2_rejects_inconsistent_variants() {
-        // musl libc with a manylinux floor.
-        let musl_with_manylinux = encode_l2(&target(
-            TargetOperatingSystem::Linux,
-            TargetArchitecture::Amd64,
-            VariantConstraints {
-                libc: Some(LibcFamily::Musl),
-                min_manylinux: Some("2_28".to_string()),
-                ..Default::default()
-            },
-        ));
-        assert!(matches!(musl_with_manylinux, Err(PlatformError::InvalidVariant { .. })));
-
-        // musllinux floor without a musl libc.
-        let gnu_with_musllinux = encode_l2(&target(
-            TargetOperatingSystem::Linux,
-            TargetArchitecture::Amd64,
-            VariantConstraints {
-                libc: Some(LibcFamily::Gnu),
-                min_musllinux: Some("1_2".to_string()),
-                ..Default::default()
-            },
-        ));
-        assert!(matches!(gnu_with_musllinux, Err(PlatformError::InvalidVariant { .. })));
-    }
-
-    #[test]
-    fn l2_grammar_version_is_one() {
-        assert_eq!(L2_GRAMMAR_VERSION, 1);
     }
 }

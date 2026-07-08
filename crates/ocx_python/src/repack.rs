@@ -26,7 +26,6 @@ use sha2::{Digest, Sha256};
 ///
 /// Single source of truth for the deterministic-repack convention (sorted
 /// entries, epoch mtimes, uid/gid 0, normalized modes, pinned zstd level).
-/// Parallels [`L2_GRAMMAR_VERSION`](crate::platform::L2_GRAMMAR_VERSION).
 pub const REPACK_VERSION: &str = "repack-v1";
 
 /// Pinned zstd compression level for the deterministic `tar.zst` layer

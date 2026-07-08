@@ -28,6 +28,19 @@ pub struct ContainerConfig {
     pub id: Option<String>,
 }
 
+/// The libc family for a container image, driving both which
+/// statically-linked ocx release binary a test leg mounts (renderer) and
+/// which containers' JUnit files gate a `+libc.*` env entry (push). Inferred
+/// from the image name: Alpine is musl, everything else (Debian, Ubuntu,
+/// Fedora, …) is gnu.
+///
+// ponytail: name-prefix inference, not a spec field — the corpus needs exactly
+// alpine(musl) + debian(gnu). Add an explicit `containers[].libc` to
+// `ContainerConfig` if a musl image that isn't Alpine ever shows up.
+pub fn container_libc_for_image(image: &str) -> &'static str {
+    if image.starts_with("alpine") { "musl" } else { "gnu" }
+}
+
 /// Configuration for one platform target in the test pipeline.
 ///
 /// A platform without `containers` runs tests natively on the declared GHA

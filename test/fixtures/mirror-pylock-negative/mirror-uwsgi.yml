@@ -16,6 +16,9 @@ python:
   abi: cp313
   interpreter_package: "ocx.sh/python/cpython:3.13.1"
 
+wheels:
+  linux/amd64: ~
+
 platforms:
   linux/amd64:
     runner: ubuntu-latest

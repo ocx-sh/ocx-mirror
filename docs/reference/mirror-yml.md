@@ -12,7 +12,8 @@
 | `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. Not used by `source.type: pylock`/`pypi`. |
 | `asset_type` | string | No | `Archive` (default) or `Binary`. Not used by `source.type: pylock`/`pypi`. |
 | `python` | object | No* | Interpreter version/ABI + `interpreter_package`, plus optional [`lock`](#python-lock) and [`entrypoints`](#entrypoints) config. **Required** for `source.type: pylock` or `pypi`. See [Python apps](#pylock). |
-| `variants` | array | No* | Wheel-selection variants (libc, manylinux floor, [`wheel_priority`](#wheel-priority) ranking). Used by `source.type: pylock`/`pypi`. See [Python apps](#pylock). |
+| `variants` | array | No* | Archive asset variants (per-variant `assets`/`metadata`/`asset_type`, variant-prefixed tags). `github_release`/`url_index` only — rejected for env sources. |
+| `wheels` | object | No* | Per-platform wheel selection for env sources. **Required** for `source.type: pylock`/`pypi`; keys may carry `+libc.glibc`/`+libc.musl` (published as OCI `os.features`). See [`wheels`](#wheels). |
 | `wheel_scope` | string | No | Repo-naming scope prefix for [shared wheel layers](#shared-wheel-layers) (`source.type: pylock`/`pypi`). Default `pip-packages`. |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
@@ -64,7 +65,7 @@ A `pylock` or `pypi` source mirrors a Python **application** into a runnable OCX
 - **`pylock`** — a lock file committed to the mirror repository; resolves exactly one version (the one recorded in the lock).
 - **`pypi`** — versions are discovered from a PyPI-compatible index, and a lock is derived in-pipeline per version (see [`source.type: pypi`](#pypi-source)).
 
-Everything downstream of "a lock is in hand" — wheel selection ([`variants`](#variants)), entrypoint synthesis ([`python.entrypoints`](#entrypoints)), composition, and [shared wheel layers](#shared-wheel-layers) — is identical for both.
+Everything downstream of "a lock is in hand" — wheel selection ([`wheels`](#wheels)), entrypoint synthesis ([`python.entrypoints`](#entrypoints)), composition, and [shared wheel layers](#shared-wheel-layers) — is identical for both.
 
 ```yaml
 name: black                       # PEP 503-normalized to match the app package in the lock
@@ -78,10 +79,8 @@ python:
   version: "3.14.6"               # interpreter version
   abi: cp314                      # target ABI tag
   interpreter_package: "ocx.sh/cpython:3.14.6"   # OCX package providing python3
-variants:
-  - default: true                 # the unnamed default variant → bare tags
-    libc: gnu                     # gnu | musl
-    min_manylinux: "2_28"         # manylinux floor for compiled wheels
+wheels:
+  "linux/amd64+libc.glibc":       # glibc entry (default filter [manylinux, any])
 tests:
   - name: smoke
     script: tests/black.smoke.star
@@ -213,37 +212,40 @@ python:
 
 **Nuance — `auto` removes dependency console-script shims.** Under `auto`, a *dependency* wheel's own console script (e.g. a library the app depends on that ships its own CLI) no longer synthesizes as an entrypoint. If the app itself spawns that dependency's CLI as a subprocess (`subprocess.run(["some-dep-cli", ...])`), the spawn will fail to find it under `auto` — such an app needs `all`, or the dependency's script name listed explicitly.
 
-### `variants`
+### `wheels` — per-platform wheel selection {#wheels}
 
-Each variant is a wheel-selection axis. The **default** variant (`default: true`, unnamed) publishes to bare tags. `libc` (`gnu`/`musl`), `min_manylinux`, and `min_musllinux` gate which compiled Linux wheels are eligible. For a pure `py3-none-any` app the variant does not change wheel selection (the pure wheel matches any target).
-
-A variant may also carry its own `interpreter_package`, overriding the top-level `python.interpreter_package` for that variant's env. This is how a `libc: musl` variant depends on a **musl-libc CPython** while the default variant keeps the glibc one:
+Env sources declare their support envelope in a top-level `wheels:` map — the env analogue of the archive `assets:` map. It is **required** for `source.type: pylock`/`pypi` and rejected for every other source; `variants:` is rejected outright for env sources (libc is a platform `os.features` axis for env packages, never a variant/tag axis).
 
 ```yaml
-python:
-  interpreter_package: "ocx.sh/cpython:3.14.6"          # glibc default
-variants:
-  - default: true
-    libc: musl
-    min_musllinux: "1_2"
-    interpreter_package: "dev.ocx.sh/ocx/cpython-musl:3.14.6"   # musl override
+wheels:
+  linux/amd64:                          # value omitted → key-derived default filter
+  "linux/arm64+libc.glibc": ~           # glibc-stamped entry
+  "linux/arm64+libc.musl": [musllinux, any]   # explicit filter
+  darwin/arm64: ~
+  windows/amd64: ~
 ```
 
-The musl interpreter lives in a **separate repository** (`…/cpython-musl`), not a musl candidate inside the glibc `cpython` index: OCX index candidates are keyed by `os/arch` only, so musl and glibc `linux/amd64` cannot coexist under one tag — libc is the variant axis. Publish one by mirroring a python-build-standalone `…-unknown-linux-musl-install_only.tar.gz` as a single-layer archive (`strip=1`, `PATH=${installPath}/bin`). Pair a `libc: musl` variant with an [`alpine` container test leg](#platforms) to validate it end-to-end.
+**Keys** are OCI platform strings — a concrete `os/arch`, optionally carrying **one** `+libc.glibc`/`+libc.musl` suffix (Linux only; no OCI `variant`/`os_version` segments, no other feature namespaces). The key is published **verbatim** as the image-index platform entry: a `+libc.*` suffix lands in OCI `os.features`, which ocx ≥ 0.4.2 clients match against the host libc at install time. Two keys sharing one base (`linux/amd64+libc.glibc` + `linux/amd64+libc.musl`) publish **two entries in one index under one bare tag** — one package, no variant-prefixed tags, no per-variant repos.
 
-#### `variants[].wheel_priority` {#wheel-priority}
+**The key is a declaration, not a computation.** The mirror stamps nothing and infers nothing from wheel contents. A maintainer may legitimately publish glibc-only wheels under a plain `linux/amd64` key with an explicit `[manylinux, any]` filter — that key then installs on musl hosts too (its entry carries no `os.features`); whether that is correct is the maintainer's support-envelope call, and no warning is emitted.
 
-An ordered list of PEP 425 platform-tag *prefixes*, ranking which of a package's tag-compatible wheels wins when more than one applies. Earlier entries in the list outrank later ones; a tag matching none of the list ranks lowest (today's tag-priority-only ordering, unchanged). Absent (the default) or empty: every wheel ranks identically and the existing `uv-platform-tags` priority alone decides — no behavior change.
+**Values** are ordered lists of PEP 425 platform-tag *prefixes* acting as **admissibility filter + ranking**: a tag-compatible wheel whose platform tags match no listed prefix is **excluded** (fail closed — e.g. the default `["any"]` on a plain linux key errors with exit 65 if the lock demands a compiled wheel), and earlier prefixes outrank later ones among survivors. A `~`/omitted value selects the key-derived default:
 
-```yaml
-variants:
-  - default: true
-    wheel_priority: ["any"]   # prefer pure-Python wheels over compiled ones
-```
+| Key class | Default filter |
+|-----------|----------------|
+| `linux/*` (plain) | `["any"]` — pure wheels only, runs on any libc |
+| `linux/*+libc.glibc` | `["manylinux", "any"]` |
+| `linux/*+libc.musl` | `["musllinux", "any"]` |
+| `darwin/*` | `["macosx", "any"]` |
+| `windows/*` | `["win", "any"]` |
 
-**`["any"]`-first is mandatory for fully-static interpreters.** A statically-linked interpreter build cannot `dlopen` a compiled C-extension wheel. Without `wheel_priority: ["any"]`, normal tag priority ranks an exact compiled wheel (e.g. `manylinux_2_28_x86_64`) above a pure `py3-none-any` one — the wrong choice for such a build. Listing `"any"` first flips that ordering so the pure wheel wins whenever both are candidates.
+One key's filter must not mix `manylinux*` and `musllinux*` prefixes (a single env cannot need both libcs at runtime), and a `+libc.*` key's filter must not contradict its declared libc. The filter never re-admits a wheel that tag-compatibility already excluded.
 
-**Ranking is a reorder, not a re-admission.** `wheel_priority` only reorders wheels that already passed tag-compatibility against the `libc`/`min_manylinux`/`min_musllinux` floor above — it can never select a wheel those constraints already excluded. Ranking `musllinux` first on a `gnu`/manylinux target still cannot select a musllinux-only wheel; there is simply no compatible candidate to rank.
+**Cross-validation with `platforms:`.** Every wheels key's base `os/arch` must be declared under [`platforms:`](#platforms) (it needs a CI test leg), and every declared platform leg must be covered by at least one wheels key. `platforms:` keys stay plain — the CI matrix is a base-platform axis.
+
+**Container gating.** At push time, a `+libc.glibc` entry is gated only by the JUnit results of glibc container legs (debian/ubuntu/… — and native runners), a `+libc.musl` entry only by musl (alpine) legs, and a featureless entry by **all** legs of its base platform (it claims to run anywhere, so everything must be green). An entry whose declared libc no test leg covers fails closed. Pair a `+libc.musl` key with an alpine container leg.
+
+**Interpreter.** The single `python.interpreter_package` serves every wheels key — there is no per-key interpreter override. A dual-libc app therefore needs an interpreter package that itself resolves per-libc (its own index carrying `os.features` entries), or a static/musl build that runs on both.
 
 ### What is published
 
@@ -265,9 +267,9 @@ An env package's `metadata.json` is *composed* from the resolved lock (interpret
 
 Two apps that both depend on the same `numpy` wheel do not need two copies of it in the registry. Each wheel layer is pushed once to a **content-addressed repository** and then cross-repository **mounted** into every app that depends on it, instead of being re-uploaded as a private layer per app.
 
-**Naming.** A wheel's standalone repository is `<wheel_scope>/<index-host>/<package>/<slug>`, tagged with its `sha256` — e.g. `pip-packages/files.pythonhosted.org/numpy/cp313-manylinux_2_28_x86_64:<sha256>`. `<wheel_scope>` is the top-level `wheel_scope` spec key (default `pip-packages`); `<index-host>` groups wheels by the index they were downloaded from; `<slug>` disambiguates build tag/ABI/platform (deliberately *not* the Python tag, so `abi3` wheels shared across CPython minors dedupe correctly).
+**Naming.** A wheel's standalone repository is `<wheel_scope>/<index-host>/<package>`, tagged with its `sha256` — e.g. `pip-packages/files.pythonhosted.org/numpy:<sha256>`. `<wheel_scope>` is the top-level `wheel_scope` spec key (default `pip-packages`); `<index-host>` groups wheels by the index they were downloaded from. The `sha256` tag is content-addressed, so every wheel of a package — however its build tag / ABI / platform differ — lands in that one repo as a distinct tag, and byte-identical wheels (e.g. an `abi3` wheel shared across CPython minors) dedupe onto a single tag. No per-wheel path segment is needed.
 
-**Push order.** Before pushing an app's own env package, `pipeline push` registers each not-yet-published wheel layer standalone under its content-addressed reference (skipped if already present — checked via a tag-list lookup, deduped across the whole run so a wheel shared by many apps/platforms is checked once). The app's own layer positionals then each carry a `:from=<wheel_repository>` tail (`ocx package push …/wheel.tar.zst:from=pip-packages/.../numpy/...`), so the push attempts a cross-repository blob **mount** against that standalone registration before falling back to a full upload on a miss — the fallback is load-bearing, not a bug.
+**Push order.** Before pushing an app's own env package, `pipeline push` registers each not-yet-published wheel layer standalone under its content-addressed reference (skipped if already present — checked via a tag-list lookup, deduped across the whole run so a wheel shared by many apps/platforms is checked once). The app's own layer positionals then each carry a `:from=<wheel_repository>` tail (`ocx package push …/wheel.tar.zst:from=pip-packages/files.pythonhosted.org/numpy`), so the push attempts a cross-repository blob **mount** against that standalone registration before falling back to a full upload on a miss — the fallback is load-bearing, not a bug.
 
 **Visibility.** `run-summary.json` carries a `layer_reuse` counter per version, aggregated across all its pushed platforms:
 

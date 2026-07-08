@@ -238,6 +238,9 @@ python:
   abi: cp313
   interpreter_package: "{interpreter_package}"
 
+wheels:
+  linux/amd64: ~
+
 platforms:
   linux/amd64:
     runner: ubuntu-latest

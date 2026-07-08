@@ -159,7 +159,7 @@ pub fn select_wheels(lock: &Pylock, target: &PythonTarget)
 // WheelRef carries name, version, filename, url, sha256
 
 pub fn wheel_reference(scope: &WheelScope, wheel: &WheelRef) -> WheelReference;
-// renders "<scope>/<index-host>/<package>/<slug>:<sha256>"
+// renders "<scope>/<index-host>/<package>:<sha256>"
 
 pub async fn repack_wheel(wheel_path: &Path, output_dir: &Path)
     -> Result<RepackedWheel, RepackError>;
@@ -396,9 +396,9 @@ determinism, analogous to ocx's manifest byte-golden test.
 
 ## Conventions (one-way-doors — upstream ADR before first publish)
 
-1. **Naming**: `<scope>/<index-host>/<package>/<slug>:<sha256>`; scope
-   maintainer-configured (default `pip-packages`); slug for build/variant
-   disambiguation.
+1. **Naming**: `<scope>/<index-host>/<package>:<sha256>`; scope
+   maintainer-configured (default `pip-packages`); the content-addressed
+   `sha256` tag is the sole disambiguator (no build/variant path segment).
 2. **Repack determinism**: sorted entries, epoch mtimes, uid/gid 0, mode
    normalization, pinned zstd level; versioned `repack-v1` annotation.
 3. **Layout**: `repack` emits the FINAL relocated tree per wheel —
@@ -447,7 +447,7 @@ determinism, analogous to ocx's manifest byte-golden test.
    (cross-mount) is therefore not implementable now. Env push uses
    `LayerRef::File{layer_path, LayerLayoutSpec::default()}` per wheel →
    the wheel blob is re-uploaded into the env repo. The wheel's own
-   content-addressed repo (`<scope>/<host>/<pkg>/<slug>:<sha256>`) is still
+   content-addressed repo (`<scope>/<host>/<pkg>:<sha256>`) is still
    published (upload-if-missing) as the discoverable "layer repo" the goal
    requires, but it is a SEPARATE registration — the env package is
    self-contained (all layers present in the env repo), so `ocx run` /
