@@ -180,6 +180,7 @@ mod tests {
             artifact_type: None,
             manifests: vec![ocx_lib::oci::native::ImageIndexEntry {
                 media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                artifact_type: None,
                 digest: format!("sha256:{}", "a".repeat(64)),
                 size: 1,
                 platform: Some(ocx_lib::oci::native::Platform {

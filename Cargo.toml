@@ -72,7 +72,7 @@ tempfile = "3.27.0"
 # submodules of external/ocx. Requires `git submodule update --init --recursive`.
 #
 # Invariant: the fork versions must keep satisfying ocx_lib's requirements
-# (oci-client "0.16", docker_credential "1.3"). A drift surfaces as a hard
+# (oci-client "0.17", docker_credential "1.3"). A drift surfaces as a hard
 # resolution error at `cargo update`. WARNING: dropping this table does NOT
 # error — cargo would silently resolve the unpatched crates.io releases.
 # CI guards this with `cargo tree -i oci-client` (see verify workflow).
