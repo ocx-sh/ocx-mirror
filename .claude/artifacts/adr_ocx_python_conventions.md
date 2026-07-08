@@ -85,7 +85,7 @@ public error types map to consumer exit codes (`error.rs`, and
 ### Convention 1 — Naming (PEP 503 normalization + conventional repo path)
 
 `naming::wheel_reference(scope, wheel)` renders the repo-relative, host-free
-reference `<scope>/<index-host>/<package>/<slug>:<sha256>`:
+reference `<scope>/<index-host>/<package>:<sha256>`:
 
 - **Package segment** — `naming::normalize_package_name` (`naming.rs`): lowercase,
   and collapse runs of `-` / `_` / `.` to a single `-` (equivalent to
@@ -96,10 +96,13 @@ reference `<scope>/<index-host>/<package>/<slug>:<sha256>`:
 - **Index-host** — the URL authority via a hand-rolled `extract_host` (no `url`
   dep in this crate); folds `.`/`..` to the `unknown-index-host` fallback as a
   CWE-22 path-traversal guard.
-- **Slug** — `wheel_slug`: the wheel's build tag (if any) plus its **ABI and
-  platform tags**, deliberately **not** the Python tag — the slug disambiguates
-  build/variant, not interpreter.
-- **Tag** — the wheel's `sha256` (hex, no `sha256:` prefix): content-addressed.
+- **Tag** — the wheel's `sha256` (hex, no `sha256:` prefix): content-addressed,
+  and therefore the *sole* disambiguator. Wheels of one package that differ by
+  build tag / ABI / platform share the `<package>` repo as distinct tags;
+  byte-identical wheels (e.g. an `abi3` wheel shared across CPython minors)
+  dedupe onto one tag. An earlier revision carried an extra `<slug>` path
+  segment (ABI+platform tags) for this — dropped as redundant with the content
+  hash, which already distinguishes every distinct wheel.
 
 The reference carries **no registry host**; the consumer prepends the registry
 when it builds the final `ocx_lib::oci::Identifier`.

@@ -347,13 +347,13 @@ mod tests {
         let layers = vec![
             env_layer(
                 "/work/layers/pycowsay.tar.zst",
-                "pip-packages/files.pythonhosted.org/pycowsay/none-any",
+                "pip-packages/files.pythonhosted.org/pycowsay",
                 "aaa",
                 "pycowsay",
             ),
             env_layer(
                 "/work/layers/six.tar.zst",
-                "pip-packages/files.pythonhosted.org/six/none-any",
+                "pip-packages/files.pythonhosted.org/six",
                 "bbb",
                 "six",
             ),
@@ -393,11 +393,11 @@ mod tests {
         let layer_start = metadata_flag + 2;
         assert_eq!(
             args[layer_start],
-            "/work/layers/pycowsay.tar.zst:from=pip-packages/files.pythonhosted.org/pycowsay/none-any"
+            "/work/layers/pycowsay.tar.zst:from=pip-packages/files.pythonhosted.org/pycowsay"
         );
         assert_eq!(
             args[layer_start + 1],
-            "/work/layers/six.tar.zst:from=pip-packages/files.pythonhosted.org/six/none-any"
+            "/work/layers/six.tar.zst:from=pip-packages/files.pythonhosted.org/six"
         );
         assert_eq!(args.len(), layer_start + 2, "no trailing args beyond the two layers");
     }

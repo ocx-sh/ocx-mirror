@@ -4,17 +4,15 @@
 //! Conventional wheel repo naming — the one-way-door naming convention.
 //!
 //! Renders the repo-relative reference for a mirrored wheel:
-//! `<scope>/<index-host>/<package>/<slug>:<sha256>`. The scope is
+//! `<scope>/<index-host>/<package>:<sha256>`. The scope is
 //! maintainer-configured (default `pip-packages`); `<index-host>` groups
-//! wheels by their source index; `<slug>` disambiguates build/variant; the tag
-//! is the wheel's `sha256`. The reference is **repo-relative** — it carries no
-//! registry host; the consumer prepends the registry when building the final
-//! [`ocx_lib::oci::Identifier`].
-
-use std::fmt::Display;
-use std::str::FromStr;
-
-use uv_distribution_filename::WheelFilename;
+//! wheels by their source index; the tag is the wheel's `sha256`. The tag is
+//! content-addressed, so it alone distinguishes every wheel sharing a
+//! repository — wheels that differ by build tag / ABI / platform land under
+//! the same `<package>` repo as distinct tags, and byte-identical wheels
+//! dedupe onto one tag (the property the cross-repo blob mount reuses). The
+//! reference is **repo-relative** — it carries no registry host; the consumer
+//! prepends the registry when building the final [`ocx_lib::oci::Identifier`].
 
 use crate::select::WheelRef;
 
@@ -64,10 +62,11 @@ impl Default for WheelScope {
 /// in `select` (W1.4), so `wheel_reference` can stay infallible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WheelReference {
-    /// The repo-relative repository path
-    /// (`<scope>/<index-host>/<package>/<slug>`) — no registry host.
+    /// The repo-relative repository path (`<scope>/<index-host>/<package>`) —
+    /// no registry host.
     pub repository: String,
-    /// The tag: the wheel `sha256` (hex, no `sha256:` prefix).
+    /// The tag: the wheel `sha256` (hex, no `sha256:` prefix). Content-addressed,
+    /// so it alone distinguishes every wheel sharing the repository.
     pub tag: String,
 }
 
@@ -79,15 +78,16 @@ impl std::fmt::Display for WheelReference {
 
 /// Renders the conventional repo-relative [`WheelReference`] for a wheel.
 ///
-/// Pure function: `<scope>/<index-host>/<package>/<slug>:<sha256>`, with the
-/// index host derived from [`WheelRef::url`] and the slug disambiguating
-/// build/variant. Never emits a registry host (target-agnostic).
+/// Pure function: `<scope>/<index-host>/<package>:<sha256>`, with the index
+/// host derived from [`WheelRef::url`]. The `sha256` tag is content-addressed,
+/// so wheels that differ by build tag / ABI / platform land under the same
+/// repository as distinct tags — no path segment is needed to disambiguate
+/// them. Never emits a registry host (target-agnostic).
 pub fn wheel_reference(scope: &WheelScope, wheel: &WheelRef) -> WheelReference {
     let index_host = wheel.url.as_deref().and_then(extract_host).unwrap_or(NO_URL_INDEX_HOST);
     let package = normalize_package_name(&wheel.name);
-    let slug = wheel_slug(&wheel.filename);
     WheelReference {
-        repository: format!("{}/{index_host}/{package}/{slug}", scope.as_str()),
+        repository: format!("{}/{index_host}/{package}", scope.as_str()),
         tag: wheel.sha256.clone(),
     }
 }
@@ -133,46 +133,6 @@ pub(crate) fn normalize_package_name(name: &str) -> String {
     normalized
 }
 
-/// Filesystem-safe build/variant disambiguator: the wheel's build tag (if
-/// any) plus its ABI and platform tags — deliberately NOT the Python tag
-/// (design spec, naming convention #1: the slug disambiguates
-/// build/variant, not interpreter). `AbiTag`/`PlatformTag` `Display` output
-/// is already lowercase alphanumeric plus `_`/`.` (`uv-platform-tags`), so no
-/// extra sanitization is needed once parsed.
-fn wheel_slug(filename: &str) -> String {
-    match WheelFilename::from_str(filename) {
-        Ok(parsed) => {
-            let abi = join_tags(parsed.abi_tags());
-            let platform = join_tags(parsed.platform_tags());
-            match parsed.build_tag() {
-                Some(build) => format!("{build}-{abi}-{platform}"),
-                None => format!("{abi}-{platform}"),
-            }
-        }
-        // Defensive fallback only: `select` (W1.3) already parses every
-        // candidate filename via the same crate before producing a
-        // `WheelRef`, so this arm should be unreachable in practice — it
-        // exists so this function stays infallible.
-        Err(_) => sanitize_for_slug(filename.trim_end_matches(".whl")),
-    }
-}
-
-fn join_tags<T: Display>(tags: &[T]) -> String {
-    tags.iter().map(ToString::to_string).collect::<Vec<_>>().join(".")
-}
-
-fn sanitize_for_slug(raw: &str) -> String {
-    raw.chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,31 +166,37 @@ mod tests {
 
         let reference = wheel_reference(&WheelScope::default(), &wheel);
 
-        assert_eq!(
-            reference.repository,
-            "pip-packages/files.pythonhosted.org/flask-cors/none-any"
-        );
+        assert_eq!(reference.repository, "pip-packages/files.pythonhosted.org/flask-cors");
         assert_eq!(reference.tag, "deadbeef");
         assert_eq!(
             reference.to_string(),
-            "pip-packages/files.pythonhosted.org/flask-cors/none-any:deadbeef"
+            "pip-packages/files.pythonhosted.org/flask-cors:deadbeef"
         );
     }
 
     #[test]
-    fn slug_includes_build_tag_when_present_and_is_deterministic() {
-        let with_build = wheel_slug("foo-1.2.3-202206090410-py3-none-any.whl");
-        assert_eq!(with_build, "202206090410-none-any");
-        // Determinism: re-deriving from the same filename yields the same slug.
-        assert_eq!(wheel_slug("foo-1.2.3-202206090410-py3-none-any.whl"), with_build);
+    fn differing_wheels_share_one_repo_distinguished_by_content_tag() {
+        // Two wheels of the same package differing by ABI/platform get the same
+        // repository (no slug) and are told apart purely by their sha256 tag.
+        let manylinux = wheel_ref(
+            "numpy",
+            "numpy-1.26.2-cp311-cp311-manylinux_2_17_x86_64.whl",
+            Some("https://files.pythonhosted.org/packages/aa/numpy-manylinux.whl"),
+            "1111",
+        );
+        let musllinux = wheel_ref(
+            "numpy",
+            "numpy-1.26.2-cp311-cp311-musllinux_1_2_x86_64.whl",
+            Some("https://files.pythonhosted.org/packages/bb/numpy-musllinux.whl"),
+            "2222",
+        );
 
-        let without_build = wheel_slug("foo-1.2.3-py3-none-any.whl");
-        assert_eq!(without_build, "none-any");
+        let a = wheel_reference(&WheelScope::default(), &manylinux);
+        let b = wheel_reference(&WheelScope::default(), &musllinux);
 
-        // Compound (multi-tag) platform tags join with `.`, mirroring the
-        // wheel filename's own tag-set syntax.
-        let compound = wheel_slug("numpy-1.26.2-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl");
-        assert_eq!(compound, "cp311-manylinux_2_17_x86_64.manylinux2014_x86_64");
+        assert_eq!(a.repository, b.repository, "same package → same repo");
+        assert_eq!(a.repository, "pip-packages/files.pythonhosted.org/numpy");
+        assert_ne!(a.tag, b.tag, "distinct content → distinct tag");
     }
 
     #[test]
@@ -255,10 +221,7 @@ mod tests {
 
         let reference = wheel_reference(&WheelScope::default(), &wheel);
 
-        assert_eq!(
-            reference.repository,
-            format!("pip-packages/{NO_URL_INDEX_HOST}/foo/none-any")
-        );
+        assert_eq!(reference.repository, format!("pip-packages/{NO_URL_INDEX_HOST}/foo"));
     }
 
     #[test]
@@ -277,9 +240,6 @@ mod tests {
             "rendered repository must not contain a path-traversal segment: {}",
             reference.repository
         );
-        assert_eq!(
-            reference.repository,
-            format!("pip-packages/{NO_URL_INDEX_HOST}/foo/none-any")
-        );
+        assert_eq!(reference.repository, format!("pip-packages/{NO_URL_INDEX_HOST}/foo"));
     }
 }

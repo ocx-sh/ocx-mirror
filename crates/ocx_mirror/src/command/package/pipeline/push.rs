@@ -2157,7 +2157,7 @@ platforms:
         std::fs::create_dir_all(&version_dir).unwrap();
 
         let make_layer = |name: &str| EnvLayer {
-            wheel_repository: format!("pip-packages/example.com/{name}/none-any"),
+            wheel_repository: format!("pip-packages/example.com/{name}"),
             digest: format!("sha256:{}", "0".repeat(64)),
             path: version_dir.join(format!("{name}.tar.zst")),
             package_name: name.to_string(),
@@ -2263,7 +2263,7 @@ platforms:
                 variant: None,
                 metadata_path: version_dir.join("linux_amd64-metadata.json"),
                 layers: vec![EnvLayer {
-                    wheel_repository: "pip-packages/example.com/pycowsay/none-any".to_string(),
+                    wheel_repository: "pip-packages/example.com/pycowsay".to_string(),
                     digest: format!("sha256:{}", "0".repeat(64)),
                     path: version_dir.join("pycowsay.tar.zst"),
                     package_name: "pycowsay".to_string(),

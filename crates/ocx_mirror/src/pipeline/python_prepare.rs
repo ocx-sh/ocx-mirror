@@ -490,7 +490,7 @@ mod tests {
                 filename: FIXTURE_FILENAME.to_string(),
                 url: url::Url::parse("https://example.com/wheel.whl").expect("valid url"),
                 sha256: sha256.to_string(),
-                wheel_repository: "pip-packages/example.com/console-pkg/none-any".to_string(),
+                wheel_repository: "pip-packages/example.com/console-pkg".to_string(),
             }],
             interpreter: interpreter_dependency(),
             requested_extras: Vec::new(),
