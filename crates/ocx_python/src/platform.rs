@@ -467,7 +467,9 @@ fn encode_platform_key(platform: &TargetPlatform) -> Platform {
         arch,
         variant: None,
         os_version: None,
-        os_features: None,
+        // Empty = no libc requirement declared (v0.4.2 os_features semantics);
+        // libc still lives in the variant prefix for env packages today.
+        os_features: Vec::new(),
         features: None,
     }
 }
