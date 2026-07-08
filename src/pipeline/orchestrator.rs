@@ -403,9 +403,28 @@ pub async fn execute_mirror(
 }
 
 /// Build the task directory path: `{work_dir}/{version}/{platform_slug}/`
+///
+/// Two entries may share the same os/arch when they differ by `os_features`
+/// (e.g. `linux/amd64+libc.glibc` vs `linux/amd64+libc.musl`). `ascii_segments`
+/// drops `os_features`, so the slug appends a sorted, deduped suffix of the
+/// os_features values — otherwise both variants would slug to `linux_amd64` and
+/// their bundles would collide in one work directory.
 pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::Platform) -> PathBuf {
-    let platform_slug = platform.ascii_segments().join("_");
-    work_dir.join(version).join(platform_slug)
+    use ocx_lib::utility::string_ext::StringExt as _;
+
+    let mut slug = platform.ascii_segments().join("_");
+
+    if let ocx_lib::oci::Platform::Specific { os_features, .. } = platform
+        && !os_features.is_empty()
+    {
+        let mut sorted = os_features.clone();
+        sorted.sort();
+        sorted.dedup();
+        slug.push('_');
+        slug.push_str(&sorted.join("_").to_relaxed_slug());
+    }
+
+    work_dir.join(version).join(slug)
 }
 
 /// Phase 1: Download, verify, and bundle a single task.
@@ -533,5 +552,32 @@ async fn push_task(
 async fn clean_task_dir(task_dir: &Path) {
     if let Err(e) = tokio::fs::remove_dir_all(task_dir).await {
         log::debug!("Failed to clean task dir {}: {e}", task_dir.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn platform(spec: &str) -> ocx_lib::oci::Platform {
+        spec.parse().expect("valid platform")
+    }
+
+    #[test]
+    fn task_dir_distinguishes_libc_variants() {
+        let work = Path::new("/work");
+        let glibc = task_dir(work, "3.12.5", &platform("linux/amd64+libc.glibc"));
+        let musl = task_dir(work, "3.12.5", &platform("linux/amd64+libc.musl"));
+
+        // Same os/arch, different libc must not collide in one work directory.
+        assert_ne!(glibc, musl);
+        assert_eq!(glibc, Path::new("/work/3.12.5/linux_amd64_libc.glibc"));
+        assert_eq!(musl, Path::new("/work/3.12.5/linux_amd64_libc.musl"));
+
+        // Bare os/arch (no os_features) keeps its plain slug.
+        assert_eq!(
+            task_dir(work, "3.12.5", &platform("linux/amd64")),
+            Path::new("/work/3.12.5/linux_amd64")
+        );
     }
 }
