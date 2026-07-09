@@ -53,6 +53,33 @@ Checklist when bumping:
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
 
+## Bumping the pinned uv crates
+
+`crates/ocx_python` parses `pylock.toml`, wheel filenames, and PEP 508/440
+markers via four crates from [astral-sh/uv](https://github.com/astral-sh/uv):
+`uv-distribution-filename`, `uv-platform-tags`, `uv-pep508`, `uv-pep440`.
+These are **not published to crates.io**, so they enter as git dependencies in
+the root `[workspace.dependencies]`, rev-pinned (same discipline as the ocx
+submodule — never a floating range).
+
+All four share **one** `rev`. To advance:
+
+```sh
+# Pick the new commit on astral-sh/uv, then update all four rev = "…" lines
+# in Cargo.toml together (they must stay identical).
+cargo update -p uv-pep508 -p uv-pep440 -p uv-platform-tags -p uv-distribution-filename
+task verify
+```
+
+Notes:
+
+- Bump all four to the same rev in the same commit — a split rev risks
+  incompatible internal types across the parser crates.
+- `version-ranges` (from `pubgrub`) is pulled in **transitively** by
+  `uv-pep508`; it is not declared here and needs no manual bump.
+- API breakage on a bump surfaces at `cargo check -p ocx_python` — the git pin
+  freezes the surface, so review the changelog before advancing.
+
 ## Mirror development against unreleased ocx changes
 
 Point the submodule at an ocx feature branch, develop, and land the ocx side

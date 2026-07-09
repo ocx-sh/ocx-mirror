@@ -1,0 +1,49 @@
+[package]
+name = "ocx_mirror"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Mirror upstream tool releases into OCI registries as OCX packages"
+publish = false
+
+[[bin]]
+name = "ocx-mirror"
+path = "src/main.rs"
+
+[features]
+default = []
+jsonschema = ["dep:schemars"]
+
+[dependencies]
+ocx_lib = { workspace = true }
+ocx_python = { workspace = true }
+# PEP 440 version parsing for `source.type: pypi` prerelease/dev-release
+# detection (upstream versions are real PEP 440, not the mirror's own
+# semver-ish `ocx_lib::package::version::Version`).
+uv-pep440 = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+schemars = { workspace = true, optional = true }
+chrono = { workspace = true }
+regex = { workspace = true }
+url = { workspace = true }
+octocrab = { workspace = true }
+quick-junit = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

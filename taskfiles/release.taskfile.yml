@@ -37,7 +37,7 @@ tasks:
         sh: git-cliff --bumped-version
     cmds:
       - echo "Next version:{{.NEXT_VERSION}}"
-      - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
+      - cargo set-version --workspace "{{.NEXT_VERSION | trimPrefix "v"}}"
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
       - task verify
       - |
