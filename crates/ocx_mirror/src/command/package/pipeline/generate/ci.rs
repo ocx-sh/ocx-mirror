@@ -467,6 +467,20 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
         r#""${BUNDLE}""#
     };
 
+    // The `--platform` a test invocation declares. Env container legs append
+    // the container's libc as an os_feature (`+libc.glibc`/`+libc.musl`):
+    // `ocx package test` threads the flag verbatim into DEPENDENCY resolution
+    // (`pull_local` → setup), and an env's interpreter index may carry only
+    // per-libc entries — a bare `linux/amd64` request would match none of
+    // them. The leg runs inside exactly that libc's userland, so declaring it
+    // is a statement of fact, not an override. Archive legs keep the bare
+    // matrix platform (byte-identical output for the existing corpus).
+    let test_platform = if is_pylock {
+        r#""${TEST_PLATFORM}""#
+    } else {
+        r#""${{ matrix.platform }}""#
+    };
+
     // Emit the container wrapper only when a leg actually declares an image, so
     // native-only workflows stay byte-identical to the pre-container renderer
     // (no drift on the archive/native corpus). `{OCX_TEST}` is the test-command
@@ -530,15 +544,15 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
-                {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
+                {OCX_TEST} --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
-                {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
+                {OCX_TEST} --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
-                printf '%s' "${TEST_INLINE}" | {OCX_TEST} --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
+                printf '%s' "${TEST_INLINE}" | {OCX_TEST} --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script - || RC=$?
               fi
               END=$(date +%s)
@@ -571,6 +585,7 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_pylock: bool) -> String {
     body.replace("{CONTAINER_PRELUDE}", container_prelude)
         .replace("{OCX_TEST}", ocx_test)
         .replace("{TEST_TARGET}", test_target)
+        .replace("{TEST_PLATFORM}", test_platform)
         .replace("{OCX_CLI_TAG}", OCX_CONTAINER_CLI_TAG)
 }
 
@@ -699,6 +714,14 @@ fn test_target_resolve_script(is_pylock: bool) -> String {
         // the loop with no JUnit written. Mirrors the archive path's
         // "genuine miss still reds" invariant.
         r#"            VERSION_DIR="bundles/${VERSION}"
+            # The leg's own libc, declared on `--platform` as an os_feature so
+            # dependency resolution (the env's interpreter) can select a
+            # per-libc index entry. Native legs carry no container_libc → bare.
+            TEST_PLATFORM="${{ matrix.platform }}"
+            case "${{ matrix.container_libc }}" in
+              musl) TEST_PLATFORM="${TEST_PLATFORM}+libc.musl" ;;
+              gnu) TEST_PLATFORM="${TEST_PLATFORM}+libc.glibc" ;;
+            esac
             ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" --arg libc "${{ matrix.container_libc }}" '(if $libc == "musl" then "libc.musl" else "libc.glibc" end) as $feat | ([.envs[] | select(.platform == ($p + "+" + $feat))] + [.envs[] | select(.platform == $p)]) | first // empty' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
             METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null || true)"
             LAYERS=""
@@ -1033,6 +1056,18 @@ mod tests {
         assert!(
             !content.contains(r#""${BUNDLE}""#),
             "pylock test job must not reference the archive BUNDLE var:\n{content}"
+        );
+
+        // Env legs declare the container's libc on --platform (os_feature) so
+        // dependency resolution can select a per-libc interpreter index entry;
+        // a bare `linux/amd64` request matches no `+libc.*`-only index.
+        assert!(
+            content.contains(r#"--platform "${TEST_PLATFORM}""#),
+            "env test invocations must use the libc-declared TEST_PLATFORM:\n{content}"
+        );
+        assert!(
+            content.contains(r#"musl) TEST_PLATFORM="${TEST_PLATFORM}+libc.musl" ;;"#),
+            "musl container legs must append +libc.musl to the test platform:\n{content}"
         );
 
         // HARD REGRESSION LOCK: a committed-lock pylock spec is `is_env()` but
