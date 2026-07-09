@@ -439,8 +439,9 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
 /// The ocx CLI release whose statically-linked binary is mounted into a
 /// container test leg. Pinned (not `latest`) for reproducible generated
 /// workflows; Renovate can bump it via the same customManager that pins the
-/// baked action refs.
-const OCX_CONTAINER_CLI_TAG: &str = "v0.4.1";
+/// baked action refs. Floor: >= v0.4.2 — the `os.features` (`+libc.*`)
+/// subset matcher env packages' per-libc interpreter indexes rely on.
+const OCX_CONTAINER_CLI_TAG: &str = "v0.4.2";
 
 /// Render per-test shell commands for the `test` job's run step.
 ///
@@ -1155,7 +1156,9 @@ mod tests {
             "test calls route through ocx_test"
         );
         assert!(
-            content.contains("releases/download/v0.4.1/ocx-${OCX_TRIPLE}.tar.xz"),
+            content.contains(&format!(
+                "releases/download/{OCX_CONTAINER_CLI_TAG}/ocx-${{OCX_TRIPLE}}.tar.xz"
+            )),
             "pinned libc-matched ocx binary is provisioned"
         );
         assert!(
