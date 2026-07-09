@@ -516,6 +516,46 @@ impl Push {
                                     layer_reuse.verified += report.layers.verified;
                                     platforms_pushed.push(platform_str.clone());
                                     cascade_tags.extend(report.cascade_tags_written);
+
+                                    // `latest` alias for non-semver env versions:
+                                    // ocx cascade derives rolling tags only from
+                                    // parseable X.Y.Z versions, so a PEP 440
+                                    // version like `0.0.0.2` never gets `latest`
+                                    // and a bare ref (`repo` → `repo:latest`)
+                                    // stays unresolvable. Alias the NEWEST
+                                    // version's green entries under `:latest` —
+                                    // content-addressed, so the re-push is a
+                                    // cheap verify+tag; each entry merges into
+                                    // the one latest index. Best-effort: the
+                                    // primary publish already succeeded, so a
+                                    // failed alias warns instead of redding.
+                                    let is_newest = Some(version.as_str()) == newest_version.as_deref();
+                                    if !cascade && is_newest {
+                                        let latest_ref =
+                                            format!("{}/{}:latest", spec.target.registry, spec.target.repository);
+                                        match python_push::invoke_env_push(
+                                            platform_str,
+                                            &latest_ref,
+                                            &env_entry.metadata_path,
+                                            &env_entry.layers,
+                                            false,
+                                        )
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                if !cascade_tags.iter().any(|t| t == "latest") {
+                                                    cascade_tags.push("latest".to_string());
+                                                }
+                                            }
+                                            Err(msg) => log::warn!(
+                                                "[{}] latest alias push failed for {}/{}: {}",
+                                                spec.name,
+                                                version,
+                                                platform_str,
+                                                msg
+                                            ),
+                                        }
+                                    }
                                 }
                             }
                             Err(msg) => {
