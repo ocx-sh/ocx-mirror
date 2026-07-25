@@ -5,7 +5,7 @@
 //! call `ocx package push --cascade --format json` for passing `(V, P)` pairs,
 //! and emit `run-summary.json`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
@@ -708,32 +708,29 @@ fn parse_bundle_filename(name: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Invoke `ocx package push --cascade -p {platform} -i {target_ref} {bundle} --format json`
-/// as a subprocess and parse the JSON output.
+/// Build the `ocx package push` argv for one bundle. Pure and unit-testable —
+/// locks the flag order and the `--annotation KEY=VALUE` tail without spawning
+/// a subprocess.
 ///
-/// Returns the parsed `PushReport` on success, or a descriptive error string
-/// on subprocess failure (caller records as `push_error` without aborting).
+/// `--format` is a global ocx flag and must precede the subcommand.
 ///
-/// The `_spec` parameter is reserved for future use (e.g. passing registry
-/// auth config to the subprocess; currently forwarded via `OCX_*` env vars).
-async fn invoke_push(
-    _spec: &MirrorSpec,
+/// `--new` makes the FIRST push of a brand-new mirror succeed: a cascade push
+/// lists existing tags to compute the rolling tags, but a not-yet-published
+/// repository answers `tags/list` with 404 ("repository name not known").
+/// `--new` tells `ocx package push` to treat that failure as an empty tag set
+/// instead of aborting. It is a no-op once the repository exists (the tag
+/// list then succeeds and is used), so the mirror always passes it.
+fn build_push_args(
     platform: &str,
     target_ref: &str,
     bundle_path: &Path,
-) -> Result<PushReport, String> {
-    let ocx_binary = resolve_ocx_binary()?;
+    annotations: &BTreeMap<String, String>,
+) -> Result<Vec<String>, String> {
+    let bundle = bundle_path
+        .to_str()
+        .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?;
 
-    let mut cmd = tokio::process::Command::new(&ocx_binary);
-    // `--format` is a global ocx flag and must precede the subcommand.
-    //
-    // `--new` makes the FIRST push of a brand-new mirror succeed: a cascade push
-    // lists existing tags to compute the rolling tags, but a not-yet-published
-    // repository answers `tags/list` with 404 ("repository name not known").
-    // `--new` tells `ocx package push` to treat that failure as an empty tag set
-    // instead of aborting. It is a no-op once the repository exists (the tag
-    // list then succeeds and is used), so the mirror always passes it.
-    cmd.args([
+    let mut args: Vec<String> = [
         "--format",
         "json",
         "package",
@@ -744,10 +741,35 @@ async fn invoke_push(
         platform,
         "-i",
         target_ref,
-        bundle_path
-            .to_str()
-            .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?,
-    ]);
+        bundle,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+
+    args.extend(crate::annotations::push_args(annotations));
+
+    Ok(args)
+}
+
+/// Invoke `ocx package push --cascade -p {platform} -i {target_ref} {bundle} --format json`
+/// as a subprocess and parse the JSON output.
+///
+/// Returns the parsed `PushReport` on success, or a descriptive error string
+/// on subprocess failure (caller records as `push_error` without aborting).
+async fn invoke_push(
+    spec: &MirrorSpec,
+    platform: &str,
+    target_ref: &str,
+    bundle_path: &Path,
+) -> Result<PushReport, String> {
+    let ocx_binary = resolve_ocx_binary()?;
+
+    let annotations = crate::annotations::build_annotations(&spec.annotations);
+    let args = build_push_args(platform, target_ref, bundle_path, &annotations)?;
+
+    let mut cmd = tokio::process::Command::new(&ocx_binary);
+    cmd.args(&args);
 
     // Forward OCX_* environment variables into the subprocess.
     // This preserves offline mode, remote mode, registry config, etc.
@@ -852,6 +874,91 @@ mod tests {
     fn job_url_env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    // ── `ocx package push` argv assembly ──────────────────────────────────
+
+    #[test]
+    fn build_push_args_orders_flags_then_bundle_then_annotations() {
+        let annotations = BTreeMap::from([
+            (
+                "org.opencontainers.image.source".to_string(),
+                "https://github.com/ocx-sh/mirror-shfmt".to_string(),
+            ),
+            ("org.opencontainers.image.revision".to_string(), "a1b2c3d4".to_string()),
+        ]);
+
+        let args = build_push_args(
+            "linux/amd64",
+            "ghcr.io/ocx-sh/shfmt:3.8.0",
+            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &annotations,
+        )
+        .expect("utf-8 bundle path");
+
+        assert_eq!(
+            args,
+            vec![
+                "--format",
+                "json",
+                "package",
+                "push",
+                "--cascade",
+                "--new",
+                "-p",
+                "linux/amd64",
+                "-i",
+                "ghcr.io/ocx-sh/shfmt:3.8.0",
+                "/bundles/shfmt.tar.xz",
+                "--annotation",
+                "org.opencontainers.image.revision=a1b2c3d4",
+                "--annotation",
+                "org.opencontainers.image.source=https://github.com/ocx-sh/mirror-shfmt",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_push_args_without_annotations_matches_the_bare_invocation() {
+        let args = build_push_args(
+            "linux/amd64",
+            "ghcr.io/ocx-sh/shfmt:3.8.0",
+            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &BTreeMap::new(),
+        )
+        .expect("utf-8 bundle path");
+
+        assert_eq!(args.len(), 11);
+        assert!(!args.iter().any(|arg| arg == "--annotation"));
+    }
+
+    /// The `ocx` subprocess inherits the runner environment — the generated
+    /// workflow's push step carries `GH_TOKEN` — so the assembled argv must
+    /// never carry anything sourced from it.
+    #[test]
+    fn build_push_args_carries_no_ambient_env_value() {
+        let annotations = crate::annotations::build_annotations(&BTreeMap::new());
+        let args = build_push_args(
+            "linux/amd64",
+            "ghcr.io/ocx-sh/shfmt:3.8.0",
+            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &annotations,
+        )
+        .expect("utf-8 bundle path");
+
+        let allowed = ["GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_SHA"];
+        for (name, value) in std::env::vars() {
+            // Short values (`LANG=C`, `SHLVL=1`) collide with argv substrings by
+            // chance; secrets are long. 16 chars keeps the check deterministic
+            // wherever it runs without weakening it against a real token.
+            if allowed.contains(&name.as_str()) || value.len() < 16 {
+                continue;
+            }
+            assert!(
+                !args.iter().any(|arg| arg.contains(&value)),
+                "argv carries the value of ambient env var {name}"
+            );
+        }
     }
 
     // ── §3.7 S7: AND-across-containers + push driver tests ────────────────

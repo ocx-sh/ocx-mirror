@@ -46,6 +46,21 @@ Discord user ID (snowflake) to mention when a run carries failures. Non-secret �
 
 **Scope:** `pipeline notify`.
 
+### `GITHUB_SERVER_URL` / `GITHUB_REPOSITORY` / `GITHUB_SHA` {#annotation-env}
+
+The [OCI annotations][oci-annotations] recorded on every published image index. [GitHub Actions][github-actions-docs] sets all three as default variables in every step, so the generated workflows pass nothing explicitly:
+
+| Variable | Annotation |
+|----------|------------|
+| `GITHUB_SERVER_URL` + `GITHUB_REPOSITORY` | `org.opencontainers.image.source` = `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` — the mirror repository, which is what [GHCR][ghcr-source] uses to link the package to a repository and inherit its permissions |
+| `GITHUB_SHA` | `org.opencontainers.image.revision` |
+
+A missing or blank variable means its annotation is not written; `image.source` needs both halves. Outside CI nothing is emitted and the push leaves the registry's existing annotations alone.
+
+These three names are the **complete** environment surface for annotations — the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, and its values are taken verbatim from the spec. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
+
+**Scope:** `sync`, `pipeline push`.
+
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
 `ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package describe`). The child binary is resolved in order: `OCX_BINARY_PIN`, an `ocx` co-located with the `ocx-mirror` executable, then `ocx` on `PATH`.
@@ -78,6 +93,8 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [github-actions-secrets]: https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions
 [discord]: https://discord.com/developers/docs/resources/webhook
 [ocx-env]: https://ocx.sh/docs/reference/environment
+[oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[ghcr-source]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 
 <!-- internal -->
 [cli-generate-ci]: ./cli.md#pipeline-generate-ci

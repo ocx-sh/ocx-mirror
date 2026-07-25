@@ -22,6 +22,9 @@ use super::mirror_task::VariantContext;
 /// When `variant` indicates a default variant, a second cascade pass generates
 /// unadorned alias tags (e.g., `3.12.5`, `3.12`, `3`, `latest`) pointing to
 /// the same manifest as the variant-prefixed tags.
+///
+/// `annotations` are the OCI annotations for this run (see [`crate::annotations`]),
+/// written onto the image index of every tag the push touches.
 pub async fn push_and_cascade(
     publisher: &Publisher,
     info: Info,
@@ -29,6 +32,7 @@ pub async fn push_and_cascade(
     cascade: bool,
     cascade_versions: &BTreeSet<Version>,
     variant: Option<&VariantContext>,
+    annotations: &BTreeMap<String, String>,
 ) -> Result<MirrorResult> {
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
@@ -43,7 +47,6 @@ pub async fn push_and_cascade(
     // push path (`command::package::pipeline::push`) already gets by shelling
     // out — both mirror publish paths write the digest-named safety-net tag.
     let canonical_tag = true;
-    let annotations = BTreeMap::new();
 
     if cascade {
         publisher
@@ -53,7 +56,7 @@ pub async fn push_and_cascade(
                 cascade_versions.clone(),
                 None,
                 canonical_tag,
-                &annotations,
+                annotations,
             )
             .await?;
 
@@ -79,7 +82,7 @@ pub async fn push_and_cascade(
                     cascade_versions.clone(),
                     None,
                     canonical_tag,
-                    &annotations,
+                    annotations,
                 )
                 .await?;
         }
@@ -92,7 +95,7 @@ pub async fn push_and_cascade(
     }
 
     publisher
-        .push(vec![info], &layers, None, canonical_tag, &annotations)
+        .push(vec![info], &layers, None, canonical_tag, annotations)
         .await?;
 
     Ok(MirrorResult::Pushed {

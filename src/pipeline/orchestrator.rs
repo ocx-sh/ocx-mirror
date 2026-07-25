@@ -217,6 +217,7 @@ pub async fn execute_mirror(
     progress: &ProgressManager,
     fail_fast: bool,
     concurrency: ConcurrencyParams,
+    annotations: &std::collections::BTreeMap<String, String>,
 ) -> Vec<MirrorResult> {
     // Group tasks by version
     let mut by_version: HashMap<String, Vec<MirrorTask>> = HashMap::new();
@@ -353,6 +354,7 @@ pub async fn execute_mirror(
                             &prep.metadata,
                             publisher,
                             &cascade_versions,
+                            annotations,
                         ))
                         .await;
 
@@ -527,6 +529,7 @@ async fn push_task(
     metadata: &Metadata,
     publisher: &Publisher,
     cascade_versions: &std::collections::BTreeSet<Version>,
+    annotations: &std::collections::BTreeMap<String, String>,
 ) -> Result<MirrorResult> {
     let identifier = ocx_lib::oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
         .clone_with_tag(&task.normalized_version);
@@ -544,6 +547,7 @@ async fn push_task(
         task.cascade,
         cascade_versions,
         task.variant.as_ref(),
+        annotations,
     )
     .await
 }
