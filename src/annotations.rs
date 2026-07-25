@@ -40,8 +40,9 @@ pub fn build_annotations(configured: &BTreeMap<String, String>) -> BTreeMap<Stri
 /// The pure half of [`build_annotations`]: `lookup` resolves an environment
 /// variable name. Split out so tests can record exactly which names are read —
 /// the allowlist is a security boundary, which wants a test rather than a
-/// comment.
-fn assemble<F>(configured: &BTreeMap<String, String>, mut lookup: F) -> BTreeMap<String, String>
+/// comment. `pub(crate)` for the argv-boundary test in
+/// `command::package::pipeline::push`, which needs the same seam.
+pub(crate) fn assemble<F>(configured: &BTreeMap<String, String>, mut lookup: F) -> BTreeMap<String, String>
 where
     F: FnMut(&str) -> Option<String>,
 {

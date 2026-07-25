@@ -934,10 +934,28 @@ mod tests {
 
     /// The `ocx` subprocess inherits the runner environment — the generated
     /// workflow's push step carries `GH_TOKEN` — so the assembled argv must
-    /// never carry anything sourced from it.
+    /// never carry a value sourced from outside the three-name allowlist.
+    ///
+    /// Same guarantee as `annotations::tests::secret_shaped_env_never_reaches_an_annotation`,
+    /// one boundary further out: that one stops at the map, this one at the
+    /// argv the subprocess actually receives. Driven through the injected
+    /// lookup rather than the real environment — reading `std::env` would make
+    /// the assertion depend on where it runs, and CI legitimately carries the
+    /// allowlisted values under other names too (`GITHUB_WORKFLOW_SHA` holds
+    /// the same SHA as `GITHUB_SHA`), so a real-env read collides on *value*
+    /// and no name skip or length threshold can repair it.
     #[test]
-    fn build_push_args_carries_no_ambient_env_value() {
-        let annotations = crate::annotations::build_annotations(&BTreeMap::new());
+    fn build_push_args_never_carries_a_non_allowlisted_env_value() {
+        const TOKEN: &str = "ghs_liveTokenFromTheRunnerEnvironment";
+
+        let annotations = crate::annotations::assemble(&BTreeMap::new(), |name| match name {
+            "GITHUB_SERVER_URL" => Some("https://github.com".to_string()),
+            "GITHUB_REPOSITORY" => Some("ocx-sh/mirror-shfmt".to_string()),
+            "GITHUB_SHA" => Some("a1b2c3d4".to_string()),
+            // Every other name the function might reach for answers with a token.
+            _ => Some(TOKEN.to_string()),
+        });
+
         let args = build_push_args(
             "linux/amd64",
             "ghcr.io/ocx-sh/shfmt:3.8.0",
@@ -946,19 +964,16 @@ mod tests {
         )
         .expect("utf-8 bundle path");
 
-        let allowed = ["GITHUB_SERVER_URL", "GITHUB_REPOSITORY", "GITHUB_SHA"];
-        for (name, value) in std::env::vars() {
-            // Short values (`LANG=C`, `SHLVL=1`) collide with argv substrings by
-            // chance; secrets are long. 16 chars keeps the check deterministic
-            // wherever it runs without weakening it against a real token.
-            if allowed.contains(&name.as_str()) || value.len() < 16 {
-                continue;
-            }
-            assert!(
-                !args.iter().any(|arg| arg.contains(&value)),
-                "argv carries the value of ambient env var {name}"
-            );
-        }
+        assert!(
+            !args.iter().any(|arg| arg.contains(TOKEN)),
+            "argv carries a value from outside the allowlist: {args:?}"
+        );
+        // Positive half, so the assertion above cannot pass on an empty argv.
+        assert!(
+            args.contains(&"org.opencontainers.image.source=https://github.com/ocx-sh/mirror-shfmt".to_string())
+                && args.contains(&"org.opencontainers.image.revision=a1b2c3d4".to_string()),
+            "allowlisted values must still reach the argv: {args:?}"
+        );
     }
 
     // ── §3.7 S7: AND-across-containers + push driver tests ────────────────
