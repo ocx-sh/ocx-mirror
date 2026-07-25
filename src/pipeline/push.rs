@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -39,9 +39,22 @@ pub async fn push_and_cascade(
         layout: LayerLayoutSpec::default(),
     }];
 
+    // `true` matches the `ocx package push` default, which is what the pipeline
+    // push path (`command::package::pipeline::push`) already gets by shelling
+    // out — both mirror publish paths write the digest-named safety-net tag.
+    let canonical_tag = true;
+    let annotations = BTreeMap::new();
+
     if cascade {
         publisher
-            .push_cascade(info.clone(), &layers, cascade_versions.clone(), None)
+            .push_cascade(
+                vec![info.clone()],
+                &layers,
+                cascade_versions.clone(),
+                None,
+                canonical_tag,
+                &annotations,
+            )
             .await?;
 
         // Default variant aliasing: generate unadorned tags for the default variant.
@@ -60,7 +73,14 @@ pub async fn push_and_cascade(
                 platform: info.platform,
             };
             publisher
-                .push_cascade(bare_info, &layers, cascade_versions.clone(), None)
+                .push_cascade(
+                    vec![bare_info],
+                    &layers,
+                    cascade_versions.clone(),
+                    None,
+                    canonical_tag,
+                    &annotations,
+                )
                 .await?;
         }
 
@@ -71,7 +91,9 @@ pub async fn push_and_cascade(
         });
     }
 
-    publisher.push(info, &layers, None).await?;
+    publisher
+        .push(vec![info], &layers, None, canonical_tag, &annotations)
+        .await?;
 
     Ok(MirrorResult::Pushed {
         version: version_str,
