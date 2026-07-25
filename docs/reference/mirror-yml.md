@@ -20,6 +20,7 @@
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
 | `ocx_mirror` | object | No* | ocx-mirror version pin for generated workflows. Required when any Linux platform declares containers. |
 | `notify` | object | No | Discord webhook notification settings |
+| `annotations` | object | No | Extra OCI annotations written onto every published image index. See [`annotations`](#annotations). |
 
 The `tests`, `platforms`, `ocx_mirror`, and `notify` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
 
@@ -282,6 +283,35 @@ When `user_id` is set, any message that carries a partial or failed version is p
 | New versions published, some platforms failed | Yellow/red embeds for the affected versions; mention if `user_id` set |
 | No new versions published, all platforms failed | Red embeds with failure details and run URL; mention if `user_id` set |
 
+## `annotations` {#annotations}
+
+[OCI annotations][oci-annotations] written onto the image index of every tag a push writes — the version tag and each rolling cascade tag alike.
+
+Two keys are filled in automatically from the workflow environment, so a mirror running in GitHub Actions needs no configuration at all:
+
+| Key | Value |
+|-----|-------|
+| `org.opencontainers.image.source` | `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` — the mirror repository itself |
+| `org.opencontainers.image.revision` | `$GITHUB_SHA` |
+
+`image.source` names the **mirror** repository, not the upstream project. Registries use this key for package-to-repository linkage: on [GHCR][ghcr-source] it is what attaches the package to a repository and lets it inherit that repository's permissions, so it has to name a repository the publisher controls.
+
+Outside CI the variables are absent and the annotations are simply not written — `ocx package push` then leaves whatever the registry already holds untouched, so a local run never clears a link an earlier CI run established.
+
+The `annotations:` block adds further keys and overrides an auto-detected one:
+
+```yaml
+annotations:
+  org.opencontainers.image.licenses: Apache-2.0
+  org.opencontainers.image.vendor: OCX
+```
+
+A key listed here replaces the auto-detected value for **that key only**; the others still apply. Values are taken verbatim — nothing is read from the environment beyond the three variables above (see [Variables read by ocx-mirror][env-read]).
+
+**Validation:**
+
+- A key must be non-empty and must not contain `=`. Annotations reach `ocx package push` as `--annotation KEY=VALUE`, so a `=` in the key would be re-split at the wrong place and publish a different key than configured. Violations are rejected with exit code 65 (`DataError`).
+
 ## Spec inheritance {#inheritance}
 
 `mirror.yml` files support an `extends:` key for shallow merge from a parent spec. Child keys override parent keys at the top level. This is useful for sharing `source` and `assets` across variants of the same tool.
@@ -358,6 +388,11 @@ notify:
 [discord]: https://discord.com/developers/docs/resources/webhook
 [discord-snowflake]: https://discord.com/developers/docs/reference#snowflakes
 [setup-ocx]: https://github.com/ocx-sh/setup-ocx
+[oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
+[ghcr-source]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
+
+<!-- internal -->
+[env-read]: ./environment.md#annotation-env
 
 <!-- commands -->
 [cmd-pipeline]: ./cli.md#pipeline

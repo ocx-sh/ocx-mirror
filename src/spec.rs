@@ -39,7 +39,7 @@ pub use versions_config::VersionsConfig;
 use ocx_lib::log;
 use ocx_lib::package::version::Version;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use crate::error::MirrorError;
@@ -118,6 +118,13 @@ pub struct MirrorSpec {
     /// When omitted, defaults apply: `readme: CATALOG.md`, logo probed.
     #[serde(default)]
     pub catalog: Option<CatalogConfig>,
+
+    /// OCI annotations written onto the image index of every published tag,
+    /// on top of the ones auto-detected from the CI environment
+    /// (`org.opencontainers.image.source` and `.revision`). A key given here
+    /// overrides the auto-detected value for that key.
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
 
     /// Opt out of the generated drift-guard workflow (discouraged).
     ///
@@ -223,6 +230,7 @@ impl MirrorSpec {
         if let Some(notify) = &self.notify {
             validate_notify_config(notify, &mut errors);
         }
+        crate::annotations::validate(&self.annotations, &mut errors);
 
         // Cross-field: release_tag required when any platform declares containers.
         // This catches the case where ocx_mirror block is absent or release_tag is omitted.
@@ -3091,6 +3099,47 @@ notify:
         assert!(
             webhook_errors.is_empty(),
             "Unexpected webhook_secret errors for valid GHA secret name: {webhook_errors:?}"
+        );
+    }
+
+    #[test]
+    fn annotations_block_parses_and_defaults_to_empty() {
+        let bare: MirrorSpec = serde_yaml_ng::from_str(MINIMAL_BASE_YAML).unwrap();
+        assert!(bare.annotations.is_empty());
+
+        let yaml = format!(
+            r#"{base}
+annotations:
+  org.opencontainers.image.licenses: Apache-2.0
+  org.opencontainers.image.source: https://github.com/upstream/project
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(spec.annotations["org.opencontainers.image.licenses"], "Apache-2.0");
+        assert_eq!(
+            spec.annotations["org.opencontainers.image.source"],
+            "https://github.com/upstream/project"
+        );
+        assert!(spec.validate(Path::new("test.yml")).is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_annotation_key_containing_equals() {
+        // `KEY=VALUE` is the wire form; a `=` in the key would re-split wrong
+        // and publish a key the spec never asked for.
+        let yaml = format!(
+            r#"{base}
+annotations:
+  "bad=key": value
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("bad=key")),
+            "expected rejection of '=' in annotation key, got: {errors:?}"
         );
     }
 

@@ -256,6 +256,7 @@ impl Sync {
                 max_bundles: spec.concurrency.max_bundles,
                 compression_threads,
             },
+            &crate::annotations::build_annotations(&spec.annotations),
         )
         .await;
 
