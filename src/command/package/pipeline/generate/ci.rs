@@ -320,6 +320,8 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .replace("{TEST_RUN_STEPS}", &test_run_steps)
         .replace("{TARGET_IDENTIFIER}", &target_identifier)
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
+        .replace("{DISCOVER_PERMISSIONS}", render_discover_permissions(spec))
+        .replace("{DISCOVER_AUTH_STEPS}", &render_discover_auth_steps(spec))
         .replace("{PUSH_PERMISSIONS}", render_push_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{WEBHOOK_SECRET_NAME}", webhook_secret_name)
@@ -370,6 +372,68 @@ fn render_push_permissions(spec: &MirrorSpec) -> &'static str {
     }
 }
 
+/// `permissions:` block for the discover job.
+///
+/// Only `contents: read` (checkout, setup-ocx) and `packages: read` — discover
+/// lists the target's tags and writes nothing.
+const GHCR_DISCOVER_PERMISSIONS: &str = "    permissions:\n      contents: read\n      packages: read\n";
+
+fn render_discover_permissions(spec: &MirrorSpec) -> &'static str {
+    if spec.target.registry == GHCR_REGISTRY {
+        GHCR_DISCOVER_PERMISSIONS
+    } else {
+        ""
+    }
+}
+
+/// `permissions:` block for the describe job.
+///
+/// `pipeline describe` pushes the catalog metadata as an `__ocx.desc` referrer
+/// on the target repository, so GHCR needs `packages: write` here — the read
+/// scope discover gets is not enough.
+const GHCR_DESCRIBE_PERMISSIONS: &str = "    permissions:\n      contents: read\n      packages: write\n";
+
+fn render_describe_permissions(spec: &MirrorSpec) -> &'static str {
+    if spec.target.registry == GHCR_REGISTRY {
+        GHCR_DESCRIBE_PERMISSIONS
+    } else {
+        ""
+    }
+}
+
+/// Registry-login step for the discover job.
+///
+/// `pipeline plan` reads the target's tag list to decide which versions are
+/// new. GHCR answers an *unauthenticated* read of a repository that does not
+/// exist — or is private — with `403 DENIED`, never `404`; it does not reveal
+/// non-existence to anonymous callers. `list_target_tags` deliberately treats
+/// only an authoritative not-found as "nothing published" (issue #157), so
+/// without a credential here the very first run of a new GHCR mirror aborts in
+/// discover and the target can never come into existence.
+///
+/// A public non-GHCR target lists anonymously, so no login is emitted there —
+/// the shared `OCX_MIRROR_REGISTRY_*` secrets stay confined to the push job.
+fn render_discover_auth_steps(spec: &MirrorSpec) -> String {
+    if spec.target.registry != GHCR_REGISTRY {
+        return String::new();
+    }
+    format!(
+        r#"      # `pipeline plan` reads the target's tags. ghcr.io answers an
+      # anonymous read of a missing or private repository with 403 DENIED
+      # rather than 404, so an unauthenticated discover can never see the
+      # empty target a first publish starts from. docker login so ocx picks
+      # the credential up via its native-credential fallback.
+      - name: Login to {ghcr}
+        run: |
+          echo "${{{{ secrets.GITHUB_TOKEN }}}}" \
+            | docker login {ghcr} \
+                -u "${{{{ github.actor }}}}" \
+                --password-stdin
+"#,
+        ghcr = GHCR_REGISTRY,
+    )
+}
+
 /// Best-effort warning that a `ghcr.io` target sits outside the publishing
 /// repository's owner.
 ///
@@ -403,7 +467,8 @@ fn ghcr_owner_warning(spec: &MirrorSpec, publishing_repo: Option<&str>) -> Optio
     ))
 }
 
-/// Credential-detection + registry-login steps for the push job.
+/// Credential-detection + registry-login steps, shared by the push job and the
+/// describe job — both write to the target registry with the same credential.
 ///
 /// GHCR is always credentialed: `GITHUB_TOKEN` is present on every run, so the
 /// probe is a constant `have=true`. Without that, a GHCR push would take the
@@ -601,6 +666,8 @@ fn render_describe(spec: &MirrorSpec) -> String {
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
         .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
+        .replace("{DESCRIBE_PERMISSIONS}", render_describe_permissions(spec))
+        .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
 }
 
@@ -1822,18 +1889,19 @@ notify:
     #[test]
     fn describe_workflow_has_detect_credentials_step() {
         // describe.yml must also guard the docker-login so a repo with no secrets
-        // goes green on the describe job.
-        let template = super::DESCRIBE_TEMPLATE;
+        // goes green on the describe job. The steps come from the shared
+        // renderer, so assert on the rendered workflow, not on the template.
+        let describe = render_describe(&spec_from_yaml(SHFMT_SPEC));
         assert!(
-            template.contains("name: Detect registry credentials"),
+            describe.contains("name: Detect registry credentials"),
             "describe workflow must contain 'Detect registry credentials' step"
         );
         assert!(
-            template.contains("id: creds"),
+            describe.contains("id: creds"),
             "describe credentials-detect step must have id: creds"
         );
         assert!(
-            template.contains("OCX_MIRROR_REGISTRY_TOKEN: ${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}"),
+            describe.contains("OCX_MIRROR_REGISTRY_TOKEN: ${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}"),
             "describe credentials-detect step must inject secret as env var"
         );
     }
@@ -1842,9 +1910,9 @@ notify:
     fn describe_workflow_login_and_publish_steps_have_creds_guard() {
         // Both the docker-login and the 'Publish catalog metadata' step in
         // describe.yml must carry the creds guard.
-        let template = super::DESCRIBE_TEMPLATE;
+        let describe = render_describe(&spec_from_yaml(SHFMT_SPEC));
         let guard = "if: ${{ steps.creds.outputs.have == 'true' }}";
-        let count = template.matches(guard).count();
+        let count = describe.matches(guard).count();
         assert!(
             count >= 2,
             "describe workflow must guard both login and publish steps; found {count} occurrence(s)"
@@ -2039,6 +2107,103 @@ announce:
         assert!(
             !workflow.contains("have=false"),
             "ghcr.io workflow must have no no-credentials branch, got:\n{workflow}"
+        );
+    }
+
+    /// The `discover:` job only, so a push-job step cannot satisfy an
+    /// assertion about discover.
+    fn discover_job(workflow: &str) -> String {
+        let start = workflow.find("\n  discover:").expect("workflow has a discover job");
+        let rest = &workflow[start + 1..];
+        let end = rest.find("\n  prepare:").expect("workflow has a prepare job");
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn ghcr_discover_authenticates_so_a_first_publish_can_bootstrap() {
+        // ghcr.io answers an anonymous read of a missing repository with 403
+        // DENIED, not 404. `list_target_tags` only treats an authoritative
+        // not-found as an empty target (issue #157), so an unauthenticated
+        // discover aborts the run before the push that would create the
+        // package — the target could never come into existence.
+        let discover = discover_job(&render_workflow(&spec_from_yaml(GHCR_SPEC)));
+
+        assert!(
+            discover.contains("docker login ghcr.io"),
+            "a ghcr.io discover job must log in, got:\n{discover}"
+        );
+        assert!(
+            discover.contains("      packages: read\n"),
+            "a ghcr.io discover job must grant packages: read, got:\n{discover}"
+        );
+        assert!(
+            discover.contains("      contents: read\n"),
+            "naming any permission zeroes the rest — checkout still needs contents: read, got:\n{discover}"
+        );
+        // Discover reads; only the push job writes.
+        assert!(
+            !discover.contains("packages: write"),
+            "discover must not ask for write access, got:\n{discover}"
+        );
+    }
+
+    #[test]
+    fn non_ghcr_discover_stays_anonymous_and_unprivileged() {
+        // A public ocx.sh target lists tags anonymously, and the shared
+        // OCX_MIRROR_REGISTRY_* secrets stay confined to the push job.
+        let discover = discover_job(&render_workflow(&spec_from_yaml(SHFMT_SPEC)));
+
+        assert!(
+            !discover.contains("docker login"),
+            "a non-GHCR discover job must not log in, got:\n{discover}"
+        );
+        assert!(
+            !discover.contains("permissions:"),
+            "a non-GHCR discover job keeps the repository default scopes, got:\n{discover}"
+        );
+    }
+
+    #[test]
+    fn ghcr_describe_logs_in_with_the_run_token_not_the_ocx_sh_secrets() {
+        // `describe` pushes the catalog metadata as an `__ocx.desc` referrer on
+        // the target. Switching the target host to ghcr.io without switching
+        // the credential left it feeding ocx.sh org-secret credentials to
+        // ghcr.io — a login that cannot succeed, and a scope the job never got.
+        let describe = render_describe(&spec_from_yaml(GHCR_SPEC));
+
+        assert!(
+            describe.contains("docker login ghcr.io"),
+            "a ghcr.io describe job must log in to ghcr.io, got:\n{describe}"
+        );
+        assert!(
+            describe.contains(r#"-u "${{ github.actor }}""#),
+            "a ghcr.io describe job must use the run's own actor, got:\n{describe}"
+        );
+        assert!(
+            !describe.contains("secrets.OCX_MIRROR_REGISTRY_"),
+            "the ocx.sh org secrets must not reach a ghcr.io describe job, got:\n{describe}"
+        );
+        assert!(
+            describe.contains("      packages: write\n") && describe.contains("      contents: read\n"),
+            "a ghcr.io describe job writes a referrer, so it needs packages: write plus contents: read for checkout, got:\n{describe}"
+        );
+    }
+
+    #[test]
+    fn non_ghcr_describe_keeps_the_org_secret_login_and_adds_no_permissions() {
+        let describe = render_describe(&spec_from_yaml(SHFMT_SPEC));
+
+        assert!(
+            describe.contains("docker login ocx.sh"),
+            "an ocx.sh describe job keeps its own login, got:\n{describe}"
+        );
+        assert!(
+            describe.contains(r#"-u "${{ secrets.OCX_MIRROR_REGISTRY_USER }}""#),
+            "an ocx.sh describe job keeps the org-secret credentials, got:\n{describe}"
+        );
+        assert!(
+            !describe.contains("permissions:"),
+            "a non-GHCR describe job keeps the repository default scopes, got:\n{describe}"
         );
     }
 
