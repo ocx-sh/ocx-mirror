@@ -94,6 +94,39 @@ pub struct VersionSummary {
     pub platforms_excluded: Vec<ExcludedPlatform>,
 }
 
+/// Outcome of the single index announce a push run makes.
+///
+/// Absent from the summary when the spec carries no `announce:` block or the
+/// run published nothing. Present otherwise, and the three states are
+/// deliberately distinguishable: a run that pushed and then skipped announcing
+/// must not read the same as one that announced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AnnounceOutcome {
+    /// `ocx package announce` succeeded — the index PR was opened or updated.
+    Announced {
+        /// Logical index package (`<namespace>/<package>`).
+        package: String,
+        /// Tags handed to `--tags-file`, in run order.
+        tags: Vec<String>,
+    },
+    /// `announce:` is configured but `OCX_ANNOUNCE_TOKEN` was absent, so no
+    /// call was made. A valid configuration (forks and test repos run this
+    /// way) — the push results above still stand.
+    SkippedNoCredential {
+        /// Logical index package that would have been announced.
+        package: String,
+    },
+    /// The announce call ran and failed. Does not change the push exit code:
+    /// the packages are already in the registry.
+    Failed {
+        /// Logical index package the call named.
+        package: String,
+        /// Subprocess failure detail.
+        error: String,
+    },
+}
+
 /// Top-level `run-summary.json` schema (schema_version 1).
 ///
 /// Produced by `ocx-mirror package pipeline push`, consumed by `ocx-mirror package pipeline notify`.
@@ -133,6 +166,10 @@ pub struct RunSummary {
     pub logo_url: Option<String>,
     /// Per-version outcomes, oldest first.
     pub versions: Vec<VersionSummary>,
+    /// Outcome of this run's index announce. Absent when the spec has no
+    /// `announce:` block or when the run published nothing to announce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announce: Option<AnnounceOutcome>,
     /// `true` when any version status is `failed` or `partial` with test failures.
     pub any_red: bool,
     /// `true` when at least one version was pushed (status `published` or `partial`).
@@ -172,6 +209,7 @@ mod tests {
                 test_failures: vec![],
                 platforms_excluded: vec![],
             }],
+            announce: None,
             any_red: false,
             any_new_green: true,
         }
@@ -212,6 +250,7 @@ mod tests {
                 }],
                 platforms_excluded: vec![],
             }],
+            announce: None,
             any_red: true,
             any_new_green: true,
         }

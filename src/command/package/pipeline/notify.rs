@@ -393,6 +393,7 @@ mod tests {
             source_url: None,
             logo_url: None,
             versions,
+            announce: None,
             any_red,
             any_new_green,
         }

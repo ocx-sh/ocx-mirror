@@ -20,9 +20,26 @@
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
 | `ocx_mirror` | object | No* | ocx-mirror version pin for generated workflows. Required when any Linux platform declares containers. |
 | `notify` | object | No | Discord webhook notification settings |
+| `announce` | object | No | Index announce settings. See [`announce`](#announce). |
 | `annotations` | object | No | Extra OCI annotations written onto every published image index. See [`annotations`](#annotations). |
 
-The `tests`, `platforms`, `ocx_mirror`, and `notify` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
+The `tests`, `platforms`, `ocx_mirror`, `notify`, and `announce` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
+
+## `target` {#target}
+
+The registry and repository a push writes to — the **physical** path.
+
+```yaml
+target:
+  registry: ghcr.io
+  repository: ocx-contrib/bazelbuild/bazelisk
+```
+
+Path segments are separated by `/` and are never flattened into a hyphen: `ocx-contrib/bazelbuild/bazelisk`, not `ocx-contrib/bazelbuild-bazelisk`. GHCR needs no repository of its own for a path segment — package-to-repository linkage comes from the [`org.opencontainers.image.source`](#annotations) annotation, which the pipeline writes automatically.
+
+The physical path and the [logical index package](#announce) are related by convention, not by a rule: a mirror publishing to `ghcr.io/ocx-contrib/bazelbuild/bazelisk` announces the logical package `bazelbuild/bazelisk`. Spell both out.
+
+When `registry` is `ghcr.io`, generated workflows log in with the run's own `GITHUB_TOKEN` and `github.actor`, and the push job declares `permissions: packages: write`. The shared `OCX_MIRROR_REGISTRY_USER` / `OCX_MIRROR_REGISTRY_TOKEN` organisation secrets carry `ocx.sh` credentials and are not read on that path. A GHCR push therefore never depends on a secret being configured — `GITHUB_TOKEN` is present on every run.
 
 ## `assets` {#assets}
 
@@ -312,6 +329,50 @@ A key listed here replaces the auto-detected value for **that key only**; the ot
 
 - A key must be non-empty and must not contain `=`. Annotations reach `ocx package push` as `--annotation KEY=VALUE`, so a `=` in the key would be re-split at the wrong place and publish a different key than configured. Violations are rejected with exit code 65 (`DataError`).
 
+## `announce` {#announce}
+
+Publishes this mirror's tags into the [OCX index][index-repo] after a push run. Opt-in — without an `announce:` block nothing is announced.
+
+```yaml
+announce:
+  package: bazelbuild/bazelisk
+  fork: ocx-contrib/index
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `package` | string | Yes | Logical index package as `<namespace>/<package>`. Not derived from [`target.repository`](#target) — the physical path and the logical name are related by convention only. |
+| `fork` | string | Yes | Fork the index pull request is opened from, as `<owner>/<repo>`. |
+| `index_repo` | string | No | Index repository the pull request targets, as `<owner>/<repo>`. Defaults to `ocx-sh/index`. |
+
+**Behaviour:**
+
+The push job makes **one** `ocx package announce` call per run, after every version has been pushed — never one per version or per platform. It carries the union of every cascade tag the run wrote, deduplicated: each platform's push report re-lists the same cascade hierarchy, and consecutive versions share the rolling `X.Y` / `X` / `latest` tags. Versions that only failed, or that were already present in the registry, contribute nothing.
+
+Tags are handed over with `--tags-file`, which **adds** to the already-curated index entry and never removes a committed tag. The alternative, `--tags`, replaces the curated set — for a mirror that would delete every previously announced version the moment one run published a new one.
+
+A run that published nothing makes no call at all.
+
+**Credentials:**
+
+The announce needs an `OCX_ANNOUNCE_TOKEN` [secret][github-actions-secrets] with push access to the fork and permission to open the pull request. Generated workflows thread it into the push step's environment.
+
+Without the secret the run still pushes and still reports its results; the announce is skipped, a GitHub notice is emitted, and `run-summary.json` records it:
+
+| `announce.status` in `run-summary.json` | Meaning |
+|------|---------|
+| *(key absent)* | No `announce:` block, or the run published nothing |
+| `announced` | Index pull request opened or updated, with the tags listed under `tags` |
+| `skipped_no_credential` | Configured, but no `OCX_ANNOUNCE_TOKEN` — a valid configuration for forks and test repos |
+| `failed` | The call ran and failed, with the detail under `error`. The push exit code is unaffected: the packages are already in the registry. |
+
+**Validation:**
+
+- `package` must be a `<namespace>/<package>` pair of lowercase alphanumerics with `.`, `_` or `-`. A bare tool name is rejected with exit code 65 (`DataError`).
+- `fork` and `index_repo` must each be an `<owner>/<repo>` pair. A pasted URL is rejected the same way.
+
 ## Spec inheritance {#inheritance}
 
 `mirror.yml` files support an `extends:` key for shallow merge from a parent spec. Child keys override parent keys at the top level. This is useful for sharing `source` and `assets` across variants of the same tool.
@@ -390,6 +451,7 @@ notify:
 [setup-ocx]: https://github.com/ocx-sh/setup-ocx
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
+[index-repo]: https://github.com/ocx-sh/index
 
 <!-- internal -->
 [env-read]: ./environment.md#annotation-env

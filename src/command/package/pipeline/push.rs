@@ -14,8 +14,10 @@ use ocx_lib::package::version::Version;
 
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
-use crate::run_summary::{ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary};
-use crate::spec::{self, MirrorSpec, PlatformConfig, Severity};
+use crate::run_summary::{
+    AnnounceOutcome, ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
+};
+use crate::spec::{self, AnnounceConfig, MirrorSpec, PlatformConfig, Severity};
 
 /// `ocx-mirror package pipeline push` subcommand.
 ///
@@ -263,6 +265,20 @@ impl Push {
             })
             .unwrap_or_else(|| "https://github.com/actions/runs/unknown".to_string());
 
+        // One announce per run, after every version has been pushed — never
+        // one per version or per platform. Concurrent announces on the same
+        // package are a race the index singleflight exists to survive; there
+        // is no reason to generate one from inside a single run.
+        let announce_token = std::env::var(ENV_ANNOUNCE_TOKEN).ok().filter(|t| !t.trim().is_empty());
+        let announce = run_announce(
+            spec.announce.as_ref(),
+            &version_summaries,
+            &self.write_summary.with_extension("announce-tags"),
+            announce_token.as_deref(),
+            &resolve_ocx_binary().unwrap_or_else(|_| PathBuf::from("ocx")),
+        )
+        .await;
+
         let summary = RunSummary {
             schema_version: 1,
             mirror: spec.name.clone(),
@@ -272,6 +288,7 @@ impl Push {
             source_url: compute_source_url(&spec.source),
             logo_url: compute_logo_url(),
             versions: version_summaries,
+            announce,
             any_red,
             any_new_green,
         };
@@ -787,6 +804,155 @@ async fn invoke_push(
         .map_err(|e| format!("failed to parse push JSON output: {e}\nstdout: {}", stdout.trim()))?;
 
     Ok(report)
+}
+
+/// GitHub Actions secret carrying the token `ocx package announce` uses to
+/// push the fork branch and open the index pull request.
+const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
+
+/// Tags this run should announce: the union of `cascade_tags_written` across
+/// every version that actually published, in run order, deduped.
+///
+/// Deduping is load-bearing, not cosmetic — each platform's push report
+/// re-lists the same cascade hierarchy, and consecutive versions share the
+/// rolling `X.Y` / `X` / `latest` tags.
+///
+/// A version that only skipped-existing or only failed contributes nothing:
+/// its tags are either already announced or were never written.
+fn announce_tag_union(versions: &[VersionSummary]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    versions
+        .iter()
+        .filter(|vs| {
+            matches!(vs.status, VersionStatus::Published | VersionStatus::Partial) && !vs.platforms_pushed.is_empty()
+        })
+        .flat_map(|vs| vs.cascade_tags_written.iter())
+        .filter(|tag| seen.insert((*tag).clone()))
+        .cloned()
+        .collect()
+}
+
+/// Build the `ocx package announce` argv. Pure and unit-testable — locks the
+/// flag set without spawning a subprocess.
+///
+/// `--tags-file` is additive: it adds to the already-curated set and never
+/// removes a committed tag. `--tags` would *replace* the curated set, which for
+/// a mirror means one run publishing one new version deletes every previously
+/// announced version from the index entry. Never use it here.
+fn build_announce_args(config: &AnnounceConfig, tags_file: &Path) -> Result<Vec<String>, String> {
+    let file = tags_file
+        .to_str()
+        .ok_or_else(|| format!("announce tags file path is not valid UTF-8: {}", tags_file.display()))?;
+
+    Ok([
+        "package",
+        "announce",
+        "--package",
+        &config.package,
+        "--tags-file",
+        file,
+        "--fork",
+        &config.fork,
+        "--index-repo",
+        &config.index_repo,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect())
+}
+
+/// Make this run's single index announce.
+///
+/// Returns `None` when there is nothing to announce — no `announce:` block, or
+/// no version published. Never returns `Err`: an announce failure is recorded
+/// in the run summary and leaves the push exit code alone, because the packages
+/// are already in the registry either way.
+///
+/// `token` is the resolved `OCX_ANNOUNCE_TOKEN` and `ocx_binary` the `ocx` to
+/// drive — both passed in rather than read here so tests can exercise the
+/// subprocess boundary without mutating process environment.
+async fn run_announce(
+    config: Option<&AnnounceConfig>,
+    versions: &[VersionSummary],
+    tags_file: &Path,
+    token: Option<&str>,
+    ocx_binary: &Path,
+) -> Option<AnnounceOutcome> {
+    let config = config?;
+    let tags = announce_tag_union(versions);
+    if tags.is_empty() {
+        log::info!("[announce] nothing published in this run — index announce skipped");
+        return None;
+    }
+
+    if token.is_none() {
+        // A mirror repo without the secret is a valid configuration, so this
+        // degrades rather than failing. It must still be visible: a run that
+        // pushed and then did not announce cannot read like one that did.
+        println!(
+            "::notice title=Index announce skipped::No {ENV_ANNOUNCE_TOKEN} secret — \
+             {} published {} tag(s) but the index was not updated.",
+            config.package,
+            tags.len()
+        );
+        return Some(AnnounceOutcome::SkippedNoCredential {
+            package: config.package.clone(),
+        });
+    }
+
+    match invoke_announce(config, &tags, tags_file, ocx_binary).await {
+        Ok(()) => {
+            log::info!(
+                "[announce] {} → {} ({} tag(s))",
+                config.package,
+                config.index_repo,
+                tags.len()
+            );
+            Some(AnnounceOutcome::Announced {
+                package: config.package.clone(),
+                tags,
+            })
+        }
+        Err(error) => {
+            log::warn!("[announce] {} failed: {error}", config.package);
+            println!("::warning title=Index announce failed::{}: {error}", config.package);
+            Some(AnnounceOutcome::Failed {
+                package: config.package.clone(),
+                error,
+            })
+        }
+    }
+}
+
+/// Write the tag set to `tags_file` and run `ocx package announce` against it.
+async fn invoke_announce(
+    config: &AnnounceConfig,
+    tags: &[String],
+    tags_file: &Path,
+    ocx_binary: &Path,
+) -> Result<(), String> {
+    let args = build_announce_args(config, tags_file)?;
+
+    tokio::fs::write(tags_file, tags.join("\n"))
+        .await
+        .map_err(|e| format!("failed to write announce tags file {}: {e}", tags_file.display()))?;
+
+    let mut cmd = tokio::process::Command::new(ocx_binary);
+    cmd.args(&args);
+    forward_ocx_env(&mut cmd);
+
+    let output = cmd.output().await.map_err(|e| format!("failed to spawn ocx: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ocx package announce exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Resolve the path to the `ocx` binary.
@@ -2023,5 +2189,333 @@ platforms:
                 );
             }
         }
+    }
+
+    // ── Index announce (E-P4) ─────────────────────────────────────────────
+    //
+    // One announce per run, carrying the union of every cascade tag the run
+    // wrote. `--tags-file` (additive) never `--tags` (replacing), because a
+    // mirror announcing a replacing tag set would delete every previously
+    // announced version the moment one run published a new one.
+
+    fn version_summary(version: &str, status: VersionStatus, pushed: &[&str], tags: &[&str]) -> VersionSummary {
+        VersionSummary {
+            version: version.to_string(),
+            status,
+            platforms_pushed: pushed.iter().map(|s| (*s).to_string()).collect(),
+            platforms_failed: vec![],
+            cascade_tags_written: tags.iter().map(|s| (*s).to_string()).collect(),
+            test_failures: vec![],
+            platforms_excluded: vec![],
+        }
+    }
+
+    fn announce_config() -> AnnounceConfig {
+        serde_yaml_ng::from_str("package: bazelbuild/bazelisk\nfork: ocx-contrib/index\nindex_repo: ocx-sh/index\n")
+            .unwrap()
+    }
+
+    /// A stand-in `ocx` that appends its argv (one invocation per line) to
+    /// `log`. Lets the announce subprocess boundary be exercised without
+    /// mutating process environment.
+    #[cfg(unix)]
+    fn fake_ocx(dir: &Path, log: &Path, exit_code: u8) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {exit_code}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    fn announce_tag_union_dedups_across_versions_and_platforms() {
+        // Each platform's push report re-lists the same cascade hierarchy, and
+        // consecutive versions share the rolling `1` / `latest` tags. The
+        // union must carry each tag exactly once, in run order.
+        let versions = vec![
+            version_summary(
+                "1.20.0",
+                VersionStatus::Published,
+                &["linux/amd64", "darwin/arm64"],
+                &["1.20.0", "1.20", "1", "latest"],
+            ),
+            version_summary(
+                "1.21.0",
+                VersionStatus::Published,
+                &["linux/amd64"],
+                &["1.21.0", "1.21", "1", "latest"],
+            ),
+        ];
+
+        assert_eq!(
+            announce_tag_union(&versions),
+            vec!["1.20.0", "1.20", "1", "latest", "1.21.0", "1.21"],
+        );
+    }
+
+    #[test]
+    fn announce_tag_union_covers_partial_versions_but_not_unpublished_ones() {
+        // Partial with at least one platform pushed still wrote tags → include.
+        // Failed / skipped_existing wrote nothing new → exclude, so a run that
+        // published nothing announces nothing.
+        let versions = vec![
+            version_summary("1.0.0", VersionStatus::SkippedExisting, &[], &["1.0.0"]),
+            version_summary("2.0.0", VersionStatus::Failed, &[], &[]),
+            version_summary("3.0.0", VersionStatus::Partial, &["linux/amd64"], &["3.0.0", "3.0"]),
+        ];
+
+        assert_eq!(announce_tag_union(&versions), vec!["3.0.0", "3.0"]);
+
+        let nothing_published = vec![
+            version_summary("1.0.0", VersionStatus::SkippedExisting, &[], &["1.0.0"]),
+            version_summary("2.0.0", VersionStatus::Failed, &[], &[]),
+        ];
+        assert!(announce_tag_union(&nothing_published).is_empty());
+    }
+
+    #[test]
+    fn build_announce_args_uses_additive_tags_file_never_replacing_tags() {
+        let args = build_announce_args(&announce_config(), Path::new("/tmp/tags.txt")).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "package",
+                "announce",
+                "--package",
+                "bazelbuild/bazelisk",
+                "--tags-file",
+                "/tmp/tags.txt",
+                "--fork",
+                "ocx-contrib/index",
+                "--index-repo",
+                "ocx-sh/index",
+            ],
+        );
+        assert!(
+            !args.iter().any(|a| a == "--tags"),
+            "--tags REPLACES the curated set — a mirror must never use it",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_runs_exactly_once_per_run_with_the_union_of_tags() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let tags_file = dir.path().join("run-summary.announce-tags");
+        let config = announce_config();
+
+        let versions = vec![
+            version_summary(
+                "1.20.0",
+                VersionStatus::Published,
+                &["linux/amd64"],
+                &["1.20.0", "1.20"],
+            ),
+            version_summary(
+                "1.21.0",
+                VersionStatus::Published,
+                &["linux/amd64"],
+                &["1.21.0", "1.21"],
+            ),
+        ];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&config),
+            &versions,
+            &tags_file,
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::Announced {
+                package: "bazelbuild/bazelisk".to_string(),
+                tags: vec![
+                    "1.20.0".to_string(),
+                    "1.20".to_string(),
+                    "1.21.0".to_string(),
+                    "1.21".to_string()
+                ],
+            }),
+        );
+
+        // Exactly one subprocess, not one per version and not one per platform.
+        let invocations = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            invocations.lines().count(),
+            1,
+            "announce must run once per pipeline run, got: {invocations}",
+        );
+        assert!(invocations.contains("--tags-file"), "got: {invocations}");
+
+        // The tag set travels in the file, so the whole union lands even when
+        // it outgrows anything comfortable on a command line.
+        let written = std::fs::read_to_string(&tags_file).unwrap();
+        assert_eq!(written, "1.20.0\n1.20\n1.21.0\n1.21");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_skipped_without_token_and_stays_distinguishable_in_the_summary() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let config = announce_config();
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&config),
+            &versions,
+            &dir.path().join("tags"),
+            None,
+            &ocx,
+        ));
+
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::SkippedNoCredential {
+                package: "bazelbuild/bazelisk".to_string(),
+            }),
+        );
+        assert!(!log.exists(), "no token must mean no announce subprocess");
+
+        // A run that pushed and skipped announcing must not read like one that
+        // announced, nor like one that tried and failed.
+        let rendered = |o: &AnnounceOutcome| serde_json::to_value(o).unwrap()["status"].clone();
+        assert_eq!(rendered(&outcome.unwrap()), "skipped_no_credential");
+        assert_eq!(
+            rendered(&AnnounceOutcome::Announced {
+                package: "p/q".into(),
+                tags: vec![]
+            }),
+            "announced",
+        );
+        assert_eq!(
+            rendered(&AnnounceOutcome::Failed {
+                package: "p/q".into(),
+                error: "boom".into()
+            }),
+            "failed",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_failure_is_recorded_and_does_not_abort_the_run() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 70);
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        match outcome {
+            Some(AnnounceOutcome::Failed { package, error }) => {
+                assert_eq!(package, "bazelbuild/bazelisk");
+                assert!(error.contains("ocx package announce exited"), "got: {error}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_announce_when_nothing_published_or_when_unconfigured() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Configured, but the run published nothing.
+        let barren = vec![version_summary(
+            "1.0.0",
+            VersionStatus::SkippedExisting,
+            &[],
+            &["1.0.0"],
+        )];
+        assert_eq!(
+            rt.block_on(run_announce(
+                Some(&announce_config()),
+                &barren,
+                &dir.path().join("tags"),
+                Some("gh-token"),
+                &ocx,
+            )),
+            None,
+        );
+
+        // Published, but no `announce:` block — announce is opt-in.
+        let published = vec![version_summary(
+            "1.0.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.0.0"],
+        )];
+        assert_eq!(
+            rt.block_on(run_announce(
+                None,
+                &published,
+                &dir.path().join("tags"),
+                Some("t"),
+                &ocx
+            )),
+            None,
+        );
+
+        assert!(!log.exists(), "neither case may spawn an announce subprocess");
+    }
+
+    #[test]
+    fn run_summary_omits_announce_when_the_run_never_announced() {
+        // `pipeline notify` reads this file; an absent announce must not
+        // appear as a null field it has to special-case.
+        let spec_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ))
+        .to_path_buf();
+        let dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+
+        run_push_cmd(
+            spec_path,
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            summary_path.clone(),
+        )
+        .unwrap();
+
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert!(val.get("announce").is_none(), "got: {val}");
     }
 }

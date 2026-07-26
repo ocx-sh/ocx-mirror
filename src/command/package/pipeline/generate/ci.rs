@@ -316,9 +316,92 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .replace("{TEST_RUN_STEPS}", &test_run_steps)
         .replace("{TARGET_IDENTIFIER}", &target_identifier)
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
+        .replace("{PUSH_PERMISSIONS}", render_push_permissions(spec))
+        .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{WEBHOOK_SECRET_NAME}", webhook_secret_name)
         .replace("{DISCORD_USER_ID_ENV}", &discord_user_id_env)
         .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
+}
+
+/// GitHub's own container registry — authenticated with the workflow's
+/// `GITHUB_TOKEN`, not with the shared `OCX_MIRROR_REGISTRY_*` org secrets.
+const GHCR_REGISTRY: &str = "ghcr.io";
+
+/// `permissions:` block for the push job.
+///
+/// GHCR needs `packages: write` on the run's `GITHUB_TOKEN` to accept a push.
+/// Other registries authenticate with an org secret and need no extra token
+/// scope, so the block is omitted entirely there. Naming any permission
+/// narrows the whole token, so `contents: read` is restated for the checkout.
+fn render_push_permissions(spec: &MirrorSpec) -> &'static str {
+    if spec.target.registry == GHCR_REGISTRY {
+        "    permissions:\n      contents: read\n      packages: write\n"
+    } else {
+        ""
+    }
+}
+
+/// Credential-detection + registry-login steps for the push job.
+///
+/// GHCR is always credentialed: `GITHUB_TOKEN` is present on every run, so the
+/// probe is a constant `have=true`. Without that, a GHCR push would take the
+/// "no `OCX_MIRROR_REGISTRY_TOKEN`" branch and silently skip on every run.
+/// Those org secrets hold `ocx.sh` credentials shared across every mirror
+/// repository — repurposing them for GHCR would break all of them — so the
+/// GHCR path never reads them.
+fn render_registry_auth_steps(spec: &MirrorSpec) -> String {
+    if spec.target.registry == GHCR_REGISTRY {
+        return format!(
+            r#"      # ghcr.io authenticates with this run's own GITHUB_TOKEN, which is
+      # always present — so the credential probe is constant. The shared
+      # OCX_MIRROR_REGISTRY_* org secrets hold {other} credentials and are
+      # deliberately not read here.
+      - name: Detect registry credentials
+        id: creds
+        run: echo "have=true" >> "${{GITHUB_OUTPUT}}"
+      # docker login so ocx picks the credential up via its native-credential
+      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      - name: Login to {ghcr}
+        run: |
+          echo "${{{{ secrets.GITHUB_TOKEN }}}}" \
+            | docker login {ghcr} \
+                -u "${{{{ github.actor }}}}" \
+                --password-stdin
+"#,
+            ghcr = GHCR_REGISTRY,
+            other = "ocx.sh",
+        );
+    }
+
+    format!(
+        r#"      # Detect whether registry credentials are configured.
+      # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
+      # step level via env-var injection (secret value never echoed to logs).
+      - name: Detect registry credentials
+        id: creds
+        env:
+          OCX_MIRROR_REGISTRY_TOKEN: ${{{{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}}}
+        run: |
+          if [ -n "${{OCX_MIRROR_REGISTRY_TOKEN}}" ]; then
+            echo "have=true" >> "${{GITHUB_OUTPUT}}"
+          else
+            echo "have=false" >> "${{GITHUB_OUTPUT}}"
+            echo "::notice::No OCX_MIRROR_REGISTRY_TOKEN secret — registry push skipped (repo runs in test/validation mode)."
+          fi
+      # Use docker login so ocx picks credentials up via its
+      # native-credential fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # Env-var auth (`OCX_AUTH_<REG>_USER/_TOKEN`) takes precedence over the
+      # docker fallback inside ocx, so do NOT also export those vars here.
+      - name: Login to {registry}
+        if: ${{{{ steps.creds.outputs.have == 'true' }}}}
+        run: |
+          echo "${{{{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}}}" \
+            | docker login {registry} \
+                -u "${{{{ secrets.OCX_MIRROR_REGISTRY_USER }}}}" \
+                --password-stdin
+"#,
+        registry = spec.target.registry,
+    )
 }
 
 /// Render the YAML matrix `include:` entries for the test job.
@@ -1566,8 +1649,10 @@ notify:
     fn push_job_has_detect_credentials_step() {
         // The push job must emit a 'Detect registry credentials' step with
         // id: creds that probes OCX_MIRROR_REGISTRY_TOKEN via env-var injection
-        // without echoing the secret value.
-        let template = super::WORKFLOW_TEMPLATE;
+        // without echoing the secret value. The auth steps are rendered per
+        // target registry, so this asserts on the rendered workflow.
+        let template = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let template = template.as_str();
         assert!(
             template.contains("name: Detect registry credentials"),
             "push job must contain 'Detect registry credentials' step"
@@ -1598,8 +1683,9 @@ notify:
     fn push_job_login_step_has_creds_guard() {
         // The docker-login step in the push job must be guarded so it is skipped
         // when no credentials are present.
-        let template = super::WORKFLOW_TEMPLATE;
-        // The login step and its guard must both be present in the template.
+        let template = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let template = template.as_str();
+        // The login step and its guard must both be present in the workflow.
         assert!(
             template.contains("if: ${{ steps.creds.outputs.have == 'true' }}"),
             "at least one step in push job must carry if: steps.creds.outputs.have == 'true' guard"
@@ -1610,7 +1696,8 @@ notify:
     fn push_job_push_step_has_creds_guard() {
         // The 'Push' step (ocx-mirror package pipeline push) must also be guarded so the
         // run-summary.json is only written when credentials are available.
-        let template = super::WORKFLOW_TEMPLATE;
+        let template = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let template = template.as_str();
         // Count occurrences: both login and push steps must have the guard.
         let guard = "if: ${{ steps.creds.outputs.have == 'true' }}";
         let count = template.matches(guard).count();
@@ -1756,5 +1843,143 @@ notify:
                 "rendered describe.yml must have guard on both login and publish steps; found {count}"
             );
         }
+    }
+
+    // ── GHCR target: login path + package write permission (E-P4) ──────────
+
+    const GHCR_SPEC: &str = r#"
+name: bazelisk
+target:
+  registry: ghcr.io
+  repository: ocx-contrib/bazelbuild/bazelisk
+source:
+  type: github_release
+  owner: bazelbuild
+  repo: bazelisk
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "bazelisk-linux-amd64$"
+asset_type:
+  type: binary
+  name: bazelisk
+tests:
+  - name: version
+    command: bazelisk --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+announce:
+  package: bazelbuild/bazelisk
+  fork: ocx-contrib/index
+"#;
+
+    #[test]
+    fn ghcr_target_logs_in_with_github_token_and_declares_packages_write() {
+        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+
+        assert!(
+            workflow.contains("      packages: write\n"),
+            "a ghcr.io push job must declare packages: write, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains("docker login ghcr.io"),
+            "ghcr.io target must log in to ghcr.io, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains(r#"-u "${{ github.actor }}""#),
+            "ghcr.io login must use the run's own actor, got:\n{workflow}"
+        );
+        // The shared OCX_MIRROR_REGISTRY_* org secrets carry ocx.sh credentials
+        // used by every other mirror repo. Repurposing them for GHCR would
+        // break all of them.
+        assert!(
+            !workflow.contains("OCX_MIRROR_REGISTRY_TOKEN"),
+            "ghcr.io path must not touch the shared ocx.sh registry secrets, got:\n{workflow}"
+        );
+        assert!(
+            !workflow.contains("OCX_MIRROR_REGISTRY_USER"),
+            "ghcr.io path must not touch the shared ocx.sh registry secrets, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn ghcr_target_is_always_credentialed_so_the_push_never_silently_skips() {
+        // GITHUB_TOKEN is present on every run. If the probe kept testing for
+        // OCX_MIRROR_REGISTRY_TOKEN, every GHCR push would take the "no creds"
+        // branch and skip while still reporting success.
+        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+
+        assert!(
+            workflow.contains("run: echo \"have=true\" >> \"${GITHUB_OUTPUT}\"\n"),
+            "ghcr.io credential probe must be a constant have=true, got:\n{workflow}"
+        );
+        assert!(
+            !workflow.contains("have=false"),
+            "ghcr.io workflow must have no no-credentials branch, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn non_ghcr_target_keeps_the_registry_secret_login_and_adds_no_permissions() {
+        let workflow = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+
+        assert!(
+            workflow.contains("docker login ocx.sh"),
+            "ocx.sh target must keep its own login, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains(r#"-u "${{ secrets.OCX_MIRROR_REGISTRY_USER }}""#),
+            "ocx.sh target must keep the org-secret credentials, got:\n{workflow}"
+        );
+        assert!(
+            !workflow.contains("packages: write"),
+            "a non-GHCR push job needs no extra token scope, got:\n{workflow}"
+        );
+        assert!(
+            !workflow.contains("docker login ghcr.io"),
+            "ocx.sh target must not log in to ghcr.io, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn push_step_carries_the_announce_token() {
+        // The announce happens inside `ocx-mirror package pipeline push`, so
+        // the token has to reach that step's env — there is no separate job.
+        for spec in [SHFMT_SPEC, GHCR_SPEC] {
+            let workflow = render_workflow(&spec_from_yaml(spec));
+            assert!(
+                workflow.contains("OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
+                "push step must carry OCX_ANNOUNCE_TOKEN, got:\n{workflow}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_placeholder_is_substituted_for_both_registries() {
+        for spec in [SHFMT_SPEC, GHCR_SPEC] {
+            let workflow = render_workflow(&spec_from_yaml(spec));
+            assert!(
+                !workflow.contains("{PUSH_PERMISSIONS}") && !workflow.contains("{REGISTRY_AUTH_STEPS}"),
+                "unsubstituted placeholder in:\n{workflow}"
+            );
+        }
+    }
+
+    #[test]
+    fn ghcr_announce_fixture_renders_end_to_end() {
+        // The inline specs above bypass `load_spec`. This one goes through it,
+        // so the fixture also proves the `announce:` block survives
+        // deny_unknown_fields and spec validation on the way to a written file.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-ghcr-announce.yml", dir.path()).expect("ghcr + announce fixture must render");
+
+        let content = std::fs::read_to_string(dir.path().join(".github/workflows/mirror.yml")).unwrap();
+        assert!(content.contains("packages: write"), "got:\n{content}");
+        assert!(content.contains("docker login ghcr.io"), "got:\n{content}");
+        assert!(
+            content.contains("OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
+            "got:\n{content}"
+        );
     }
 }
