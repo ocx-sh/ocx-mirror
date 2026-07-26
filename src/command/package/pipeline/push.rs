@@ -190,7 +190,7 @@ impl Push {
             let mut platforms_pushed: Vec<String> = Vec::new();
             let mut cascade_tags: Vec<String> = Vec::new();
             let mut all_skipped_existing = platforms_failed.is_empty();
-            let target_ref = format!("{}:{}", spec.target.repository, version);
+            let target_ref = format!("{}:{}", spec.target.reference(), version);
 
             for (platform_str, bundle_path) in &ready {
                 // EVERY push of a whole version cascades. A cascade push merges
@@ -2933,10 +2933,18 @@ esac
     }
 
     /// Every logged `package push` argv that targets `repo:version`.
+    /// Pushes for `version`, matched on the **registry-qualified** `-i`.
+    ///
+    /// The fixture targets ghcr.io, so that is what must reach the argv. A bare
+    /// `ocx-contrib/…` reference resolves against the default registry instead:
+    /// the first ghcr.io mirror sent five versions at `ocx.sh` and took
+    /// `403 UNAUTHORIZED: No permission to write manifest` on every one. Match
+    /// the whole reference so dropping the registry empties this list rather
+    /// than silently passing.
     fn pushes_for(log: &str, version: &str) -> Vec<String> {
         log.lines()
             .filter(|line| line.contains("package push"))
-            .filter(|line| line.contains(&format!("-i ocx-contrib/bazelbuild/bazelisk:{version} ")))
+            .filter(|line| line.contains(&format!("-i ghcr.io/ocx-contrib/bazelbuild/bazelisk:{version} ")))
             .map(str::to_string)
             .collect()
     }

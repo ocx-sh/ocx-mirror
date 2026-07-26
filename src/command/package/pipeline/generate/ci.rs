@@ -309,7 +309,7 @@ fn render_workflow(spec: &MirrorSpec) -> String {
     let matrix = build_matrix(spec);
     let matrix_entries = render_matrix_entries(&matrix);
     let test_run_steps = render_test_run_steps(&matrix);
-    let target_identifier = format!("{}/{}", spec.target.registry, spec.target.repository);
+    let target_identifier = spec.target.reference();
 
     WORKFLOW_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
