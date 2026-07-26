@@ -119,8 +119,13 @@ platforms:
                 .unwrap_or_else(|e| panic!("resolve_metadata failed for {platform}: {e}"));
 
             // The resolved metadata must declare the darwin-specific PATH value,
-            // not the default `${installPath}/bin`.
-            let path_entry = metadata
+            // not the default `${installPath}/bin`. `env` lives on the published
+            // projection; the authoring form this returns is the publisher's
+            // hand-written shape.
+            let published = metadata
+                .to_published(&platform.parse().unwrap())
+                .unwrap_or_else(|e| panic!("to_published failed for {platform}: {e}"));
+            let path_entry = published
                 .env()
                 .and_then(|vars| vars.into_iter().find(|v| v.key == "PATH"))
                 .unwrap_or_else(|| panic!("PATH entry missing in metadata for {platform}"));

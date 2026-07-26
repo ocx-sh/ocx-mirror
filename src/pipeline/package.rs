@@ -5,8 +5,9 @@ use std::path::Path;
 
 use anyhow::Result;
 use ocx_lib::archive::{Archive, ExtractOptions};
+use ocx_lib::oci::Platform;
 use ocx_lib::package::bundle::BundleBuilder;
-use ocx_lib::package::metadata::Metadata;
+use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 
 use crate::spec::{AssetType, MetadataConfig};
 
@@ -72,7 +73,11 @@ async fn place_binary(asset_path: &Path, content_dir: &Path, name: &str, asset_n
 }
 
 /// Resolve the metadata JSON file for a given platform, falling back to the default.
-pub fn resolve_metadata(config: &MetadataConfig, platform: &str, spec_dir: &Path) -> Result<Metadata> {
+///
+/// Returns the *authoring* form: a spec's `metadata.json` is what a publisher
+/// hand-writes, and it may carry sidecar-only fields (per-dependency
+/// `platforms` pin maps) that the published form has no room for.
+pub fn resolve_metadata(config: &MetadataConfig, platform: &str, spec_dir: &Path) -> Result<AuthoringMetadata> {
     let metadata_path = if let Some(platform_path) = config.platforms.get(platform) {
         spec_dir.join(platform_path)
     } else {
@@ -82,10 +87,25 @@ pub fn resolve_metadata(config: &MetadataConfig, platform: &str, spec_dir: &Path
     let content = std::fs::read_to_string(&metadata_path)
         .map_err(|e| anyhow::anyhow!("failed to read metadata file {}: {e}", metadata_path.display()))?;
 
-    let metadata: Metadata = serde_json::from_str(&content)
+    let metadata: AuthoringMetadata = serde_json::from_str(&content)
         .map_err(|e| anyhow::anyhow!("failed to parse metadata file {}: {e}", metadata_path.display()))?;
 
     Ok(metadata)
+}
+
+/// Renders the `-metadata.json` sidecar that travels beside a prepared bundle.
+///
+/// The recorded `platform` is the whole point: `ocx package test` and `ocx
+/// package push` both resolve a bundle's platform from its sidecar and reject
+/// one that has none, so a sidecar written without it fails downstream with
+/// "metadata sidecar has no recorded platform". `ocx package create` records
+/// it via the same [`AuthoringMetadata::with_platform`]; the spec-level
+/// `metadata.json` a publisher writes by hand never carries it, because the
+/// spec is platform-independent and one file serves every platform.
+pub fn sidecar_json(metadata: &AuthoringMetadata, platform: &Platform) -> Result<String> {
+    let recorded = metadata.clone().with_platform(platform.clone());
+    serde_json::to_string_pretty(&recorded)
+        .map_err(|e| anyhow::anyhow!("failed to serialize metadata sidecar for {platform}: {e}"))
 }
 
 #[cfg(test)]
@@ -185,6 +205,44 @@ mod tests {
         };
 
         let _metadata = resolve_metadata(&config, "linux/amd64", dir.path()).unwrap();
+    }
+
+    /// The sidecar `pipeline prepare` writes must record its platform.
+    ///
+    /// A spec-level `metadata.json` never carries one, and byte-copying it
+    /// produced a sidecar that `ocx package test` and `ocx package push` both
+    /// reject with "metadata sidecar has no recorded platform" — the whole
+    /// mirror fleet's test leg, on the first version it actually had to test.
+    /// Asserted through `resolve_platform`, the call that did the rejecting.
+    #[test]
+    fn sidecar_records_the_platform_it_was_prepared_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Exactly the shape a publisher hand-writes: no `platform` key.
+        std::fs::write(
+            dir.path().join("default.json"),
+            r#"{"type":"bundle","version":1,"strip_components":1,"env":[]}"#,
+        )
+        .unwrap();
+        let config = MetadataConfig {
+            default: "default.json".into(),
+            platforms: HashMap::new(),
+        };
+        let platform: Platform = "linux/arm64".parse().unwrap();
+
+        let metadata = resolve_metadata(&config, "linux/arm64", dir.path()).unwrap();
+        assert!(
+            metadata.platform().is_none(),
+            "fixture must start without a platform, or this test proves nothing"
+        );
+
+        let sidecar = sidecar_json(&metadata, &platform).unwrap();
+        let written: AuthoringMetadata = serde_json::from_str(&sidecar).unwrap();
+
+        assert_eq!(
+            written.resolve_platform(Some(&platform)).unwrap(),
+            platform,
+            "sidecar must resolve to the platform it was prepared for"
+        );
     }
 
     #[test]
