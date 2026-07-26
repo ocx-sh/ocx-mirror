@@ -1791,6 +1791,30 @@ notify:
             template.contains("any_red=false"),
             "fallback step must emit any_red=false"
         );
+        assert!(
+            template.contains("announce=not_run"),
+            "fallback step must emit announce=not_run — the push step never ran, \
+             which is not the same as the mirror never opting in"
+        );
+    }
+
+    #[test]
+    fn push_job_exports_the_announce_outcome_as_a_job_output() {
+        // Without it, a run that published a dozen images and failed to
+        // announce them is indistinguishable — to `notify` and to any branch
+        // protection reading the job outputs — from one that announced. An
+        // expired OCX_ANNOUNCE_TOKEN would then keep every nightly green while
+        // the index drifts arbitrarily far behind the registry.
+        let template = super::WORKFLOW_TEMPLATE;
+        assert!(
+            template.contains("announce: ${{ steps.summarise.outputs.announce }}"),
+            "push job must export an `announce` output"
+        );
+        assert!(
+            template.contains(r#"echo "announce=$(jq -r '.announce.status // "unconfigured"' run-summary.json)""#),
+            "summarise must source the announce output from run-summary.json, \
+             defaulting to `unconfigured` when the mirror has no announce: block"
+        );
     }
 
     // ── No-credentials guard: describe workflow ─────────────────────────────────

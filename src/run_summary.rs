@@ -127,13 +127,28 @@ pub enum AnnounceOutcome {
         /// Logical index package that would have been announced.
         package: String,
     },
-    /// The announce call ran and failed. Does not change the push exit code:
-    /// the packages are already in the registry.
+    /// The announce call ran and failed. Fails the push job — the images are
+    /// in the registry and the index does not know, and a green check on that
+    /// lets an expired token drift the index arbitrarily far behind.
     Failed {
         /// Logical index package the call named.
         package: String,
         /// Subprocess failure detail.
         error: String,
+    },
+    /// Written to the summary *before* the announce runs and overwritten by
+    /// whichever outcome above it reaches. Surviving in a published summary
+    /// means the run died in between — a reclaimed runner, a cancelled
+    /// backfill — with everything that pushed already live in the registry and
+    /// the index state unknown.
+    ///
+    /// It exists because the alternative encoding for "announce not decided
+    /// yet" is an absent key, and an absent key already means "this mirror
+    /// has no `announce:` block". A killed run must not read as one that never
+    /// opted in. The fix is the same manual catch-up as after a `failed`.
+    Interrupted {
+        /// Logical index package the interrupted call named.
+        package: String,
     },
 }
 

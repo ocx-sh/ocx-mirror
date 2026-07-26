@@ -247,6 +247,9 @@ fn announce_field(announce: Option<&AnnounceOutcome>) -> Option<DiscordEmbedFiel
         AnnounceOutcome::Failed { package, error } => {
             format!("`{STATUS_FAIL}` `{package}` — **announce failed**: {error}")
         }
+        AnnounceOutcome::Interrupted { package } => format!(
+            "`{STATUS_FAIL}` `{package}` — **announce interrupted**: the run was killed mid-call, the index may not know about this push"
+        ),
     };
     Some(DiscordEmbedField {
         name: "Index".to_string(),
@@ -765,9 +768,13 @@ mod tests {
                 package: package.clone(),
             },
             AnnounceOutcome::Failed {
-                package,
+                package: package.clone(),
                 error: "boom".to_string(),
             },
+            // A run killed mid-announce keeps the pre-announce placeholder.
+            // It must not read as any of the four settled states, and above
+            // all not as the absent key below — which means "never opted in".
+            AnnounceOutcome::Interrupted { package },
         ];
 
         let mut rendered: Vec<String> = Vec::new();

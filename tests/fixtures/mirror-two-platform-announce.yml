@@ -1,0 +1,43 @@
+# Mirror spec: two declared platforms plus an index announce block. The shape a
+# rolling-alias test needs — one platform can go red while the other publishes.
+name: bazelisk
+target:
+  registry: ghcr.io
+  repository: ocx-contrib/bazelbuild/bazelisk
+
+source:
+  type: github_release
+  owner: bazelbuild
+  repo: bazelisk
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "bazelisk-linux-amd64$"
+  darwin/arm64:
+    - "bazelisk-darwin-arm64$"
+
+asset_type:
+  type: binary
+  name: bazelisk
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: bazelisk --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+  darwin/arm64:
+    runner: macos-latest
+
+ocx_mirror:
+  release_tag: v0.7.2
+
+announce:
+  package: bazelbuild/bazelisk
+  fork: ocx-contrib/index

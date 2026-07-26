@@ -370,13 +370,16 @@ A run that published nothing makes no call at all.
 
 **Partially published versions:**
 
-When some platforms of a version publish and others fail, only the **exact version tag** `X.Y.Z` is announced. Every rolling alias — `latest`, `X`, `X.Y` — is withheld from the whole run, including from a fully published version that also wrote it.
+A rolling alias — `latest`, `X`, `X.Y` — means "the best build of this line", so it has to resolve to a complete platform set. A version any platform of which failed never gets one: the push job decides every `(version, platform)` pair *before* it pushes anything, and passes `--cascade` only on the last push of a version whose every platform is green and has already landed. The green platforms of a partial version publish under the **exact version tag** `X.Y.Z` alone.
 
-A rolling alias means "the best build of this line", so it has to resolve to a complete platform set; `X.Y.Z` is simply the name of what was published, whatever that turned out to be. `push --cascade` has already moved the aliases in the registry onto the partial version's image index by the time the failure is known — announcing them would tell someone resolving `bazelbuild/bazelisk@1` to install a manifest missing their platform.
+So a partial version announces `X.Y.Z` and nothing else — not because the announce filters aliases, but because the registry never received any. Filtering them at announce time cannot work: `ocx package announce` re-observes every tag the index entry already curates, so an alias an earlier run committed is re-fetched from the registry and re-committed against whatever it points at *now*. Withholding an alias only ever blocks its first addition, and an established mirror already has all of them.
 
-This keeps a bad alias out of the index. It does not retract one an earlier green run already committed: `--tags-file` is additive, and the index entry keeps what it has. Repairing the registry side — not moving a rolling tag until every platform of a version has landed — belongs to `ocx package push`, since the mirror pushes platform by platform and cannot know a later leg will fail.
+Two gaps remain, both narrower than the registry write they replace:
 
-`run-summary.json` keeps reporting the tags the registry actually received, rolling aliases included. It describes the registry; the announce decides what the index learns.
+- A version already published by an earlier run keeps whatever aliases that run wrote. Nothing here retracts them; the repair is a manual `ocx package push --cascade` of a whole version, or a manual `ocx package announce --tags`.
+- A platform the workflow never built a bundle for is invisible to the push job, which sees only the bundles that arrived. A version whose `prepare` leg failed outright can therefore still look whole.
+
+`run-summary.json` reports the tags the registry actually received. `cascade_tags_written` for a partial version holds only `X.Y.Z` because that is all that was written.
 
 **Credentials:**
 
@@ -390,9 +393,18 @@ Without the secret the run still pushes and still reports its results; the annou
 | `announced` | Index pull request opened or updated, with the tags listed under `tags` |
 | `nothing_to_announce` | Configured, but the run produced no new tag |
 | `skipped_no_credential` | Configured, but no `OCX_ANNOUNCE_TOKEN` — a valid configuration for forks and test repos |
-| `failed` | The call ran and failed, with the detail under `error`. The push exit code is unaffected: the packages are already in the registry. |
+| `failed` | The call ran and failed, with the detail under `error` |
+| `interrupted` | The run was killed while the announce was in flight — a reclaimed runner, a cancelled backfill. Whatever pushed is live in the registry and the index state is unknown. |
 
-Whichever of these a run lands on is also rendered as an **Index** row on the run's Discord notification, so a skipped or failed announce cannot look like a successful one.
+`interrupted` is written *before* the announce runs and overwritten by whichever of the others it reaches. Its presence, rather than an absent key, is the signal: an absent key already means "this mirror has no `announce:` block", and a killed run must not read as one that never opted in.
+
+**Exit code and job output:**
+
+`failed` **fails the push job**, on the same reasoning as a red platform: the images are in the registry and the index does not know about them. Left green, an expired `OCX_ANNOUNCE_TOKEN` keeps every nightly passing while the index drifts arbitrarily far behind the registry, and no scheduled-run alert ever fires because nothing failed. `skipped_no_credential` does not fail the job — a mirror without the secret is a valid configuration.
+
+The push job exports the outcome as an `announce` job output, so `notify` and any branch protection can branch on it. Its value is the `announce.status` above, or `unconfigured` when the mirror has no `announce:` block — plus `not_run` when the push step itself was skipped for lack of registry credentials.
+
+Whichever of these a run lands on is also rendered as an **Index** row on the run's Discord notification, so a skipped, failed or interrupted announce cannot look like a successful one.
 
 **Catching up an existing mirror:**
 

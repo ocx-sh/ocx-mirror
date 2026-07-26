@@ -177,6 +177,11 @@ jobs:
 {PUSH_PERMISSIONS}    outputs:
       any_new_green: ${{ steps.summarise.outputs.any_new_green }}
       any_red: ${{ steps.summarise.outputs.any_red }}
+      # `run-summary.json`'s `announce.status`, or `unconfigured` when the
+      # mirror has no `announce:` block. Without it a run that published a
+      # dozen images and failed to announce them is indistinguishable, to
+      # `notify` and to branch protection, from one that announced.
+      announce: ${{ steps.summarise.outputs.announce }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
@@ -227,6 +232,9 @@ jobs:
         run: |
           echo "any_new_green=false" >> "${GITHUB_OUTPUT}"
           echo "any_red=false" >> "${GITHUB_OUTPUT}"
+          # The push step never ran, so no announce was attempted — distinct
+          # from `unconfigured`, which claims the mirror never opted in.
+          echo "announce=not_run" >> "${GITHUB_OUTPUT}"
       # `if: always()` keeps the job outputs flowing to `notify` even when the
       # push step exits non-zero (full-red run). Without it, a failed push job
       # leaves the outputs empty and the notify gate evaluates to false.
@@ -237,6 +245,10 @@ jobs:
           if [ -f run-summary.json ]; then
             echo "any_new_green=$(jq -r '.any_new_green' run-summary.json)" >> "${GITHUB_OUTPUT}"
             echo "any_red=$(jq -r '.any_red' run-summary.json)" >> "${GITHUB_OUTPUT}"
+            # An absent `announce` key means the mirror has no `announce:`
+            # block. `interrupted` means the run died mid-call and the summary
+            # still carries the pre-announce placeholder.
+            echo "announce=$(jq -r '.announce.status // "unconfigured"' run-summary.json)" >> "${GITHUB_OUTPUT}"
           fi
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
