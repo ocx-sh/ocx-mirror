@@ -192,11 +192,17 @@ impl Push {
             let mut all_skipped_existing = platforms_failed.is_empty();
             let target_ref = format!("{}:{}", spec.target.repository, version);
 
-            for (index, (platform_str, bundle_path)) in ready.iter().enumerate() {
-                // The rolling aliases ride on the LAST push of the version, and
-                // only while nothing about it has failed — neither a test leg
-                // in phase 1 nor an earlier push in this loop.
-                let cascade = platforms_failed.is_empty() && index + 1 == ready.len();
+            for (platform_str, bundle_path) in &ready {
+                // EVERY push of a whole version cascades. A cascade push merges
+                // only its OWN platform into each rolling tag — `client.rs`
+                // `merge_platform_into_index` retains every other platform's
+                // existing entry — so giving `--cascade` to one push per version
+                // leaves the other platforms stranded on the exact version tag,
+                // and each alias keeps whatever the PREVIOUS version left there.
+                // The condition is only about failure: nothing about this
+                // version may have gone wrong, neither a test leg in phase 1 nor
+                // an earlier push in this loop.
+                let cascade = platforms_failed.is_empty();
 
                 match invoke_push(&spec, platform_str, &target_ref, bundle_path, cascade).await {
                     Ok(report) => {
@@ -229,9 +235,21 @@ impl Push {
             if !platforms_pushed.is_empty() && !cascade_tags.iter().any(|t| t == version) {
                 cascade_tags.insert(0, version.clone());
             }
-            // Order-preserving full dedup: each platform's push report
-            // re-lists the same cascade hierarchy, and `Vec::dedup` only
-            // collapses *consecutive* duplicates.
+            // Order-preserving full dedup: every platform of a whole version
+            // cascades, so every one of their reports re-lists the same
+            // hierarchy, and `Vec::dedup` only collapses *consecutive*
+            // duplicates.
+            //
+            // The accumulation is therefore the UNION over the version's
+            // platforms — "at least one platform wrote this tag", not "this tag
+            // carries every platform". The two differ only when
+            // `resolve_cascade_tags`, which IS platform-aware, stops one
+            // platform's chain early on a blocker the others do not have. The
+            // union is the right set to announce even then: the tag exists in
+            // the registry, and `ocx package announce` re-fetches each one and
+            // records the platforms it actually holds. Reporting the
+            // intersection instead would leave a live registry tag unannounced,
+            // which is the exact drift the announce exists to prevent.
             {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 cascade_tags.retain(|t| seen.insert(t.clone()));
@@ -868,8 +886,9 @@ const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
 ///
 /// This announces exactly what the registry received, and nothing is filtered
 /// out here. It can be, because a rolling alias can no longer reach a partial
-/// version in the first place: the phase-2 loop in [`Push::execute`] withholds
-/// `--cascade` from every push of a version any part of which failed, so a
+/// version in the first place: the phase-2 loop in [`Push::execute`] gives
+/// `--cascade` to every push of a whole version and to none of a version any
+/// part of which failed, so a
 /// `Partial` version's `cascade_tags_written` only ever holds its exact
 /// `X.Y.Z`. Filtering aliases *here* was a protection that could not work —
 /// `--tags-file` is additive, and `ocx package announce` re-observes every tag
@@ -2829,13 +2848,27 @@ esac
         assert_eq!(val["announce"]["tags"][0], "3.7.0", "got: {val}");
     }
 
-    /// A stand-in `ocx` for the whole-pipeline tests: logs every argv, answers
-    /// a push with a `PushReport` whose cascade tags depend on whether the
-    /// invocation actually carried `--cascade`, and exits `announce_exit` on
-    /// `package announce`.
+    /// A stand-in `ocx` for the whole-pipeline tests: logs every argv, exits
+    /// `announce_exit` on `package announce`, and — crucially — models what a
+    /// push does to the *registry* rather than just answering with a canned
+    /// tag list.
+    ///
+    /// The modelled semantics are `client.rs::merge_platform_into_index`: every
+    /// push merges its own platform into the exact version tag's index, and a
+    /// `--cascade` push additionally merges that **same single platform** into
+    /// each rolling tag, replacing only its own entry (`retain(|e| e.platform
+    /// != platform)`) and keeping every other platform's entry exactly as it
+    /// found it. A canned list that answered the same aliases for any
+    /// `--cascade` invocation could not observe that only one platform ever
+    /// reached them.
+    ///
+    /// State lands in `{dir}/tagstate/{tag}`, one sorted `platform=version`
+    /// line per platform the tag's index carries — read back with [`tag_index`].
     #[cfg(unix)]
     fn fake_ocx_pipeline(dir: &Path, log: &Path, announce_exit: u8) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
+        let state = dir.join("tagstate");
+        std::fs::create_dir_all(&state).unwrap();
         let script = dir.join("fake-ocx");
         std::fs::write(
             &script,
@@ -2844,16 +2877,59 @@ esac
 printf '%s\n' "$*" >> '{log}'
 case "$*" in
   *"package announce"*) exit {announce_exit} ;;
-  *--cascade*) echo '{{"cascade_tags_written":["1.20","1","latest"],"status":"pushed"}}' ;;
-  *) echo '{{"cascade_tags_written":[],"status":"pushed"}}' ;;
+esac
+
+# The push carries `-p PLATFORM` and `-i REPOSITORY:VERSION`.
+platform=''; ref=''; prev=''
+for a in "$@"; do
+  case "$prev" in
+    -p) platform="$a" ;;
+    -i) ref="$a" ;;
+  esac
+  prev="$a"
+done
+version="${{ref##*:}}"
+minor="${{version%.*}}"
+major="${{minor%.*}}"
+
+# merge_platform_into_index: read, drop THIS platform's entry, append it
+# back pointing at this version, keep every other platform's entry.
+merge() {{
+  f='{state}'/"$1"
+  [ -f "$f" ] || : > "$f"
+  grep -v "^$platform=" "$f" > "$f.tmp"
+  echo "$platform=$version" >> "$f.tmp"
+  sort -o "$f" "$f.tmp"
+  rm -f "$f.tmp"
+}}
+
+merge "$version"
+case "$*" in
+  *--cascade*)
+    for t in "$minor" "$major" latest; do merge "$t"; done
+    echo '{{"cascade_tags_written":["'"$minor"'","'"$major"'","latest"],"status":"pushed"}}'
+    ;;
+  *)
+    echo '{{"cascade_tags_written":[],"status":"pushed"}}'
+    ;;
 esac
 "#,
                 log = log.display(),
+                state = state.display(),
             ),
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         script
+    }
+
+    /// The `platform=version` entries the stand-in registry's `tag` index
+    /// carries, or empty when the tag was never written.
+    #[cfg(unix)]
+    fn tag_index(dir: &Path, tag: &str) -> Vec<String> {
+        std::fs::read_to_string(dir.join("tagstate").join(tag))
+            .map(|body| body.lines().map(str::to_string).collect())
+            .unwrap_or_default()
     }
 
     /// Every logged `package push` argv that targets `repo:version`.
@@ -2926,6 +3002,17 @@ esac
         let log = dir.path().join("invocations.log");
         let script = fake_ocx_pipeline(dir.path(), &log, 0);
 
+        // An established mirror: `latest` and `1` already resolve to 1.19.0 on
+        // both platforms. This is what a cascade merges INTO, and what it
+        // leaves behind for any platform it does not carry.
+        for tag in ["latest", "1"] {
+            std::fs::write(
+                dir.path().join("tagstate").join(tag),
+                "darwin/arm64=1.19.0\nlinux/amd64=1.19.0\n",
+            )
+            .unwrap();
+        }
+
         for (version, slug, platform, green) in [
             ("1.20.0", "linux_amd64", "linux/amd64", true),
             ("1.20.0", "darwin_arm64", "darwin/arm64", true),
@@ -2962,19 +3049,39 @@ esac
             "a version with a red platform must never cascade: {partial:?}",
         );
 
-        // 1.20.0: whole, so it does cascade — exactly once, on the last push.
+        // 1.20.0 is whole, so what the REGISTRY ends up holding is the claim:
+        // every rolling alias must resolve to 1.20.0 on BOTH platforms. A
+        // cascade push merges only its own platform, so cascading on one push
+        // per version leaves each alias carrying that platform at 1.20.0 and
+        // every other one still at 1.19.0 — a mixed-version index that freezes
+        // half the users on the old release, on this run and every one after.
+        let both_at_1_20_0 = vec!["darwin/arm64=1.20.0".to_string(), "linux/amd64=1.20.0".to_string()];
+        for tag in ["1.20", "1", "latest"] {
+            assert_eq!(
+                tag_index(dir.path(), tag),
+                both_at_1_20_0,
+                "rolling tag `{tag}` must carry every platform of the whole version",
+            );
+        }
+        assert_eq!(tag_index(dir.path(), "1.20.0"), both_at_1_20_0, "exact version tag");
+
+        // The argv that produced it: every push of a whole version cascades.
         let whole = pushes_for(&invocations, "1.20.0");
         assert_eq!(whole.len(), 2, "both platforms push: {whole:?}");
-        let cascading: Vec<usize> = whole
-            .iter()
-            .enumerate()
-            .filter(|(_, argv)| argv.contains("--cascade"))
-            .map(|(i, _)| i)
-            .collect();
+        let cascading: Vec<&String> = whole.iter().filter(|argv| argv.contains("--cascade")).collect();
         assert_eq!(
-            cascading,
-            vec![1],
-            "the alias must ride on the last push of a whole version: {whole:?}",
+            cascading.len(),
+            whole.len(),
+            "every push of a whole version must cascade: {whole:?}",
+        );
+
+        // 1.21.0 is partial: its green platform reaches the exact version tag
+        // and nothing else — no alias, and no `1.21` conjured from a fresh
+        // single-platform index.
+        assert_eq!(tag_index(dir.path(), "1.21.0"), vec!["linux/amd64=1.21.0".to_string()]);
+        assert!(
+            tag_index(dir.path(), "1.21").is_empty(),
+            "a partial version writes no `1.21`"
         );
 
         // And the summary reports the registry truthfully: the partial version
@@ -2986,6 +3093,22 @@ esac
             .iter()
             .find(|v| v["version"] == "1.21.0")
             .unwrap();
+        // The whole version's `cascade_tags_written` is the UNION over its
+        // platforms, and the dedup is what keeps it a set: both platforms now
+        // cascade, so both reports re-list the same hierarchy and an
+        // un-deduped accumulation would read `1.20 1 latest 1.20 1 latest`.
+        let whole_version = val["versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["version"] == "1.20.0")
+            .unwrap();
+        assert_eq!(
+            whole_version["cascade_tags_written"],
+            serde_json::json!(["1.20.0", "1.20", "1", "latest"]),
+            "got: {whole_version}",
+        );
+
         assert_eq!(partial_version["status"], "partial", "got: {partial_version}");
         assert_eq!(
             partial_version["cascade_tags_written"],

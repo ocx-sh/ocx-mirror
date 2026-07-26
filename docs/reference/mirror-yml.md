@@ -370,14 +370,17 @@ A run that published nothing makes no call at all.
 
 **Partially published versions:**
 
-A rolling alias — `latest`, `X`, `X.Y` — means "the best build of this line", so it has to resolve to a complete platform set. A version any platform of which failed never gets one: the push job decides every `(version, platform)` pair *before* it pushes anything, and passes `--cascade` only on the last push of a version whose every platform is green and has already landed. The green platforms of a partial version publish under the **exact version tag** `X.Y.Z` alone.
+A rolling alias — `latest`, `X`, `X.Y` — means "the best build of this line", so it has to resolve to a complete platform set. A version any platform of which failed never gets one: the push job decides every `(version, platform)` pair *before* it pushes anything, and passes `--cascade` only once every platform of that version is green. The green platforms of a partial version publish under the **exact version tag** `X.Y.Z` alone.
+
+When the version is whole, **every** one of its pushes carries `--cascade` — not just the last. A cascade push merges its own platform into each rolling tag and leaves every other platform's entry on that tag exactly as it found it, so cascading once per version would strand the remaining platforms on `X.Y.Z` and leave each alias still pointing at the *previous* version for them. `latest` would become a mixed-version index and those platforms would never advance.
 
 So a partial version announces `X.Y.Z` and nothing else — not because the announce filters aliases, but because the registry never received any. Filtering them at announce time cannot work: `ocx package announce` re-observes every tag the index entry already curates, so an alias an earlier run committed is re-fetched from the registry and re-committed against whatever it points at *now*. Withholding an alias only ever blocks its first addition, and an established mirror already has all of them.
 
-Two gaps remain, both narrower than the registry write they replace:
+Three gaps remain, all narrower than the registry write they replace:
 
 - A version already published by an earlier run keeps whatever aliases that run wrote. Nothing here retracts them; the repair is a manual `ocx package push --cascade` of a whole version, or a manual `ocx package announce --tags`.
 - A platform the workflow never built a bundle for is invisible to the push job, which sees only the bundles that arrived. A version whose `prepare` leg failed outright can therefore still look whole.
+- A version decided whole whose *push* then fails part-way leaves the aliases carrying the platforms that landed before the failure, and the previous version for the rest. The remaining platforms are withheld from cascading the moment the failure is seen, but a registry write already made cannot be taken back. Re-running the version repairs it.
 
 `run-summary.json` reports the tags the registry actually received. `cascade_tags_written` for a partial version holds only `X.Y.Z` because that is all that was written.
 
