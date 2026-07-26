@@ -18,7 +18,7 @@ use crate::discord::{
     DiscordWebhookPayload,
 };
 use crate::error::MirrorError;
-use crate::run_summary::{RunSummary, VersionStatus, VersionSummary};
+use crate::run_summary::{AnnounceOutcome, RunSummary, VersionStatus, VersionSummary};
 
 /// `ocx-mirror package pipeline notify` subcommand.
 ///
@@ -201,18 +201,60 @@ fn build_version_embed(summary: &RunSummary, version: &VersionSummary, decorate:
         description: None,
         author: decorate.then(|| build_author(summary)).flatten(),
         thumbnail: decorate.then(|| build_thumbnail(summary.logo_url.as_deref())).flatten(),
-        fields: vec![
-            DiscordEmbedField {
+        fields: [
+            Some(DiscordEmbedField {
                 name: "Platform".to_string(),
                 value: clip_to_field_limit(&platforms.join("\n")),
                 inline: true,
-            },
-            DiscordEmbedField {
+            }),
+            Some(DiscordEmbedField {
                 name: "Status".to_string(),
                 value: clip_to_field_limit(&statuses.join("\n")),
                 inline: true,
-            },
-        ],
+            }),
+            // Once per run, on the first emitted embed.
+            decorate.then(|| announce_field(summary.announce.as_ref())).flatten(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
+    })
+}
+
+/// Render the run's index-announce outcome as an embed field.
+///
+/// The announce is what makes a published version findable. Without this row a
+/// failed or skipped announce is indistinguishable from a successful one: the
+/// push is green either way, the embed says "published" either way, and the
+/// only other trace is a `::warning` in a step log plus a JSON field in an
+/// artifact that expires in a day. That is exactly the false green this
+/// pipeline exists to prevent, so the outcome goes where the maintainer
+/// actually looks.
+///
+/// Rendered for every state, not just the bad ones: an absent row would be
+/// ambiguous between "announced fine" and "this mirror predates the field".
+fn announce_field(announce: Option<&AnnounceOutcome>) -> Option<DiscordEmbedField> {
+    let value = match announce? {
+        AnnounceOutcome::Announced { package, tags } => {
+            format!("`{STATUS_SUCCESS}` `{package}` — {} tag(s) announced", tags.len())
+        }
+        AnnounceOutcome::NothingToAnnounce { package } => {
+            format!("`{STATUS_EXCLUDED}` `{package}` — nothing new to announce")
+        }
+        AnnounceOutcome::SkippedNoCredential { package } => format!(
+            "`{STATUS_MISSING}` `{package}` — **not announced**: no `OCX_ANNOUNCE_TOKEN`, the index does not know about this run"
+        ),
+        AnnounceOutcome::Failed { package, error } => {
+            format!("`{STATUS_FAIL}` `{package}` — **announce failed**: {error}")
+        }
+        AnnounceOutcome::Interrupted { package } => format!(
+            "`{STATUS_FAIL}` `{package}` — **announce interrupted**: the run was killed mid-call, the index may not know about this push"
+        ),
+    };
+    Some(DiscordEmbedField {
+        name: "Index".to_string(),
+        value: clip_to_field_limit(&value),
+        inline: false,
     })
 }
 
@@ -393,6 +435,7 @@ mod tests {
             source_url: None,
             logo_url: None,
             versions,
+            announce: None,
             any_red,
             any_new_green,
         }
@@ -663,6 +706,123 @@ mod tests {
         let status = &col_status(only_embed(&messages)).value;
         assert!(status.contains("`🔒`"), "bare 🔒 chip expected: {status}");
         assert!(status.ends_with("`🔒`"), "no trailing reason text: {status}");
+    }
+
+    // ── Index-announce row ─────────────────────────────────────────────────
+
+    fn announce_row(embed: &DiscordEmbed) -> &DiscordEmbedField {
+        embed
+            .fields
+            .iter()
+            .find(|f| f.name == "Index")
+            .unwrap_or_else(|| panic!("embed carries no Index row: {:?}", embed.fields))
+    }
+
+    #[test]
+    fn a_failed_announce_does_not_render_as_a_successful_one() {
+        // Everything published; OCX_ANNOUNCE_TOKEN has expired. The push exits
+        // 0 and the job is green, so without this row Discord posts an embed
+        // byte-identical to a run that announced — while the index never
+        // learned about the release and the only other evidence is a
+        // `::warning` and an artifact that expires in a day.
+        let mut summary = make_all_green_summary();
+
+        summary.announce = Some(AnnounceOutcome::Announced {
+            package: "bazelbuild/bazelisk".to_string(),
+            tags: vec!["1.21.0".to_string(), "1.21".to_string()],
+        });
+        let announced = build_messages(&summary, None);
+
+        summary.announce = Some(AnnounceOutcome::Failed {
+            package: "bazelbuild/bazelisk".to_string(),
+            error: "ocx package announce exited 70: bad credentials".to_string(),
+        });
+        let failed = build_messages(&summary, None);
+
+        assert_ne!(
+            announce_row(only_embed(&announced)).value,
+            announce_row(only_embed(&failed)).value,
+            "a failed announce must be distinguishable from a successful one",
+        );
+
+        let row = announce_row(only_embed(&failed));
+        assert!(row.value.contains("announce failed"), "got: {}", row.value);
+        assert!(row.value.contains("bad credentials"), "got: {}", row.value);
+        assert!(!row.inline, "the Index row must not join the two-column layout");
+    }
+
+    #[test]
+    fn every_announce_state_reads_differently_and_absent_means_unconfigured() {
+        let mut summary = make_all_green_summary();
+        let package = "bazelbuild/bazelisk".to_string();
+
+        let states = [
+            AnnounceOutcome::Announced {
+                package: package.clone(),
+                tags: vec!["1.21.0".to_string()],
+            },
+            AnnounceOutcome::NothingToAnnounce {
+                package: package.clone(),
+            },
+            AnnounceOutcome::SkippedNoCredential {
+                package: package.clone(),
+            },
+            AnnounceOutcome::Failed {
+                package: package.clone(),
+                error: "boom".to_string(),
+            },
+            // A run killed mid-announce keeps the pre-announce placeholder.
+            // It must not read as any of the four settled states, and above
+            // all not as the absent key below — which means "never opted in".
+            AnnounceOutcome::Interrupted { package },
+        ];
+
+        let mut rendered: Vec<String> = Vec::new();
+        for state in states {
+            summary.announce = Some(state);
+            let messages = build_messages(&summary, None);
+            rendered.push(announce_row(only_embed(&messages)).value.clone());
+        }
+        rendered.sort();
+        let distinct = rendered.len();
+        rendered.dedup();
+        assert_eq!(rendered.len(), distinct, "every announce state must read differently");
+
+        // No `announce:` block at all → no row, and the two-column layout is
+        // untouched for every mirror that never opted in.
+        summary.announce = None;
+        let unconfigured = build_messages(&summary, None);
+        let names: Vec<&str> = only_embed(&unconfigured)
+            .fields
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["Platform", "Status"]);
+    }
+
+    #[test]
+    fn the_announce_row_is_attached_once_per_run() {
+        // One announce per run, so one row — on the first emitted embed, not
+        // repeated down a multi-version backfill.
+        let mut summary = make_all_green_summary();
+        let mut second = version(VersionStatus::Published, "3.8.0");
+        second.platforms_pushed = vec!["linux/amd64".to_string()];
+        summary.versions.push(second);
+        summary.announce = Some(AnnounceOutcome::SkippedNoCredential {
+            package: "bazelbuild/bazelisk".to_string(),
+        });
+
+        let messages = build_messages(&summary, None);
+        assert_eq!(messages.len(), 2, "one message per version");
+        assert!(
+            announce_row(&messages[0].embeds[0]).value.contains("not announced"),
+            "the first embed carries the row",
+        );
+        assert!(
+            !messages[1].embeds[0].fields.iter().any(|f| f.name == "Index"),
+            "later embeds must not repeat it: {:?}",
+            messages[1].embeds[0].fields,
+        );
     }
 
     // ── In-message mention ─────────────────────────────────────────────────

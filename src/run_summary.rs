@@ -94,6 +94,64 @@ pub struct VersionSummary {
     pub platforms_excluded: Vec<ExcludedPlatform>,
 }
 
+/// Outcome of the single index announce a push run makes.
+///
+/// Absent from the summary only when the spec carries no `announce:` block.
+/// Present otherwise, and every state is deliberately distinguishable: a run
+/// that pushed and then skipped announcing must not read the same as one that
+/// announced, and a configured mirror with nothing new must not read the same
+/// as one that was never configured.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum AnnounceOutcome {
+    /// `ocx package announce` succeeded — the index PR was opened or updated.
+    Announced {
+        /// Logical index package (`<namespace>/<package>`).
+        package: String,
+        /// Tags handed to `--tags-file`, in run order.
+        tags: Vec<String>,
+    },
+    /// `announce:` is configured but the run produced no new tag, so no call
+    /// was made. Steady state for a mirror that is up to date — and the state
+    /// an owner sees forever after adding `announce:` to an already-complete
+    /// mirror, because nothing new will ever publish to trigger it. The
+    /// catch-up is manual: `ocx package announce --package <p> --tags <set>`.
+    NothingToAnnounce {
+        /// Logical index package that would have been announced.
+        package: String,
+    },
+    /// `announce:` is configured but `OCX_ANNOUNCE_TOKEN` was absent, so no
+    /// call was made. A valid configuration (forks and test repos run this
+    /// way) — the push results above still stand.
+    SkippedNoCredential {
+        /// Logical index package that would have been announced.
+        package: String,
+    },
+    /// The announce call ran and failed. Fails the push job — the images are
+    /// in the registry and the index does not know, and a green check on that
+    /// lets an expired token drift the index arbitrarily far behind.
+    Failed {
+        /// Logical index package the call named.
+        package: String,
+        /// Subprocess failure detail.
+        error: String,
+    },
+    /// Written to the summary *before* the announce runs and overwritten by
+    /// whichever outcome above it reaches. Surviving in a published summary
+    /// means the run died in between — a reclaimed runner, a cancelled
+    /// backfill — with everything that pushed already live in the registry and
+    /// the index state unknown.
+    ///
+    /// It exists because the alternative encoding for "announce not decided
+    /// yet" is an absent key, and an absent key already means "this mirror
+    /// has no `announce:` block". A killed run must not read as one that never
+    /// opted in. The fix is the same manual catch-up as after a `failed`.
+    Interrupted {
+        /// Logical index package the interrupted call named.
+        package: String,
+    },
+}
+
 /// Top-level `run-summary.json` schema (schema_version 1).
 ///
 /// Produced by `ocx-mirror package pipeline push`, consumed by `ocx-mirror package pipeline notify`.
@@ -133,6 +191,11 @@ pub struct RunSummary {
     pub logo_url: Option<String>,
     /// Per-version outcomes, oldest first.
     pub versions: Vec<VersionSummary>,
+    /// Outcome of this run's index announce. Absent only when the spec has no
+    /// `announce:` block — a configured mirror with nothing new records
+    /// `nothing_to_announce` rather than going quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announce: Option<AnnounceOutcome>,
     /// `true` when any version status is `failed` or `partial` with test failures.
     pub any_red: bool,
     /// `true` when at least one version was pushed (status `published` or `partial`).
@@ -172,6 +235,7 @@ mod tests {
                 test_failures: vec![],
                 platforms_excluded: vec![],
             }],
+            announce: None,
             any_red: false,
             any_new_green: true,
         }
@@ -212,6 +276,7 @@ mod tests {
                 }],
                 platforms_excluded: vec![],
             }],
+            announce: None,
             any_red: true,
             any_new_green: true,
         }
