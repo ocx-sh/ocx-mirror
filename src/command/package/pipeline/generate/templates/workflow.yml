@@ -22,14 +22,14 @@ concurrency:
 jobs:
   discover:
     runs-on: ubuntu-latest
-    outputs:
+{DISCOVER_PERMISSIONS}    outputs:
       has_new: ${{ steps.plan.outputs.has_new }}
       versions: ${{ steps.plan.outputs.versions }}
       target: ${{ steps.plan.outputs.target }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
-      - id: plan
+{DISCOVER_AUTH_STEPS}      - id: plan
         name: Plan versions
         # `GITHUB_TOKEN` is forwarded to the in-process octocrab client so
         # release-listing runs authenticated (5 000 reqs/h) instead of the
