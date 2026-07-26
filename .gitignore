@@ -44,3 +44,6 @@ venv/
 *.log
 *.pid
 *.sock
+
+# Agent worktrees (see workflow-swarm.md) — never committed.
+.agents/

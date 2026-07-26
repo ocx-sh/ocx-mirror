@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'announce/**']
   # release.yml reuses this workflow as its quality gate on the tag.
   workflow_call: {}
 
