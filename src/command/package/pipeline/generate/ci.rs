@@ -95,6 +95,10 @@ impl GenerateCi {
         policy_check_notify(&spec)?;
         policy_check_no_containers(&spec)?;
 
+        if let Some(warning) = ghcr_owner_warning(&spec, std::env::var("GITHUB_REPOSITORY").ok().as_deref()) {
+            eprintln!("warning: {warning}");
+        }
+
         // Phase 4: render all generated files.
         let repo_root = self.spec.parent().unwrap_or(Path::new("."));
         let files = render(&spec, repo_root)?;
@@ -331,14 +335,72 @@ const GHCR_REGISTRY: &str = "ghcr.io";
 ///
 /// GHCR needs `packages: write` on the run's `GITHUB_TOKEN` to accept a push.
 /// Other registries authenticate with an org secret and need no extra token
-/// scope, so the block is omitted entirely there. Naming any permission
-/// narrows the whole token, so `contents: read` is restated for the checkout.
+/// scope, so the block is omitted entirely there and the job keeps the
+/// repository's default token scopes.
+///
+/// Naming *any* permission sets every unnamed scope to `none`, so this block is
+/// the whole token for that job and every step in it has to be paid for:
+///
+/// | Scope | Step that needs it |
+/// |---|---|
+/// | `contents: read` | `actions/checkout`, `setup-ocx` |
+/// | `packages: write` | `docker login ghcr.io` + `ocx package push` |
+/// | `actions: read` | `gh api …/actions/runs/N/jobs` resolving the push job URL |
+/// | `checks: write` | `publish-unit-test-result-action`'s check run |
+/// | `pull-requests: write` | the same action's pull-request comment |
+///
+/// `actions: read` is the one that fails silently: the `gh api` call ends in
+/// `| head -n1 || true`, so a 403 leaves `OCX_MIRROR_JOB_URL` empty and every
+/// Discord row quietly loses its link. The two `publish-unit-test-result-action`
+/// scopes are the pairing this repository's own `verify.yml` already uses with
+/// the same pinned action; without them that step 403s under `if: always()` and
+/// reds the push job on every run that published perfectly.
+///
+/// `actions/upload-artifact` and `actions/download-artifact` authenticate with
+/// the runtime token for same-run artifacts, not with `GITHUB_TOKEN`, so they
+/// need no scope of their own. The announce subprocess uses `OCX_ANNOUNCE_TOKEN`
+/// — a separate secret, not this token.
+const GHCR_PUSH_PERMISSIONS: &str = "    permissions:\n      contents: read\n      packages: write\n      actions: read\n      checks: write\n      pull-requests: write\n";
+
 fn render_push_permissions(spec: &MirrorSpec) -> &'static str {
     if spec.target.registry == GHCR_REGISTRY {
-        "    permissions:\n      contents: read\n      packages: write\n"
+        GHCR_PUSH_PERMISSIONS
     } else {
         ""
     }
+}
+
+/// Best-effort warning that a `ghcr.io` target sits outside the publishing
+/// repository's owner.
+///
+/// `GITHUB_TOKEN` authorises packages owned by *this repository's* owner only.
+/// `docker login ghcr.io` succeeds either way — login does not authorise — so a
+/// cross-owner target first surfaces as `denied: installation not allowed to
+/// Create organization package` in the push job, and the GHCR credential probe
+/// is a constant `have=true` with no honest skip branch to take.
+///
+/// `publishing_repo` is `GITHUB_REPOSITORY` (`owner/repo`). It is set on every
+/// runner — the drift guard runs `generate ci --check` there — and absent when a
+/// maintainer generates locally, where the owner is simply unknown and the
+/// check yields nothing. Warn only: generate cannot always know the remote, and
+/// a cross-owner push with a PAT is a legitimate (if unsupported) setup.
+fn ghcr_owner_warning(spec: &MirrorSpec, publishing_repo: Option<&str>) -> Option<String> {
+    if spec.target.registry != GHCR_REGISTRY {
+        return None;
+    }
+    let publishing_owner = publishing_repo?.split('/').next()?.trim();
+    let target_owner = spec.target.repository.split('/').next()?.trim();
+    if publishing_owner.is_empty() || target_owner.is_empty() || publishing_owner.eq_ignore_ascii_case(target_owner) {
+        return None;
+    }
+    Some(format!(
+        "target {}/{} is owned by `{target_owner}` but this repository belongs to \
+         `{publishing_owner}` — GITHUB_TOKEN only authorises packages under its own owner, \
+         so the push will fail with `denied: installation not allowed to Create organization \
+         package`. Publish under `{publishing_owner}`, or log in with a PAT that can write \
+         `{target_owner}` packages.",
+        GHCR_REGISTRY, spec.target.repository,
+    ))
 }
 
 /// Credential-detection + registry-login steps for the push job.
@@ -1875,7 +1937,43 @@ announce:
 "#;
 
     #[test]
-    fn ghcr_target_logs_in_with_github_token_and_declares_packages_write() {
+    fn ghcr_push_job_grants_every_scope_its_steps_need() {
+        // Declaring ANY permission sets every unnamed scope to `none`, so this
+        // block is the whole token for the push job and a missing line is a
+        // revoked capability, not a default. Asserted as one exact block —
+        // checking only `packages: write` would have passed against the version
+        // that silently revoked the other three.
+        //
+        // Per step:
+        //   contents: read       — actions/checkout, setup-ocx
+        //   packages: write      — docker login ghcr.io + `ocx package push`
+        //   actions: read        — `gh api …/runs/N/jobs` for OCX_MIRROR_JOB_URL,
+        //                          whose `|| true` swallows a 403 and silently
+        //                          drops the link from every Discord row
+        //   checks: write        — publish-unit-test-result-action's check run
+        //   pull-requests: write — the same action's PR comment; without the
+        //                          pair it 403s under `if: always()` and reds
+        //                          the job on a perfectly successful publish
+        // download-artifact / upload-artifact use the runtime token for
+        // same-run artifacts and need no scope here; the announce authenticates
+        // with OCX_ANNOUNCE_TOKEN, not with GITHUB_TOKEN.
+        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+
+        assert!(
+            workflow.contains(
+                "    permissions:\n\
+                 \x20     contents: read\n\
+                 \x20     packages: write\n\
+                 \x20     actions: read\n\
+                 \x20     checks: write\n\
+                 \x20     pull-requests: write\n"
+            ),
+            "ghcr.io push job must grant exactly the scopes its steps need, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn ghcr_target_logs_in_with_github_token() {
         let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
 
         assert!(
@@ -1964,6 +2062,48 @@ announce:
                 "unsubstituted placeholder in:\n{workflow}"
             );
         }
+    }
+
+    #[test]
+    fn a_cross_owner_ghcr_target_is_warned_about_at_generate_time() {
+        // GITHUB_TOKEN authorises packages under its own repository's owner.
+        // `docker login ghcr.io` succeeds regardless — login does not
+        // authorise — and the GHCR credential probe is a constant `have=true`,
+        // so a cross-owner target has no honest skip: the push just reds with
+        // `denied: installation not allowed to Create organization package`.
+        let spec = spec_from_yaml(GHCR_SPEC); // target owner: ocx-contrib
+        assert!(ghcr_owner_warning(&spec, Some("ocx-contrib/mirror-bazelisk")).is_none());
+        assert!(
+            ghcr_owner_warning(&spec, Some("OCX-Contrib/mirror-bazelisk")).is_none(),
+            "GHCR owners are case-insensitive"
+        );
+        assert!(
+            ghcr_owner_warning(&spec, None).is_none(),
+            "generate cannot always know the remote — unknown owner must stay quiet"
+        );
+        assert!(
+            ghcr_owner_warning(&spec_from_yaml(SHFMT_SPEC), Some("someone-else/x")).is_none(),
+            "a non-GHCR target authenticates with an org secret, not with repo ownership"
+        );
+
+        let warning =
+            ghcr_owner_warning(&spec, Some("someone-else/mirror-bazelisk")).expect("cross-owner target must warn");
+        assert!(warning.contains("ocx-contrib"), "got: {warning}");
+        assert!(warning.contains("someone-else"), "got: {warning}");
+    }
+
+    #[test]
+    fn the_run_summary_artifact_carries_the_announce_tags_file() {
+        // The tags file is the exact `--tags-file` the index call received.
+        // Uploading only run-summary.json leaves nothing to reconstruct a
+        // failed announce from.
+        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+
+        assert!(
+            workflow
+                .contains("          path: |\n            run-summary.json\n            run-summary.announce-tags\n"),
+            "the run-summary artifact must carry the announce tags file, got:\n{workflow}"
+        );
     }
 
     #[test]

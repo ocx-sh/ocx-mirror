@@ -39,7 +39,20 @@ Path segments are separated by `/` and are never flattened into a hyphen: `ocx-c
 
 The physical path and the [logical index package](#announce) are related by convention, not by a rule: a mirror publishing to `ghcr.io/ocx-contrib/bazelbuild/bazelisk` announces the logical package `bazelbuild/bazelisk`. Spell both out.
 
-When `registry` is `ghcr.io`, generated workflows log in with the run's own `GITHUB_TOKEN` and `github.actor`, and the push job declares `permissions: packages: write`. The shared `OCX_MIRROR_REGISTRY_USER` / `OCX_MIRROR_REGISTRY_TOKEN` organisation secrets carry `ocx.sh` credentials and are not read on that path. A GHCR push therefore never depends on a secret being configured — `GITHUB_TOKEN` is present on every run.
+When `registry` is `ghcr.io`, generated workflows log in with the run's own `GITHUB_TOKEN` and `github.actor`, and the push job declares an explicit `permissions:` block. The shared `OCX_MIRROR_REGISTRY_USER` / `OCX_MIRROR_REGISTRY_TOKEN` organisation secrets carry `ocx.sh` credentials and are not read on that path.
+
+**The first path segment must be the mirror repository's own owner.** `GITHUB_TOKEN` authorises packages owned by the repository it runs in; `docker login ghcr.io` succeeds regardless — logging in is not authorisation — and the push then fails with `denied: installation not allowed to Create organization package`. So a mirror in `ocx-contrib/mirror-bazelisk` can publish `ghcr.io/ocx-contrib/…` without any secret being configured, and cannot publish under another owner without one. `generate ci` warns when it can see the mismatch (it reads `GITHUB_REPOSITORY`, so on a runner always, and locally only when that variable is set).
+
+Declaring any permission sets every unnamed scope to `none`, so the generated block names every scope the push job's steps need:
+
+```yaml
+    permissions:
+      contents: read          # checkout, setup-ocx
+      packages: write         # docker login + ocx package push
+      actions: read           # resolving the job URL for the notification links
+      checks: write           # test-result check run
+      pull-requests: write    # test-result pull-request comment
+```
 
 ## `assets` {#assets}
 
@@ -355,6 +368,16 @@ Tags are handed over with `--tags-file`, which **adds** to the already-curated i
 
 A run that published nothing makes no call at all.
 
+**Partially published versions:**
+
+When some platforms of a version publish and others fail, only the **exact version tag** `X.Y.Z` is announced. Every rolling alias — `latest`, `X`, `X.Y` — is withheld from the whole run, including from a fully published version that also wrote it.
+
+A rolling alias means "the best build of this line", so it has to resolve to a complete platform set; `X.Y.Z` is simply the name of what was published, whatever that turned out to be. `push --cascade` has already moved the aliases in the registry onto the partial version's image index by the time the failure is known — announcing them would tell someone resolving `bazelbuild/bazelisk@1` to install a manifest missing their platform.
+
+This keeps a bad alias out of the index. It does not retract one an earlier green run already committed: `--tags-file` is additive, and the index entry keeps what it has. Repairing the registry side — not moving a rolling tag until every platform of a version has landed — belongs to `ocx package push`, since the mirror pushes platform by platform and cannot know a later leg will fail.
+
+`run-summary.json` keeps reporting the tags the registry actually received, rolling aliases included. It describes the registry; the announce decides what the index learns.
+
 **Credentials:**
 
 The announce needs an `OCX_ANNOUNCE_TOKEN` [secret][github-actions-secrets] with push access to the fork and permission to open the pull request. Generated workflows thread it into the push step's environment.
@@ -363,10 +386,25 @@ Without the secret the run still pushes and still reports its results; the annou
 
 | `announce.status` in `run-summary.json` | Meaning |
 |------|---------|
-| *(key absent)* | No `announce:` block, or the run published nothing |
+| *(key absent)* | No `announce:` block — the mirror never opted in |
 | `announced` | Index pull request opened or updated, with the tags listed under `tags` |
+| `nothing_to_announce` | Configured, but the run produced no new tag |
 | `skipped_no_credential` | Configured, but no `OCX_ANNOUNCE_TOKEN` — a valid configuration for forks and test repos |
 | `failed` | The call ran and failed, with the detail under `error`. The push exit code is unaffected: the packages are already in the registry. |
+
+Whichever of these a run lands on is also rendered as an **Index** row on the run's Discord notification, so a skipped or failed announce cannot look like a successful one.
+
+**Catching up an existing mirror:**
+
+The announce only ever carries what the *current run* published, so adding `announce:` to a mirror that has already published everything reports `nothing_to_announce` on every run, indefinitely — there is nothing new to trigger it. The same applies after an announce failure: the next run has nothing to retry with. Neither is retried automatically; run the announce by hand once:
+
+```sh
+ocx package announce --package bazelbuild/bazelisk \
+  --tags 1.21.0,1.21,1,latest \
+  --fork ocx-contrib/index
+```
+
+`--tags` replaces the curated set for that entry, so pass the complete list you want the index to carry. (`--refresh` solves a different problem — it re-observes the tags already committed, picking up a digest that moved, and never adds one.)
 
 **Validation:**
 

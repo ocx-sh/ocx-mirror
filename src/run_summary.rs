@@ -96,10 +96,11 @@ pub struct VersionSummary {
 
 /// Outcome of the single index announce a push run makes.
 ///
-/// Absent from the summary when the spec carries no `announce:` block or the
-/// run published nothing. Present otherwise, and the three states are
-/// deliberately distinguishable: a run that pushed and then skipped announcing
-/// must not read the same as one that announced.
+/// Absent from the summary only when the spec carries no `announce:` block.
+/// Present otherwise, and every state is deliberately distinguishable: a run
+/// that pushed and then skipped announcing must not read the same as one that
+/// announced, and a configured mirror with nothing new must not read the same
+/// as one that was never configured.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AnnounceOutcome {
@@ -109,6 +110,15 @@ pub enum AnnounceOutcome {
         package: String,
         /// Tags handed to `--tags-file`, in run order.
         tags: Vec<String>,
+    },
+    /// `announce:` is configured but the run produced no new tag, so no call
+    /// was made. Steady state for a mirror that is up to date — and the state
+    /// an owner sees forever after adding `announce:` to an already-complete
+    /// mirror, because nothing new will ever publish to trigger it. The
+    /// catch-up is manual: `ocx package announce --package <p> --tags <set>`.
+    NothingToAnnounce {
+        /// Logical index package that would have been announced.
+        package: String,
     },
     /// `announce:` is configured but `OCX_ANNOUNCE_TOKEN` was absent, so no
     /// call was made. A valid configuration (forks and test repos run this
@@ -166,8 +176,9 @@ pub struct RunSummary {
     pub logo_url: Option<String>,
     /// Per-version outcomes, oldest first.
     pub versions: Vec<VersionSummary>,
-    /// Outcome of this run's index announce. Absent when the spec has no
-    /// `announce:` block or when the run published nothing to announce.
+    /// Outcome of this run's index announce. Absent only when the spec has no
+    /// `announce:` block — a configured mirror with nothing new records
+    /// `nothing_to_announce` rather than going quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub announce: Option<AnnounceOutcome>,
     /// `true` when any version status is `failed` or `partial` with test failures.
