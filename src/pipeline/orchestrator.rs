@@ -460,9 +460,13 @@ pub(crate) async fn prepare_task(
     // generated CI workflow's `cp` step copies the correct per-platform file
     // (not the spec-level default metadata.json from the working directory).
     // Written before the early-exit check so resume runs also refresh the file.
-    let metadata_json = serde_json::to_string_pretty(&metadata)
-        .map_err(|e| anyhow::anyhow!("failed to serialize metadata for {}: {e}", task.platform))?;
+    let metadata_json = package::sidecar_json(&metadata, &task.platform)?;
     tokio::fs::write(task_dir.join("metadata.json"), metadata_json).await?;
+
+    // The in-process push carries the platform beside the metadata in `Info`,
+    // so it needs the published projection — which is also where a dependency
+    // declared only as a `platforms` pin map collapses to this platform's pin.
+    let metadata = metadata.to_published(&task.platform)?;
 
     if bundle_path.exists() {
         // Resume: bundle already exists, metadata.json already written above.
