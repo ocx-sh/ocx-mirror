@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+mod announce_config;
 mod asset_type;
 mod assets;
 mod catalog_config;
@@ -17,6 +18,8 @@ mod variant;
 mod verify_config;
 mod versions_config;
 
+#[allow(unused_imports)]
+pub use announce_config::{AnnounceConfig, DEFAULT_INDEX_REPO};
 pub use asset_type::{AssetType, AssetTypeConfig};
 pub use assets::AssetPatterns;
 pub use catalog_config::CatalogConfig;
@@ -114,6 +117,12 @@ pub struct MirrorSpec {
     #[serde(default)]
     pub notify: Option<NotifyConfig>,
 
+    /// Index announce settings. When present, a push run that published at
+    /// least one version makes a single `ocx package announce` call carrying
+    /// every cascade tag the run wrote. Absent → nothing is announced.
+    #[serde(default)]
+    pub announce: Option<AnnounceConfig>,
+
     /// Catalog publishing settings (README + logo → `__ocx.desc`).
     /// When omitted, defaults apply: `readme: CATALOG.md`, logo probed.
     #[serde(default)]
@@ -183,6 +192,15 @@ static GIT_REV_RE: std::sync::LazyLock<regex::Regex> =
 static GHA_SECRET_NAME_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[A-Z][A-Z0-9_]+$").unwrap());
 
+/// Regex for a logical index package: `<namespace>/<package>`, each segment
+/// lowercase alphanumeric with interior `.`, `_` or `-`.
+static INDEX_PACKAGE_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$").unwrap());
+
+/// Regex for a GitHub repository slug: `<owner>/<repo>`.
+static GITHUB_REPO_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap());
+
 /// Regex for a Discord user ID (snowflake): 17–20 ASCII digits.
 static DISCORD_USER_ID_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[0-9]{17,20}$").unwrap());
@@ -229,6 +247,9 @@ impl MirrorSpec {
         }
         if let Some(notify) = &self.notify {
             validate_notify_config(notify, &mut errors);
+        }
+        if let Some(announce) = &self.announce {
+            validate_announce_config(announce, &mut errors);
         }
         crate::annotations::validate(&self.annotations, &mut errors);
 
@@ -708,6 +729,29 @@ fn validate_notify_config(config: &NotifyConfig, errors: &mut Vec<String>) {
         errors.push(format!(
             "notify.discord.user_id: '{user_id}' is not a valid Discord user ID (must match ^[0-9]{{17,20}}$)"
         ));
+    }
+}
+
+/// Validate the `announce:` block: the logical package and both repository
+/// slugs must be well-formed `<a>/<b>` pairs.
+///
+/// A malformed value is reported as a named field error (contributing to
+/// `SpecInvalid`, exit 65) rather than a serde shape mismatch, so the message
+/// names the field and what it expected.
+fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String>) {
+    if !INDEX_PACKAGE_RE.is_match(&config.package) {
+        errors.push(format!(
+            "announce.package: '{}' is not a valid index package (must be '<namespace>/<package>', \
+             lowercase alphanumeric with '.', '_' or '-')",
+            config.package
+        ));
+    }
+    for (field, value) in [("fork", &config.fork), ("index_repo", &config.index_repo)] {
+        if !GITHUB_REPO_RE.is_match(value) {
+            errors.push(format!(
+                "announce.{field}: '{value}' is not a valid GitHub repository (must be '<owner>/<repo>')"
+            ));
+        }
     }
 }
 
@@ -3393,6 +3437,81 @@ ocx_mirror:
         assert!(
             kind_errors.is_empty(),
             "Single-command entry must not produce kind errors: {errors:?}"
+        );
+    }
+
+    // ── announce ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn announce_block_round_trips_and_defaults_the_index_repo() {
+        let yaml = format!(
+            r#"{base}
+announce:
+  package: bazelbuild/bazelisk
+  fork: ocx-contrib/index
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let announce = spec.announce.as_ref().expect("announce block parsed");
+        assert_eq!(announce.package, "bazelbuild/bazelisk");
+        assert_eq!(announce.fork, "ocx-contrib/index");
+        assert_eq!(announce.index_repo, DEFAULT_INDEX_REPO);
+        assert!(
+            spec.validate(Path::new("test.yml")).is_empty(),
+            "valid announce block must not error"
+        );
+    }
+
+    #[test]
+    fn spec_without_announce_block_announces_nothing() {
+        let spec: MirrorSpec = serde_yaml_ng::from_str(MINIMAL_BASE_YAML).unwrap();
+        assert!(spec.announce.is_none(), "announce is opt-in");
+    }
+
+    #[test]
+    fn validate_rejects_malformed_announce_package_with_a_named_error() {
+        // A bare package name is the likely mistake — the index needs the
+        // `<namespace>/<package>` pair, and the message has to say which
+        // field is wrong rather than surface a serde shape mismatch.
+        let yaml = format!(
+            r#"{base}
+announce:
+  package: bazelisk
+  fork: ocx-contrib/index
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("announce.package") && e.contains("<namespace>/<package>")),
+            "malformed package must produce a named field error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_malformed_announce_fork_and_index_repo() {
+        let yaml = format!(
+            r#"{base}
+announce:
+  package: bazelbuild/bazelisk
+  fork: https://github.com/ocx-contrib/index
+  index_repo: index
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("announce.fork")),
+            "URL paste into fork must error: {errors:?}"
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("announce.index_repo")),
+            "bare repo name must error: {errors:?}"
         );
     }
 }

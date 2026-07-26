@@ -1,0 +1,40 @@
+# Mirror spec: GHCR target with an index announce block (E-P4 pilot shape).
+# Logical index package `bazelbuild/bazelisk` lives at the physical path
+# `ghcr.io/ocx-contrib/bazelbuild/bazelisk` — slash segments, never flattened.
+name: bazelisk
+target:
+  registry: ghcr.io
+  repository: ocx-contrib/bazelbuild/bazelisk
+
+source:
+  type: github_release
+  owner: bazelbuild
+  repo: bazelisk
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "bazelisk-linux-amd64$"
+
+asset_type:
+  type: binary
+  name: bazelisk
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: bazelisk --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+ocx_mirror:
+  release_tag: v0.7.2
+
+announce:
+  package: bazelbuild/bazelisk
+  fork: ocx-contrib/index

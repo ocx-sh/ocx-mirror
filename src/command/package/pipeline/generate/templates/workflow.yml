@@ -174,9 +174,14 @@ jobs:
     # publication + notification.
     if: always() && needs.discover.outputs.has_new == 'true'
     runs-on: ubuntu-latest
-    outputs:
+{PUSH_PERMISSIONS}    outputs:
       any_new_green: ${{ steps.summarise.outputs.any_new_green }}
       any_red: ${{ steps.summarise.outputs.any_red }}
+      # `run-summary.json`'s `announce.status`, or `unconfigured` when the
+      # mirror has no `announce:` block. Without it a run that published a
+      # dozen images and failed to announce them is indistinguishable, to
+      # `notify` and to branch protection, from one that announced.
+      announce: ${{ steps.summarise.outputs.announce }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
@@ -190,35 +195,14 @@ jobs:
           pattern: junit-*
           path: .artifacts/junit/
           merge-multiple: true
-      # Detect whether registry credentials are configured.
-      # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
-      # step level via env-var injection (secret value never echoed to logs).
-      - name: Detect registry credentials
-        id: creds
-        env:
-          OCX_MIRROR_REGISTRY_TOKEN: ${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}
-        run: |
-          if [ -n "${OCX_MIRROR_REGISTRY_TOKEN}" ]; then
-            echo "have=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "have=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::No OCX_MIRROR_REGISTRY_TOKEN secret — registry push skipped (repo runs in test/validation mode)."
-          fi
-      # Use docker login so ocx picks credentials up via its
-      # native-credential fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
-      # Env-var auth (`OCX_AUTH_<REG>_USER/_TOKEN`) takes precedence over the
-      # docker fallback inside ocx, so do NOT also export those vars here.
-      - name: Login to {TARGET_REGISTRY}
-        if: ${{ steps.creds.outputs.have == 'true' }}
-        run: |
-          echo "${{ secrets.OCX_MIRROR_REGISTRY_TOKEN }}" \
-            | docker login {TARGET_REGISTRY} \
-                -u "${{ secrets.OCX_MIRROR_REGISTRY_USER }}" \
-                --password-stdin
-      - name: Push
+{REGISTRY_AUTH_STEPS}      - name: Push
         if: ${{ steps.creds.outputs.have == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Announcing into the index is opt-in via `announce:` in mirror.yml.
+          # An absent secret degrades: the run pushes and records the announce
+          # as skipped in run-summary.json rather than failing.
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
         run: |
           set -euo pipefail
           # Resolve this push job's html_url so the Discord embed can link
@@ -248,6 +232,9 @@ jobs:
         run: |
           echo "any_new_green=false" >> "${GITHUB_OUTPUT}"
           echo "any_red=false" >> "${GITHUB_OUTPUT}"
+          # The push step never ran, so no announce was attempted — distinct
+          # from `unconfigured`, which claims the mirror never opted in.
+          echo "announce=not_run" >> "${GITHUB_OUTPUT}"
       # `if: always()` keeps the job outputs flowing to `notify` even when the
       # push step exits non-zero (full-red run). Without it, a failed push job
       # leaves the outputs empty and the notify gate evaluates to false.
@@ -258,12 +245,22 @@ jobs:
           if [ -f run-summary.json ]; then
             echo "any_new_green=$(jq -r '.any_new_green' run-summary.json)" >> "${GITHUB_OUTPUT}"
             echo "any_red=$(jq -r '.any_red' run-summary.json)" >> "${GITHUB_OUTPUT}"
+            # An absent `announce` key means the mirror has no `announce:`
+            # block. `interrupted` means the run died mid-call and the summary
+            # still carries the pre-announce placeholder.
+            echo "announce=$(jq -r '.announce.status // "unconfigured"' run-summary.json)" >> "${GITHUB_OUTPUT}"
           fi
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: run-summary
-          path: run-summary.json
+          # The announce tags file is the exact `--tags-file` the index call
+          # received. Uploading it beside the summary is what makes an announce
+          # reconstructable after the fact; without it the only record of what
+          # was curated is the summary's tag list.
+          path: |
+            run-summary.json
+            run-summary.announce-tags
           retention-days: 1
           if-no-files-found: ignore
       - name: Publish test results

@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
@@ -14,8 +15,10 @@ use ocx_lib::package::version::Version;
 
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
-use crate::run_summary::{ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary};
-use crate::spec::{self, MirrorSpec, PlatformConfig, Severity};
+use crate::run_summary::{
+    AnnounceOutcome, ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
+};
+use crate::spec::{self, AnnounceConfig, MirrorSpec, PlatformConfig, Severity};
 
 /// `ocx-mirror package pipeline push` subcommand.
 ///
@@ -130,12 +133,16 @@ impl Push {
                 .collect();
             sorted_platforms.sort_by_key(|p| platform_order.iter().position(|s| s == p).unwrap_or(usize::MAX));
 
-            // ── Evaluate JUNIT go/no-go for each (V, P) pair ─────────────────
-            let mut platforms_pushed: Vec<String> = Vec::new();
+            // ── Phase 1: decide every (V, P) pair BEFORE pushing anything ────
+            //
+            // Nothing is pushed while the verdict for the version is still
+            // open. `--cascade` moves `latest` / `X` / `X.Y` as a side effect
+            // of the push that carries it, so interleaving decide-and-push
+            // let the first green platform advertise a version whose next leg
+            // then went red.
             let mut platforms_failed: Vec<PlatformFailure> = Vec::new();
             let mut all_test_failures: Vec<TestFailure> = Vec::new();
-            let mut cascade_tags: Vec<String> = Vec::new();
-            let mut all_skipped_existing = true;
+            let mut ready: Vec<(String, PathBuf)> = Vec::new();
 
             for platform_str in &sorted_platforms {
                 // Derive the platform_slug from the platform string.
@@ -159,52 +166,64 @@ impl Push {
                         platform_failure,
                         test_failures,
                     } => {
-                        all_skipped_existing = false;
                         platforms_failed.push(platform_failure);
                         all_test_failures.extend(test_failures);
                     }
                     VpDecision::Green => {
-                        // Find the bundle file for this (V, P).
                         let bundle_path = bundle_path_for(&self.bundles_dir, version, &platform_slug);
-
-                        if !bundle_path.exists() {
+                        if bundle_path.exists() {
+                            ready.push((platform_str.clone(), bundle_path));
+                        } else {
                             // Bundle absent — treat as failure.
-                            all_skipped_existing = false;
                             platforms_failed.push(PlatformFailure {
                                 platform: platform_str.clone(),
                                 reason: "missing_bundle".to_string(),
                                 failed_tests: vec![],
                                 job_url: push_job_url.clone(),
                             });
-                            continue;
                         }
+                    }
+                }
+            }
 
-                        // ── Invoke `ocx package push --cascade` ──────────────
-                        let target_ref = format!("{}:{}", spec.target.repository, version);
-                        let push_result = invoke_push(&spec, platform_str, &target_ref, &bundle_path).await;
+            // ── Phase 2: push, cascading only on a whole version ─────────────
+            let mut platforms_pushed: Vec<String> = Vec::new();
+            let mut cascade_tags: Vec<String> = Vec::new();
+            let mut all_skipped_existing = platforms_failed.is_empty();
+            let target_ref = format!("{}:{}", spec.target.repository, version);
 
-                        match push_result {
-                            Ok(report) => {
-                                let status_str = report.status.as_deref().unwrap_or("pushed");
-                                if status_str == "skipped_existing" {
-                                    // Don't flip all_skipped_existing to false
-                                } else {
-                                    all_skipped_existing = false;
-                                    platforms_pushed.push(platform_str.clone());
-                                    cascade_tags.extend(report.cascade_tags_written);
-                                }
-                            }
-                            Err(msg) => {
-                                all_skipped_existing = false;
-                                log::warn!("[{}] Push failed for {}/{}: {}", spec.name, version, platform_str, msg);
-                                platforms_failed.push(PlatformFailure {
-                                    platform: platform_str.clone(),
-                                    reason: "push_error".to_string(),
-                                    failed_tests: vec![],
-                                    job_url: push_job_url.clone(),
-                                });
-                            }
+            for (platform_str, bundle_path) in &ready {
+                // EVERY push of a whole version cascades. A cascade push merges
+                // only its OWN platform into each rolling tag — `client.rs`
+                // `merge_platform_into_index` retains every other platform's
+                // existing entry — so giving `--cascade` to one push per version
+                // leaves the other platforms stranded on the exact version tag,
+                // and each alias keeps whatever the PREVIOUS version left there.
+                // The condition is only about failure: nothing about this
+                // version may have gone wrong, neither a test leg in phase 1 nor
+                // an earlier push in this loop.
+                let cascade = platforms_failed.is_empty();
+
+                match invoke_push(&spec, platform_str, &target_ref, bundle_path, cascade).await {
+                    Ok(report) => {
+                        let status_str = report.status.as_deref().unwrap_or("pushed");
+                        if status_str == "skipped_existing" {
+                            // Don't flip all_skipped_existing to false
+                        } else {
+                            all_skipped_existing = false;
+                            platforms_pushed.push(platform_str.clone());
+                            cascade_tags.extend(report.cascade_tags_written);
                         }
+                    }
+                    Err(msg) => {
+                        all_skipped_existing = false;
+                        log::warn!("[{}] Push failed for {}/{}: {}", spec.name, version, platform_str, msg);
+                        platforms_failed.push(PlatformFailure {
+                            platform: platform_str.clone(),
+                            reason: "push_error".to_string(),
+                            failed_tests: vec![],
+                            job_url: push_job_url.clone(),
+                        });
                     }
                 }
             }
@@ -216,9 +235,21 @@ impl Push {
             if !platforms_pushed.is_empty() && !cascade_tags.iter().any(|t| t == version) {
                 cascade_tags.insert(0, version.clone());
             }
-            // Order-preserving full dedup: each platform's push report
-            // re-lists the same cascade hierarchy, and `Vec::dedup` only
-            // collapses *consecutive* duplicates.
+            // Order-preserving full dedup: every platform of a whole version
+            // cascades, so every one of their reports re-lists the same
+            // hierarchy, and `Vec::dedup` only collapses *consecutive*
+            // duplicates.
+            //
+            // The accumulation is therefore the UNION over the version's
+            // platforms — "at least one platform wrote this tag", not "this tag
+            // carries every platform". The two differ only when
+            // `resolve_cascade_tags`, which IS platform-aware, stops one
+            // platform's chain early on a blocker the others do not have. The
+            // union is the right set to announce even then: the tag exists in
+            // the registry, and `ocx package announce` re-fetches each one and
+            // records the platforms it actually holds. Reporting the
+            // intersection instead would leave a live registry tag unannounced,
+            // which is the exact drift the announce exists to prevent.
             {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 cascade_tags.retain(|t| seen.insert(t.clone()));
@@ -231,7 +262,6 @@ impl Push {
                 &platforms_failed,
                 all_skipped_existing && !sorted_platforms.is_empty(),
                 is_newest,
-                &mut cascade_tags,
             );
 
             version_summaries.push(VersionSummary {
@@ -263,7 +293,7 @@ impl Push {
             })
             .unwrap_or_else(|| "https://github.com/actions/runs/unknown".to_string());
 
-        let summary = RunSummary {
+        let mut summary = RunSummary {
             schema_version: 1,
             mirror: spec.name.clone(),
             target: format!("{}/{}", spec.target.registry, spec.target.repository),
@@ -272,11 +302,44 @@ impl Push {
             source_url: compute_source_url(&spec.source),
             logo_url: compute_logo_url(),
             versions: version_summaries,
+            // Pre-announce placeholder, overwritten below by the real outcome.
+            // Its PRESENCE is the signal: an absent key means "this mirror has
+            // no `announce:` block", so writing `None` here would have made a
+            // run killed mid-announce — a reclaimed runner, a cancelled
+            // backfill — read as a mirror that never opted in, with a dozen
+            // images live in GHCR and the index knowing about none of them.
+            announce: spec.announce.as_ref().map(|config| AnnounceOutcome::Interrupted {
+                package: config.package.clone(),
+            }),
             any_red,
             any_new_green,
         };
 
+        // Durable record first, announce second. The announce below does
+        // unbounded network work; a run killed during it must still leave
+        // behind the record of everything that *did* publish. Written after it,
+        // the file would never exist — the artifact upload would find nothing,
+        // the notify gate would evaluate false, and a dozen live images would
+        // go unannounced *and* unreported.
         write_run_summary(&self.write_summary, &summary).await?;
+
+        // One announce per run, after every version has been pushed — never
+        // one per version or per platform. Concurrent announces on the same
+        // package are a race the index singleflight exists to survive; there
+        // is no reason to generate one from inside a single run.
+        let announce_token = std::env::var(ENV_ANNOUNCE_TOKEN).ok().filter(|t| !t.trim().is_empty());
+        summary.announce = run_announce(
+            spec.announce.as_ref(),
+            &summary.versions,
+            &self.write_summary.with_extension("announce-tags"),
+            announce_token.as_deref(),
+            &resolve_ocx_binary().unwrap_or_else(|_| PathBuf::from("ocx")),
+        )
+        .await;
+
+        if summary.announce.is_some() {
+            write_run_summary(&self.write_summary, &summary).await?;
+        }
 
         log::info!(
             "[{}] Run summary written to {} (any_red={}, any_new_green={})",
@@ -295,8 +358,9 @@ impl Push {
         // (`any_red` / `any_new_green`), not its `success()` status, and the
         // `summarise` step uses `if: always()` to write outputs even when this
         // call returns Err.
+        let mut failures: Vec<String> = Vec::new();
         if summary.any_red {
-            let detail = if summary.any_new_green {
+            failures.push(if summary.any_new_green {
                 format!(
                     "partial run across {} version(s): some platforms failed — see run-summary.json",
                     summary.versions.len(),
@@ -306,8 +370,25 @@ impl Push {
                     "all platforms failed across {} version(s); no package published — see run-summary.json",
                     summary.versions.len(),
                 )
-            };
-            return Err(MirrorError::ExecutionFailed(vec![detail]));
+            });
+        }
+        // A failed announce fails the job, on the same reasoning as `any_red`
+        // directly above: the images ARE in the registry, and the exit code is
+        // how a partial outcome reaches the pipeline and the maintainer. Left
+        // green, an expired `OCX_ANNOUNCE_TOKEN` keeps every nightly passing
+        // while the index drifts arbitrarily far behind the registry, and no
+        // scheduled-run alert ever fires because nothing failed.
+        //
+        // `SkippedNoCredential` deliberately does not: a mirror without the
+        // secret is a valid configuration (forks, test repos). It stays visible
+        // through the summary, the `announce` job output and the Index row.
+        if let Some(AnnounceOutcome::Failed { package, error }) = &summary.announce {
+            failures.push(format!(
+                "index announce for {package} failed: {error} — the registry is ahead of the index",
+            ));
+        }
+        if !failures.is_empty() {
+            return Err(MirrorError::ExecutionFailed(failures));
         }
 
         Ok(())
@@ -613,16 +694,20 @@ fn slug_to_platform(slug: &str) -> String {
 
 /// Determine the `VersionStatus` for a version based on push outcomes.
 ///
-/// `latest` cascade tag is written only when the version is the newest in the
-/// run AND all platforms were pushed successfully (status = `Published`).
-/// The `is_newest` flag is currently informational — the `ocx package push --cascade`
-/// subprocess handles `latest` tag writes internally based on cascade version ordering.
+/// A verdict, not a tag rewriter. `cascade_tags_written` records what the
+/// registry actually received; editing it here would make `run-summary.json`
+/// and the Discord report describe a registry state that does not exist. A
+/// `Partial` version carries only its exact `X.Y.Z` because the push loop
+/// never gave it `--cascade`, not because anything trimmed the list.
+///
+/// The `is_newest` flag is informational — the `ocx package push --cascade`
+/// subprocess handles `latest` tag writes internally based on cascade version
+/// ordering.
 fn determine_status(
     platforms_pushed: &[String],
     platforms_failed: &[PlatformFailure],
     all_skipped_existing: bool,
     _is_newest: bool,
-    cascade_tags: &mut Vec<String>,
 ) -> VersionStatus {
     if all_skipped_existing && platforms_pushed.is_empty() && platforms_failed.is_empty() {
         return VersionStatus::SkippedExisting;
@@ -635,7 +720,6 @@ fn determine_status(
 
     if !platforms_pushed.is_empty() && platforms_failed.is_empty() {
         // All platforms pushed successfully.
-        // `latest` is included only when this is the newest version.
         // The cascade tags are whatever the push subprocess returned. If `latest`
         // was not returned by the subprocess but should be written, the subprocess
         // handles that internally (ocx package push --cascade logic).
@@ -643,8 +727,7 @@ fn determine_status(
         return VersionStatus::Published;
     }
 
-    // Mixed: some pushed, some failed → Partial. Remove `latest` from cascade tags.
-    cascade_tags.retain(|t| t != "latest");
+    // Mixed: some pushed, some failed.
     VersionStatus::Partial
 }
 
@@ -714,6 +797,13 @@ fn parse_bundle_filename(name: &str) -> Option<(&str, &str)> {
 ///
 /// `--format` is a global ocx flag and must precede the subcommand.
 ///
+/// `cascade` decides whether this push also moves the rolling `latest` / `X` /
+/// `X.Y` aliases onto the version's image index. Without it the push writes the
+/// exact version tag and nothing else — the platform still merges into that
+/// tag's index, so a version can be assembled platform by platform and only
+/// advertised once it is whole. Who gets it is decided by the caller, once per
+/// version; see the phase-2 loop in [`Push::execute`].
+///
 /// `--new` makes the FIRST push of a brand-new mirror succeed: a cascade push
 /// lists existing tags to compute the rolling tags, but a not-yet-published
 /// repository answers `tags/list` with 404 ("repository name not known").
@@ -725,34 +815,31 @@ fn build_push_args(
     target_ref: &str,
     bundle_path: &Path,
     annotations: &BTreeMap<String, String>,
+    cascade: bool,
 ) -> Result<Vec<String>, String> {
     let bundle = bundle_path
         .to_str()
         .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?;
 
-    let mut args: Vec<String> = [
-        "--format",
-        "json",
-        "package",
-        "push",
-        "--cascade",
-        "--new",
-        "-p",
-        platform,
-        "-i",
-        target_ref,
-        bundle,
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
+    let mut args: Vec<String> = ["--format", "json", "package", "push"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    if cascade {
+        args.push("--cascade".to_string());
+    }
+    args.extend(
+        ["--new", "-p", platform, "-i", target_ref, bundle]
+            .iter()
+            .map(|s| (*s).to_string()),
+    );
 
     args.extend(crate::annotations::push_args(annotations));
 
     Ok(args)
 }
 
-/// Invoke `ocx package push --cascade -p {platform} -i {target_ref} {bundle} --format json`
+/// Invoke `ocx package push [--cascade] -p {platform} -i {target_ref} {bundle} --format json`
 /// as a subprocess and parse the JSON output.
 ///
 /// Returns the parsed `PushReport` on success, or a descriptive error string
@@ -762,11 +849,12 @@ async fn invoke_push(
     platform: &str,
     target_ref: &str,
     bundle_path: &Path,
+    cascade: bool,
 ) -> Result<PushReport, String> {
     let ocx_binary = resolve_ocx_binary()?;
 
     let annotations = crate::annotations::build_annotations(&spec.annotations);
-    let args = build_push_args(platform, target_ref, bundle_path, &annotations)?;
+    let args = build_push_args(platform, target_ref, bundle_path, &annotations, cascade)?;
 
     let mut cmd = tokio::process::Command::new(&ocx_binary);
     cmd.args(&args);
@@ -787,6 +875,204 @@ async fn invoke_push(
         .map_err(|e| format!("failed to parse push JSON output: {e}\nstdout: {}", stdout.trim()))?;
 
     Ok(report)
+}
+
+/// GitHub Actions secret carrying the token `ocx package announce` uses to
+/// push the fork branch and open the index pull request.
+const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
+
+/// Tags this run should announce: the union of `cascade_tags_written` across
+/// every version that actually published, in run order, deduped.
+///
+/// This announces exactly what the registry received, and nothing is filtered
+/// out here. It can be, because a rolling alias can no longer reach a partial
+/// version in the first place: the phase-2 loop in [`Push::execute`] gives
+/// `--cascade` to every push of a whole version and to none of a version any
+/// part of which failed, so a
+/// `Partial` version's `cascade_tags_written` only ever holds its exact
+/// `X.Y.Z`. Filtering aliases *here* was a protection that could not work —
+/// `--tags-file` is additive, and `ocx package announce` re-observes every tag
+/// already curated on the entry, so an alias an earlier run committed is
+/// re-fetched from the registry and re-committed against whatever it points at
+/// now. Withholding an alias only ever blocks its first addition, and every
+/// established mirror already has all of them.
+///
+/// Deduping is load-bearing, not cosmetic — each platform's push report
+/// re-lists the same cascade hierarchy, and consecutive versions share the
+/// rolling tags.
+///
+/// A version that only skipped-existing or only failed contributes nothing:
+/// its tags are either already announced or were never written.
+fn announce_tag_union(versions: &[VersionSummary]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    versions
+        .iter()
+        .filter(|vs| {
+            matches!(vs.status, VersionStatus::Published | VersionStatus::Partial) && !vs.platforms_pushed.is_empty()
+        })
+        .flat_map(|vs| vs.cascade_tags_written.iter())
+        .filter(|tag| seen.insert((*tag).clone()))
+        .cloned()
+        .collect()
+}
+
+/// Build the `ocx package announce` argv. Pure and unit-testable — locks the
+/// flag set without spawning a subprocess.
+///
+/// `--tags-file` is additive: it adds to the already-curated set and never
+/// removes a committed tag. `--tags` would *replace* the curated set, which for
+/// a mirror means one run publishing one new version deletes every previously
+/// announced version from the index entry. Never use it here.
+fn build_announce_args(config: &AnnounceConfig, tags_file: &Path) -> Result<Vec<String>, String> {
+    let file = tags_file
+        .to_str()
+        .ok_or_else(|| format!("announce tags file path is not valid UTF-8: {}", tags_file.display()))?;
+
+    Ok([
+        "package",
+        "announce",
+        "--package",
+        &config.package,
+        "--tags-file",
+        file,
+        "--fork",
+        &config.fork,
+        "--index-repo",
+        &config.index_repo,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect())
+}
+
+/// How long the announce subprocess may run before it is killed.
+///
+/// It pushes a fork branch, calls the pull-request API and observes the
+/// registry — network work with no bound of its own. Unbounded, one stalled
+/// call (a registry 429 retry loop is enough) takes the whole job down with it
+/// on the runner timeout, and everything the run published downstream of the
+/// summary write goes unreported.
+const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Make this run's single index announce.
+///
+/// Returns `None` only when there is no `announce:` block at all. A configured
+/// mirror that published nothing still reports
+/// [`AnnounceOutcome::NothingToAnnounce`] — the two states have very different
+/// fixes, and conflating them makes an owner who just added `announce:` to an
+/// already-complete mirror read permanent silence as success.
+///
+/// Never returns `Err`: an announce failure is recorded in the run summary and
+/// leaves the push exit code alone, because the packages are already in the
+/// registry either way.
+///
+/// `token` is the resolved `OCX_ANNOUNCE_TOKEN` and `ocx_binary` the `ocx` to
+/// drive — both passed in rather than read here so tests can exercise the
+/// subprocess boundary without mutating process environment.
+async fn run_announce(
+    config: Option<&AnnounceConfig>,
+    versions: &[VersionSummary],
+    tags_file: &Path,
+    token: Option<&str>,
+    ocx_binary: &Path,
+) -> Option<AnnounceOutcome> {
+    let config = config?;
+    let tags = announce_tag_union(versions);
+    if tags.is_empty() {
+        log::info!("[announce] {} — nothing new to announce in this run", config.package);
+        return Some(AnnounceOutcome::NothingToAnnounce {
+            package: config.package.clone(),
+        });
+    }
+
+    if token.is_none() {
+        // A mirror repo without the secret is a valid configuration, so this
+        // degrades rather than failing. It must still be visible: a run that
+        // pushed and then did not announce cannot read like one that did.
+        println!(
+            "::notice title=Index announce skipped::No {ENV_ANNOUNCE_TOKEN} secret — \
+             {} published {} tag(s) but the index was not updated.",
+            config.package,
+            tags.len()
+        );
+        return Some(AnnounceOutcome::SkippedNoCredential {
+            package: config.package.clone(),
+        });
+    }
+
+    match invoke_announce(config, &tags, tags_file, ocx_binary, ANNOUNCE_TIMEOUT).await {
+        Ok(()) => {
+            log::info!(
+                "[announce] {} → {} ({} tag(s))",
+                config.package,
+                config.index_repo,
+                tags.len()
+            );
+            Some(AnnounceOutcome::Announced {
+                package: config.package.clone(),
+                tags,
+            })
+        }
+        Err(error) => {
+            log::warn!("[announce] {} failed: {error}", config.package);
+            println!("::warning title=Index announce failed::{}: {error}", config.package);
+            Some(AnnounceOutcome::Failed {
+                package: config.package.clone(),
+                error,
+            })
+        }
+    }
+}
+
+/// Write the tag set to `tags_file` and run `ocx package announce` against it.
+///
+/// `timeout` is a parameter rather than a constant read so the bound itself can
+/// be tested without a ten-minute test.
+async fn invoke_announce(
+    config: &AnnounceConfig,
+    tags: &[String],
+    tags_file: &Path,
+    ocx_binary: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let args = build_announce_args(config, tags_file)?;
+
+    // The tags file is a sibling of `--write-summary`, and the announce runs
+    // before the summary is written — so with `--write-summary out/x.json` and
+    // no `out/` yet, nothing has created the directory. Same treatment as
+    // `write_run_summary`. An empty parent (a bare relative path) is a no-op.
+    if let Some(parent) = tags_file.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("failed to create announce tags directory {}: {e}", parent.display()))?;
+    }
+
+    tokio::fs::write(tags_file, tags.join("\n"))
+        .await
+        .map_err(|e| format!("failed to write announce tags file {}: {e}", tags_file.display()))?;
+
+    let mut cmd = tokio::process::Command::new(ocx_binary);
+    cmd.args(&args);
+    forward_ocx_env(&mut cmd);
+    // Tokio leaves a child running when its future is dropped; on timeout that
+    // would orphan an announce still talking to the registry.
+    cmd.kill_on_drop(true);
+
+    let output = tokio::time::timeout(timeout, cmd.output())
+        .await
+        .map_err(|_| format!("ocx package announce timed out after {}s", timeout.as_secs()))?
+        .map_err(|e| format!("failed to spawn ocx: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "ocx package announce exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Resolve the path to the `ocx` binary.
@@ -893,6 +1179,7 @@ mod tests {
             "ghcr.io/ocx-sh/shfmt:3.8.0",
             std::path::Path::new("/bundles/shfmt.tar.xz"),
             &annotations,
+            true,
         )
         .expect("utf-8 bundle path");
 
@@ -925,11 +1212,45 @@ mod tests {
             "ghcr.io/ocx-sh/shfmt:3.8.0",
             std::path::Path::new("/bundles/shfmt.tar.xz"),
             &BTreeMap::new(),
+            true,
         )
         .expect("utf-8 bundle path");
 
         assert_eq!(args.len(), 11);
         assert!(!args.iter().any(|arg| arg == "--annotation"));
+    }
+
+    #[test]
+    fn build_push_args_omits_cascade_so_a_platform_can_land_without_moving_an_alias() {
+        // The non-cascade shape still names the exact version tag, and the
+        // registry merges the platform into that tag's image index — a version
+        // can therefore be assembled platform by platform and only advertised
+        // through `latest` / `X` / `X.Y` once it is whole.
+        let args = build_push_args(
+            "linux/amd64",
+            "ghcr.io/ocx-sh/shfmt:3.8.0",
+            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &BTreeMap::new(),
+            false,
+        )
+        .expect("utf-8 bundle path");
+
+        assert!(!args.iter().any(|arg| arg == "--cascade"), "got: {args:?}");
+        assert_eq!(
+            args,
+            vec![
+                "--format",
+                "json",
+                "package",
+                "push",
+                "--new",
+                "-p",
+                "linux/amd64",
+                "-i",
+                "ghcr.io/ocx-sh/shfmt:3.8.0",
+                "/bundles/shfmt.tar.xz",
+            ],
+        );
     }
 
     /// The `ocx` subprocess inherits the runner environment — the generated
@@ -961,6 +1282,7 @@ mod tests {
             "ghcr.io/ocx-sh/shfmt:3.8.0",
             std::path::Path::new("/bundles/shfmt.tar.xz"),
             &annotations,
+            true,
         )
         .expect("utf-8 bundle path");
 
@@ -1614,48 +1936,55 @@ platforms:
     #[test]
     fn determine_status_all_pushed_is_published() {
         // D12: All platforms pushed → Published
-        let mut tags = vec!["3.7.0".to_string(), "3.7".to_string(), "latest".to_string()];
-        let status = determine_status(&["linux/amd64".to_string()], &[], false, true, &mut tags);
+        let status = determine_status(&["linux/amd64".to_string()], &[], false, true);
         assert!(matches!(status, VersionStatus::Published));
     }
 
     #[test]
     fn determine_status_all_failed_is_failed() {
         // D12: All platforms failed → Failed
-        let mut tags = vec![];
         let failed = vec![PlatformFailure {
             platform: "linux/amd64".to_string(),
             reason: "test_failed".to_string(),
             failed_tests: vec![],
             job_url: None,
         }];
-        let status = determine_status(&[], &failed, false, false, &mut tags);
+        let status = determine_status(&[], &failed, false, false);
         assert!(matches!(status, VersionStatus::Failed));
     }
 
     #[test]
-    fn determine_status_partial_removes_latest() {
-        // D12: Partial → "latest" removed from cascade_tags_written
-        let mut tags = vec!["3.7.0".to_string(), "3.7".to_string(), "latest".to_string()];
+    fn a_partial_version_reports_the_registry_truthfully() {
+        // `determine_status` is a verdict, never a tag rewriter: the summary
+        // reports what the registry received. A partial version carries its
+        // exact version tag alone because the push loop withheld `--cascade`
+        // from it, not because anything trimmed the list afterwards — and the
+        // announce therefore repeats it verbatim.
         let failed = vec![PlatformFailure {
             platform: "darwin/arm64".to_string(),
             reason: "test_failed".to_string(),
             failed_tests: vec![],
             job_url: None,
         }];
-        let status = determine_status(&["linux/amd64".to_string()], &failed, false, true, &mut tags);
+        let status = determine_status(&["linux/amd64".to_string()], &failed, false, true);
         assert!(matches!(status, VersionStatus::Partial));
-        assert!(
-            !tags.contains(&"latest".to_string()),
-            "Partial push must not include 'latest' in cascade_tags"
-        );
+
+        let summary = VersionSummary {
+            version: "3.7.0".to_string(),
+            status,
+            platforms_pushed: vec!["linux/amd64".to_string()],
+            platforms_failed: failed,
+            cascade_tags_written: vec!["3.7.0".into()],
+            test_failures: vec![],
+            platforms_excluded: vec![],
+        };
+        assert_eq!(announce_tag_union(std::slice::from_ref(&summary)), vec!["3.7.0"]);
     }
 
     #[test]
     fn determine_status_all_skipped_existing() {
         // D12: All skipped → SkippedExisting
-        let mut tags = vec![];
-        let status = determine_status(&[], &[], true, false, &mut tags);
+        let status = determine_status(&[], &[], true, false);
         assert!(matches!(status, VersionStatus::SkippedExisting));
     }
 
@@ -2023,5 +2352,955 @@ platforms:
                 );
             }
         }
+    }
+
+    // ── Index announce (E-P4) ─────────────────────────────────────────────
+    //
+    // One announce per run, carrying the union of every cascade tag the run
+    // wrote. `--tags-file` (additive) never `--tags` (replacing), because a
+    // mirror announcing a replacing tag set would delete every previously
+    // announced version the moment one run published a new one.
+
+    fn version_summary(version: &str, status: VersionStatus, pushed: &[&str], tags: &[&str]) -> VersionSummary {
+        VersionSummary {
+            version: version.to_string(),
+            status,
+            platforms_pushed: pushed.iter().map(|s| (*s).to_string()).collect(),
+            platforms_failed: vec![],
+            cascade_tags_written: tags.iter().map(|s| (*s).to_string()).collect(),
+            test_failures: vec![],
+            platforms_excluded: vec![],
+        }
+    }
+
+    fn announce_config() -> AnnounceConfig {
+        serde_yaml_ng::from_str("package: bazelbuild/bazelisk\nfork: ocx-contrib/index\nindex_repo: ocx-sh/index\n")
+            .unwrap()
+    }
+
+    /// A stand-in `ocx` that appends its argv (one invocation per line) to
+    /// `log`. Lets the announce subprocess boundary be exercised without
+    /// mutating process environment.
+    #[cfg(unix)]
+    fn fake_ocx(dir: &Path, log: &Path, exit_code: u8) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {exit_code}\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[test]
+    fn announce_tag_union_dedups_across_versions_and_platforms() {
+        // Each platform's push report re-lists the same cascade hierarchy, and
+        // consecutive versions share the rolling `1` / `latest` tags. The
+        // union must carry each tag exactly once, in run order.
+        let versions = vec![
+            version_summary(
+                "1.20.0",
+                VersionStatus::Published,
+                &["linux/amd64", "darwin/arm64"],
+                &["1.20.0", "1.20", "1", "latest"],
+            ),
+            version_summary(
+                "1.21.0",
+                VersionStatus::Published,
+                &["linux/amd64"],
+                &["1.21.0", "1.21", "1", "latest"],
+            ),
+        ];
+
+        assert_eq!(
+            announce_tag_union(&versions),
+            vec!["1.20.0", "1.20", "1", "latest", "1.21.0", "1.21"],
+        );
+    }
+
+    #[test]
+    fn announce_tag_union_covers_partial_versions_but_not_unpublished_ones() {
+        // Partial with at least one platform pushed still wrote its exact
+        // version tag → include that. Failed / skipped_existing wrote nothing
+        // new → exclude, so a run that published nothing announces nothing.
+        let versions = vec![
+            version_summary("1.0.0", VersionStatus::SkippedExisting, &[], &["1.0.0"]),
+            version_summary("2.0.0", VersionStatus::Failed, &[], &[]),
+            version_summary("3.0.0", VersionStatus::Partial, &["linux/amd64"], &["3.0.0"]),
+        ];
+
+        assert_eq!(announce_tag_union(&versions), vec!["3.0.0"]);
+
+        let nothing_published = vec![
+            version_summary("1.0.0", VersionStatus::SkippedExisting, &[], &["1.0.0"]),
+            version_summary("2.0.0", VersionStatus::Failed, &[], &[]),
+        ];
+        assert!(announce_tag_union(&nothing_published).is_empty());
+    }
+
+    #[test]
+    fn a_run_with_a_partial_version_still_announces_the_whole_one_in_full() {
+        // bazelisk 1.21.0 on linux + darwin, darwin red, alongside a fully
+        // published 1.20.0. `latest` and `1` are announced — in the registry
+        // they still point at 1.20.0's complete index, because the push loop
+        // never gave 1.21.0 `--cascade`. Filtering them here (the shape this
+        // replaces) suppressed a truthful alias while doing nothing about the
+        // untruthful one, which `announce`'s re-observation of the already
+        // curated set would have re-committed regardless.
+        let versions = vec![
+            version_summary(
+                "1.20.0",
+                VersionStatus::Published,
+                &["linux/amd64", "darwin/arm64"],
+                &["1.20.0", "1.20", "1", "latest"],
+            ),
+            version_summary("1.21.0", VersionStatus::Partial, &["linux/amd64"], &["1.21.0"]),
+        ];
+
+        assert_eq!(
+            announce_tag_union(&versions),
+            vec!["1.20.0", "1.20", "1", "latest", "1.21.0"],
+        );
+    }
+
+    #[test]
+    fn build_announce_args_uses_additive_tags_file_never_replacing_tags() {
+        let args = build_announce_args(&announce_config(), Path::new("/tmp/tags.txt")).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "package",
+                "announce",
+                "--package",
+                "bazelbuild/bazelisk",
+                "--tags-file",
+                "/tmp/tags.txt",
+                "--fork",
+                "ocx-contrib/index",
+                "--index-repo",
+                "ocx-sh/index",
+            ],
+        );
+        assert!(
+            !args.iter().any(|a| a == "--tags"),
+            "--tags REPLACES the curated set — a mirror must never use it",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_runs_exactly_once_per_run_with_the_union_of_tags() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let tags_file = dir.path().join("run-summary.announce-tags");
+        let config = announce_config();
+
+        let versions = vec![
+            version_summary(
+                "1.20.0",
+                VersionStatus::Published,
+                &["linux/amd64"],
+                &["1.20.0", "1.20"],
+            ),
+            version_summary(
+                "1.21.0",
+                VersionStatus::Published,
+                &["linux/amd64"],
+                &["1.21.0", "1.21"],
+            ),
+        ];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&config),
+            &versions,
+            &tags_file,
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::Announced {
+                package: "bazelbuild/bazelisk".to_string(),
+                tags: vec![
+                    "1.20.0".to_string(),
+                    "1.20".to_string(),
+                    "1.21.0".to_string(),
+                    "1.21".to_string()
+                ],
+            }),
+        );
+
+        // Exactly one subprocess, not one per version and not one per platform.
+        let invocations = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            invocations.lines().count(),
+            1,
+            "announce must run once per pipeline run, got: {invocations}",
+        );
+        assert!(invocations.contains("--tags-file"), "got: {invocations}");
+
+        // The tag set travels in the file, so the whole union lands even when
+        // it outgrows anything comfortable on a command line.
+        let written = std::fs::read_to_string(&tags_file).unwrap();
+        assert_eq!(written, "1.20.0\n1.20\n1.21.0\n1.21");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_skipped_without_token_and_stays_distinguishable_in_the_summary() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let config = announce_config();
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&config),
+            &versions,
+            &dir.path().join("tags"),
+            None,
+            &ocx,
+        ));
+
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::SkippedNoCredential {
+                package: "bazelbuild/bazelisk".to_string(),
+            }),
+        );
+        assert!(!log.exists(), "no token must mean no announce subprocess");
+
+        // A run that pushed and skipped announcing must not read like one that
+        // announced, nor like one that tried and failed.
+        let rendered = |o: &AnnounceOutcome| serde_json::to_value(o).unwrap()["status"].clone();
+        assert_eq!(rendered(&outcome.unwrap()), "skipped_no_credential");
+        assert_eq!(
+            rendered(&AnnounceOutcome::Announced {
+                package: "p/q".into(),
+                tags: vec![]
+            }),
+            "announced",
+        );
+        assert_eq!(
+            rendered(&AnnounceOutcome::Failed {
+                package: "p/q".into(),
+                error: "boom".into()
+            }),
+            "failed",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_failure_is_recorded_and_does_not_abort_the_run() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 70);
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        match outcome {
+            Some(AnnounceOutcome::Failed { package, error }) => {
+                assert_eq!(package, "bazelbuild/bazelisk");
+                assert!(error.contains("ocx package announce exited"), "got: {error}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_to_announce_stays_distinct_from_never_configured() {
+        // Both make no call. They need very different fixes, though: the first
+        // is the steady state of an up-to-date mirror *and* the permanent state
+        // of one whose `announce:` block was added after everything had already
+        // published — where the catch-up is manual. Collapsing both to `None`
+        // makes that owner read forever-silence as success.
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        // Configured, but the run published nothing.
+        let barren = vec![version_summary(
+            "1.0.0",
+            VersionStatus::SkippedExisting,
+            &[],
+            &["1.0.0"],
+        )];
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &barren,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::NothingToAnnounce {
+                package: "bazelbuild/bazelisk".to_string(),
+            }),
+        );
+        assert_eq!(
+            serde_json::to_value(outcome.unwrap()).unwrap()["status"],
+            "nothing_to_announce",
+        );
+
+        // Published, but no `announce:` block — announce is opt-in.
+        let published = vec![version_summary(
+            "1.0.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.0.0"],
+        )];
+        assert_eq!(
+            rt.block_on(run_announce(
+                None,
+                &published,
+                &dir.path().join("tags"),
+                Some("t"),
+                &ocx
+            )),
+            None,
+        );
+
+        assert!(!log.exists(), "neither case may spawn an announce subprocess");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn announce_writes_its_tags_file_into_a_not_yet_existing_directory() {
+        // `--write-summary out/run-summary.json` with `out/` absent: the tags
+        // file is a sibling, and the announce runs before the summary write
+        // that would have created the directory. Without a create_dir_all here
+        // every announce under such a path is a deterministic failure.
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx(dir.path(), &log, 0);
+        let tags_file = dir.path().join("out").join("run-summary.announce-tags");
+
+        let versions = vec![version_summary(
+            "1.0.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.0.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &tags_file,
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert!(
+            matches!(outcome, Some(AnnounceOutcome::Announced { .. })),
+            "got: {outcome:?}",
+        );
+        assert_eq!(std::fs::read_to_string(&tags_file).unwrap(), "1.0.0");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stalled_announce_is_killed_instead_of_taking_the_job_down_with_it() {
+        // The announce pushes a fork branch, calls the PR API and observes the
+        // registry. A stall there (a 429 retry loop is enough) used to run
+        // until the runner killed the job.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("hanging-ocx");
+        std::fs::write(&script, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let started = std::time::Instant::now();
+        let result = rt.block_on(invoke_announce(
+            &announce_config(),
+            &["1.0.0".to_string()],
+            &dir.path().join("tags"),
+            &script,
+            Duration::from_millis(200),
+        ));
+
+        let error = result.expect_err("a hung announce must not hang the run");
+        assert!(error.contains("timed out"), "got: {error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the timeout must bound the wait, took {:?}",
+            started.elapsed(),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_run_summary_is_on_disk_before_the_announce_starts() {
+        // Twelve images push fine, the announce stalls, the job is killed on
+        // the runner timeout. Written after the announce, run-summary.json
+        // would never exist: the artifact upload finds nothing, the notify
+        // gate reads false, and a dozen live images go unreported.
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let log = dir.path().join("announce-observations.log");
+
+        // Stand-in `ocx`: answers a push with a cascade report, and on announce
+        // records whether the summary was already on disk when it was called.
+        let script = dir.path().join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+case "$*" in
+  *"package announce"*)
+    if [ -f '{summary}' ]; then echo saw-summary >> '{log}'; else echo saw-nothing >> '{log}'; fi
+    ;;
+  *)
+    echo '{{"cascade_tags_written":["3.7.0"],"status":"pushed"}}'
+    ;;
+esac
+"#,
+                summary = summary_path.display(),
+                log = log.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let version = "3.7.0";
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+        // Contents are irrelevant — the push subprocess is the stand-in above.
+        std::fs::write(bundles_dir.path().join("bundle-3.7.0-linux_amd64.tar.xz"), b"x").unwrap();
+
+        // SAFETY: test-only process env, serialised by the lock above.
+        unsafe {
+            std::env::set_var("OCX_BINARY_PIN", &script);
+            std::env::set_var(ENV_ANNOUNCE_TOKEN, "gh-token");
+        }
+
+        let result = run_push_cmd(
+            std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/mirror-ghcr-announce.yml"
+            ))
+            .to_path_buf(),
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        // SAFETY: cleanup so neighbouring tests don't inherit either var.
+        unsafe {
+            std::env::remove_var("OCX_BINARY_PIN");
+            std::env::remove_var(ENV_ANNOUNCE_TOKEN);
+        }
+        result.expect("a fully green run must exit 0");
+
+        assert_eq!(
+            std::fs::read_to_string(&log).unwrap().trim(),
+            "saw-summary",
+            "the announce must run against an already-durable run summary",
+        );
+
+        // And the announce outcome still lands in the file afterwards.
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(val["announce"]["status"], "announced", "got: {val}");
+        assert_eq!(val["announce"]["tags"][0], "3.7.0", "got: {val}");
+    }
+
+    /// A stand-in `ocx` for the whole-pipeline tests: logs every argv, exits
+    /// `announce_exit` on `package announce`, and — crucially — models what a
+    /// push does to the *registry* rather than just answering with a canned
+    /// tag list.
+    ///
+    /// The modelled semantics are `client.rs::merge_platform_into_index`: every
+    /// push merges its own platform into the exact version tag's index, and a
+    /// `--cascade` push additionally merges that **same single platform** into
+    /// each rolling tag, replacing only its own entry (`retain(|e| e.platform
+    /// != platform)`) and keeping every other platform's entry exactly as it
+    /// found it. A canned list that answered the same aliases for any
+    /// `--cascade` invocation could not observe that only one platform ever
+    /// reached them.
+    ///
+    /// State lands in `{dir}/tagstate/{tag}`, one sorted `platform=version`
+    /// line per platform the tag's index carries — read back with [`tag_index`].
+    #[cfg(unix)]
+    fn fake_ocx_pipeline(dir: &Path, log: &Path, announce_exit: u8) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let state = dir.join("tagstate");
+        std::fs::create_dir_all(&state).unwrap();
+        let script = dir.join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> '{log}'
+case "$*" in
+  *"package announce"*) exit {announce_exit} ;;
+esac
+
+# The push carries `-p PLATFORM` and `-i REPOSITORY:VERSION`.
+platform=''; ref=''; prev=''
+for a in "$@"; do
+  case "$prev" in
+    -p) platform="$a" ;;
+    -i) ref="$a" ;;
+  esac
+  prev="$a"
+done
+version="${{ref##*:}}"
+minor="${{version%.*}}"
+major="${{minor%.*}}"
+
+# merge_platform_into_index: read, drop THIS platform's entry, append it
+# back pointing at this version, keep every other platform's entry.
+merge() {{
+  f='{state}'/"$1"
+  [ -f "$f" ] || : > "$f"
+  grep -v "^$platform=" "$f" > "$f.tmp"
+  echo "$platform=$version" >> "$f.tmp"
+  sort -o "$f" "$f.tmp"
+  rm -f "$f.tmp"
+}}
+
+merge "$version"
+case "$*" in
+  *--cascade*)
+    for t in "$minor" "$major" latest; do merge "$t"; done
+    echo '{{"cascade_tags_written":["'"$minor"'","'"$major"'","latest"],"status":"pushed"}}'
+    ;;
+  *)
+    echo '{{"cascade_tags_written":[],"status":"pushed"}}'
+    ;;
+esac
+"#,
+                log = log.display(),
+                state = state.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// The `platform=version` entries the stand-in registry's `tag` index
+    /// carries, or empty when the tag was never written.
+    #[cfg(unix)]
+    fn tag_index(dir: &Path, tag: &str) -> Vec<String> {
+        std::fs::read_to_string(dir.join("tagstate").join(tag))
+            .map(|body| body.lines().map(str::to_string).collect())
+            .unwrap_or_default()
+    }
+
+    /// Every logged `package push` argv that targets `repo:version`.
+    fn pushes_for(log: &str, version: &str) -> Vec<String> {
+        log.lines()
+            .filter(|line| line.contains("package push"))
+            .filter(|line| line.contains(&format!("-i ocx-contrib/bazelbuild/bazelisk:{version} ")))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Drive the whole push pipeline against a stand-in `ocx`.
+    #[cfg(unix)]
+    fn run_pipeline_with_fake_ocx(
+        fixture: &str,
+        script: &Path,
+        junit_dir: &Path,
+        bundles_dir: &Path,
+        summary_path: &Path,
+        token: Option<&str>,
+    ) -> Result<(), MirrorError> {
+        // SAFETY: test-only process env, serialised by the caller's lock.
+        unsafe {
+            std::env::set_var("OCX_BINARY_PIN", script);
+            match token {
+                Some(t) => std::env::set_var(ENV_ANNOUNCE_TOKEN, t),
+                None => std::env::remove_var(ENV_ANNOUNCE_TOKEN),
+            }
+        }
+        let result = run_push_cmd(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(fixture),
+            junit_dir.to_path_buf(),
+            bundles_dir.to_path_buf(),
+            summary_path.to_path_buf(),
+        );
+        // SAFETY: cleanup so neighbouring tests don't inherit either var.
+        unsafe {
+            std::env::remove_var("OCX_BINARY_PIN");
+            std::env::remove_var(ENV_ANNOUNCE_TOKEN);
+        }
+        result
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_red_platform_stops_the_run_from_moving_any_rolling_alias_in_the_registry() {
+        // The scenario that defeats every announce-side filter. mirror-bazelisk
+        // has been publishing for months, so the index entry ALREADY curates
+        // `latest`, `1`, `1.20` and `1.20.0`. Tonight's run publishes 1.21.0
+        // with darwin/arm64 red.
+        //
+        // `ocx package announce --tags-file` is additive AND re-observes every
+        // tag the entry already carries — so withholding `latest` and `1` from
+        // this run's union buys nothing: the announce re-fetches them from the
+        // registry and re-commits whatever they point at now. The only place
+        // the damage can be prevented is the registry: those aliases must never
+        // be moved onto 1.21.0's linux-only index in the first place.
+        //
+        // So this asserts on the argv the registry-facing subprocess received,
+        // not on what the union computed. 1.20.0 (whole) still cascades, once,
+        // on its LAST platform — an earlier push failing mid-version must not
+        // leave an alias on a half-assembled index either.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let log = dir.path().join("invocations.log");
+        let script = fake_ocx_pipeline(dir.path(), &log, 0);
+
+        // An established mirror: `latest` and `1` already resolve to 1.19.0 on
+        // both platforms. This is what a cascade merges INTO, and what it
+        // leaves behind for any platform it does not carry.
+        for tag in ["latest", "1"] {
+            std::fs::write(
+                dir.path().join("tagstate").join(tag),
+                "darwin/arm64=1.19.0\nlinux/amd64=1.19.0\n",
+            )
+            .unwrap();
+        }
+
+        for (version, slug, platform, green) in [
+            ("1.20.0", "linux_amd64", "linux/amd64", true),
+            ("1.20.0", "darwin_arm64", "darwin/arm64", true),
+            ("1.21.0", "linux_amd64", "linux/amd64", true),
+            ("1.21.0", "darwin_arm64", "darwin/arm64", false),
+        ] {
+            let xml = if green {
+                passing_junit(version, platform, "_native_")
+            } else {
+                failing_junit(version, platform, "_native_")
+            };
+            write_junit(junit_dir.path(), version, slug, "_native_", &xml);
+            std::fs::write(bundles_dir.path().join(format!("bundle-{version}-{slug}.tar.xz")), b"x").unwrap();
+        }
+
+        let result = run_pipeline_with_fake_ocx(
+            "mirror-two-platform-announce.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            Some("gh-token"),
+        );
+        assert!(result.is_err(), "a red platform must still fail the push job");
+
+        let invocations = std::fs::read_to_string(&log).unwrap();
+
+        // 1.21.0: the green linux leg publishes under the exact version tag,
+        // and NOTHING in the run moves `latest` / `1` / `1.21`.
+        let partial = pushes_for(&invocations, "1.21.0");
+        assert_eq!(partial.len(), 1, "only the green platform pushes: {partial:?}");
+        assert!(
+            !partial.iter().any(|argv| argv.contains("--cascade")),
+            "a version with a red platform must never cascade: {partial:?}",
+        );
+
+        // 1.20.0 is whole, so what the REGISTRY ends up holding is the claim:
+        // every rolling alias must resolve to 1.20.0 on BOTH platforms. A
+        // cascade push merges only its own platform, so cascading on one push
+        // per version leaves each alias carrying that platform at 1.20.0 and
+        // every other one still at 1.19.0 — a mixed-version index that freezes
+        // half the users on the old release, on this run and every one after.
+        let both_at_1_20_0 = vec!["darwin/arm64=1.20.0".to_string(), "linux/amd64=1.20.0".to_string()];
+        for tag in ["1.20", "1", "latest"] {
+            assert_eq!(
+                tag_index(dir.path(), tag),
+                both_at_1_20_0,
+                "rolling tag `{tag}` must carry every platform of the whole version",
+            );
+        }
+        assert_eq!(tag_index(dir.path(), "1.20.0"), both_at_1_20_0, "exact version tag");
+
+        // The argv that produced it: every push of a whole version cascades.
+        let whole = pushes_for(&invocations, "1.20.0");
+        assert_eq!(whole.len(), 2, "both platforms push: {whole:?}");
+        let cascading: Vec<&String> = whole.iter().filter(|argv| argv.contains("--cascade")).collect();
+        assert_eq!(
+            cascading.len(),
+            whole.len(),
+            "every push of a whole version must cascade: {whole:?}",
+        );
+
+        // 1.21.0 is partial: its green platform reaches the exact version tag
+        // and nothing else — no alias, and no `1.21` conjured from a fresh
+        // single-platform index.
+        assert_eq!(tag_index(dir.path(), "1.21.0"), vec!["linux/amd64=1.21.0".to_string()]);
+        assert!(
+            tag_index(dir.path(), "1.21").is_empty(),
+            "a partial version writes no `1.21`"
+        );
+
+        // And the summary reports the registry truthfully: the partial version
+        // carries its version tag alone because nothing else was ever written.
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let partial_version = val["versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["version"] == "1.21.0")
+            .unwrap();
+        // The whole version's `cascade_tags_written` is the UNION over its
+        // platforms, and the dedup is what keeps it a set: both platforms now
+        // cascade, so both reports re-list the same hierarchy and an
+        // un-deduped accumulation would read `1.20 1 latest 1.20 1 latest`.
+        let whole_version = val["versions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["version"] == "1.20.0")
+            .unwrap();
+        assert_eq!(
+            whole_version["cascade_tags_written"],
+            serde_json::json!(["1.20.0", "1.20", "1", "latest"]),
+            "got: {whole_version}",
+        );
+
+        assert_eq!(partial_version["status"], "partial", "got: {partial_version}");
+        assert_eq!(
+            partial_version["cascade_tags_written"],
+            serde_json::json!(["1.21.0"]),
+            "got: {partial_version}",
+        );
+        assert_eq!(
+            val["announce"]["tags"],
+            serde_json::json!(["1.20.0", "1.20", "1", "latest", "1.21.0"]),
+            "got: {val}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_run_killed_during_the_announce_does_not_read_as_a_mirror_that_never_opted_in() {
+        // The hosted runner is reclaimed, or a maintainer cancels a backfill,
+        // while the announce subprocess is in flight. The `if: always()` steps
+        // still upload run-summary.json. With `announce: None` written first
+        // that summary serialises with the key ABSENT — which `pipeline notify`
+        // reads as "no `announce:` block at all". Twelve images live in GHCR,
+        // the index knows about none of them, and the artifact says the mirror
+        // does not announce.
+        //
+        // Observed from inside the announce subprocess: that is exactly the
+        // window in which the kill lands.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let observed = dir.path().join("observed-announce-state.log");
+
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.path().join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+case "$*" in
+  *"package announce"*)
+    grep -A1 '"announce": {{' '{summary}' | grep -o '"status": "[a-z_]*"' >> '{observed}'
+    ;;
+  *) echo '{{"cascade_tags_written":[],"status":"pushed"}}' ;;
+esac
+"#,
+                summary = summary_path.display(),
+                observed = observed.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let version = "3.7.0";
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+        std::fs::write(bundles_dir.path().join("bundle-3.7.0-linux_amd64.tar.xz"), b"x").unwrap();
+
+        run_pipeline_with_fake_ocx(
+            "mirror-ghcr-announce.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            Some("gh-token"),
+        )
+        .expect("a fully green run must exit 0");
+
+        assert_eq!(
+            std::fs::read_to_string(&observed).unwrap().trim(),
+            r#""status": "interrupted""#,
+            "the durable summary must already name the announce as in flight",
+        );
+
+        // And the placeholder is replaced once the call returns.
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(val["announce"]["status"], "announced", "got: {val}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_announce_fails_the_push_job() {
+        // `OCX_ANNOUNCE_TOKEN` expires. Every push is green, so without this
+        // the check stays green forever, no scheduled-run alert fires because
+        // nothing failed, and the index drifts arbitrarily far behind the
+        // registry. Same reasoning as `any_red`: the images ARE in the
+        // registry, and the exit code is how a partial outcome reaches the
+        // pipeline and the maintainer.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let log = dir.path().join("invocations.log");
+        let script = fake_ocx_pipeline(dir.path(), &log, 70);
+
+        let version = "3.7.0";
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+        std::fs::write(bundles_dir.path().join("bundle-3.7.0-linux_amd64.tar.xz"), b"x").unwrap();
+
+        let result = run_pipeline_with_fake_ocx(
+            "mirror-ghcr-announce.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            Some("gh-token"),
+        );
+
+        let error = result.expect_err("a failed announce must fail the push job");
+        assert!(
+            format!("{error}").contains("index announce for bazelbuild/bazelisk failed"),
+            "got: {error}",
+        );
+
+        // The announce is the ONLY reason: every push was green.
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(val["any_red"], false, "got: {val}");
+        assert_eq!(val["announce"]["status"], "failed", "got: {val}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_credential_leaves_the_push_job_green_but_visible() {
+        // The counterpart to the test above: a mirror without the secret is a
+        // valid configuration (forks, test repos), so it degrades rather than
+        // failing — but it must stay legible in the summary, and from there in
+        // the `announce` job output and the Index row.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let log = dir.path().join("invocations.log");
+        let script = fake_ocx_pipeline(dir.path(), &log, 70);
+
+        let version = "3.7.0";
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+        std::fs::write(bundles_dir.path().join("bundle-3.7.0-linux_amd64.tar.xz"), b"x").unwrap();
+
+        run_pipeline_with_fake_ocx(
+            "mirror-ghcr-announce.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            None,
+        )
+        .expect("a missing announce secret must not fail the push job");
+
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(val["announce"]["status"], "skipped_no_credential", "got: {val}");
+    }
+
+    #[test]
+    fn run_summary_omits_announce_when_the_run_never_announced() {
+        // `pipeline notify` reads this file; an absent announce must not
+        // appear as a null field it has to special-case.
+        let spec_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-minimal.yml"
+        ))
+        .to_path_buf();
+        let dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+
+        run_push_cmd(
+            spec_path,
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            summary_path.clone(),
+        )
+        .unwrap();
+
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert!(val.get("announce").is_none(), "got: {val}");
     }
 }
