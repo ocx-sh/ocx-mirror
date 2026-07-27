@@ -235,8 +235,19 @@ fn build_version_embed(summary: &RunSummary, version: &VersionSummary, decorate:
 /// ambiguous between "announced fine" and "this mirror predates the field".
 fn announce_field(announce: Option<&AnnounceOutcome>) -> Option<DiscordEmbedField> {
     let value = match announce? {
-        AnnounceOutcome::Announced { package, tags } => {
-            format!("`{STATUS_SUCCESS}` `{package}` — {} tag(s) announced", tags.len())
+        AnnounceOutcome::Announced {
+            package,
+            tags,
+            pull_request_url,
+        } => match pull_request_url {
+            Some(url) => format!(
+                "`{STATUS_SUCCESS}` `{package}` — {} tag(s) announced ([PR]({url}))",
+                tags.len()
+            ),
+            None => format!("`{STATUS_SUCCESS}` `{package}` — {} tag(s) announced", tags.len()),
+        },
+        AnnounceOutcome::AlreadyCurrent { package } => {
+            format!("`{STATUS_EXCLUDED}` `{package}` — index already current, nothing changed")
         }
         AnnounceOutcome::NothingToAnnounce { package } => {
             format!("`{STATUS_EXCLUDED}` `{package}` — nothing new to announce")
@@ -730,6 +741,7 @@ mod tests {
         summary.announce = Some(AnnounceOutcome::Announced {
             package: "bazelbuild/bazelisk".to_string(),
             tags: vec!["1.21.0".to_string(), "1.21".to_string()],
+            pull_request_url: Some("https://github.com/ocx-sh/index/pull/81".to_string()),
         });
         let announced = build_messages(&summary, None);
 
@@ -760,6 +772,10 @@ mod tests {
             AnnounceOutcome::Announced {
                 package: package.clone(),
                 tags: vec!["1.21.0".to_string()],
+                pull_request_url: None,
+            },
+            AnnounceOutcome::AlreadyCurrent {
+                package: package.clone(),
             },
             AnnounceOutcome::NothingToAnnounce {
                 package: package.clone(),

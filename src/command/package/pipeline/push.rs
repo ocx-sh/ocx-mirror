@@ -936,6 +936,10 @@ fn build_announce_args(config: &AnnounceConfig, tags_file: &Path) -> Result<Vec<
         .ok_or_else(|| format!("announce tags file path is not valid UTF-8: {}", tags_file.display()))?;
 
     Ok([
+        // Global flags precede the subcommand. JSON because the caller has to
+        // read what the announce *did* — its exit code is 0 either way.
+        "--format",
+        "json",
         "package",
         "announce",
         "--package",
@@ -1008,16 +1012,27 @@ async fn run_announce(
     }
 
     match invoke_announce(config, &tags, tags_file, ocx_binary, ANNOUNCE_TIMEOUT).await {
-        Ok(()) => {
+        // `unchanged` with no pull request is the no-op: the index already
+        // carried every tag this run published. Recording it as `announced`
+        // is what let a run that did nothing read as one that curated tags.
+        Ok(report) if report.status == "unchanged" && report.pull_request_url.is_none() => {
+            log::info!("[announce] {} — index already current, nothing changed", config.package);
+            Some(AnnounceOutcome::AlreadyCurrent {
+                package: config.package.clone(),
+            })
+        }
+        Ok(report) => {
             log::info!(
-                "[announce] {} → {} ({} tag(s))",
+                "[announce] {} → {} ({} tag(s), {})",
                 config.package,
                 config.index_repo,
-                tags.len()
+                tags.len(),
+                report.pull_request_url.as_deref().unwrap_or("no pull request reported"),
             );
             Some(AnnounceOutcome::Announced {
                 package: config.package.clone(),
                 tags,
+                pull_request_url: report.pull_request_url,
             })
         }
         Err(error) => {
@@ -1041,7 +1056,7 @@ async fn invoke_announce(
     tags_file: &Path,
     ocx_binary: &Path,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<AnnounceReport, String> {
     let args = build_announce_args(config, tags_file)?;
 
     // The tags file is a sibling of `--write-summary`, and the announce runs
@@ -1079,7 +1094,30 @@ async fn invoke_announce(
         ));
     }
 
-    Ok(())
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim()).map_err(|e| {
+        // An unreadable report is a genuine unknown, not a success: the run
+        // cannot tell whether the index moved. Recording it as `failed` fails
+        // the push job, which is the honest outcome — the images are live and
+        // the index state is undetermined.
+        format!(
+            "ocx package announce reported no readable JSON ({e}): {}",
+            stdout.trim()
+        )
+    })
+}
+
+/// The subset of `ocx package announce --format json` this pipeline reads.
+///
+/// `status` is `"updated"` or `"unchanged"`. `unchanged` does **not** imply no
+/// pull request: an announce whose branch is ahead of the index base ensures
+/// one without committing anything, and those tags are as pending as a fresh
+/// run's. Only `unchanged` *and* no pull request means nothing happened.
+#[derive(Debug, serde::Deserialize)]
+struct AnnounceReport {
+    status: String,
+    #[serde(default)]
+    pull_request_url: Option<String>,
 }
 
 /// Resolve the path to the `ocx` binary.
@@ -2479,13 +2517,28 @@ platforms:
     /// `log`. Lets the announce subprocess boundary be exercised without
     /// mutating process environment.
     #[cfg(unix)]
+    /// An `ocx` that reports a real announce: tags curated, pull request opened.
     fn fake_ocx(dir: &Path, log: &Path, exit_code: u8) -> PathBuf {
+        fake_ocx_reporting(
+            dir,
+            log,
+            exit_code,
+            r#"{"status":"updated","pull_request_url":"https://github.com/ocx-sh/index/pull/81"}"#,
+        )
+    }
+
+    /// An `ocx` that exits `exit_code` after printing `report` on stdout.
+    ///
+    /// The report is the whole point: `ocx package announce` exits 0 whether it
+    /// curated tags or changed nothing, so a stub that only sets an exit code
+    /// cannot express the difference the caller has to detect.
+    fn fake_ocx_reporting(dir: &Path, log: &Path, exit_code: u8, report: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let script = dir.join("fake-ocx");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit {exit_code}\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat <<'EOF'\n{report}\nEOF\nexit {exit_code}\n",
                 log.display()
             ),
         )
@@ -2572,6 +2625,8 @@ platforms:
         assert_eq!(
             args,
             vec![
+                "--format",
+                "json",
                 "package",
                 "announce",
                 "--package",
@@ -2633,6 +2688,7 @@ platforms:
                     "1.21.0".to_string(),
                     "1.21".to_string()
                 ],
+                pull_request_url: Some("https://github.com/ocx-sh/index/pull/81".to_string()),
             }),
         );
 
@@ -2649,6 +2705,159 @@ platforms:
         // it outgrows anything comfortable on a command line.
         let written = std::fs::read_to_string(&tags_file).unwrap();
         assert_eq!(written, "1.20.0\n1.20\n1.21.0\n1.21");
+    }
+
+    /// A no-op announce must not be recorded as `announced`.
+    ///
+    /// `ocx package announce` exits 0 whether it curated tags or found the
+    /// index already current, so this outcome used to be read off the exit
+    /// status and every no-op was filed as a success. Run `30241738383`
+    /// reported `announced` having done nothing; the index's tags had come
+    /// from a hand-made PR twenty minutes earlier.
+    #[cfg(unix)]
+    #[test]
+    fn an_announce_that_changed_nothing_is_not_recorded_as_announced() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx_reporting(
+            dir.path(),
+            &log,
+            0,
+            r#"{"status":"unchanged","pull_request_url":null,"written_paths":[]}"#,
+        );
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::AlreadyCurrent {
+                package: "bazelbuild/bazelisk".to_string(),
+            }),
+            "an unchanged announce with no pull request changed nothing",
+        );
+
+        // The call was made — this is not `nothing_to_announce`, and the
+        // summary must not let the two collapse into one another.
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        let status = serde_json::to_value(outcome.unwrap()).unwrap()["status"].clone();
+        assert_eq!(status, "already_current");
+    }
+
+    /// The other direction: a real announce still records as `announced`, and
+    /// carries the pull request that proves it.
+    #[cfg(unix)]
+    #[test]
+    fn an_announce_that_opened_a_pull_request_records_it() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx_reporting(
+            dir.path(),
+            &log,
+            0,
+            r#"{"status":"updated","pull_request_url":"https://github.com/ocx-sh/index/pull/81"}"#,
+        );
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert_eq!(
+            outcome,
+            Some(AnnounceOutcome::Announced {
+                package: "bazelbuild/bazelisk".to_string(),
+                tags: vec!["1.20.0".to_string()],
+                pull_request_url: Some("https://github.com/ocx-sh/index/pull/81".to_string()),
+            }),
+        );
+    }
+
+    /// An `unchanged` run that still ensured a pull request *did* announce:
+    /// its branch is ahead of the index base, so the tags are pending review
+    /// exactly as a fresh run's would be.
+    #[cfg(unix)]
+    #[test]
+    fn an_unchanged_announce_with_an_ensured_pull_request_still_counts() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx_reporting(
+            dir.path(),
+            &log,
+            0,
+            r#"{"status":"unchanged","pull_request_url":"https://github.com/ocx-sh/index/pull/81"}"#,
+        );
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert!(
+            matches!(outcome, Some(AnnounceOutcome::Announced { .. })),
+            "got: {outcome:?}",
+        );
+    }
+
+    /// An unreadable report is an unknown, not a success.
+    #[cfg(unix)]
+    #[test]
+    fn an_announce_reporting_nothing_readable_is_recorded_as_failed() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("invocations.log");
+        let ocx = fake_ocx_reporting(dir.path(), &log, 0, "announced 3 tags");
+        let versions = vec![version_summary(
+            "1.20.0",
+            VersionStatus::Published,
+            &["linux/amd64"],
+            &["1.20.0"],
+        )];
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let outcome = rt.block_on(run_announce(
+            Some(&announce_config()),
+            &versions,
+            &dir.path().join("tags"),
+            Some("gh-token"),
+            &ocx,
+        ));
+
+        assert!(
+            matches!(outcome, Some(AnnounceOutcome::Failed { .. })),
+            "got: {outcome:?}",
+        );
     }
 
     #[cfg(unix)]
@@ -2689,7 +2898,8 @@ platforms:
         assert_eq!(
             rendered(&AnnounceOutcome::Announced {
                 package: "p/q".into(),
-                tags: vec![]
+                tags: vec![],
+                pull_request_url: None,
             }),
             "announced",
         );
@@ -2885,6 +3095,7 @@ platforms:
 case "$*" in
   *"package announce"*)
     if [ -f '{summary}' ]; then echo saw-summary >> '{log}'; else echo saw-nothing >> '{log}'; fi
+    echo '{{"status":"updated","pull_request_url":"https://github.com/ocx-sh/index/pull/81"}}'
     ;;
   *)
     echo '{{"cascade_tags_written":["3.7.0"],"status":"pushed"}}'
@@ -2973,7 +3184,10 @@ esac
                 r#"#!/bin/sh
 printf '%s\n' "$*" >> '{log}'
 case "$*" in
-  *"package announce"*) exit {announce_exit} ;;
+  *"package announce"*)
+    echo '{{"status":"updated","pull_request_url":"https://github.com/ocx-sh/index/pull/81"}}'
+    exit {announce_exit}
+    ;;
 esac
 
 # The push carries `-p PLATFORM` and `-i REPOSITORY:VERSION`.
@@ -3256,6 +3470,7 @@ esac
 case "$*" in
   *"package announce"*)
     grep -A1 '"announce": {{' '{summary}' | grep -o '"status": "[a-z_]*"' >> '{observed}'
+    echo '{{"status":"updated","pull_request_url":"https://github.com/ocx-sh/index/pull/81"}}'
     ;;
   *) echo '{{"cascade_tags_written":[],"status":"pushed"}}' ;;
 esac
