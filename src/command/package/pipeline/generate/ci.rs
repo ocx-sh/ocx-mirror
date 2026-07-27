@@ -796,15 +796,21 @@ fn render_describe(spec: &MirrorSpec) -> String {
 
 /// Render the `announce-from-registry.yml` catch-up workflow.
 ///
-/// Same placeholder set as `describe.yml` — auth steps plus the GHCR
-/// permissions block. Dispatch-only by design: the push job already announces
-/// what each run publishes, and this one exists for the backlog a mirror that
-/// opted into `announce:` late can never reach by running forward.
+/// Same placeholder set as `describe.yml` — auth steps plus a GHCR permissions
+/// block. Dispatch-only by design: the push job already announces what each run
+/// publishes, and this one exists for the backlog a mirror that opted into
+/// `announce:` late can never reach by running forward.
+///
+/// Takes **discover's** read-only permissions, not describe's. This job only
+/// lists the target's tags and fetches their manifests — the writes it performs
+/// all land on the index repository, through `OCX_ANNOUNCE_TOKEN`, never through
+/// the job's own `GITHUB_TOKEN`. Handing it `packages: write` would grant the
+/// one scope that could overwrite the very artifacts it exists to describe.
 fn render_announce_from_registry(spec: &MirrorSpec) -> String {
     ANNOUNCE_FROM_REGISTRY_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
-        .replace("{DESCRIBE_PERMISSIONS}", render_describe_permissions(spec))
+        .replace("{ANNOUNCE_PERMISSIONS}", render_discover_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
 }
 
