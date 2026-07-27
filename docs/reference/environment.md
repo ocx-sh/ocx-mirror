@@ -61,6 +61,29 @@ These three names are the **complete** environment surface for annotations — t
 
 **Scope:** `sync`, `pipeline push`.
 
+### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
+
+The GitHub credential `ocx package announce` uses to push the fork branch and open the index pull request. Read from the environment and handed to the `ocx` subprocess; `ocx-mirror` never stores it and never logs it.
+
+Only mirrors with an [`announce:`][spec-announce] block need it. The two commands read it differently:
+
+| Command | Without the token |
+|---------|-------------------|
+| [`pipeline push`][cli-push] | Degrades: the run publishes normally, emits a GitHub notice, and records `skipped_no_credential` in `run-summary.json`. A mirror without the secret is a valid configuration. |
+| [`pipeline announce`][cli-announce] | Fails. Opening the index pull request is the only thing this command does — except under `--dry-run`, which writes to a temporary directory and needs no token. |
+
+Both generated workflows thread it in from a repository secret of the same name:
+
+```yaml
+# In the generated workflow (do not write by hand):
+env:
+  OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
+```
+
+It is deliberately **not** the workflow's own `GITHUB_TOKEN`: the pull request targets a different repository ([`ocx-sh/index`][index-repo], from a fork), which the run's automatic token cannot reach.
+
+**Scope:** `pipeline push`, `pipeline announce`.
+
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
 `ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package describe`). The child binary is resolved in order: `OCX_BINARY_PIN`, an `ocx` co-located with the `ocx-mirror` executable, then `ocx` on `PATH`.
@@ -95,9 +118,12 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [ocx-env]: https://ocx.sh/docs/reference/environment
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
+[index-repo]: https://github.com/ocx-sh/index
 
 <!-- internal -->
 [cli-generate-ci]: ./cli.md#pipeline-generate-ci
 [cli-plan]: ./cli.md#pipeline-plan
 [cli-push]: ./cli.md#pipeline-push
 [cli-notify]: ./cli.md#pipeline-notify
+[cli-announce]: ./cli.md#pipeline-announce
+[spec-announce]: ./mirror-yml.md#announce

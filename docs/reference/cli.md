@@ -57,11 +57,11 @@ ocx-mirror schema <TARGET>
 
 ## `package pipeline` {#pipeline}
 
-Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
+Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe` and `announce` each own a standalone workflow outside that chain. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
-Render (or check) the CI workflow files for a mirror repository. Writes `.github/workflows/mirror.yml`, `describe.yml`, and — unless the spec sets `allow_manual_edits: true` — the `verify-generated.yml` drift guard.
+Render (or check) the CI workflow files for a mirror repository. Writes `.github/workflows/mirror.yml`, `describe.yml`, and — unless the spec sets `allow_manual_edits: true` — the `verify-generated.yml` drift guard. A spec with an [`announce:`][spec-announce] block also gets `announce-from-registry.yml`.
 
 ```sh
 ocx-mirror package pipeline generate ci [OPTIONS]
@@ -144,6 +144,23 @@ ocx-mirror package pipeline describe [OPTIONS]
 |------|---------|-------------|
 | `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
 
+### `package pipeline announce` {#pipeline-announce}
+
+Announce every tag the target repository currently holds into the index, by spawning `ocx package announce --tags-from-registry`. Additive: it cannot drop a tag the index already commits, and yank markers survive.
+
+This is the catch-up path for a mirror that published before it gained an [`announce:`][spec-announce] block — the push job announces only what its own run wrote, so no future run ever covers that backlog. Driven by the generated `announce-from-registry.yml` workflow, which is `workflow_dispatch` only.
+
+```sh
+ocx-mirror package pipeline announce [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
+| `--dry-run` | off | Write the rebuilt entry to a temporary directory and report `updated` / `unchanged` without opening a pull request |
+
+Needs [`OCX_ANNOUNCE_TOKEN`][env-announce-token] unless `--dry-run` is set. Exits 64 when the spec has no `announce:` block — there is no index package to announce into.
+
 ## Exit codes {#exit-codes}
 
 Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
@@ -152,7 +169,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 |------|---------|-----------|
 | 0 | Success | — |
 | 1 | Pipeline execution failure (download, push, verify) | `sync`, `prepare`, `push` |
-| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell | `validate`, `pipeline generate ci` |
+| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block | `validate`, `pipeline generate ci`, `pipeline announce` |
 | 65 | Data error: spec validation failed, renderer drift (`--check`), JUnit/plan/run-summary malformed | all |
 | 69 | Upstream source or target registry unreachable; Discord 5xx / timeout | `sync`, `check`, `plan`, `push`, `notify` |
 | 74 | I/O error: template render or file write failure | `pipeline generate ci`, `push` |
@@ -164,5 +181,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 
 <!-- internal -->
 [ref-mirror-yml]: ./mirror-yml.md
+[spec-announce]: ./mirror-yml.md#announce
 [env-discord-hook]: ./environment.md#ocx-mirror-discord-hook
 [env-discord-user-id]: ./environment.md#ocx-mirror-discord-user-id
+[env-announce-token]: ./environment.md#ocx-announce-token
