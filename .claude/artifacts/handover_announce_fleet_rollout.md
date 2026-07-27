@@ -214,9 +214,31 @@ manager's glob and regex against the working tree in `task verify` and fails by
 name when one matches nothing. Copy it into any repo that grows a
 `customManager`.
 
-Same reflex applies to the `paths:` globs on rule files and to any other config
-whose failure mode is "quietly does less": if you cannot state what would go
-red when it breaks, it is not checked.
+This is one instance of R9.
+
+### R9 — If you cannot state what would go red when it breaks, it is not checked
+
+A green result is only evidence if a red one was reachable. Four separate
+instances of the same shape turned up on 2026-07-27 alone, in four subsystems:
+
+| Where | The green that meant nothing |
+|---|---|
+| `renovate.json` | A `customManager` glob matching no files looks exactly like one with no work to do. |
+| `test_mirror_pipeline.py` | Four tests accepted any non-zero exit as "unimplemented stub", so a spec rejection at 65 read as a pass. |
+| Same file | Structural tests asserted `"ocx_mirror:" in content` — file *text*, where a parser was available. Passed on a fixture no parser accepts. |
+| ocx index client | Client and live index disagreed on `c/index.json`; both suites passed, each against its own fixture. |
+
+None was a wrong assertion. Each was an assertion that never ran, or ran against
+something other than the real thing.
+
+*The reflex:* for any check you rely on, name the failure it would catch, then
+make it happen once and watch it go red. If you cannot make it fail, you do not
+have a check — you have a habit. It costs one command, and it is the same move
+as R4's ordering proof.
+
+Cheapest three tells: a test that tolerates a *range* of exit codes; an
+assertion on file text where a parser exists; a skip whose message states a
+cause it did not observe. All three shipped here.
 
 ---
 
