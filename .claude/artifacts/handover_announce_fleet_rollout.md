@@ -123,11 +123,24 @@ its branch to that **fork** and opens a cross-repository pull request against
 Two consequences:
 
 - The token in `OCX_ANNOUNCE_TOKEN` needs push on the **fork**, not on the
-  index. A PAT can never exceed the permission of the GitHub App backing the
-  machine account: on the pilot this surfaced as
-  `404 … /ocx-contrib/index/git/blobs`, GitHub masking an unauthorized *write*
-  as not-found. Reading that as a missing path, or as a PAT scope problem, is
-  the trap — it was the App lacking write on the fork.
+  index. When it does not have it, GitHub masks the unauthorized *write* as
+  not-found — the announce dies on
+  `forge returned HTTP status 404 for https://api.github.com/repos/ocx-contrib/index/git/refs`.
+  There is no missing path; the path is fine and the write was refused.
+
+  **Do not debug this from the collaborator list.** Observed on
+  `ocx-contrib/mirror-bazelbuild` run
+  [30254441005](https://github.com/ocx-contrib/mirror-bazelbuild/actions/runs/30254441005):
+  `ocx-bot` holds `push` on `ocx-contrib/index` as a collaborator, and the
+  announce still 404'd. The token is scoped narrower than the account it
+  belongs to. Check, in order: the PAT's own scopes (a classic PAT needs full
+  `repo`; `public_repo` alone is not enough for the org policy path), then
+  whether the org restricts classic tokens, then — for a fine-grained PAT —
+  whether `ocx-contrib/index` is in its repository selection with
+  `Contents: read and write` **and** `Pull requests: read and write`.
+  A PAT can never exceed the permission of the GitHub App backing the machine
+  account, so an App-scoped read-only grant caps the PAT regardless of what the
+  PAT itself requests.
 - `announce` **refuses an unclaimed namespace**. The root must exist before the
   first announce, and the bot cannot create it. The claim is a separate,
   human-lane pull request against `ocx-sh/index`.
@@ -331,12 +344,22 @@ None of these blocked the pilot; all of them are plausible at ~41 repositories.
   the human-lane claims are seeded? Widening first means a repo can announce
   into a namespace nobody claimed — which `announce` refuses, so the failure is
   loud rather than wrong. Widening after means one more manual step per repo.
-- **The fork path is not yet proven from a fleet repo.** Both of the pilot's
-  merged index pull requests were opened from branches in `ocx-sh/index` itself
-  under a human identity, not from the `ocx-contrib/index` fork under the bot —
-  though the announce PR ([#81](https://github.com/ocx-sh/index/pull/81)) *was*
-  merged by `app/github-actions` with no human click, so the machine **merge**
-  lane is proven. What is not proven is the cross-repository leg: bot pushes to
-  the shared fork, opens the PR from there. That is what every fleet repo will
-  do. Treat the second migration as the first real test of it, and expect R5's
-  `404`-masking-a-`403` failure mode there first.
+- **The fork path is blocked today — this is the one thing to fix before the
+  fleet.** Both of the pilot's merged index pull requests were opened from
+  branches in `ocx-sh/index` itself under a human identity, not from the
+  `ocx-contrib/index` fork under the bot. The announce PR
+  ([#81](https://github.com/ocx-sh/index/pull/81)) *was* merged by
+  `app/github-actions` with no human click, so the machine **merge** lane is
+  proven. The cross-repository leg — bot pushes to the shared fork, opens the PR
+  from there — is not, and it is what every fleet repo will use.
+
+  As of 2026-07-27 it fails: run
+  [30254441005](https://github.com/ocx-contrib/mirror-bazelbuild/actions/runs/30254441005)
+  published `1.25.0` across all five platforms and then reported
+  `index announce for bazelbuild/bazelisk failed: … HTTP status 404 for
+  https://api.github.com/repos/ocx-contrib/index/git/refs — the registry is
+  ahead of the index`. That is R5, and the push job is red because of it (by
+  design: a registry ahead of the index is a failure, not a warning). The index
+  root is therefore missing the `1.25.0` / `1.25` tags. Fix
+  `OCX_ANNOUNCE_TOKEN` per R5 before migrating repo two — every fleet repo will
+  hit this on its first announce.
