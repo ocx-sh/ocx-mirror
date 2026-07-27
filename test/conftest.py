@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import http.server
+import json
 import os
 import re
 import shutil
 import sys
 import threading
 from pathlib import Path
+from typing import NamedTuple
 from uuid import uuid4
 
 import pytest
@@ -126,6 +128,42 @@ def asset_server(tmp_path: Path):
 
     yield Server()
     httpd.shutdown()
+
+
+class WebhookCapture(NamedTuple):
+    """Holds captured webhook POST requests."""
+
+    url: str
+    payloads: list[dict]
+
+
+@pytest.fixture()
+def webhook_server() -> WebhookCapture:
+    """Local HTTP server standing in for the Discord webhook.
+
+    Shared by the e2e (asserts the green embed is POSTed) and the pipeline
+    suite (asserts an all-skipped run POSTs nothing) — silence is only a real
+    assertion if something was listening.
+    """
+    captured: list[dict] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            try:
+                captured.append(json.loads(body))
+            except json.JSONDecodeError:
+                captured.append({"_raw": body.decode(errors="replace")})
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, fmt: str, *args: object) -> None:  # noqa: ANN002
+            pass  # suppress request logging in test output
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield WebhookCapture(url=f"http://127.0.0.1:{server.server_address[1]}/webhook", payloads=captured)
+    server.shutdown()
 
 
 @pytest.fixture()
