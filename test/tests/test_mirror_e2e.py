@@ -170,6 +170,11 @@ def test_full_pipeline_against_registry(
     )
     plan = json.loads(plan_path.read_text())
     assert plan["has_new"] is True
+    # Pin the cardinality before indexing: with a second fixture version this
+    # would otherwise publish and assert against whichever sorts first, and
+    # nothing would red.
+    assert [v["source_version"] for v in plan["versions"]] == ["3.7.0"]
+    assert plan["versions"][0]["platforms"] == ["linux/amd64"]
     version = plan["versions"][0]["version"]
     platform = plan["versions"][0]["platforms"][0]
     platform_slug = platform.replace("/", "_")
@@ -212,6 +217,7 @@ def test_full_pipeline_against_registry(
     summary = json.loads(summary_path.read_text())
     assert summary["any_new_green"] is True
     assert summary["any_red"] is False
+    assert [v["version"] for v in summary["versions"]] == [version]
     published = summary["versions"][0]
     assert published["status"] == "published", published
     assert published["platforms_pushed"] == [platform]
