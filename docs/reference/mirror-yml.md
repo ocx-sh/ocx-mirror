@@ -142,12 +142,29 @@ tests:
 
 ## `platforms` {#platforms}
 
-Declares the GHA runner and container matrix for the generated workflow. Each key is a platform slug in `<os>/<arch>` form.
+Declares the GHA runner and container matrix for the generated workflow. Each key is a platform key, in the same form [`assets`](#assets) uses — including the `+libc.<flavor>` suffix.
 
 A platform without `containers:` runs its tests natively on the runner. A platform with `containers:` runs them once per image: the generated workflow fetches a libc-matched, statically-linked `ocx` release and executes every `ocx package test` inside `docker run <image>`, so the mirrored artifact is loaded and run by that image's own libc. That is the only way an `os.features` musl or glibc claim is actually verified — an artifact that links glibc reds its Alpine leg instead of shipping a false claim.
 
-!!! note "Container legs are linux-only"
-    Tests run via `docker run`, so `containers:` is rejected on a `darwin/*` or `windows/*` platform. A spec may mix freely: container legs on Linux, native legs everywhere else.
+!!! note "Container legs are linux-only, and run natively"
+    Tests run via `docker run`, so `containers:` is rejected on a `darwin/*` or `windows/*` platform. A spec may mix freely: container legs on Linux, native legs everywhere else. No qemu is installed, so a `linux/arm64` platform with `containers:` needs an arm64 `runner:` — the leg fails with that message rather than emulating.
+
+Making a libc claim provable is the point of the container matrix, so the platform key carries it:
+
+```yaml
+platforms:
+  "linux/amd64+libc.musl":
+    runner: ubuntu-latest
+    containers:
+      - { image: "alpine:3.20", shell: sh }
+
+  "linux/amd64+libc.glibc":
+    runner: ubuntu-latest
+    containers:
+      - { image: "ubuntu:24.04", shell: bash }
+```
+
+`docker run --platform` is handed the key with the `+libc.*` suffix stripped (`linux/amd64`); `ocx package test --platform` keeps the full key, which is what selects that entry out of the image index.
 
 ```yaml
 platforms:
@@ -198,7 +215,8 @@ platforms:
 
 **Platform key validation:**
 
-- Must match `^[a-z0-9_-]+/[a-z0-9_-]+$`.
+- Must parse as a platform key: `<os>/<arch>[/<variant>][+libc.<flavor>,...]` — the same grammar [`assets`](#assets-libc) uses. Quote any key containing `+`.
+- A key declaring a libc must be tested under that libc: every image on `linux/amd64+libc.musl` has to be a musl base (Alpine), and every image on a `+libc.glibc` key a glibc base. The mismatch is rejected at generate time — a musl-static binary runs fine under glibc, so an Alpine claim tested in Ubuntu goes green having verified nothing.
 
 ### Version applicability {#platform-version-applicability}
 

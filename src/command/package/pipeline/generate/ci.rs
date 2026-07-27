@@ -179,6 +179,9 @@ struct MatrixLeg {
     container_image: String,
     /// Container libc family (`musl` / `gnu`); empty for a native leg.
     container_libc: String,
+    /// `platform` with any `os.features` suffix stripped — what
+    /// `docker run --platform` accepts. Empty for a native leg.
+    docker_platform: String,
     shell: String,
     tests: Vec<RenderedTest>,
 }
@@ -221,7 +224,12 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
     let mut legs = Vec::new();
     for platform_key in platform_keys {
         let config = &platforms[platform_key];
-        let platform_slug = platform_key.replace('/', "_");
+        // Must equal the basename `pipeline prepare` gives this platform's work
+        // directory — the workflow flattens that into `bundle-{V}-{slug}.tar.xz`
+        // and names the leg's JUnit file with it. A libc-bearing key slugs to
+        // `linux_amd64_libc.musl` there, so `replace('/', "_")` here pointed the
+        // leg at a bundle that does not exist.
+        let platform_slug = spec::platform_key_slug(platform_key);
 
         let effective_tests: Vec<RenderedTest> = config
             .tests
@@ -255,6 +263,7 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                         container_id,
                         container_image: container.image.clone(),
                         container_libc: spec::infer_libc_from_image(&container.image).to_string(),
+                        docker_platform: spec::platform_without_features(platform_key),
                         shell,
                         tests: effective_tests.clone(),
                     });
@@ -269,6 +278,7 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                     container_id: "_native_".to_string(),
                     container_image: String::new(),
                     container_libc: String::new(),
+                    docker_platform: String::new(),
                     shell: shell.to_string(),
                     tests: effective_tests,
                 });
@@ -576,8 +586,8 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
         // `container_image` as native mode.
         if !leg.container_image.is_empty() {
             out.push_str(&format!(
-                "            container_image: {:?}\n            container_libc: {:?}\n",
-                leg.container_image, leg.container_libc,
+                "            container_image: {:?}\n            container_libc: {:?}\n            docker_platform: {:?}\n",
+                leg.container_image, leg.container_libc, leg.docker_platform,
             ));
         }
         out.push_str(&format!("            shell: {}\n", leg.shell));
@@ -655,11 +665,24 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
             # the runner's own ocx unchanged.
             CONTAINER_IMAGE="${{ matrix.container_image }}"
             if [ -n "${CONTAINER_IMAGE}" ]; then
-              case "${{ matrix.platform }}" in
+              # `docker_platform` is `platform` minus any `os.features` suffix:
+              # docker rejects `linux/amd64+libc.musl` outright, while the matrix
+              # label, the `ocx package test --platform` flag and the discover
+              # platform set all need the full, unambiguous key.
+              case "${{ matrix.docker_platform }}" in
                 linux/amd64) OCX_ARCH=x86_64 ;;
                 linux/arm64) OCX_ARCH=aarch64 ;;
-                *) echo "::error::container test legs are linux-only (got ${{ matrix.platform }})"; exit 1 ;;
+                *) echo "::error::no static ocx release for container platform ${{ matrix.docker_platform }} (linux/amd64 and linux/arm64 only)"; exit 1 ;;
               esac
+              # Container legs run the artifact natively — no qemu is installed,
+              # so a leg whose runner is a different architecture cannot execute
+              # the image at all. Say that, rather than let docker fail with a
+              # bare exec-format error several minutes in.
+              RUNNER_ARCH_UNAME="$(uname -m)"
+              if [ "${RUNNER_ARCH_UNAME}" != "${OCX_ARCH}" ]; then
+                echo "::error::container legs for ${{ matrix.docker_platform }} need a ${OCX_ARCH} runner (this one is ${RUNNER_ARCH_UNAME}); set an arch-matched \`runner:\` on this platform"
+                exit 1
+              fi
               OCX_TRIPLE="${OCX_ARCH}-unknown-linux-${{ matrix.container_libc }}"
               OCX_CONTAINER_DIR="${RUNNER_TEMP}/ocx-${OCX_TRIPLE}"
               OCX_CONTAINER_BIN="${OCX_CONTAINER_DIR}/ocx"
@@ -682,7 +705,7 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
                 # The gnu ocx verifies TLS against the system CA store, which a
                 # minimal base image need not carry; the musl build has webpki
                 # roots baked in and ignores the mount.
-                docker run --rm -i --platform "${{ matrix.platform }}" \
+                docker run --rm -i --platform "${{ matrix.docker_platform }}" \
                   -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
                   -v "${OCX_CONTAINER_BIN}:/usr/local/bin/ocx:ro" \
                   -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
@@ -991,7 +1014,11 @@ mod tests {
         // Container mode is the only path that emits extra matrix keys, so it is
         // the only path that can break the hand-built indentation of the
         // `include:` block. A string assertion cannot see that; parsing can.
-        for fixture in ["mirror-multi-container.yml", "mirror-container-mixed.yml"] {
+        for fixture in [
+            "mirror-multi-container.yml",
+            "mirror-container-mixed.yml",
+            "mirror-container-libc.yml",
+        ] {
             let workflow = workflow_for(fixture);
             let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&workflow)
                 .unwrap_or_else(|e| panic!("{fixture} must render parseable YAML: {e}\n{workflow}"));
@@ -1024,7 +1051,7 @@ mod tests {
         let workflow = workflow_for("mirror-multi-container.yml");
 
         assert!(
-            workflow.contains("docker run --rm -i --platform \"${{ matrix.platform }}\" \\"),
+            workflow.contains("docker run --rm -i --platform \"${{ matrix.docker_platform }}\" \\"),
             "container legs must invoke docker run, got:\n{workflow}"
         );
         assert!(
@@ -1087,12 +1114,12 @@ mod tests {
         let workflow = workflow_for("mirror-container-mixed.yml");
 
         assert!(
-            workflow.contains("container_image: \"docker.io/library/alpine:3.20\"\n            container_libc: \"musl\"\n            shell: sh\n"),
+            workflow.contains("container_image: \"docker.io/library/alpine:3.20\"\n            container_libc: \"musl\"\n            docker_platform: \"linux/amd64\"\n            shell: sh\n"),
             "a registry-qualified alpine must still infer musl + sh, got:\n{workflow}"
         );
         assert!(
             workflow.contains(
-                "container_image: \"debian:12\"\n            container_libc: \"gnu\"\n            shell: bash\n"
+                "container_image: \"debian:12\"\n            container_libc: \"gnu\"\n            docker_platform: \"linux/amd64\"\n            shell: bash\n"
             ),
             "debian must infer gnu + bash, got:\n{workflow}"
         );
@@ -1131,6 +1158,98 @@ mod tests {
     }
 
     #[test]
+    fn a_libc_bearing_platform_key_renders_a_leg_that_can_run() {
+        // The gate G-E case. `linux/amd64+libc.musl` is the only way to declare
+        // a libc claim, and every part of the leg has to survive it:
+        //
+        //   * `docker run --platform` and the ocx-triple `case` see the bare
+        //     `linux/amd64` — docker rejects the `+libc.musl` spelling outright,
+        //     and the `case` used to fall through to `*)` and abort the leg.
+        //   * the matrix label and `ocx package test --platform` see the FULL
+        //     key, which is what disambiguates the two entries.
+        //   * `platform_slug` is the name `pipeline prepare` gave the bundle, so
+        //     the leg finds a file that exists.
+        let workflow = workflow_for("mirror-container-libc.yml");
+
+        assert!(
+            workflow.contains(
+                "          - platform: linux/amd64+libc.musl\n            platform_slug: linux_amd64_libc.musl\n"
+            ),
+            "the matrix label must keep the full key and slug it the way prepare does, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "container_image: \"alpine:3.20\"\n            container_libc: \"musl\"\n            docker_platform: \"linux/amd64\"\n"
+            ),
+            "the docker platform must drop the os.features suffix, got:\n{workflow}"
+        );
+        // Everything docker parses reads docker_platform; nothing else may.
+        assert!(
+            workflow.contains("docker run --rm -i --platform \"${{ matrix.docker_platform }}\" \\")
+                && workflow.contains("case \"${{ matrix.docker_platform }}\" in"),
+            "docker must be handed the feature-stripped platform, got:\n{workflow}"
+        );
+        // …and the artifact selection still reads the full key.
+        assert!(
+            workflow.contains("ocx_test package test --platform \"${{ matrix.platform }}\""),
+            "`ocx package test` must keep the full platform key, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn the_rendered_slug_is_the_one_prepare_writes_the_bundle_under() {
+        // The leg reads `bundles/bundle-{V}-{platform_slug}.tar.xz`, which the
+        // workflow flattened out of `pipeline prepare`'s work tree by basename.
+        // Two independent slug rules here means the leg reds on a missing
+        // bundle, so assert the renderer and prepare agree — for a libc key,
+        // where the naive `/`→`_` rule diverges.
+        let workflow = workflow_for("mirror-container-libc.yml");
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&workflow).expect("parseable workflow");
+        let legs = parsed["jobs"]["test"]["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .expect("matrix include")
+            .clone();
+
+        for key in ["linux/amd64+libc.musl", "linux/amd64+libc.glibc"] {
+            let rendered = legs
+                .iter()
+                .find(|leg| leg["platform"].as_str() == Some(key))
+                .unwrap_or_else(|| panic!("no leg for {key} in:\n{workflow}"))["platform_slug"]
+                .as_str()
+                .expect("platform_slug")
+                .to_owned();
+            let prepared = crate::pipeline::orchestrator::task_dir(
+                Path::new("/work"),
+                "3.7.0",
+                &key.parse::<ocx_lib::oci::Platform>().expect("valid platform"),
+            );
+            assert_eq!(
+                rendered,
+                prepared.file_name().unwrap().to_string_lossy(),
+                "rendered slug for {key} must equal the basename `pipeline prepare` writes"
+            );
+        }
+    }
+
+    #[test]
+    fn container_legs_refuse_a_runner_of_the_wrong_architecture() {
+        // No qemu is installed, so an arm64 leg on an x86_64 runner cannot
+        // execute the image. Fail with the reason and the fix instead of a bare
+        // docker exec-format error minutes into the run.
+        let workflow = workflow_for("mirror-container-mixed.yml");
+
+        assert!(
+            workflow.contains("RUNNER_ARCH_UNAME=\"$(uname -m)\"")
+                && workflow.contains("if [ \"${RUNNER_ARCH_UNAME}\" != \"${OCX_ARCH}\" ]; then"),
+            "the prelude must compare the runner's arch to the leg's, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains("set an arch-matched \\`runner:\\` on this platform"),
+            "the error must name the fix, got:\n{workflow}"
+        );
+    }
+
+    #[test]
     fn native_legs_of_a_mixed_spec_keep_running_on_the_runner() {
         // A spec with containers on linux and none on darwin renders both. The
         // darwin leg carries no container keys, so `${{ matrix.container_image }}`
@@ -1155,7 +1274,13 @@ mod tests {
         // native specs must not gain a docker prelude or container matrix keys.
         let workflow = workflow_for("mirror-minimal.yml");
 
-        for needle in ["docker run", "container_image:", "container_libc:", "ocx_test"] {
+        for needle in [
+            "docker run",
+            "container_image:",
+            "container_libc:",
+            "docker_platform:",
+            "ocx_test",
+        ] {
             assert!(
                 !workflow.contains(needle),
                 "native spec must not render `{needle}`, got:\n{workflow}"

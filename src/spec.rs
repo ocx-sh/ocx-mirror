@@ -40,6 +40,7 @@ pub(crate) use versions_config::BackfillOrder;
 pub use versions_config::VersionsConfig;
 
 use ocx_lib::log;
+use ocx_lib::oci::Platform;
 use ocx_lib::package::version::Version;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -103,7 +104,9 @@ pub struct MirrorSpec {
     pub tests: Option<Vec<TestEntry>>,
 
     /// Per-platform runner + container matrix for the generated GHA workflow.
-    /// Keys must match the OCI platform format (`^[a-z0-9_-]+/[a-z0-9_-]+$`).
+    /// Keys use the canonical platform grammar `os/arch[/variant][+feature,…]`,
+    /// so a libc claim (`linux/amd64+libc.musl`) is a first-class key here just
+    /// as it is under `assets:`.
     #[serde(default)]
     pub platforms: Option<HashMap<String, PlatformConfig>>,
 
@@ -171,10 +174,6 @@ static VARIANT_NAME_RE: std::sync::LazyLock<regex::Regex> =
 /// Regex for valid test entry names: starts with letter, then letters/digits/hyphens/underscores.
 static TEST_NAME_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9_-]*$").unwrap());
-
-/// Regex for valid OCI platform keys: `os/arch` format with lowercase alphanumerics, hyphens, underscores.
-static PLATFORM_KEY_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9_-]+/[a-z0-9_-]+$").unwrap());
 
 /// Regex for valid `release_tag` — semantic version with optional pre-release.
 static RELEASE_TAG_RE: std::sync::LazyLock<regex::Regex> =
@@ -518,6 +517,67 @@ pub(crate) fn infer_libc_from_image(image: &str) -> &'static str {
     }
 }
 
+/// The `os.features` value that declares a given libc family.
+///
+/// The rust triple spells glibc `gnu`; the OCI feature spells it `libc.glibc`.
+/// Crossing the two names is the whole point of the cross-check, so the
+/// translation lives in one place.
+fn libc_feature(family: &str) -> &'static str {
+    if family == "musl" { "libc.musl" } else { "libc.glibc" }
+}
+
+/// The on-disk / artifact-name slug for a platform.
+///
+/// `linux/amd64` → `linux_amd64`; `linux/amd64+libc.musl` → `linux_amd64_libc.musl`.
+///
+/// This is the second join key of the pipeline (after
+/// [`image_to_container_id`]): `pipeline prepare` names its work directory with
+/// it, the CI workflow flattens that directory into `bundle-{V}-{slug}.tar.xz`
+/// and `junit-{V}-{slug}-{container_id}.xml`, and `pipeline push` looks both
+/// back up by it. `ascii_segments` drops `os_features`, so two platforms
+/// differing only by libc would collide — the sorted, deduped feature suffix is
+/// what keeps them apart. Every producer and consumer must call this one
+/// function or a libc-bearing platform's artifacts become invisible downstream.
+pub(crate) fn platform_slug(platform: &Platform) -> String {
+    use ocx_lib::utility::string_ext::StringExt as _;
+
+    let mut slug = platform.ascii_segments().join("_");
+
+    if let Platform::Specific { os_features, .. } = platform
+        && !os_features.is_empty()
+    {
+        let mut sorted = os_features.clone();
+        sorted.sort();
+        sorted.dedup();
+        slug.push('_');
+        slug.push_str(&sorted.join("_").to_relaxed_slug());
+    }
+
+    slug
+}
+
+/// [`platform_slug`] for a spec platform key in string form.
+///
+/// An unparseable key falls back to the naive `/` → `_` replacement; validation
+/// rejects such keys, so the fallback only keeps callers total.
+pub(crate) fn platform_key_slug(key: &str) -> String {
+    key.parse::<Platform>()
+        .map(|p| platform_slug(&p))
+        .unwrap_or_else(|_| key.replace('/', "_"))
+}
+
+/// A spec platform key stripped of its `os.features` suffix.
+///
+/// `docker run --platform` speaks OCI `os/arch[/variant]` and rejects the
+/// `+libc.musl` suffix outright, while the matrix label, the `--platform` flag
+/// of `ocx package test` and the `discover` platform set all need the full key.
+/// Strip only where docker looks.
+pub(crate) fn platform_without_features(key: &str) -> String {
+    key.parse::<Platform>()
+        .map(|p| p.segments().join("/"))
+        .unwrap_or_else(|_| key.to_string())
+}
+
 /// Slugify a container image reference into a JUnit-filename `container_id`.
 ///
 /// All `:`, `/` and `.` separators become `_`, and consecutive underscores
@@ -610,9 +670,15 @@ fn validate_exclude_entry(key: &str, index: usize, entry: &ExcludeEntry, errors:
 /// `max_version`, `exclude`).
 fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut Vec<String>) {
     for (key, config) in platforms {
-        if !PLATFORM_KEY_RE.is_match(key) {
+        // The canonical `os/arch[/variant][+feature,…]` grammar, parsed by the
+        // same `FromStr` the `assets:` keys and every `--platform` flag use. A
+        // hand-rolled regex here is what kept `linux/amd64+libc.musl` — the only
+        // way to declare a libc claim — out of the test matrix entirely.
+        let parsed = key.parse::<Platform>();
+        if parsed.is_err() {
             errors.push(format!(
-                "platforms: invalid key '{key}' (must be os/arch format, e.g. linux/amd64)"
+                "platforms: invalid key '{key}' (must be os/arch[+feature] format, \
+                 e.g. linux/amd64 or linux/amd64+libc.musl)"
             ));
         }
 
@@ -670,6 +736,21 @@ fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut 
                         "platforms: '{key}': containers are linux-only (tests run via `docker run`)"
                     ));
                 }
+                // The libc family the platform key claims, if it claims one.
+                // Declaring `+libc.musl` and then testing in a glibc image is
+                // the silent failure this whole matrix exists to prevent: a
+                // musl-static artifact runs fine under glibc, so the leg goes
+                // green having verified nothing. Reject the pairing here, where
+                // the maintainer is still looking at the spec.
+                let declared_libc: Vec<&str> = match parsed.as_ref() {
+                    Ok(Platform::Specific { os_features, .. }) => os_features
+                        .iter()
+                        .filter(|f| f.starts_with("libc."))
+                        .map(String::as_str)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+
                 for container in containers {
                     // If no explicit shell, the image must have a known default.
                     if container.shell.is_none() && infer_shell_from_image(&container.image).is_none() {
@@ -677,6 +758,17 @@ fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut 
                             "platforms: '{key}': container image '{}' has ambiguous shell; \
                              set an explicit shell (e.g. shell: bash)",
                             container.image
+                        ));
+                    }
+
+                    let image_libc = libc_feature(infer_libc_from_image(&container.image));
+                    if !declared_libc.is_empty() && !declared_libc.contains(&image_libc) {
+                        errors.push(format!(
+                            "platforms: '{key}': container image '{}' is {image_libc}, \
+                             but the platform declares {} — the leg would run without \
+                             testing the libc claim",
+                            container.image,
+                            declared_libc.join(",")
                         ));
                     }
                 }
@@ -2621,6 +2713,111 @@ ocx_mirror:
             errors.iter().any(|e| e.contains("containers are linux-only")),
             "containers on a windows platform must be rejected, got: {errors:?}"
         );
+    }
+
+    #[test]
+    fn validate_accepts_a_libc_bearing_platform_key() {
+        // Declaring a libc is the only way to make the claim testable, so the
+        // key grammar has to admit it — a `^[a-z0-9_-]+/[a-z0-9_-]+$` regex does
+        // not, and that alone kept every libc mirror out of the test matrix.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  "linux/amd64+libc.musl":
+    runner: ubuntu-latest
+    containers:
+      - image: alpine:3.20
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.is_empty(),
+            "a musl claim tested in an alpine image must validate, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_container_whose_libc_contradicts_the_platform_key() {
+        // The silent direction: a musl-static artifact runs fine under glibc, so
+        // testing a `+libc.musl` claim inside ubuntu goes GREEN having verified
+        // nothing. The mismatch must be named, not rendered.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  "linux/amd64+libc.musl":
+    runner: ubuntu-latest
+    containers:
+      - image: ubuntu:24.04
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("ubuntu:24.04") && e.contains("libc.glibc") && e.contains("libc.musl")),
+            "the error must name the image and both libcs, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_the_loud_libc_mismatch_too() {
+        // The other direction fails at run time rather than passing falsely, but
+        // it is the same authoring mistake — reject it symmetrically instead of
+        // spending a matrix run to learn it.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  "linux/amd64+libc.glibc":
+    runner: ubuntu-latest
+    containers:
+      - image: alpine:3.20
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("alpine:3.20") && e.contains("libc.musl")),
+            "an alpine image under a glibc claim must be rejected, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn platform_slug_separates_libc_variants_and_leaves_plain_keys_alone() {
+        // The join key between `pipeline prepare` (work-dir basename), the CI
+        // renderer (bundle + JUnit filenames) and `pipeline push` (lookup).
+        assert_eq!(platform_key_slug("linux/amd64+libc.musl"), "linux_amd64_libc.musl");
+        assert_eq!(platform_key_slug("linux/amd64+libc.glibc"), "linux_amd64_libc.glibc");
+        // Plain keys keep exactly the slug they had — this is what the pinned
+        // mirror corpus renders with.
+        for key in ["linux/amd64", "linux/arm64", "darwin/arm64", "windows/amd64"] {
+            assert_eq!(platform_key_slug(key), key.replace('/', "_"));
+        }
+
+        // Docker never sees the suffix; everything else keeps it.
+        assert_eq!(platform_without_features("linux/amd64+libc.musl"), "linux/amd64");
+        assert_eq!(platform_without_features("linux/arm64"), "linux/arm64");
     }
 
     #[test]

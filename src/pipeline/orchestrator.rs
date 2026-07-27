@@ -406,27 +406,12 @@ pub async fn execute_mirror(
 
 /// Build the task directory path: `{work_dir}/{version}/{platform_slug}/`
 ///
-/// Two entries may share the same os/arch when they differ by `os_features`
-/// (e.g. `linux/amd64+libc.glibc` vs `linux/amd64+libc.musl`). `ascii_segments`
-/// drops `os_features`, so the slug appends a sorted, deduped suffix of the
-/// os_features values — otherwise both variants would slug to `linux_amd64` and
-/// their bundles would collide in one work directory.
+/// The basename is [`crate::spec::platform_slug`] — the same slug the CI
+/// renderer stamps into `bundle-{V}-{slug}.tar.xz` and `pipeline push` reads
+/// back. Computing it locally is how a libc-bearing platform's bundle became
+/// invisible to the leg that was supposed to test it.
 pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::Platform) -> PathBuf {
-    use ocx_lib::utility::string_ext::StringExt as _;
-
-    let mut slug = platform.ascii_segments().join("_");
-
-    if let ocx_lib::oci::Platform::Specific { os_features, .. } = platform
-        && !os_features.is_empty()
-    {
-        let mut sorted = os_features.clone();
-        sorted.sort();
-        sorted.dedup();
-        slug.push('_');
-        slug.push_str(&sorted.join("_").to_relaxed_slug());
-    }
-
-    work_dir.join(version).join(slug)
+    work_dir.join(version).join(crate::spec::platform_slug(platform))
 }
 
 /// Phase 1: Download, verify, and bundle a single task.
