@@ -106,8 +106,6 @@ def test_fixture_spec_contains_required_pipeline_fields() -> None:
     assert "runner:" in content, "platforms must declare runner:"
     # §2.1: platforms.[P].containers required when linux platform with containers
     assert "containers:" in content, "linux platform must declare containers:"
-    # §2.1: ocx_mirror.release_tag required when linux platform has containers
-    assert "release_tag:" in content, "ocx_mirror.release_tag required for container legs"
     # §2.1: ocx_mirror.rev must be present (40-hex SHA)
     assert "rev:" in content, "ocx_mirror.rev must be present"
     # §2.1: notify.discord.webhook_secret must be an env-var name (not a URL)

@@ -42,7 +42,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/concurrency_config.rs` | Parallel download/push limits |
 | `spec/tests_config.rs` | `TestEntry` (name + command); top-level `tests:` schema |
 | `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig`; `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
-| `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (release_tag + rev); source of `OCX_MIRROR_RELEASE_TAG` |
+| `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); plan provenance, pins nothing |
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); URL-reject validator via `policy_check_notify` |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
@@ -117,7 +117,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `ExecutionFailed` | 1 (Failure) | Mirror pipeline execution error |
 | `SourceError` | 69 (Unavailable) | Upstream source unreachable |
 | `TargetError` | 69 (Unavailable) | Target registry read failed (tag list / manifest fetch) — fail-safe abort instead of re-flagging published versions as new (issue #157) |
-| `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, missing `release_tag` when containers declared, ambiguous shell |
+| `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, ambiguous shell |
 | `RendererDrift` | 65 (DataError) | `--check` mode: generated files differ from current spec |
 | `JunitParseError` | 65 (DataError) | JUnit XML parse failure in `pipeline push` |
 | `RunSummaryError` | 65 (DataError) | Cannot read or write `run-summary.json` |
