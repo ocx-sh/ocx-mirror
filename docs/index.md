@@ -2,7 +2,7 @@
 
 Upstream projects publish their releases as loose archives on [GitHub Releases][github-releases] or ad-hoc download pages. Consuming them from CI means hand-maintaining URL matrices per platform, re-checking for new versions, and hoping nobody published a broken binary.
 
-`ocx-mirror` automates that. You describe one tool in a YAML spec — where releases come from, which asset belongs to which platform, where to publish — and `ocx-mirror` mirrors every matching upstream version into an OCI registry as an [OCX][ocx] package. Consumers then install the tool with `ocx install`, on any platform, from your registry.
+`ocx-mirror` automates that. You describe one tool in a YAML spec — where releases come from, which asset belongs to which platform, where to publish — and `ocx-mirror` mirrors every matching upstream version into an OCI registry as an [OCX][ocx] package. Consumers then install the tool with `ocx package install`, on any platform, from your registry.
 
 ## What it does
 
