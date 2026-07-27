@@ -104,12 +104,32 @@ pub struct VersionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum AnnounceOutcome {
-    /// `ocx package announce` succeeded — the index PR was opened or updated.
+    /// `ocx package announce` curated this run's tags — the index PR was
+    /// opened or updated.
+    ///
+    /// Read off the announce's own `--format json` report, not its exit code:
+    /// `ocx package announce` exits 0 on a no-op too, so an exit-status read
+    /// cannot tell a run that curated tags from one that changed nothing. It
+    /// did not, and a run that announced nothing was recorded here for weeks.
     Announced {
         /// Logical index package (`<namespace>/<package>`).
         package: String,
         /// Tags handed to `--tags-file`, in run order.
         tags: Vec<String>,
+        /// The index pull request carrying them. `None` only when the announce
+        /// reported neither — the claim is checkable or it is not made.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pull_request_url: Option<String>,
+    },
+    /// The announce ran and changed nothing: the rebuilt index root was
+    /// byte-identical to the committed one and no pull request was pending.
+    ///
+    /// Distinct from [`Self::NothingToAnnounce`], which never made the call —
+    /// here the index already carried every tag this run published, so the
+    /// state is correct and needs no catch-up.
+    AlreadyCurrent {
+        /// Logical index package the call named.
+        package: String,
     },
     /// `announce:` is configured but the run produced no new tag, so no call
     /// was made. Steady state for a mirror that is up to date — and the state
