@@ -108,6 +108,10 @@ def test_pipeline_generate_ci_produces_yaml(mirror_binary: Path, pipeline_spec: 
     workflow_path = pipeline_spec.parent / ".github" / "workflows" / "mirror.yml"
     assert workflow_path.exists(), "pipeline generate ci must create .github/workflows/mirror.yml"
     content = workflow_path.read_text()
+    # ponytail: text grep, not a parse — the locked test env has no yaml module.
+    # A malformed workflow carrying both strings still passes. Parse the file
+    # (and assert on `jobs` keys) if PyYAML ever lands in the suite for another
+    # reason; not worth a new dependency on its own.
     assert "on:" in content, "Generated workflow must have 'on:' trigger"
     assert "jobs:" in content, "Generated workflow must have 'jobs:'"
 
