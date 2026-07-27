@@ -456,7 +456,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: run-summary
-          # The announce tags file is the exact `--tags-file` the index call
+          # The announce tags file is the exact `--tags-from-file` the index call
           # received. Uploading it beside the summary is what makes an announce
           # reconstructable after the fact; without it the only record of what
           # was curated is the summary's tag list.

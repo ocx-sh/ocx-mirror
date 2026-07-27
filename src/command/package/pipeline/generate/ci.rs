@@ -46,6 +46,7 @@ const GIT_SHA_SHORT: &str = match option_env!("OCX_GIT_SHA_SHORT") {
 const WORKFLOW_TEMPLATE: &str = include_str!("templates/workflow.yml");
 const DESCRIBE_TEMPLATE: &str = include_str!("templates/describe.yml");
 const VERIFY_GENERATED_TEMPLATE: &str = include_str!("templates/verify-generated.yml");
+const ANNOUNCE_FROM_REGISTRY_TEMPLATE: &str = include_str!("templates/announce-from-registry.yml");
 
 // ── Public struct ────────────────────────────────────────────────────────────
 
@@ -793,6 +794,20 @@ fn render_describe(spec: &MirrorSpec) -> String {
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
 }
 
+/// Render the `announce-from-registry.yml` catch-up workflow.
+///
+/// Same placeholder set as `describe.yml` — auth steps plus the GHCR
+/// permissions block. Dispatch-only by design: the push job already announces
+/// what each run publishes, and this one exists for the backlog a mirror that
+/// opted into `announce:` late can never reach by running forward.
+fn render_announce_from_registry(spec: &MirrorSpec) -> String {
+    ANNOUNCE_FROM_REGISTRY_TEMPLATE
+        .replace("{OCX_MIRROR_VERSION}", VERSION)
+        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{DESCRIBE_PERMISSIONS}", render_describe_permissions(spec))
+        .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+}
+
 /// Render the `verify-generated.yml` drift-guard workflow.
 ///
 /// The workflow runs `ocx-mirror package pipeline generate ci --check` on pull requests
@@ -813,6 +828,17 @@ fn render(spec: &MirrorSpec, _repo_root: &Path) -> Result<BTreeMap<PathBuf, Stri
 
     files.insert(PathBuf::from(".github/workflows/mirror.yml"), render_workflow(spec));
     files.insert(PathBuf::from(".github/workflows/describe.yml"), render_describe(spec));
+
+    // Index catch-up workflow: only a mirror that announces has an index entry
+    // to catch up. Emitted for every such mirror — there is no separate opt-in,
+    // because a mirror that opted into `announce:` after publishing is exactly
+    // the one that needs it, and it cannot know that about itself.
+    if spec.announce.is_some() {
+        files.insert(
+            PathBuf::from(".github/workflows/announce-from-registry.yml"),
+            render_announce_from_registry(spec),
+        );
+    }
 
     // Drift-guard workflow: emitted unless the spec opts out (discouraged). When
     // present it runs `generate ci --check` in CI, failing on any hand-edit to a
@@ -1031,6 +1057,49 @@ mod tests {
                 .count();
             assert!(with_image > 0, "{fixture} must render container legs");
         }
+    }
+
+    #[test]
+    fn announce_from_registry_is_dispatch_only_and_carries_the_token() {
+        // The Python acceptance test only text-greps `"on:"` (the locked test
+        // env has no yaml module), so the real parse lives here. A schedule or
+        // push trigger on this workflow would open an index pull request on
+        // every commit — the one thing it must never do.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-ghcr-announce.yml", dir.path()).expect("announce fixture must render");
+        let rendered =
+            std::fs::read_to_string(dir.path().join(".github/workflows/announce-from-registry.yml")).unwrap();
+
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered)
+            .unwrap_or_else(|e| panic!("announce-from-registry.yml must be parseable YAML: {e}\n{rendered}"));
+
+        let triggers = &parsed["on"];
+        let mapping = triggers
+            .as_mapping()
+            .unwrap_or_else(|| panic!("triggers must be a mapping, got: {triggers:?}"));
+        assert_eq!(
+            mapping.keys().map(|k| k.as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["workflow_dispatch"],
+            "announce-from-registry must be dispatch-only — no push, no schedule",
+        );
+
+        let dry_run = &triggers["workflow_dispatch"]["inputs"]["dry_run"];
+        assert_eq!(dry_run["type"].as_str(), Some("boolean"), "got: {dry_run:?}");
+        assert_eq!(dry_run["default"].as_bool(), Some(true), "got: {dry_run:?}");
+
+        // The announce cannot open a pull request without the secret, so an
+        // env: block that lost it would turn every dispatch into an auth error.
+        let step = parsed["jobs"]["announce"]["steps"]
+            .as_sequence()
+            .expect("announce job must have steps")
+            .iter()
+            .find(|step| step.get("env").is_some())
+            .expect("one step must carry the announce environment");
+        assert_eq!(
+            step["env"]["OCX_ANNOUNCE_TOKEN"].as_str(),
+            Some("${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
+            "got: {step:?}",
+        );
     }
 
     #[test]
@@ -2670,7 +2739,7 @@ announce:
 
     #[test]
     fn the_run_summary_artifact_carries_the_announce_tags_file() {
-        // The tags file is the exact `--tags-file` the index call received.
+        // The tags file is the exact `--tags-from-file` the index call received.
         // Uploading only run-summary.json leaves nothing to reconstruct a
         // failed announce from.
         let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));

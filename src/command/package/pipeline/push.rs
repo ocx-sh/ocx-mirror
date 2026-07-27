@@ -898,7 +898,7 @@ const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
 /// part of which failed, so a
 /// `Partial` version's `cascade_tags_written` only ever holds its exact
 /// `X.Y.Z`. Filtering aliases *here* was a protection that could not work —
-/// `--tags-file` is additive, and `ocx package announce` re-observes every tag
+/// `--tags-from-file` is additive, and `ocx package announce` re-observes every tag
 /// already curated on the entry, so an alias an earlier run committed is
 /// re-fetched from the registry and re-committed against whatever it points at
 /// now. Withholding an alias only ever blocks its first addition, and every
@@ -923,37 +923,71 @@ fn announce_tag_union(versions: &[VersionSummary]) -> Vec<String> {
         .collect()
 }
 
+/// Where `ocx package announce` takes its tag set from.
+///
+/// Both variants are **additive** — neither can remove a tag the index already
+/// commits, and yank markers survive. The third mode `ocx package announce`
+/// offers, `--tags`, *replaces* the curated set; a mirror must never use it,
+/// because one run publishing one new version would delete every previously
+/// announced version from the index entry.
+pub(crate) enum TagSource<'a> {
+    /// This run's own tags, handed over in a file. The pipeline's normal mode:
+    /// it announces exactly what the run published and nothing else.
+    File { path: &'a Path, tags: &'a [String] },
+    /// Every tag the physical repository currently holds, listed by `ocx`
+    /// itself. Used to catch up a mirror that published before it had an
+    /// `announce:` block, where no single run's tag set can ever cover the
+    /// backlog.
+    FromRegistry,
+}
+
 /// Build the `ocx package announce` argv. Pure and unit-testable — locks the
 /// flag set without spawning a subprocess.
 ///
-/// `--tags-file` is additive: it adds to the already-curated set and never
-/// removes a committed tag. `--tags` would *replace* the curated set, which for
-/// a mirror means one run publishing one new version deletes every previously
-/// announced version from the index entry. Never use it here.
-fn build_announce_args(config: &AnnounceConfig, tags_file: &Path) -> Result<Vec<String>, String> {
-    let file = tags_file
-        .to_str()
-        .ok_or_else(|| format!("announce tags file path is not valid UTF-8: {}", tags_file.display()))?;
+/// `out` writes the rebuilt entry to a directory instead of opening a pull
+/// request — `--out` and `--fork` are mutually exclusive on the `ocx` side, so
+/// exactly one of them is emitted.
+fn build_announce_args(
+    config: &AnnounceConfig,
+    source: &TagSource<'_>,
+    out: Option<&Path>,
+) -> Result<Vec<String>, String> {
+    // Global flags precede the subcommand. JSON because the caller has to
+    // read what the announce *did* — its exit code is 0 either way.
+    let mut args: Vec<String> = ["--format", "json", "package", "announce", "--package", &config.package]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
 
-    Ok([
-        // Global flags precede the subcommand. JSON because the caller has to
-        // read what the announce *did* — its exit code is 0 either way.
-        "--format",
-        "json",
-        "package",
-        "announce",
-        "--package",
-        &config.package,
-        "--tags-file",
-        file,
-        "--fork",
-        &config.fork,
-        "--index-repo",
-        &config.index_repo,
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect())
+    match source {
+        TagSource::File { path, .. } => {
+            let file = path
+                .to_str()
+                .ok_or_else(|| format!("announce tags file path is not valid UTF-8: {}", path.display()))?;
+            args.push("--tags-from-file".to_string());
+            args.push(file.to_string());
+        }
+        TagSource::FromRegistry => args.push("--tags-from-registry".to_string()),
+    }
+
+    match out {
+        Some(directory) => {
+            let dir = directory
+                .to_str()
+                .ok_or_else(|| format!("announce output directory is not valid UTF-8: {}", directory.display()))?;
+            args.push("--out".to_string());
+            args.push(dir.to_string());
+        }
+        None => {
+            args.push("--fork".to_string());
+            args.push(config.fork.clone());
+        }
+    }
+
+    args.push("--index-repo".to_string());
+    args.push(config.index_repo.clone());
+
+    Ok(args)
 }
 
 /// How long the announce subprocess may run before it is killed.
@@ -963,7 +997,7 @@ fn build_announce_args(config: &AnnounceConfig, tags_file: &Path) -> Result<Vec<
 /// call (a registry 429 retry loop is enough) takes the whole job down with it
 /// on the runner timeout, and everything the run published downstream of the
 /// summary write goes unreported.
-const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Make this run's single index announce.
 ///
@@ -1011,7 +1045,11 @@ async fn run_announce(
         });
     }
 
-    match invoke_announce(config, &tags, tags_file, ocx_binary, ANNOUNCE_TIMEOUT).await {
+    let source = TagSource::File {
+        path: tags_file,
+        tags: &tags,
+    };
+    match invoke_announce(config, &source, None, ocx_binary, ANNOUNCE_TIMEOUT).await {
         // `unchanged` with no pull request is the no-op: the index already
         // carried every tag this run published. Recording it as `announced`
         // is what let a run that did nothing read as one that curated tags.
@@ -1046,32 +1084,35 @@ async fn run_announce(
     }
 }
 
-/// Write the tag set to `tags_file` and run `ocx package announce` against it.
+/// Run `ocx package announce`, materialising the tags file first when `source`
+/// carries one.
 ///
 /// `timeout` is a parameter rather than a constant read so the bound itself can
 /// be tested without a ten-minute test.
-async fn invoke_announce(
+pub(crate) async fn invoke_announce(
     config: &AnnounceConfig,
-    tags: &[String],
-    tags_file: &Path,
+    source: &TagSource<'_>,
+    out: Option<&Path>,
     ocx_binary: &Path,
     timeout: Duration,
 ) -> Result<AnnounceReport, String> {
-    let args = build_announce_args(config, tags_file)?;
+    let args = build_announce_args(config, source, out)?;
 
-    // The tags file is a sibling of `--write-summary`, and the announce runs
-    // before the summary is written — so with `--write-summary out/x.json` and
-    // no `out/` yet, nothing has created the directory. Same treatment as
-    // `write_run_summary`. An empty parent (a bare relative path) is a no-op.
-    if let Some(parent) = tags_file.parent() {
-        tokio::fs::create_dir_all(parent)
+    if let TagSource::File { path, tags } = source {
+        // The tags file is a sibling of `--write-summary`, and the announce runs
+        // before the summary is written — so with `--write-summary out/x.json` and
+        // no `out/` yet, nothing has created the directory. Same treatment as
+        // `write_run_summary`. An empty parent (a bare relative path) is a no-op.
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("failed to create announce tags directory {}: {e}", parent.display()))?;
+        }
+
+        tokio::fs::write(path, tags.join("\n"))
             .await
-            .map_err(|e| format!("failed to create announce tags directory {}: {e}", parent.display()))?;
+            .map_err(|e| format!("failed to write announce tags file {}: {e}", path.display()))?;
     }
-
-    tokio::fs::write(tags_file, tags.join("\n"))
-        .await
-        .map_err(|e| format!("failed to write announce tags file {}: {e}", tags_file.display()))?;
 
     let mut cmd = tokio::process::Command::new(ocx_binary);
     cmd.args(&args);
@@ -1114,10 +1155,10 @@ async fn invoke_announce(
 /// one without committing anything, and those tags are as pending as a fresh
 /// run's. Only `unchanged` *and* no pull request means nothing happened.
 #[derive(Debug, serde::Deserialize)]
-struct AnnounceReport {
-    status: String,
+pub(crate) struct AnnounceReport {
+    pub(crate) status: String,
     #[serde(default)]
-    pull_request_url: Option<String>,
+    pub(crate) pull_request_url: Option<String>,
 }
 
 /// Resolve the path to the `ocx` binary.
@@ -2492,7 +2533,7 @@ platforms:
     // ── Index announce (E-P4) ─────────────────────────────────────────────
     //
     // One announce per run, carrying the union of every cascade tag the run
-    // wrote. `--tags-file` (additive) never `--tags` (replacing), because a
+    // wrote. `--tags-from-file` (additive) never `--tags` (replacing), because a
     // mirror announcing a replacing tag set would delete every previously
     // announced version the moment one run published a new one.
 
@@ -2620,7 +2661,12 @@ platforms:
 
     #[test]
     fn build_announce_args_uses_additive_tags_file_never_replacing_tags() {
-        let args = build_announce_args(&announce_config(), Path::new("/tmp/tags.txt")).unwrap();
+        let tags = ["1.20.0".to_string()];
+        let source = TagSource::File {
+            path: Path::new("/tmp/tags.txt"),
+            tags: &tags,
+        };
+        let args = build_announce_args(&announce_config(), &source, None).unwrap();
 
         assert_eq!(
             args,
@@ -2631,7 +2677,7 @@ platforms:
                 "announce",
                 "--package",
                 "bazelbuild/bazelisk",
-                "--tags-file",
+                "--tags-from-file",
                 "/tmp/tags.txt",
                 "--fork",
                 "ocx-contrib/index",
@@ -2642,6 +2688,66 @@ platforms:
         assert!(
             !args.iter().any(|a| a == "--tags"),
             "--tags REPLACES the curated set — a mirror must never use it",
+        );
+    }
+
+    #[test]
+    fn build_announce_args_from_registry_is_additive_and_never_replacing_tags() {
+        let args = build_announce_args(&announce_config(), &TagSource::FromRegistry, None).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "--format",
+                "json",
+                "package",
+                "announce",
+                "--package",
+                "bazelbuild/bazelisk",
+                "--tags-from-registry",
+                "--fork",
+                "ocx-contrib/index",
+                "--index-repo",
+                "ocx-sh/index",
+            ],
+        );
+        // Same invariant as the file mode: catching a mirror up must never be
+        // able to drop a tag the index already commits.
+        assert!(
+            !args.iter().any(|a| a == "--tags"),
+            "--tags REPLACES the curated set — a mirror must never use it",
+        );
+    }
+
+    /// `--dry-run` must not be able to open a pull request.
+    ///
+    /// `--out` and `--fork` are mutually exclusive on the `ocx` side, so
+    /// emitting both would fail the call outright; emitting `--fork` alone
+    /// would make a "dry" run write to the index for real.
+    #[test]
+    fn build_announce_args_dry_run_writes_out_instead_of_opening_a_pull_request() {
+        let out = Path::new("/tmp/announce-out");
+        let args = build_announce_args(&announce_config(), &TagSource::FromRegistry, Some(out)).unwrap();
+
+        assert_eq!(
+            args,
+            vec![
+                "--format",
+                "json",
+                "package",
+                "announce",
+                "--package",
+                "bazelbuild/bazelisk",
+                "--tags-from-registry",
+                "--out",
+                "/tmp/announce-out",
+                "--index-repo",
+                "ocx-sh/index",
+            ],
+        );
+        assert!(
+            !args.iter().any(|a| a == "--fork"),
+            "a dry run must not carry --fork; got: {args:?}",
         );
     }
 
@@ -2699,7 +2805,7 @@ platforms:
             1,
             "announce must run once per pipeline run, got: {invocations}",
         );
-        assert!(invocations.contains("--tags-file"), "got: {invocations}");
+        assert!(invocations.contains("--tags-from-file"), "got: {invocations}");
 
         // The tag set travels in the file, so the whole union lands even when
         // it outgrows anything comfortable on a command line.
@@ -3052,10 +3158,15 @@ platforms:
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let started = std::time::Instant::now();
+        let tags = ["1.0.0".to_string()];
+        let tags_file = dir.path().join("tags");
         let result = rt.block_on(invoke_announce(
             &announce_config(),
-            &["1.0.0".to_string()],
-            &dir.path().join("tags"),
+            &TagSource::File {
+                path: &tags_file,
+                tags: &tags,
+            },
+            None,
             &script,
             Duration::from_millis(200),
         ));
@@ -3302,7 +3413,7 @@ esac
         // `latest`, `1`, `1.20` and `1.20.0`. Tonight's run publishes 1.21.0
         // with darwin/arm64 red.
         //
-        // `ocx package announce --tags-file` is additive AND re-observes every
+        // `ocx package announce --tags-from-file` is additive AND re-observes every
         // tag the entry already carries — so withholding `latest` and `1` from
         // this run's union buys nothing: the announce re-fetches them from the
         // registry and re-commits whatever they point at now. The only place

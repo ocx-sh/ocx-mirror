@@ -280,13 +280,14 @@ def test_pipeline_notify_is_silent_for_an_all_skipped_run(
         ["prepare"],
         ["push"],
         ["notify"],
+        ["announce"],
     ],
-    ids=["group", "generate-ci", "plan", "prepare", "push", "notify"],
+    ids=["group", "generate-ci", "plan", "prepare", "push", "notify", "announce"],
 )
 def test_pipeline_subcommand_is_registered(mirror_binary: Path, subcommand: list[str]) -> None:
     """§3.8: every pipeline subcommand answers `--help`.
 
-    Six near-identical tests collapsed into one. Each used to assert
+    Near-identical per-subcommand tests collapsed into one. Each used to assert
     `rc == 0 or "<name>" in output` — but clap prints the subcommand name in
     its usage error too, so the disjunction held for an unregistered command
     as well. `--help` on a registered command exits 0; that is the whole check.

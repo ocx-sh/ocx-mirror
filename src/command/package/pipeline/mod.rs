@@ -3,7 +3,7 @@
 
 //! `ocx-mirror package pipeline` subcommand group.
 //!
-//! Five subcommands implement the pre-publish multi-runner test pipeline:
+//! Seven subcommands implement the pre-publish multi-runner test pipeline:
 //!
 //! | Subcommand | GHA job | Purpose |
 //! |---|---|---|
@@ -13,7 +13,9 @@
 //! | `push` | `push` | Aggregate JUNIT results, publish passing (V, P) pairs |
 //! | `notify` | `notify` | Post Discord webhook summary |
 //! | `describe` | `describe` | Publish catalog metadata (README + logo) to the registry |
+//! | `announce` | `announce` | Announce every tag the registry holds into the index (dispatch-only) |
 
+pub mod announce;
 pub mod describe;
 pub mod generate;
 pub mod notify;
@@ -46,6 +48,9 @@ pub enum PipelineCommand {
 
     /// Publish catalog metadata (README + logo) to the registry.
     Describe(describe::Describe),
+
+    /// Announce every tag the registry currently holds into the index.
+    Announce(announce::Announce),
 }
 
 impl PipelineCommand {
@@ -59,6 +64,7 @@ impl PipelineCommand {
             Self::Push(cmd) => cmd.execute(printer).await,
             Self::Notify(cmd) => cmd.execute(printer).await,
             Self::Describe(cmd) => cmd.execute(printer).await,
+            Self::Announce(cmd) => cmd.execute(printer).await,
         }
     }
 }

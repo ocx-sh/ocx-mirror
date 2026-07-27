@@ -380,7 +380,7 @@ announce:
 
 The push job makes **one** `ocx package announce` call per run, after every version has been pushed — never one per version or per platform. It carries the union of every cascade tag the run wrote, deduplicated: each platform's push report re-lists the same cascade hierarchy, and consecutive versions share the rolling `X.Y` / `X` / `latest` tags. Versions that only failed, or that were already present in the registry, contribute nothing.
 
-Tags are handed over with `--tags-file`, which **adds** to the already-curated index entry and never removes a committed tag. The alternative, `--tags`, replaces the curated set — for a mirror that would delete every previously announced version the moment one run published a new one.
+Tags are handed over with `--tags-from-file`, which **adds** to the already-curated index entry and never removes a committed tag. The alternative, `--tags`, replaces the curated set — for a mirror that would delete every previously announced version the moment one run published a new one.
 
 A run that published nothing makes no call at all.
 
@@ -394,7 +394,7 @@ So a partial version announces `X.Y.Z` and nothing else — not because the anno
 
 Three gaps remain, all narrower than the registry write they replace:
 
-- A version already published by an earlier run keeps whatever aliases that run wrote. Nothing here retracts them; the repair is a manual `ocx package push --cascade` of a whole version, or a manual `ocx package announce --tags`.
+- A version already published by an earlier run keeps whatever aliases that run wrote. Nothing here retracts them, and neither does the catch-up workflow below — it is additive. Retracting an alias needs a manual `ocx package push --cascade` of a whole version, or a manual `ocx package announce --tags`.
 - A platform the workflow never built a bundle for is invisible to the push job, which sees only the bundles that arrived. A version whose `prepare` leg failed outright can therefore still look whole.
 - A version decided whole whose *push* then fails part-way leaves the aliases carrying the platforms that landed before the failure, and the previous version for the rest. The remaining platforms are withheld from cascading the moment the failure is seen, but a registry write already made cannot be taken back. Re-running the version repairs it.
 
@@ -427,15 +427,21 @@ Whichever of these a run lands on is also rendered as an **Index** row on the ru
 
 **Catching up an existing mirror:**
 
-The announce only ever carries what the *current run* published, so adding `announce:` to a mirror that has already published everything reports `nothing_to_announce` on every run, indefinitely — there is nothing new to trigger it. The same applies after an announce failure: the next run has nothing to retry with. Neither is retried automatically; run the announce by hand once:
+The announce only ever carries what the *current run* published, so adding `announce:` to a mirror that has already published everything reports `nothing_to_announce` on every run, indefinitely — there is nothing new to trigger it. The same applies after an announce failure: the next run has nothing to retry with.
+
+Every mirror with an `announce:` block gets a second generated workflow, `announce-from-registry.yml`, for exactly this. It is `workflow_dispatch` only — never scheduled, never triggered by a push — and it lists every tag the target repository currently holds, then unions them onto the committed index entry. Dispatch it from the repository's **Actions** tab, or:
 
 ```sh
-ocx package announce --package bazelbuild/bazelisk \
-  --tags 1.21.0,1.21,1,latest \
-  --fork ocx-contrib/index
+gh workflow run announce-from-registry.yml --repo <owner>/<mirror> -f dry_run=false
 ```
 
-`--tags` replaces the curated set for that entry, so pass the complete list you want the index to carry. (`--refresh` solves a different problem — it re-observes the tags already committed, picking up a digest that moved, and never adds one.)
+`dry_run` defaults to **true**: the run reports whether the index would change (`updated` or `unchanged`) and discards the rebuilt entry without opening a pull request. Pass `dry_run=false` to open it for real.
+
+The catch-up is **additive**, on the same footing as the push job's `--tags-from-file`: it cannot drop a tag the index already commits, and yank markers survive. Running it against a mirror that is already current is a no-op, so it is safe to dispatch on suspicion.
+
+Its `ocx-mirror` entry point is [`pipeline announce`][cli-announce]; the same command runs locally against a checkout.
+
+(`--refresh` on `ocx package announce` solves a different problem — it re-observes the tags already committed, picking up a digest that moved, and never adds one.)
 
 **Validation:**
 
@@ -525,3 +531,4 @@ notify:
 <!-- commands -->
 [cmd-pipeline]: ./cli.md#pipeline
 [cmd-sync]: ./cli.md#sync
+[cli-announce]: ./cli.md#pipeline-announce
