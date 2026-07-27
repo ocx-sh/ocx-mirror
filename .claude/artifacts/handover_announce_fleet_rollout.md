@@ -173,6 +173,43 @@ governance-mandatory for third-party mirrors and also belongs in the claim.
 CI cannot classify into the machine lane, so it waits for a human click that
 nobody is expecting.
 
+### R8 — A Renovate `customManager` that matches nothing looks exactly like one that works
+
+Your generated workflows carry SHA-pinned actions you cannot bump yourself —
+they are generated files behind a drift guard. Those pins are maintained
+upstream in `ocx-mirror` by a `customManager`, because they live outside
+`.github/` where the built-in manager would find them.
+
+That manager pointed at `src/command/pipeline/generate/templates/` — a path
+missing the `package/` level, and so a path that has not existed since that
+level was introduced. It matched nothing, opened no pull requests, and reported
+no error. Every action pin baked into every generated workflow went unbumped for
+as long as it was wrong. Fixed 2026-07-27; if your generated workflows carry
+suspiciously old action pins, this is why.
+
+*The general rule:* a `customManager` fails **silently**. A wrong
+`managerFilePatterns` glob, a regex that no longer matches after a rename, a
+capture group renamed upstream — all produce the same observable as a manager
+with nothing to do, which is nothing at all. Renovate cannot tell you it found
+no files, because finding no files is legitimate.
+
+So do not review one by reading it. Run the glob and the regex against the
+working tree and assert a match — a dozen lines of Python is enough:
+
+```python
+import json, re, pathlib
+cfg = json.load(open("renovate.json"))
+for m in cfg["customManagers"]:
+    pat = m["matchStrings"][0].replace("(?<", "(?P<")   # JS → Python named groups
+    hits = [p for p in pathlib.Path(".").rglob("*")
+            if re.search(m["managerFilePatterns"][0].strip("/"), p.as_posix())
+            and p.is_file() and re.search(pat, p.read_text())]
+    assert hits, f"customManager matches nothing: {m['description']}"
+```
+
+Same reflex applies to the `paths:` globs on rule files and to any other
+config whose failure mode is "quietly does less".
+
 ---
 
 ## 2. Per-repository checklist
