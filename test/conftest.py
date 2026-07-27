@@ -1,14 +1,22 @@
 """Shared fixtures and hooks for the mirror acceptance-test suite."""
 from __future__ import annotations
 
+import http.server
 import os
+import re
+import shutil
 import sys
+import threading
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from src.helpers import PROJECT_ROOT, start_registry
+from src.mirror_runner import MirrorRunner
 from src.runner import OcxRunner
+
+SHFMT_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "mirror-shfmt-minimal"
 
 # ---------------------------------------------------------------------------
 # Session hooks
@@ -55,9 +63,102 @@ def ocx_binary() -> Path:
     return p
 
 
+@pytest.fixture(scope="session")
+def mirror_binary() -> Path:
+    """Path to the compiled ocx-mirror binary.
+
+    Asserts rather than skips: a missing binary means the run built nothing,
+    and a whole file skipping itself away is indistinguishable from a pass.
+    """
+    if env_path := os.environ.get("OCX_MIRROR_COMMAND"):
+        p = Path(env_path)
+    else:
+        p = PROJECT_ROOT / "test" / "bin" / "ocx-mirror"
+        if sys.platform == "win32" and not p.suffix:
+            p = p.with_suffix(".exe")
+    assert p.exists(), f"ocx-mirror binary not found at {p}"
+    return p
+
+
 # ---------------------------------------------------------------------------
 # Function-scoped fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def mirror(mirror_binary: Path, registry: str, tmp_path: Path) -> MirrorRunner:
+    temp_dir = tmp_path / "mirror-work"
+    temp_dir.mkdir()
+    return MirrorRunner(mirror_binary, registry, temp_dir)
+
+
+@pytest.fixture()
+def unique_mirror_repo(request: pytest.FixtureRequest) -> str:
+    """Generate a unique OCI repository name for mirror tests."""
+    short_id = uuid4().hex[:8]
+    name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40]
+    return f"m_{short_id}_{name}"
+
+
+@pytest.fixture()
+def asset_server(tmp_path: Path):
+    """Start a local HTTP server serving files from tmp_path/assets/."""
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir()
+
+    handler = http.server.SimpleHTTPRequestHandler
+    httpd = http.server.HTTPServer(
+        ("127.0.0.1", 0),
+        lambda *args: handler(*args, directory=str(assets_dir)),
+    )
+    port = httpd.server_address[1]
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    class Server:
+        def __init__(self):
+            self.dir = assets_dir
+            self.port = port
+            self.base_url = f"http://127.0.0.1:{port}"
+
+        def url(self, path: str) -> str:
+            return f"{self.base_url}/{path}"
+
+    yield Server()
+    httpd.shutdown()
+
+
+@pytest.fixture()
+def pipeline_spec(tmp_path: Path, registry: str, unique_mirror_repo: str, asset_server) -> Path:
+    """Materialise the shfmt pipeline fixture with every placeholder resolved.
+
+    The fixture ships three placeholders and all three must be substituted for
+    the spec to describe a reachable world:
+
+    - ``__ASSET_PORT__`` — the upstream asset URL. Left unsubstituted the
+      source is unparseable and every command that touches it exits 69. That
+      is what kept the e2e "skipped: plan unimplemented" for months.
+    - ``localhost:5000`` — the target registry.
+    - ``test-shfmt-pipeline`` — the target repository. Made unique per test so
+      a second run cannot report ``skipped_existing`` off the first run's tags.
+
+    The whole fixture directory is copied because ``metadata.default`` resolves
+    relative to the spec's own directory.
+    """
+    spec_dir = tmp_path / "spec"
+    shutil.copytree(SHFMT_FIXTURE_DIR, spec_dir)
+
+    # The upstream asset the spec's url_index points at.
+    (asset_server.dir / "shfmt_v3.7.0_linux_amd64").write_text("#!/bin/sh\necho v3.7.0\n")
+
+    spec_path = spec_dir / "mirror.yml"
+    spec_path.write_text(
+        spec_path.read_text()
+        .replace("__ASSET_PORT__", str(asset_server.port))
+        .replace("localhost:5000", registry)
+        .replace("test-shfmt-pipeline", unique_mirror_repo)
+    )
+    return spec_path
 
 
 @pytest.fixture()
