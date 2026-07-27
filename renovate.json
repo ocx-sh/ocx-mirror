@@ -36,6 +36,14 @@
       "groupName": "actions",
       "semanticCommitType": "ci",
       "semanticCommitScope": "deps"
+    },
+    {
+      "description": "ocx CLI pin for container test legs — not an action; must not join the actions group (rule order: this one wins)",
+      "matchManagers": ["custom.regex"],
+      "matchDepNames": ["ocx-sh/ocx"],
+      "groupName": null,
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "test-runtime"
     }
   ],
   "customManagers": [
@@ -43,13 +51,23 @@
       "customType": "regex",
       "description": "Bump SHA-pinned GitHub Actions baked into pipeline templates (outside .github/, so the built-in manager never sees them)",
       "managerFilePatterns": [
-        "/^src/command/pipeline/generate/templates/[^/]+\\.yml$/"
+        "/^src/command/package/pipeline/generate/templates/[^/]+\\.yml$/"
       ],
       "matchStrings": [
         "uses:\\s+(?<depName>[^@\\s]+)@(?<currentDigest>[0-9a-f]{40})\\s+#\\s+(?<currentValue>v[^\\s]+)"
       ],
       "datasourceTemplate": "github-tags",
       "autoReplaceStringTemplate": "uses: {{{depName}}}@{{{newDigest}}}  # {{{newValue}}}"
+    },
+    {
+      "customType": "regex",
+      "description": "Bump the ocx CLI release the container test legs download (a renderer constant, so no manager sees it)",
+      "managerFilePatterns": [
+        "/^src/command/package/pipeline/generate/ci\\.rs$/"
+      ],
+      "matchStrings": [
+        "const OCX_CONTAINER_CLI_TAG: &str = \"(?<currentValue>v[^\"]+)\"; // renovate: datasource=(?<datasource>[^\\s]+) depName=(?<depName>[^\\s]+)"
+      ]
     }
   ]
 }
