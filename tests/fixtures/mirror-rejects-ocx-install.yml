@@ -31,8 +31,6 @@ platforms:
       - image: ubuntu:24.04
         shell: bash
 
-ocx_mirror:
-  release_tag: v0.7.2
 
 # This block should cause rejection:
 ocx_install: {}

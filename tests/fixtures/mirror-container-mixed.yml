@@ -51,5 +51,3 @@ platforms:
   darwin/arm64:
     runner: macos-latest
 
-ocx_mirror:
-  release_tag: v0.7.2

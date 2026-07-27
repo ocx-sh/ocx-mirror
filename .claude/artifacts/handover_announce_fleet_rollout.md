@@ -286,10 +286,6 @@ A platform with `containers:` runs each `ocx package test` inside `docker run
 loaded by that image's own loader.
 
 ```yaml
-# Required as soon as any platform declares containers:.
-ocx_mirror:
-  release_tag: v0.4.0
-
 platforms:
   linux/amd64:
     runner: ubuntu-latest
@@ -313,9 +309,9 @@ Constraints worth knowing before you write it:
 - **No qemu.** An arm64 platform with `containers:` needs an arm64 `runner:`
   (`ubuntu-24.04-arm`). Mismatch reds the leg up front with a message naming the
   fix, instead of a bare exec-format error minutes in.
-- **`ocx_mirror.release_tag` is required** the moment any platform declares
-  `containers:`, and must match `^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$`. See the open
-  question in §5 — today it is inert.
+- **Nothing else to declare.** `containers:` needs no companion block. The
+  `ocx` the legs download is a renderer constant, so the whole fleet tests
+  against one binary and it advances when your `ocx.lock` does.
 - **Shell defaults** are inferred from the image name: alpine → `sh`;
   ubuntu/debian/fedora/rocky/opensuse → `bash`. Any other image needs an
   explicit `shell:`. Setting it explicitly anyway documents the intent.
@@ -329,14 +325,6 @@ Constraints worth knowing before you write it:
 
 None of these blocked the pilot; all of them are plausible at ~41 repositories.
 
-- **`ocx_mirror.release_tag` is required but inert.** Validation rejects a spec
-  that declares `containers:` without it, and both the code doc and
-  `docs/reference/mirror-yml.md` describe it as "pinned by the generated
-  workflow" — but no template consumes it. The `ocx` release the container legs
-  actually download is a hard-coded constant in the renderer
-  (`OCX_CONTAINER_CLI_TAG`, `src/command/package/pipeline/generate/ci.rs`).
-  Either wire it through or drop the requirement; today every migrating repo must
-  set a field that changes nothing.
 - **Pull-request volume against `ocx-sh/index`.** Each repo needs one claim plus
   one announce PR to start, then an announce PR per release. Forty repos
   migrating in the same window is a burst the index CI has never seen.
@@ -368,3 +356,26 @@ None of these blocked the pilot; all of them are plausible at ~41 repositories.
   root is therefore missing the `1.25.0` / `1.25` tags. Fix
   `OCX_ANNOUNCE_TOKEN` per R5 before migrating repo two — every fleet repo will
   hit this on its first announce.
+
+  **Recovery is a re-announce, not a re-publish.** The images are in GHCR and
+  correct; only the index is behind. Once the token works, re-run the mirror
+  workflow: `discover` will find nothing new (`1.25.0` is already published, so
+  no version is scheduled and no bundle is rebuilt), and the announce refreshes
+  the root's `tags` map from the registry's actual state. Do not delete tags or
+  force a republish to "trigger" it — that would orphan digests under
+  `build_timestamp: none` for no gain.
+
+---
+
+## 6. Things that look like litter and are not
+
+- **`ocx-contrib/mirror-libc-probe` is archived, not deleted, on purpose.** It is
+  a throwaway mirror that published nothing, but its three runs are the only live
+  proof of two renderer behaviours the pilot cannot show: a test that *must* fail
+  under musl and pass under glibc reddening only the alpine legs
+  ([30252063070](https://github.com/ocx-contrib/mirror-libc-probe/actions/runs/30252063070)),
+  and the arch guard firing with its intended message when an arm64 container leg
+  is pinned to an x86_64 runner
+  ([30252180542](https://github.com/ocx-contrib/mirror-libc-probe/actions/runs/30252180542)).
+  Deleting the repository 404s those URLs and orphans the evidence. Archived, it
+  runs nothing and costs nothing. Leave it.

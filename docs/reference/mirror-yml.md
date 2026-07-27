@@ -18,7 +18,7 @@
 | `concurrency` | object | No | Parallel download and push limits |
 | `tests` | array | No* | Commands to run against each installed bundle. Required when `pipeline generate ci` is used. |
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
-| `ocx_mirror` | object | No* | ocx-mirror version pin for generated workflows. Required when any Linux platform declares containers. |
+| `ocx_mirror` | object | No | Provenance of the ocx-mirror behind a plan. Pins nothing. |
 | `notify` | object | No | Discord webhook notification settings |
 | `announce` | object | No | Index announce settings. See [`announce`](#announce). |
 | `annotations` | object | No | Extra OCI annotations written onto every published image index. See [`annotations`](#annotations). |
@@ -268,11 +268,10 @@ platforms:
 
 ## `ocx_mirror` {#ocx-mirror}
 
-Pins the `ocx-mirror` version used in generated workflow jobs (`discover`, `prepare`, `push`, `notify`).
+Records which `ocx-mirror` produced a plan. It pins nothing — see the box below for where the binaries actually come from.
 
 ```yaml
 ocx_mirror:
-  release_tag: v0.7.2
   rev: abc123def0123456789012345678901234567890
 ```
 
@@ -280,13 +279,10 @@ ocx_mirror:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `release_tag` | string | Yes (when any Linux platform has containers) | ocx-mirror release tag pinned by the generated workflow. Must match `^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$`. |
-| `rev` | string | No | Full 40-character git SHA. When set, takes precedence over `release_tag` for `cargo install` paths. When both present, `release_tag` is still used for musl artifact download. Must match `^[0-9a-f]{40}$`. |
+| `rev` | string | No | Full 40-character git SHA, echoed back as `ocx_mirror_rev` in `pipeline plan` output for traceability. Must match `^[0-9a-f]{40}$`. |
 
-When all Linux platforms are container-less (native-only mirror), `release_tag` is optional and `rev` alone is sufficient.
-
-!!! info "How ocx-mirror is installed in CI"
-    Generated jobs install the toolchain via the [`ocx-sh/setup-ocx`][setup-ocx] action, which activates the mirror repository's project toolchain (`ocx.toml`) onto `PATH` — `ocx-mirror` and `ocx` both come from there.
+!!! info "Where the binaries come from"
+    Generated jobs install the toolchain via the [`ocx-sh/setup-ocx`][setup-ocx] action, which activates the mirror repository's project toolchain (`ocx.toml` / `ocx.lock`) onto `PATH` — `ocx-mirror` and `ocx` both come from there. Container test legs additionally download a statically-linked `ocx` release; that tag is a constant in the renderer, not a spec field, so the whole fleet tests against one binary and it advances when the repository's pinned `ocx-mirror` does.
 
 ## `notify` {#notify}
 
@@ -505,9 +501,6 @@ platforms:
     tests:
       - name: version
         command: cmake.exe --version
-
-ocx_mirror:
-  release_tag: v0.7.2
 
 notify:
   discord:
