@@ -77,45 +77,23 @@ def pipeline_spec(tmp_path: Path, registry: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_fixture_spec_is_valid_yaml() -> None:
-    """§3.8: Fixture mirror.yml parses as valid YAML without error."""
-    import importlib.util
+def test_fixture_spec_parses(mirror_binary: Path) -> None:
+    """The fixture must actually load under the current schema.
 
-    spec_path = FIXTURES_DIR / "mirror.yml"
-    assert spec_path.exists(), f"Fixture not found: {spec_path}"
-
-    # Dynamically check if serde_yaml_ng is available via Python YAML parser
-    # Use stdlib-compatible approach: check if the file is well-formed YAML
-    content = spec_path.read_text()
-
-    # Minimal structural checks on the YAML content (without a YAML parser dep)
-    assert "name:" in content, "mirror.yml must have a name: field"
-    assert "target:" in content, "mirror.yml must have a target: field"
-    assert "source:" in content, "mirror.yml must have a source: field"
-    assert "platforms:" in content, "mirror.yml must have a platforms: field"
-    assert "tests:" in content, "mirror.yml must have a tests: field"
-    assert "ocx_mirror:" in content, "mirror.yml must have an ocx_mirror: field"
-    assert "notify:" in content, "mirror.yml must have a notify: field"
-
-
-def test_fixture_spec_contains_required_pipeline_fields() -> None:
-    """§3.8: Fixture spec has all fields required by the pipeline schema §2.1."""
-    content = (FIXTURES_DIR / "mirror.yml").read_text()
-
-    # §2.1: platforms.[P].runner required for every platform
-    assert "runner:" in content, "platforms must declare runner:"
-    # §2.1: platforms.[P].containers required when linux platform with containers
-    assert "containers:" in content, "linux platform must declare containers:"
-    # §2.1: ocx_mirror.release_tag required when linux platform has containers
-    assert "release_tag:" in content, "ocx_mirror.release_tag required for container legs"
-    # §2.1: ocx_mirror.rev must be present (40-hex SHA)
-    assert "rev:" in content, "ocx_mirror.rev must be present"
-    # §2.1: notify.discord.webhook_secret must be an env-var name (not a URL)
-    match = re.search(r"webhook_secret:\s*(\S+)", content)
-    assert match is not None, "webhook_secret must be present"
-    secret_val = match.group(1).strip('"').strip("'")
-    assert not secret_val.startswith("http"), (
-        f"webhook_secret must be an env-var name, not a URL: {secret_val}"
+    This replaces two tests that asserted substrings of the file as *text*
+    (`"ocx_mirror:" in content`). Text checks cannot see a field renamed
+    upstream, so the fixture carried `asset_type.kind` — a spelling the
+    schema has never accepted — from the day it was written, and every test
+    that fed it to the binary passed anyway on an `unimplemented stub`
+    escape hatch. Run the real parser instead.
+    """
+    result = subprocess.run(
+        [str(mirror_binary), "package", "validate", str(FIXTURES_DIR / "mirror.yml")],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"fixture does not parse (rc={result.returncode}): {result.stderr}"
     )
 
 
@@ -140,37 +118,30 @@ def test_fixture_spec_webhook_is_env_var_name_not_url() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_pipeline_generate_ci_produces_yaml(
-    mirror_binary: Path, pipeline_spec: Path, mirror_work_dir: Path
-) -> None:
-    """§3.8: pipeline generate ci renders workflow YAML from fixture spec.
+def test_pipeline_generate_ci_produces_yaml(mirror_binary: Path, pipeline_spec: Path) -> None:
+    """`pipeline generate ci` renders the workflow next to the spec.
 
-    Expected Phase 3: unimplemented — command exits non-zero.
-    Phase 4+: workflow YAML file written and parses as valid YAML.
+    Output goes to the spec's own directory (`ci.rs` takes `spec.parent()` as
+    the repo root), not to the working directory — a mirror repo keeps
+    `mirror.yml` at its root and the generated workflows under it.
+
+    The `unimplemented stub` escape hatch this used to carry is gone: it
+    accepted rc 64/65/74 as a pass, so for as long as the fixture failed to
+    parse the assertions below never ran, and the one about the output path
+    was wrong.
     """
-    output_dir = mirror_work_dir / "generated"
-    output_dir.mkdir()
-
     result = subprocess.run(
         [str(mirror_binary), "package", "pipeline", "generate", "ci",
          "--spec", str(pipeline_spec)],
-        cwd=str(output_dir),
         capture_output=True,
         text=True,
     )
+    assert result.returncode == 0, f"generate ci failed (rc={result.returncode}): {result.stderr}"
 
-    if result.returncode != 0:
-        # Expected: unimplemented stub
-        assert "not implemented" in result.stderr.lower() or result.returncode in (64, 65, 74), (
-            f"Unexpected failure (rc={result.returncode}): {result.stderr}"
-        )
-        return
-
-    # Phase 4+: verify generated workflow parses as YAML
-    workflow_path = output_dir / ".github" / "workflows" / "mirror.yml"
+    workflow_path = pipeline_spec.parent / ".github" / "workflows" / "mirror.yml"
     assert workflow_path.exists(), "pipeline generate ci must create .github/workflows/mirror.yml"
     content = workflow_path.read_text()
-    assert "on:" in content or "on:" in content, "Generated workflow must have 'on:' trigger"
+    assert "on:" in content, "Generated workflow must have 'on:' trigger"
     assert "jobs:" in content, "Generated workflow must have 'jobs:'"
 
 
