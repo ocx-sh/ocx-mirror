@@ -61,13 +61,16 @@ impl Announce {
 
         let ocx_binary = resolve_ocx_binary().map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
 
-        // ponytail: a pid-named directory under the system temp dir, removed on
-        // the way out. `tempfile` is a dev-dependency here and this is its only
-        // runtime caller — not worth widening the binary's dependency graph.
-        // `ocx package announce --out` creates the directory itself.
+        // The dry run needs somewhere to throw the rebuilt entry away. It goes
+        // under the pipeline's own `.ocx-mirror` work dir rather than the shared
+        // system temp dir: a predictable `/tmp/<fixed-name>` is a path any other
+        // local user can pre-create as a symlink, and `--out` writes through it.
+        // `tempfile` would solve that too but is a dev-dependency here, and this
+        // needs no randomness once the directory is not shared. `ocx package
+        // announce --out` creates it.
         let out = self
             .dry_run
-            .then(|| std::env::temp_dir().join(format!("ocx-mirror-announce-{}", std::process::id())));
+            .then(|| std::path::PathBuf::from(".ocx-mirror").join(format!("announce-dry-run-{}", std::process::id())));
 
         let result = invoke_announce(
             config,
