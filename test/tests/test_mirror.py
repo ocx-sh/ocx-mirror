@@ -1,17 +1,11 @@
 """Acceptance tests for ocx-mirror."""
 from __future__ import annotations
 
-import http.server
-import os
 import shutil
 import stat
 import sys
 import tarfile
-import threading
 from pathlib import Path
-from uuid import uuid4
-
-import pytest
 
 from src.mirror_runner import MirrorRunner
 from src.runner import OcxRunner, current_platform
@@ -108,62 +102,8 @@ def _write_spec_yaml(
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def mirror_binary() -> Path:
-    """Path to the compiled ocx-mirror binary."""
-    if env_path := os.environ.get("OCX_MIRROR_COMMAND"):
-        p = Path(env_path)
-    else:
-        from src.helpers import PROJECT_ROOT
-        p = PROJECT_ROOT / "test" / "bin" / "ocx-mirror"
-        if sys.platform == "win32" and not p.suffix:
-            p = p.with_suffix(".exe")
-    assert p.exists(), f"ocx-mirror binary not found at {p}"
-    return p
-
-
-@pytest.fixture()
-def mirror(mirror_binary: Path, registry: str, tmp_path: Path) -> MirrorRunner:
-    temp_dir = tmp_path / "mirror-work"
-    temp_dir.mkdir()
-    return MirrorRunner(mirror_binary, registry, temp_dir)
-
-
-@pytest.fixture()
-def unique_mirror_repo(request: pytest.FixtureRequest) -> str:
-    """Generate a unique OCI repository name for mirror tests."""
-    import re
-    short_id = uuid4().hex[:8]
-    name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40]
-    return f"m_{short_id}_{name}"
-
-
-@pytest.fixture()
-def asset_server(tmp_path: Path):
-    """Start a local HTTP server serving files from tmp_path/assets/."""
-    assets_dir = tmp_path / "assets"
-    assets_dir.mkdir()
-
-    handler = http.server.SimpleHTTPRequestHandler
-    httpd = http.server.HTTPServer(
-        ("127.0.0.1", 0),
-        lambda *args: handler(*args, directory=str(assets_dir)),
-    )
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-
-    class Server:
-        def __init__(self):
-            self.dir = assets_dir
-            self.port = port
-            self.base_url = f"http://127.0.0.1:{port}"
-
-        def url(self, path: str) -> str:
-            return f"{self.base_url}/{path}"
-
-    yield Server()
-    httpd.shutdown()
+# `mirror_binary`, `mirror`, `unique_mirror_repo` and `asset_server` live in
+# `conftest.py` — the pipeline and e2e suites need the same four.
 
 
 # ---------------------------------------------------------------------------
