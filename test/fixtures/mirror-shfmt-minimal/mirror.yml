@@ -18,7 +18,8 @@ assets:
   linux/amd64:
     - "shfmt_v.*_linux_amd64$"
 asset_type:
-  kind: binary
+  type: binary
+  name: shfmt
 cascade: true
 versions:
   min: "3.7.0"
@@ -34,7 +35,6 @@ tests:
   - name: version
     command: "shfmt --version"
 ocx_mirror:
-  release_tag: v0.1.0
   rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 notify:
   discord:
