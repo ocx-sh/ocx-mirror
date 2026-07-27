@@ -74,7 +74,7 @@ assets:
 
 ### libc variants {#assets-libc}
 
-When a tool ships separate builds for different C libraries on the same `os/arch` (e.g. glibc and musl on `linux/amd64`), append a `+libc.<flavor>` tag to the key. The tag is published into the OCI image index as an `os.features` entry, so a client (`ocx install`) selects the build matching its host libc:
+When a tool ships separate builds for different C libraries on the same `os/arch` (e.g. glibc and musl on `linux/amd64`), append a `+libc.<flavor>` tag to the key. The tag is published into the OCI image index as an `os.features` entry, so a client (`ocx add`) selects the build matching its host libc:
 
 ```yaml
 assets:
@@ -216,7 +216,7 @@ platforms:
 **Platform key validation:**
 
 - Must parse as a platform key: `<os>/<arch>[/<variant>][+libc.<flavor>,...]` — the same grammar [`assets`](#assets-libc) uses. Quote any key containing `+`.
-- A key declaring a libc must be tested under that libc: every image on `linux/amd64+libc.musl` has to be a musl base (Alpine), and every image on a `+libc.glibc` key a glibc base. The mismatch is rejected at generate time — a musl-static binary runs fine under glibc, so an Alpine claim tested in Ubuntu goes green having verified nothing.
+- A key declaring a libc must be tested under that libc: every image on `linux/amd64+libc.musl` has to be a musl base (Alpine), and every image on a `+libc.glibc` key a glibc base. The mismatch is rejected at generate time with exit 65 — a musl-static binary runs fine under glibc, so an Alpine claim tested in Ubuntu goes green having verified nothing.
 
 ### Version applicability {#platform-version-applicability}
 
