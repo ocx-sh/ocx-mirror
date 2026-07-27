@@ -61,5 +61,3 @@ platforms:
       - name: version
         command: uv.exe --version
 
-ocx_mirror:
-  release_tag: v0.7.2

@@ -175,10 +175,6 @@ static VARIANT_NAME_RE: std::sync::LazyLock<regex::Regex> =
 static TEST_NAME_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z][a-zA-Z0-9_-]*$").unwrap());
 
-/// Regex for valid `release_tag` — semantic version with optional pre-release.
-static RELEASE_TAG_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$").unwrap());
-
 /// Regex for a 40-character lowercase hexadecimal git SHA.
 static GIT_REV_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[0-9a-f]{40}$").unwrap());
@@ -251,20 +247,6 @@ impl MirrorSpec {
             validate_announce_config(announce, &mut errors);
         }
         crate::annotations::validate(&self.annotations, &mut errors);
-
-        // Cross-field: release_tag required when any platform declares containers.
-        // This catches the case where ocx_mirror block is absent or release_tag is omitted.
-        let any_platform_has_containers = self.platforms.as_ref().is_some_and(|plats| {
-            plats
-                .values()
-                .any(|p| p.containers.as_ref().is_some_and(|c| !c.is_empty()))
-        });
-        if any_platform_has_containers {
-            let has_release_tag = self.ocx_mirror.as_ref().and_then(|m| m.release_tag.as_ref()).is_some();
-            if !has_release_tag {
-                errors.push("ocx_mirror.release_tag is required when any platform declares containers".to_string());
-            }
-        }
 
         errors
     }
@@ -777,16 +759,8 @@ fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut 
     }
 }
 
-/// Validate `ocx_mirror:` block: release_tag format, rev format.
+/// Validate `ocx_mirror:` block: rev format.
 fn validate_ocx_mirror_config(config: &OcxMirrorConfig, errors: &mut Vec<String>) {
-    if let Some(tag) = &config.release_tag
-        && !RELEASE_TAG_RE.is_match(tag)
-    {
-        errors.push(format!(
-            "ocx_mirror: release_tag '{tag}' must match ^v\\d+\\.\\d+\\.\\d+(-[a-z0-9.]+)?$"
-        ));
-    }
-
     if let Some(rev) = &config.rev
         && !GIT_REV_RE.is_match(rev)
     {
@@ -2377,7 +2351,6 @@ platforms:
         command: shfmt.exe --version
 
 ocx_mirror:
-  release_tag: v0.7.2
   rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 notify:
@@ -2419,7 +2392,6 @@ notify:
 
         // ocx_mirror block
         let ocx_mirror = spec.ocx_mirror.as_ref().unwrap();
-        assert_eq!(ocx_mirror.release_tag.as_deref(), Some("v0.7.2"));
         assert_eq!(
             ocx_mirror.rev.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -2443,8 +2415,6 @@ platforms:
     containers:
       - image: ubuntu:24.04
         shell: bash
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2472,8 +2442,6 @@ tests:
 platforms:
   linux/amd64:
     runner: ubuntu-latest
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2568,8 +2536,6 @@ platforms:
   linux/amd64:
     runner: ubuntu-latest
     containers: []
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2597,8 +2563,6 @@ platforms:
     runner: ubuntu-latest
     containers:
       - image: mycorp/custom-runner:1.0
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2702,8 +2666,6 @@ platforms:
     runner: windows-latest
     containers:
       - image: ubuntu:24.04
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2730,8 +2692,6 @@ platforms:
     runner: ubuntu-latest
     containers:
       - image: alpine:3.20
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2758,8 +2718,6 @@ platforms:
     runner: ubuntu-latest
     containers:
       - image: ubuntu:24.04
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2788,8 +2746,6 @@ platforms:
     runner: ubuntu-latest
     containers:
       - image: alpine:3.20
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -2874,8 +2830,12 @@ platforms:
     }
 
     #[test]
-    fn validate_release_tag_required_when_linux_has_containers() {
-        // §3.1: Rejection — ocx_mirror.release_tag absent when any linux platform has containers
+    fn containers_need_no_ocx_mirror_block() {
+        // Declaring `containers:` once demanded an `ocx_mirror.release_tag`
+        // that nothing rendered — a required field with no consumer. The ocx
+        // the legs download is the renderer's own `OCX_CONTAINER_CLI_TAG`, so
+        // the spec has nothing to say about it. A container spec with no
+        // `ocx_mirror:` block at all must validate clean.
         let yaml = format!(
             r#"{base}
 tests:
@@ -2892,43 +2852,9 @@ platforms:
         );
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert!(spec.ocx_mirror.is_none(), "fixture must carry no ocx_mirror block");
         let errors = spec.validate(Path::new("test.yml"));
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("release_tag") || e.contains("ocx_mirror")),
-            "Expected error about missing release_tag when containers declared, got: {errors:?}"
-        );
-    }
-
-    #[test]
-    fn validate_release_tag_format() {
-        // §3.1: Rejection — release_tag not matching ^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$
-        let yaml = format!(
-            r#"{base}
-tests:
-  - name: version
-    command: shfmt --version
-platforms:
-  linux/amd64:
-    runner: ubuntu-latest
-    containers:
-      - image: ubuntu:24.04
-        shell: bash
-ocx_mirror:
-  release_tag: "not-a-semver"
-"#,
-            base = MINIMAL_BASE_YAML
-        );
-
-        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
-        let errors = spec.validate(Path::new("test.yml"));
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("release_tag") || e.contains("semver") || e.contains("format")),
-            "Expected invalid release_tag format error, got: {errors:?}"
-        );
+        assert!(errors.is_empty(), "expected a clean spec, got: {errors:?}");
     }
 
     #[test]
@@ -2943,7 +2869,6 @@ platforms:
   linux/amd64:
     runner: ubuntu-latest
 ocx_mirror:
-  release_tag: v0.7.2
   rev: "short"
 "#,
             base = MINIMAL_BASE_YAML
@@ -2978,8 +2903,6 @@ tests:
 platforms:
   linux/amd64:
     runner: ubuntu-latest
-ocx_mirror:
-  release_tag: v0.7.2
 ocx_install: {{}}
 "#,
             base = MINIMAL_BASE_YAML
@@ -3413,8 +3336,6 @@ platforms:
     containers:
       - image: ubuntu:24.04
         shell: bash
-ocx_mirror:
-  release_tag: v0.7.2
 notify:
   discord:
     webhook_secret: DISCORD_WEBHOOK_URL
@@ -3498,8 +3419,6 @@ platforms:
     tests:
       - name: version
         command: shfmt.exe --version
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -3542,8 +3461,6 @@ platforms:
     runner: ubuntu-latest
     containers:
       - image: alpine:3.20
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -3574,8 +3491,6 @@ platforms:
     runner: ubuntu-latest
     containers:
       - image: ubuntu:24.04
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );
@@ -3712,8 +3627,6 @@ platforms:
     containers:
       - image: ubuntu:24.04
         shell: bash
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
             base = MINIMAL_BASE_YAML
         );

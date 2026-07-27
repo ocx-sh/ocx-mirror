@@ -44,5 +44,3 @@ platforms:
     containers:
       - image: ubuntu:24.04
 
-ocx_mirror:
-  release_tag: v0.7.2

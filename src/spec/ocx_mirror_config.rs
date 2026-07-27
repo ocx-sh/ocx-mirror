@@ -1,27 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Configuration for which `ocx-mirror` / `ocx` binary versions to use in
-//! the generated pipeline workflow.
+//! Provenance of the `ocx-mirror` behind a generated plan.
 //!
-//! [`OcxMirrorConfig`] is also the sole source for the `ocx` binary download
-//! tag — the renderer reuses `release_tag` for both the ocx-mirror cargo-install
-//! path and the `ocx` binary `gh release download` step.
+//! [`OcxMirrorConfig`] pins nothing. The `ocx-mirror` a generated workflow runs
+//! comes from the repository's own `ocx.toml` / `ocx.lock`, which `setup-ocx`
+//! activates, and the `ocx` release the container test legs download is a
+//! renderer constant (`OCX_CONTAINER_CLI_TAG`) so the whole fleet tests against
+//! one binary. Neither is a per-spec choice, so neither is a field here.
 
 use serde::Deserialize;
 
-/// Pins the `ocx-mirror` binary version and, optionally, a git revision used
-/// for `cargo install --git --rev` fallback paths.
+/// Records the git revision of `ocx-mirror` behind a plan.
+///
+/// `deny_unknown_fields` deliberately: a leftover `release_tag:` from the
+/// version of this struct that had one should say so, not be quietly dropped.
+/// A silently-ignored key is what teaches people the config is decorative.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OcxMirrorConfig {
-    /// Tagged release (e.g. `v0.7.2`). Required when any platform declares
-    /// `containers:` (linux container legs need the musl static artifact via
-    /// `gh release download`). Must match `^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$`.
-    #[serde(default)]
-    pub release_tag: Option<String>,
-    /// 40-hex git SHA. When set, supersedes `release_tag` for the
-    /// `cargo install --git --rev` code path. `release_tag` is still used for
-    /// musl-asset download when present. Must match `^[0-9a-f]{40}$`.
+    /// 40-hex git SHA, surfaced as `ocx_mirror_rev` in `pipeline plan` output
+    /// for traceability. Must match `^[0-9a-f]{40}$`.
     #[serde(default)]
     pub rev: Option<String>,
 }

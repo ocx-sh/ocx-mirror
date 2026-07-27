@@ -311,13 +311,6 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .map(|cron| format!("  schedule:\n    - cron: '{}'\n", cron))
         .unwrap_or_default();
 
-    let release_tag = spec
-        .ocx_mirror
-        .as_ref()
-        .and_then(|m| m.release_tag.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("latest");
-
     // `webhook_secret` names the *GitHub Actions secret* that carries the
     // webhook URL — the rendered workflow maps it onto the conventional local
     // env var `OCX_MIRROR_DISCORD_HOOK`, which `pipeline notify` reads.
@@ -362,7 +355,6 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{WEBHOOK_SECRET_NAME}", webhook_secret_name)
         .replace("{DISCORD_USER_ID_ENV}", &discord_user_id_env)
-        .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
 }
 
 /// GitHub's own container registry — authenticated with the workflow's
@@ -630,9 +622,16 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
 /// The `ocx` CLI release whose statically-linked binary is mounted into a
 /// container test leg.
 ///
-/// Pinned rather than `latest` so a generated workflow keeps rendering the same
-/// bytes; Renovate bumps it the same way it bumps the baked action pins.
-const OCX_CONTAINER_CLI_TAG: &str = "v0.4.3";
+/// Deliberately a renderer constant and not a spec field. Which `ocx` executes
+/// the tests is a property of *this renderer* — it has to be able to read the
+/// bundles this version writes — so it moves when the renderer moves, via each
+/// repository's `ocx.lock`. A per-repo knob would let forty mirrors drift onto
+/// forty different test binaries, which is the failure this pin exists to
+/// prevent.
+///
+/// The trailing marker is the Renovate anchor; see `customManagers` in
+/// `renovate.json`. Keep the literal on one line or the regex stops matching.
+const OCX_CONTAINER_CLI_TAG: &str = "v0.4.3"; // renovate: datasource=github-releases depName=ocx-sh/ocx
 
 /// Render per-test shell commands for the `test` job's run step.
 ///
@@ -780,23 +779,15 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
 
 /// Render the describe.yml catalog-publish workflow.
 ///
-/// Lighter than `mirror.yml`: only the release-tag + target-registry
-/// placeholders need substitution. The workflow itself triggers on changes to
-/// `CATALOG.md`, `logo.*`, or `mirror.yml` and invokes
+/// Lighter than `mirror.yml`: only the auth + target-registry placeholders need
+/// substitution. The workflow itself triggers on changes to `CATALOG.md`,
+/// `logo.*`, or `mirror.yml` and invokes
 /// `ocx-mirror package pipeline describe` to publish the README + logo to the
 /// `__ocx.desc` referrer tag on the target repository.
 fn render_describe(spec: &MirrorSpec) -> String {
-    let release_tag = spec
-        .ocx_mirror
-        .as_ref()
-        .and_then(|m| m.release_tag.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("latest");
-
     DESCRIBE_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
-        .replace("{OCX_MIRROR_RELEASE_TAG}", release_tag)
         .replace("{DESCRIBE_PERMISSIONS}", render_describe_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
@@ -2034,8 +2025,6 @@ tests:
 platforms:
   linux/amd64:
     runner: ubuntu-latest
-ocx_mirror:
-  release_tag: v0.7.2
 "#,
         );
         let shell_block = render_test_run_steps(&legs);
