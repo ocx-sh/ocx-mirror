@@ -15,64 +15,14 @@ running containers: `push` reads nothing else from it.
 """
 from __future__ import annotations
 
-import http.server
 import json
+import re
 import shutil
-import threading
 import urllib.request
 from pathlib import Path
-from typing import NamedTuple
 
-import pytest
-
+from conftest import WebhookCapture
 from src.mirror_runner import MirrorRunner
-
-
-# ---------------------------------------------------------------------------
-# Webhook tracking server fixture
-# ---------------------------------------------------------------------------
-
-
-class WebhookCapture(NamedTuple):
-    """Holds captured webhook POST requests."""
-
-    url: str
-    payloads: list[dict]
-
-
-def _make_tracking_server() -> tuple[WebhookCapture, http.server.HTTPServer]:
-    """Create a local HTTP server that captures POST requests to /webhook."""
-    captured: list[dict] = []
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-            try:
-                payload = json.loads(body)
-                captured.append(payload)
-            except json.JSONDecodeError:
-                captured.append({"_raw": body.decode(errors="replace")})
-            self.send_response(204)
-            self.end_headers()
-
-        def log_message(self, fmt: str, *args: object) -> None:  # noqa: ANN002
-            pass  # suppress request logging in test output
-
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
-    port = server.server_address[1]
-    capture = WebhookCapture(url=f"http://127.0.0.1:{port}/webhook", payloads=captured)
-    return capture, server
-
-
-@pytest.fixture()
-def webhook_server() -> "WebhookCapture":
-    """Start a local webhook tracking server. Yields capture object."""
-    capture, server = _make_tracking_server()
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield capture
-    server.shutdown()
 
 
 def _registry_tags(registry: str, repository: str) -> set[str]:
@@ -82,7 +32,12 @@ def _registry_tags(registry: str, repository: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# §3.10: Webhook tracking server structural tests (pass now)
+# §3.10: Harness self-tests for the webhook capture server.
+#
+# These two assert on a payload the test itself just POSTed — the shape the
+# five deleted `test_run_summary_*` tests had. Kept deliberately: the e2e and
+# the all-skipped notify test both assert on `payloads`, and an empty list
+# only means silence if the server provably records what it receives.
 # ---------------------------------------------------------------------------
 
 
@@ -204,28 +159,41 @@ def test_full_pipeline_against_registry(
     bundles_dir.mkdir()
     summary_path = work_dir / "run-summary.json"
 
-    # Step 1: plan — discover the versions the target does not carry.
-    plan = json.loads(
+    # Step 1: plan — discover the versions the target does not carry. The
+    # workflow's `discover` job persists this as plan.json; so does this test,
+    # because step 2 consumes it.
+    plan_path = work_dir / "plan.json"
+    plan_path.write_text(
         mirror.run(
             "package", "pipeline", "plan", "--spec", str(pipeline_spec), "--format", "json"
         ).stdout
     )
+    plan = json.loads(plan_path.read_text())
     assert plan["has_new"] is True
     version = plan["versions"][0]["version"]
     platform = plan["versions"][0]["platforms"][0]
     platform_slug = platform.replace("/", "_")
+    # Default `build_timestamp` — the setting real mirrors run on. Asserted so
+    # a regression to `none` cannot quietly turn the cascade below into a
+    # weaker check.
+    assert re.fullmatch(r"3\.7\.0_\d{14}", version), version
 
-    # Step 2: prepare — download, verify, bundle.
+    # Step 2: prepare — download, verify, bundle. `--plan` reuses the asset
+    # URLs discover already resolved, as the workflow does; it also pins the
+    # timestamped version, which prepare would otherwise recompute from the
+    # clock and could land a second later than plan did.
     mirror.run(
         "package", "pipeline", "prepare",
         "--spec", str(pipeline_spec),
         "--version", version,
         "--work-dir", str(work_dir),
+        "--plan", str(plan_path),
     )
 
     # Step 3: flatten to the artifact layout `push` consumes, exactly as the
-    # generated workflow's `prepare` job does.
-    prepared = work_dir / version / platform_slug
+    # generated workflow's `prepare` job does — including its `+` → `_` slug
+    # of the version directory.
+    prepared = work_dir / version.replace("+", "_") / platform_slug
     shutil.copy(prepared / "bundle.tar.xz", bundles_dir / f"bundle-{version}-{platform_slug}.tar.xz")
     shutil.copy(prepared / "metadata.json", bundles_dir / f"bundle-{version}-{platform_slug}-metadata.json")
     (junit_dir / f"junit-{version}-{platform_slug}-{CONTAINER_ID}.xml").write_text(
@@ -247,7 +215,8 @@ def test_full_pipeline_against_registry(
     published = summary["versions"][0]
     assert published["status"] == "published", published
     assert published["platforms_pushed"] == [platform]
-    assert published["cascade_tags_written"] == [version, "3.7", "3", "latest"]
+    # The build-tagged version plus the four floating tags it advances.
+    assert published["cascade_tags_written"] == [version, "3.7.0", "3.7", "3", "latest"]
 
     # §3.10: the registry is the only witness that matters — the summary is
     # the mirror's own account of what it did, the tag list is the world's.

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import WebhookCapture
 from src.mirror_runner import MirrorRunner
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "mirror-shfmt-minimal"
@@ -132,7 +133,9 @@ def test_pipeline_plan_reports_the_unmirrored_version(
 
     plan = json.loads(result.stdout)
     assert plan["has_new"] is True, f"empty target must have new work: {plan}"
-    assert [v["version"] for v in plan["versions"]] == ["3.7.0"]
+    assert [v["source_version"] for v in plan["versions"]] == ["3.7.0"]
+    # Published version carries the default `build_timestamp`.
+    assert re.fullmatch(r"3\.7\.0_\d{14}", plan["versions"][0]["version"])
     assert plan["versions"][0]["platforms"] == ["linux/amd64"]
     assert plan["versions"][0]["assets"][0]["asset_name"] == "shfmt_v3.7.0_linux_amd64"
 
@@ -142,24 +145,45 @@ def test_pipeline_prepare_bundles_the_declared_platform(
 ) -> None:
     """§3.8: `pipeline prepare` downloads, bundles, and manifests one version.
 
+    Invoked the way the generated `prepare` job invokes it: the version comes
+    from the plan, and `--plan` hands over the assets discover already
+    resolved. That also pins the timestamped version — `prepare` names its
+    manifest after the `--version` argument verbatim but derives the bundle
+    directory from the clock, so passing the bare `3.7.0` puts the two in
+    different directories.
+
     The bundle path asserted here is the one `pipeline generate ci` flattens in
     the `prepare` job, so a rename on either side breaks this test.
     """
-    mirror.run(
+    plan_path = mirror_work_dir / "plan.json"
+    plan_path.write_text(
+        mirror.run(
+            "package", "pipeline", "plan", "--spec", str(pipeline_spec), "--format", "json"
+        ).stdout
+    )
+    version = json.loads(plan_path.read_text())["versions"][0]["version"]
+
+    result = mirror.run(
         "package", "pipeline", "prepare",
         "--spec", str(pipeline_spec),
-        "--version", "3.7.0",
+        "--version", version,
         "--work-dir", str(mirror_work_dir),
+        "--plan", str(plan_path),
     )
 
-    version_dir = mirror_work_dir / "3.7.0"
+    manifest_path = Path(result.stdout.strip())
+    assert manifest_path == mirror_work_dir / version / "manifest.json", result.stdout
+    version_dir = manifest_path.parent
     bundle_path = version_dir / "linux_amd64" / "bundle.tar.xz"
     assert bundle_path.exists(), f"expected bundle at {bundle_path}"
     # `ocx package push` discovers the metadata sidecar next to the bundle.
     assert (version_dir / "linux_amd64" / "metadata.json").exists()
 
-    manifest = json.loads((version_dir / "manifest.json").read_text())
-    assert manifest["version"] == "3.7.0"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["version"] == version_dir.name
+    assert re.fullmatch(r"3\.7\.0_\d{14}", manifest["version"]), (
+        f"default build_timestamp must stamp the version: {manifest['version']}"
+    )
     assert [b["platform_slug"] for b in manifest["bundles"]] == ["linux_amd64"]
     assert manifest["bundles"][0]["bundle_path"] == str(bundle_path)
     assert manifest["bundles"][0]["size_bytes"] == bundle_path.stat().st_size
@@ -189,23 +213,26 @@ def test_pipeline_push_with_no_bundles_reports_nothing_published(
         "--write-summary", str(summary_path),
     )
 
+    # All seven §2.4 required top-level fields.
     summary = json.loads(summary_path.read_text())
     assert summary["schema_version"] == 1
     assert summary["mirror"] == "shfmt"
     assert summary["target"] == f"{mirror.registry}/{unique_mirror_repo}"
+    assert summary["run_url"].startswith("https://github.com/"), summary["run_url"]
     assert summary["versions"] == [], "no bundles means no version rows"
     assert summary["any_red"] is False
     assert summary["any_new_green"] is False
 
 
 def test_pipeline_notify_is_silent_for_an_all_skipped_run(
-    mirror: MirrorRunner, tmp_path: Path
+    mirror: MirrorRunner, webhook_server: WebhookCapture, tmp_path: Path
 ) -> None:
     """§3.8 / D10: all `skipped_existing` and no failures → exit 0, no POST.
 
-    `OCX_MIRROR_DISCORD_HOOK` is deliberately left unset: notify must return
-    before it ever looks the webhook up. If it started POSTing on an
-    all-skipped run this would exit 78 on the missing variable.
+    The webhook is configured and listening, so the empty payload list is an
+    assertion rather than an inference: leaving `OCX_MIRROR_DISCORD_HOOK`
+    unset would also pass, but only because notify never reaches the lookup —
+    silence and never-tried would be indistinguishable.
 
     The old version of this test passed `--webhook-env-var`, a flag notify has
     never had, and accepted `rc in (0, 1, 2, 64, 65, 69, 77)` — so clap's
@@ -231,7 +258,12 @@ def test_pipeline_notify_is_silent_for_an_all_skipped_run(
         "any_new_green": False,
     }))
 
+    mirror.env["OCX_MIRROR_DISCORD_HOOK"] = webhook_server.url
     mirror.run("package", "pipeline", "notify", "--run-summary", str(summary_path))
+
+    assert webhook_server.payloads == [], (
+        f"all-skipped run must not POST: {webhook_server.payloads}"
+    )
 
 
 # ---------------------------------------------------------------------------
