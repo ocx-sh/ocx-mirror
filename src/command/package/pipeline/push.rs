@@ -129,7 +129,7 @@ impl Push {
             // and downstream push invocations.
             let mut sorted_platforms: Vec<String> = platforms_for_version
                 .into_iter()
-                .map(|slug| slug_to_platform(&slug))
+                .map(|slug| slug_to_platform(&spec, &slug))
                 .collect();
             sorted_platforms.sort_by_key(|p| platform_order.iter().position(|s| s == p).unwrap_or(usize::MAX));
 
@@ -145,9 +145,6 @@ impl Push {
             let mut ready: Vec<(String, PathBuf)> = Vec::new();
 
             for platform_str in &sorted_platforms {
-                // Derive the platform_slug from the platform string.
-                let platform_slug = platform_to_slug(platform_str);
-
                 // Determine expected container IDs from spec.
                 let container_ids = container_ids_for_platform(&spec, platform_str);
 
@@ -155,7 +152,7 @@ impl Push {
                 let decision = evaluate_junit(
                     &self.junit_dir,
                     version,
-                    &platform_slug,
+                    platform_str,
                     &container_ids,
                     &test_names_for_platform(&spec, platform_str),
                 )
@@ -170,7 +167,7 @@ impl Push {
                         all_test_failures.extend(test_failures);
                     }
                     VpDecision::Green => {
-                        let bundle_path = bundle_path_for(&self.bundles_dir, version, &platform_slug);
+                        let bundle_path = bundle_path_for(&self.bundles_dir, version, &platform_to_slug(platform_str));
                         if bundle_path.exists() {
                             ready.push((platform_str.clone(), bundle_path));
                         } else {
@@ -405,8 +402,11 @@ fn bundle_path_for(bundles_dir: &Path, version: &str, platform_slug: &str) -> Pa
 }
 
 /// Convert `linux/amd64` → `linux_amd64` (platform string → slug).
+///
+/// The canonical slug, shared with `pipeline prepare` (which names the work
+/// directory) and the CI renderer (which names the JUnit file).
 fn platform_to_slug(platform: &str) -> String {
-    platform.replace('/', "_")
+    spec::platform_key_slug(platform)
 }
 
 /// Derive the upstream project homepage from a mirror spec's `source:` block.
@@ -498,25 +498,11 @@ fn container_ids_from_config(config: &PlatformConfig) -> Vec<String> {
             .map(|c| {
                 c.id.clone().unwrap_or_else(|| {
                     // Default slug: image with `:` and `/` replaced by `_`.
-                    image_to_container_id(&c.image)
+                    crate::spec::image_to_container_id(&c.image)
                 })
             })
             .collect(),
     }
-}
-
-/// Slugify a container image name to a JUNIT file container_id.
-///
-/// All `:`, `/`, and `.` separators are replaced with `_`. Consecutive underscores
-/// (which can arise from registry paths containing `/`) are collapsed to one.
-///
-/// e.g. `ubuntu:24.04` → `ubuntu_24_04`, `alpine:3.20` → `alpine_3_20`.
-fn image_to_container_id(image: &str) -> String {
-    image
-        .replace([':', '/', '.'], "_")
-        // Collapse consecutive underscores (e.g. "ghcr.io/org/img" → "ghcr_io_org_img"
-        // but a double separator like "org//img" would produce "org__img" without this).
-        .replace("__", "_")
 }
 
 /// Returns the test names declared for a platform (platform-level override or top-level).
@@ -536,17 +522,22 @@ fn test_names_for_platform(spec: &MirrorSpec, platform_str: &str) -> Vec<String>
         .unwrap_or_default()
 }
 
-/// Evaluate the JUNIT files for a `(version, platform_slug)` pair across all
+/// Evaluate the JUNIT files for a `(version, platform)` pair across all
 /// declared container IDs, returning a go/no-go decision.
+///
+/// Takes the platform in slash form and slugs it here: reporting a failure
+/// needs the platform, finding the file needs the slug, and the slug does not
+/// reverse for a platform carrying `os.features`.
 ///
 /// AND-logic: all containers must be green for all declared tests.
 async fn evaluate_junit(
     junit_dir: &Path,
     version: &str,
-    platform_slug: &str,
+    platform: &str,
     container_ids: &[String],
     declared_test_names: &[String],
 ) -> VpDecision {
+    let platform_slug = platform_to_slug(platform);
     let mut platform_test_failures: Vec<TestFailure> = Vec::new();
     let mut missing_reasons: Vec<String> = Vec::new();
     // Capture the first `ci.job.url` we encounter across all containers in this
@@ -592,8 +583,7 @@ async fn evaluate_junit(
         for failing_tc in &failures_in_suite {
             platform_test_failures.push(TestFailure {
                 version: version.to_string(),
-                // platform is the human-readable form (platform_slug with _ → /)
-                platform: slug_to_platform(platform_slug),
+                platform: platform.to_string(),
                 container: container_id.clone(),
                 test: failing_tc.name.clone(),
                 message: failing_tc.failure_message.clone().unwrap_or_default(),
@@ -605,7 +595,7 @@ async fn evaluate_junit(
         if suite_has_failures && failures_in_suite.is_empty() {
             platform_test_failures.push(TestFailure {
                 version: version.to_string(),
-                platform: slug_to_platform(platform_slug),
+                platform: platform.to_string(),
                 container: container_id.clone(),
                 test: "<suite>".to_string(),
                 message: format!(
@@ -623,7 +613,7 @@ async fn evaluate_junit(
                 if !found_names.contains(expected_name.as_str()) {
                     platform_test_failures.push(TestFailure {
                         version: version.to_string(),
-                        platform: slug_to_platform(platform_slug),
+                        platform: platform.to_string(),
                         container: container_id.clone(),
                         test: expected_name.clone(),
                         message: format!("test '{expected_name}' not found in JUNIT"),
@@ -637,7 +627,7 @@ async fn evaluate_junit(
     if !missing_reasons.is_empty() {
         let reason = missing_reasons.join("; ");
         let failure = PlatformFailure {
-            platform: slug_to_platform(platform_slug),
+            platform: platform.to_string(),
             reason: "missing_junit".to_string(),
             failed_tests: vec![],
             job_url: job_url.clone(),
@@ -646,7 +636,7 @@ async fn evaluate_junit(
             platform_failure: failure,
             test_failures: vec![TestFailure {
                 version: version.to_string(),
-                platform: slug_to_platform(platform_slug),
+                platform: platform.to_string(),
                 container: "_missing_".to_string(),
                 test: "<junit>".to_string(),
                 message: reason,
@@ -658,7 +648,7 @@ async fn evaluate_junit(
         VpDecision::Green
     } else {
         let failure = PlatformFailure {
-            platform: slug_to_platform(platform_slug),
+            platform: platform.to_string(),
             reason: "test_failed".to_string(),
             failed_tests: platform_test_failures.clone(),
             job_url,
@@ -670,12 +660,29 @@ async fn evaluate_junit(
     }
 }
 
-/// Convert a platform slug back to platform string (`linux_amd64` → `linux/amd64`).
+/// Convert a bundle's platform slug back to its platform string
+/// (`linux_amd64` → `linux/amd64`).
 ///
-/// This is a best-effort reversal — we only replace the first `_` that
-/// separates the OS from the architecture. Known OS prefixes: `linux`,
-/// `darwin`, `windows`.
-fn slug_to_platform(slug: &str) -> String {
+/// The spec's declared keys are consulted first, because the slug is lossy
+/// wherever a platform carries `os.features`: `linux_amd64_libc.musl` has no
+/// textual reversal to `linux/amd64+libc.musl`, and guessing `linux/amd64_libc.musl`
+/// misses every subsequent `spec.platforms` lookup (container ids, test names)
+/// and would hand `ocx package push` an unparseable `--platform`.
+///
+/// The `_`-splitting heuristic stays as the fallback for a bundle whose platform
+/// the spec never declared under `platforms:`.
+fn slug_to_platform(spec: &MirrorSpec, slug: &str) -> String {
+    if let Some(platforms) = &spec.platforms
+        && let Some(key) = platforms.keys().find(|key| platform_to_slug(key) == slug)
+    {
+        return key.clone();
+    }
+    slug_to_platform_heuristic(slug)
+}
+
+/// Best-effort textual reversal — replaces the first `_` that separates the OS
+/// from the architecture. Known OS prefixes: `linux`, `darwin`, `windows`.
+fn slug_to_platform_heuristic(slug: &str) -> String {
     for os in &["linux", "darwin", "windows"] {
         let prefix = format!("{os}_");
         if slug.starts_with(prefix.as_str()) {
@@ -1481,7 +1488,7 @@ mod tests {
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &container_ids,
             &declared_tests,
         ));
@@ -1547,7 +1554,7 @@ mod tests {
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &container_ids,
             &declared_tests,
         ));
@@ -1606,7 +1613,7 @@ mod tests {
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &container_ids,
             &declared_tests,
         ));
@@ -1818,6 +1825,96 @@ mod tests {
         }
     }
 
+    /// The libc half of the regression above. `linux_amd64_libc.musl` has no
+    /// textual reversal: the `_`-splitting heuristic yields
+    /// `linux/amd64_libc.musl`, which matches no `platforms:` key, so every
+    /// container id collapses to `_native_` and a fully green leg is discarded
+    /// as `missing_junit` — the exact silent-loss shape this pipeline keeps
+    /// producing whenever two places compute the slug independently.
+    #[test]
+    fn run_loop_resolves_a_libc_bearing_platform_back_from_its_bundle_slug() {
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "3.7.0";
+        // What `pipeline prepare` names the work dir, hence what the workflow
+        // names the bundle and the JUnit file.
+        let musl_slug = "linux_amd64_libc.musl";
+        let glibc_slug = "linux_amd64_libc.glibc";
+
+        for (slug, cid) in [(musl_slug, "alpine_3_20"), (glibc_slug, "ubuntu_24_04")] {
+            std::fs::write(bundles_dir.path().join(format!("bundle-{version}-{slug}.tar.xz")), b"x").unwrap();
+            let xml = format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="{slug}.{cid}" tests="1" failures="0" errors="0" skipped="0" timestamp="2026-05-13T10:00:00Z" time="1.0">
+    <testcase name="version" classname="{slug}.{cid}" time="1.0"/>
+  </testsuite>
+</testsuites>"#
+            );
+            write_junit(junit_dir.path(), version, slug, cid, &xml);
+        }
+
+        let spec_path = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mirror-container-libc.yml"
+        ))
+        .to_path_buf();
+
+        // `ocx` is absent in the test env, so the push subprocess fails — the
+        // behaviour under test is the JUnit verdict that precedes it.
+        let _ = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let failures = summary["versions"][0]["platforms_failed"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+
+        for f in &failures {
+            assert_ne!(
+                f["reason"].as_str(),
+                Some("missing_junit"),
+                "a green libc leg was discarded: the bundle slug did not resolve back to its \
+                 `platforms:` key, so container ids fell back to `_native_`. failure: {f}"
+            );
+        }
+
+        // Both platforms must have got past the JUnit verdict to the push
+        // attempt, under their full canonical keys — `linux/amd64_libc.musl`
+        // matches no spec key and is not even a parseable `--platform`. Whether
+        // the push itself succeeds depends on whether an `ocx` is reachable, so
+        // take the union of both outcomes.
+        let mut reached: Vec<String> = summary["versions"][0]["platforms_pushed"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| p.as_str().map(str::to_owned))
+            .collect();
+        reached.extend(
+            failures
+                .iter()
+                .filter_map(|f| f["platform"].as_str().map(str::to_owned)),
+        );
+        reached.sort();
+        assert_eq!(
+            reached,
+            vec![
+                "linux/amd64+libc.glibc".to_string(),
+                "linux/amd64+libc.musl".to_string()
+            ],
+            "both libc platforms must reach push under their spec keys; summary: {summary}"
+        );
+    }
+
     // ── Additional unit tests for helpers ─────────────────────────────────
 
     const EXCLUDE_SPEC: &str = r#"
@@ -1921,9 +2018,9 @@ platforms:
 
     #[test]
     fn slug_to_platform_roundtrips() {
-        assert_eq!(slug_to_platform("linux_amd64"), "linux/amd64");
-        assert_eq!(slug_to_platform("darwin_arm64"), "darwin/arm64");
-        assert_eq!(slug_to_platform("windows_amd64"), "windows/amd64");
+        assert_eq!(slug_to_platform_heuristic("linux_amd64"), "linux/amd64");
+        assert_eq!(slug_to_platform_heuristic("darwin_arm64"), "darwin/arm64");
+        assert_eq!(slug_to_platform_heuristic("windows_amd64"), "windows/amd64");
     }
 
     #[test]
@@ -2007,7 +2104,7 @@ platforms:
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &["_native_".to_string()],
             &["version".to_string()],
         ));
@@ -2035,7 +2132,7 @@ platforms:
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &["_native_".to_string()],
             // Both "version" (present) and "smoke" (missing) declared.
             &["version".to_string(), "smoke".to_string()],
@@ -2099,7 +2196,7 @@ platforms:
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &["_native_".to_string()],
             &["version".to_string()],
         ));
@@ -2134,7 +2231,7 @@ platforms:
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &["_native_".to_string()],
             &["version".to_string()],
         ));
@@ -2181,7 +2278,7 @@ platforms:
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &["ubuntu_2404".to_string(), "alpine_3_20".to_string()],
             &["version".to_string()],
         ));
@@ -2208,7 +2305,7 @@ platforms:
         let decision = rt.block_on(evaluate_junit(
             junit_dir.path(),
             version,
-            slug,
+            &slug_to_platform_heuristic(slug),
             &["ubuntu_2404".to_string()],
             &["version".to_string()],
         ));
