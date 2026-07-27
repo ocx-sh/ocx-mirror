@@ -1,7 +1,9 @@
 # Handover: migrating a mirror onto GHCR and into the OCX index
 
 **Date:** 2026-07-27
-**Status:** written after the `bazelbuild/bazelisk` pilot completed end to end
+**Status:** written after the `bazelbuild/bazelisk` pilot published to GHCR and
+resolved from the index. One thing is still broken and it will hit every repo
+that follows: the announce from CI cannot write to the shared fork. See §5.
 **Audience:** a maintainer with no context on the announce initiative, migrating
 one of the ~41 remaining `ocx-contrib/mirror-*` repositories off `ocx.sh` onto
 `ghcr.io` and onto the index.
@@ -11,12 +13,15 @@ rules are the expensive part — every one of them cost real debugging time on t
 pilot, and none of them is discoverable from the code alone.
 
 Cross-references, for the reader who wants the decision record rather than the
-procedure. Both live in the **ocx** repository (not this one), under
-`.claude/artifacts/`:
+procedure. Both live in the **ocx** repository, not this one:
 
-- `design_spec_announce_initiative.md` — §8 carries the E-P1…E-P4 rulings quoted
-  below; §7 the dev-loop mechanics.
-- `meta-plan_announce.md` — track structure and the G-* gates.
+- `.claude/artifacts/design_spec_announce_initiative.md` — §8 carries the
+  E-P1…E-P4 rulings quoted below; §7 the dev-loop mechanics. Committed; you will
+  find it in any ocx checkout.
+- `meta-plan_announce.md` — track structure and the `G-*` gates. Lives in
+  `.claude/state/plans/`, which is **gitignored and per-checkout**: it exists
+  only on the machine that ran the initiative. If you cannot find it, everything
+  in this document stands on its own — it is context, not a dependency.
 
 Local reference for the spec surface: [`docs/reference/mirror-yml.md`](../../docs/reference/mirror-yml.md).
 
