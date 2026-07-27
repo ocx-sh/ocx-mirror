@@ -144,8 +144,10 @@ tests:
 
 Declares the GHA runner and container matrix for the generated workflow. Each key is a platform slug in `<os>/<arch>` form.
 
-!!! warning "Container legs are currently rejected by the renderer"
-    `pipeline generate ci` is native-only after the setup-ocx migration: a spec that declares `containers:` is rejected with exit 64. The `containers` fields below remain part of the spec schema but cannot be used with the current renderer.
+A platform without `containers:` runs its tests natively on the runner. A platform with `containers:` runs them once per image: the generated workflow fetches a libc-matched, statically-linked `ocx` release and executes every `ocx package test` inside `docker run <image>`, so the mirrored artifact is loaded and run by that image's own libc. That is the only way an `os.features` musl or glibc claim is actually verified — an artifact that links glibc reds its Alpine leg instead of shipping a false claim.
+
+!!! note "Container legs are linux-only"
+    Tests run via `docker run`, so `containers:` is rejected on a `darwin/*` or `windows/*` platform. A spec may mix freely: container legs on Linux, native legs everywhere else.
 
 ```yaml
 platforms:
@@ -260,7 +262,7 @@ ocx_mirror:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `release_tag` | string | Yes (when any Linux platform has containers) | ocx-mirror release tag. Used for musl-static artifact download on Linux container legs. Must match `^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$`. |
+| `release_tag` | string | Yes (when any Linux platform has containers) | ocx-mirror release tag pinned by the generated workflow. Must match `^v\d+\.\d+\.\d+(-[a-z0-9.]+)?$`. |
 | `rev` | string | No | Full 40-character git SHA. When set, takes precedence over `release_tag` for `cargo install` paths. When both present, `release_tag` is still used for musl artifact download. Must match `^[0-9a-f]{40}$`. |
 
 When all Linux platforms are container-less (native-only mirror), `release_tag` is optional and `rev` alone is sufficient.

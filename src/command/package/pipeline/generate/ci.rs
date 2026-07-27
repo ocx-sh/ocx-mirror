@@ -13,13 +13,21 @@ use crate::command::package::options::OutputFormat;
 use crate::error::MirrorError;
 use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
 
-// ── Native-only renderer ─────────────────────────────────────────────────────
+// ── Renderer (native + container legs) ───────────────────────────────────────
 //
-// As of the setup-ocx toolchain-sourcing migration the renderer emits a native-only
-// workflow shape. Container mode (legs that run tests inside a docker image
-// injected with a musl-built ocx) is deferred — see Phase 8 follow-up in
-// `.claude/artifacts/lively-leaping-quill.md`. Specs declaring `containers:`
-// are rejected by `policy_check_no_containers` before any file is written.
+// A platform without `containers:` renders one native leg: tests run on the GHA
+// runner against the ocx that setup-ocx put on PATH. A platform WITH
+// `containers:` renders one leg per image, and every `ocx package test` for that
+// leg runs inside `docker run <image>` with a libc-matched, statically-linked
+// ocx release mounted in.
+//
+// The container wrapper is the whole point of the feature: `os.features` claims
+// like musl vs glibc are unverifiable until the mirrored artifact is executed
+// under that libc's loader. A leg that merely renders proves nothing.
+//
+// Native output is byte-identical to the pre-container renderer — the extra
+// matrix keys and the docker prelude are emitted only when a leg carries an
+// image, and `tests/golden/` asserts that for the whole native fixture corpus.
 
 // ── Build-time constants ─────────────────────────────────────────────────────
 
@@ -93,7 +101,6 @@ impl GenerateCi {
 
         // Phase 3: content-policy validation on the parsed spec.
         policy_check_notify(&spec)?;
-        policy_check_no_containers(&spec)?;
 
         if let Some(warning) = ghcr_owner_warning(&spec, std::env::var("GITHUB_REPOSITORY").ok().as_deref()) {
             eprintln!("warning: {warning}");
@@ -137,30 +144,6 @@ fn policy_check_notify(spec: &MirrorSpec) -> Result<(), MirrorError> {
     spec::policy_check_notify(notify)
 }
 
-/// Reject specs that declare container test legs.
-///
-/// The renderer is native-only after the setup-ocx toolchain-sourcing migration;
-/// container mode (musl ocx injected into a docker image) needs a separate
-/// install strategy that has not been re-implemented yet.
-fn policy_check_no_containers(spec: &MirrorSpec) -> Result<(), MirrorError> {
-    let Some(platforms) = &spec.platforms else {
-        return Ok(());
-    };
-    let with_containers: Vec<&str> = platforms
-        .iter()
-        .filter(|(_, config)| config.containers.as_ref().is_some_and(|c| !c.is_empty()))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    if with_containers.is_empty() {
-        return Ok(());
-    }
-    Err(MirrorError::SpecUsageError(format!(
-        "container test legs are not supported by the current renderer (platforms: {}); \
-         remove the `containers:` blocks or pin an older ocx-mirror release",
-        with_containers.join(", "),
-    )))
-}
-
 // ── Renderer ─────────────────────────────────────────────────────────────────
 
 /// The kind of a rendered test entry — mirrors [`spec::TestKind`] but owns its
@@ -181,15 +164,21 @@ struct RenderedTest {
 
 /// Describes one matrix leg (test job matrix entry).
 ///
-/// The renderer is native-only — `container_id` is always the sentinel
-/// `_native_`. The field is retained because downstream consumers
-/// (`pipeline push`, `junit.rs`) still key on `(version, platform, container)`
-/// triples in JUnit XML and run-summary.json.
+/// A native leg has an empty `container_image` and the sentinel `container_id`
+/// `_native_`. A container leg carries the image, its libc family (which ocx
+/// release binary to mount) and a stable `container_id` taken from the config
+/// `id` or the slugified image. Downstream consumers (`pipeline push`,
+/// `junit.rs`) key on `(version, platform, container)` triples in JUnit XML and
+/// run-summary.json, so `container_id` stays meaningful in both modes.
 struct MatrixLeg {
     platform: String,
     platform_slug: String,
     runner: String,
     container_id: String,
+    /// Container image reference; empty for a native leg.
+    container_image: String,
+    /// Container libc family (`musl` / `gnu`); empty for a native leg.
+    container_libc: String,
     shell: String,
     tests: Vec<RenderedTest>,
 }
@@ -240,17 +229,51 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
             .map(render_tests)
             .unwrap_or_else(|| top_level_tests.clone());
 
-        // Native-only mode after the setup-ocx toolchain-sourcing migration.
-        // `containers:` specs are rejected upfront by `policy_check_no_containers`.
-        let shell = native_shell_for_platform(platform_key, config);
-        legs.push(MatrixLeg {
-            platform: platform_key.clone(),
-            platform_slug: platform_slug.clone(),
-            runner: config.runner.clone(),
-            container_id: "_native_".to_string(),
-            shell: shell.to_string(),
-            tests: effective_tests,
-        });
+        match config.containers.as_deref().filter(|c| !c.is_empty()) {
+            // Container mode: one leg per image, each testing the same artifact
+            // under a different userland.
+            Some(containers) => {
+                for container in containers {
+                    // Same slug `pipeline push` uses to find this leg's JUnit
+                    // file. Diverging here loses every container result.
+                    let container_id = container
+                        .id
+                        .clone()
+                        .unwrap_or_else(|| spec::image_to_container_id(&container.image));
+                    // Validation guarantees an explicit shell whenever the image
+                    // has no known default, so the fallback is unreachable for a
+                    // validated spec; POSIX `sh` is the safest thing to guess.
+                    let shell = container.shell.clone().unwrap_or_else(|| {
+                        spec::infer_shell_from_image(&container.image)
+                            .unwrap_or("sh")
+                            .to_string()
+                    });
+                    legs.push(MatrixLeg {
+                        platform: platform_key.clone(),
+                        platform_slug: platform_slug.clone(),
+                        runner: config.runner.clone(),
+                        container_id,
+                        container_image: container.image.clone(),
+                        container_libc: spec::infer_libc_from_image(&container.image).to_string(),
+                        shell,
+                        tests: effective_tests.clone(),
+                    });
+                }
+            }
+            None => {
+                let shell = native_shell_for_platform(platform_key, config);
+                legs.push(MatrixLeg {
+                    platform: platform_key.clone(),
+                    platform_slug: platform_slug.clone(),
+                    runner: config.runner.clone(),
+                    container_id: "_native_".to_string(),
+                    container_image: String::new(),
+                    container_libc: String::new(),
+                    shell: shell.to_string(),
+                    tests: effective_tests,
+                });
+            }
+        }
     }
     legs
 }
@@ -318,6 +341,9 @@ fn render_workflow(spec: &MirrorSpec) -> String {
         .replace("{SCHEDULE_BLOCK}", &schedule_block)
         .replace("{TEST_MATRIX_ENTRIES}", &matrix_entries)
         .replace("{TEST_RUN_STEPS}", &test_run_steps)
+        // Substituted after `{TEST_RUN_STEPS}` — the placeholder lives inside the
+        // container prelude that step just injected.
+        .replace("{OCX_CLI_TAG}", OCX_CONTAINER_CLI_TAG)
         .replace("{TARGET_IDENTIFIER}", &target_identifier)
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
         .replace("{DISCOVER_PERMISSIONS}", render_discover_permissions(spec))
@@ -544,6 +570,16 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
             "          - platform: {}\n            platform_slug: {}\n            runner: {}\n            container_id: {}\n",
             leg.platform, leg.platform_slug, leg.runner, leg.container_id,
         ));
+        // Emitted only for container legs, so a native-only workflow keeps the
+        // exact key set it had before container mode existed (zero drift for the
+        // pinned mirror corpus). The test step reads an absent/empty
+        // `container_image` as native mode.
+        if !leg.container_image.is_empty() {
+            out.push_str(&format!(
+                "            container_image: {:?}\n            container_libc: {:?}\n",
+                leg.container_image, leg.container_libc,
+            ));
+        }
         out.push_str(&format!("            shell: {}\n", leg.shell));
         // Inline the test entries so they are visible in the generated YAML.
         out.push_str("            tests:\n");
@@ -581,18 +617,89 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
     out
 }
 
+/// The `ocx` CLI release whose statically-linked binary is mounted into a
+/// container test leg.
+///
+/// Pinned rather than `latest` so a generated workflow keeps rendering the same
+/// bytes; Renovate bumps it the same way it bumps the baked action pins.
+const OCX_CONTAINER_CLI_TAG: &str = "v0.4.3";
+
 /// Render per-test shell commands for the `test` job's run step.
 ///
-/// Each matrix leg runs all its tests for every discovered version. The
-/// renderer emits a single shell block that iterates per-version. Native-only
-/// — container mode (musl-ocx-in-docker) is rejected upstream by
-/// `policy_check_no_containers`.
+/// Each matrix leg runs all its tests for every discovered version. The renderer
+/// emits a single shell block that iterates per-version.
+///
+/// A native leg (empty `container_image`) calls `ocx package test` directly on
+/// the runner. A container leg fetches a libc-matched, statically-linked `ocx`
+/// release and wraps every `ocx package test` in `docker run <image>` — so the
+/// mirrored artifact is actually executed by that image's loader against that
+/// image's libc, which is the only way an `os.features` musl/glibc claim can be
+/// verified. JS actions keep running on the host's glibc node throughout, which
+/// is why this is a per-command wrapper rather than a job-level `container:`.
 fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
     if legs.is_empty() {
         return String::new();
     }
 
-    let body = r#"            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
+    // Emitted only when some leg declares an image, so native-only workflows
+    // stay byte-identical to the pre-container renderer. `{OCX_TEST}` is the
+    // command prefix: the `ocx_test` wrapper under container mode, plain `ocx`
+    // otherwise.
+    let has_container = legs.iter().any(|leg| !leg.container_image.is_empty());
+    let (container_prelude, ocx_test) = if has_container {
+        (
+            r#"            # Container legs: fetch a libc-matched static ocx once, then run every
+            # `ocx package test` inside `docker run <image>` so the mirrored
+            # artifact is executed by that image's loader. Native legs (empty
+            # container_image, e.g. the macOS/Windows legs of a mixed spec) call
+            # the runner's own ocx unchanged.
+            CONTAINER_IMAGE="${{ matrix.container_image }}"
+            if [ -n "${CONTAINER_IMAGE}" ]; then
+              case "${{ matrix.platform }}" in
+                linux/amd64) OCX_ARCH=x86_64 ;;
+                linux/arm64) OCX_ARCH=aarch64 ;;
+                *) echo "::error::container test legs are linux-only (got ${{ matrix.platform }})"; exit 1 ;;
+              esac
+              OCX_TRIPLE="${OCX_ARCH}-unknown-linux-${{ matrix.container_libc }}"
+              OCX_CONTAINER_DIR="${RUNNER_TEMP}/ocx-${OCX_TRIPLE}"
+              OCX_CONTAINER_BIN="${OCX_CONTAINER_DIR}/ocx"
+              if [ ! -x "${OCX_CONTAINER_BIN}" ]; then
+                mkdir -p "${OCX_CONTAINER_DIR}"
+                # cargo-dist archives carry a single top-level directory, so
+                # --strip-components=1 lands the binary directly. A layout change
+                # fails the chmod instead of silently testing nothing.
+                curl -fsSL "https://github.com/ocx-sh/ocx/releases/download/{OCX_CLI_TAG}/ocx-${OCX_TRIPLE}.tar.gz" \
+                  | tar -xz -C "${OCX_CONTAINER_DIR}" --strip-components=1
+                chmod +x "${OCX_CONTAINER_BIN}"
+              fi
+            fi
+            ocx_test() {
+              if [ -n "${CONTAINER_IMAGE}" ]; then
+                # The workspace is mounted at its own path so the bundle and its
+                # `-metadata.json` sibling resolve identically inside and out.
+                # OCX_HOME points into the container's own /tmp, so the install
+                # the test runs against never touches the runner's filesystem.
+                # The gnu ocx verifies TLS against the system CA store, which a
+                # minimal base image need not carry; the musl build has webpki
+                # roots baked in and ignores the mount.
+                docker run --rm -i --platform "${{ matrix.platform }}" \
+                  -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -w "${GITHUB_WORKSPACE}" \
+                  -v "${OCX_CONTAINER_BIN}:/usr/local/bin/ocx:ro" \
+                  -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro \
+                  -e OCX_HOME=/tmp/ocx-home -e OCX_NO_UPDATE_CHECK=1 \
+                  "${CONTAINER_IMAGE}" ocx "$@"
+              else
+                ocx "$@"
+              fi
+            }
+"#,
+            "ocx_test",
+        )
+    } else {
+        ("", "ocx")
+    };
+
+    let body = r#"{CONTAINER_PRELUDE}            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
             mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
@@ -606,15 +713,15 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
+                {OCX_TEST} package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
-                ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                {OCX_TEST} package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
-                printf '%s' "${TEST_INLINE}" | ocx package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                printf '%s' "${TEST_INLINE}" | {OCX_TEST} package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
                   --script - || RC=$?
               fi
               END=$(date +%s)
@@ -644,7 +751,8 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
               exit 1
             fi
 "#;
-    body.to_string()
+    body.replace("{CONTAINER_PRELUDE}", container_prelude)
+        .replace("{OCX_TEST}", ocx_test)
 }
 
 /// Render the describe.yml catalog-publish workflow.
@@ -869,29 +977,194 @@ mod tests {
         }
     }
 
-    #[test]
-    fn render_rejects_container_legs_with_usage_error() {
-        // After the setup-ocx toolchain-sourcing migration the renderer is
-        // native-only; specs declaring `containers:` must be rejected before
-        // any file is written. Container mode is deferred — see Phase 8 in
-        // `.claude/artifacts/lively-leaping-quill.md`.
+    // ── Container test legs ───────────────────────────────────────────────
+
+    /// Render a fixture and return the generated `mirror.yml` content.
+    fn workflow_for(fixture: &str) -> String {
         let dir = tempdir().unwrap();
-        let result = render_fixture("mirror-multi-container.yml", dir.path());
-        match result {
-            Err(MirrorError::SpecUsageError(msg)) => {
-                assert!(
-                    msg.contains("container"),
-                    "rejection message must call out container legs, got: {msg}"
-                );
-                let workflow = dir.path().join(".github/workflows/mirror.yml");
-                assert!(
-                    !workflow.exists(),
-                    "no workflow must be written when the spec declares container legs"
-                );
-            }
-            Ok(()) => panic!("expected SpecUsageError for spec with container legs"),
-            Err(e) => panic!("expected SpecUsageError, got: {e}"),
+        render_fixture(fixture, dir.path()).unwrap_or_else(|e| panic!("{fixture} must render: {e}"));
+        std::fs::read_to_string(dir.path().join(".github/workflows/mirror.yml")).unwrap()
+    }
+
+    #[test]
+    fn container_matrix_entries_stay_valid_yaml() {
+        // Container mode is the only path that emits extra matrix keys, so it is
+        // the only path that can break the hand-built indentation of the
+        // `include:` block. A string assertion cannot see that; parsing can.
+        for fixture in ["mirror-multi-container.yml", "mirror-container-mixed.yml"] {
+            let workflow = workflow_for(fixture);
+            let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&workflow)
+                .unwrap_or_else(|e| panic!("{fixture} must render parseable YAML: {e}\n{workflow}"));
+
+            let legs = parsed["jobs"]["test"]["strategy"]["matrix"]["include"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{fixture}: test matrix must be a sequence"));
+            // Every container leg must carry both keys the run step reads; a leg
+            // with an image but no libc would build a bogus ocx triple.
+            let with_image = legs
+                .iter()
+                .filter(|leg| leg.get("container_image").is_some())
+                .inspect(|leg| {
+                    assert!(
+                        leg.get("container_libc").is_some(),
+                        "{fixture}: a leg with container_image must also carry container_libc"
+                    );
+                })
+                .count();
+            assert!(with_image > 0, "{fixture} must render container legs");
         }
+    }
+
+    #[test]
+    fn container_legs_execute_the_artifact_inside_the_image() {
+        // The gate this feature exists for: an `os.features` musl/glibc claim is
+        // only verified when the mirrored binary is executed by that image's
+        // loader. A matrix that merely names images proves nothing, so assert
+        // the wrapper actually runs `ocx package test` inside `docker run`.
+        let workflow = workflow_for("mirror-multi-container.yml");
+
+        assert!(
+            workflow.contains("docker run --rm -i --platform \"${{ matrix.platform }}\" \\"),
+            "container legs must invoke docker run, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains("\"${CONTAINER_IMAGE}\" ocx \"$@\""),
+            "docker run must exec ocx inside the image, got:\n{workflow}"
+        );
+        // Every test kind routes through the wrapper, not the runner's ocx.
+        assert_eq!(
+            workflow.matches("ocx_test package test --platform").count(),
+            3,
+            "all three test kinds must run through the container wrapper, got:\n{workflow}"
+        );
+        assert!(
+            !workflow.contains(" ocx package test --platform"),
+            "no test may bypass the wrapper onto the runner's ocx, got:\n{workflow}"
+        );
+        // The workspace must be mounted at its own path, or the bundle and its
+        // `-metadata.json` sibling resolve to nothing inside the container.
+        assert!(
+            workflow.contains("-v \"${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}\" -w \"${GITHUB_WORKSPACE}\""),
+            "workspace must be mounted at its own path, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains("-v \"${OCX_CONTAINER_BIN}:/usr/local/bin/ocx:ro\""),
+            "the libc-matched ocx must be mounted into the image, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn container_legs_fetch_a_libc_matched_ocx_per_architecture() {
+        // The static ocx is what runs inside the image; a gnu build on Alpine
+        // dies in the loader before any test starts. The triple is assembled
+        // from the leg's arch and its image's libc, so both axes must appear.
+        let workflow = workflow_for("mirror-container-mixed.yml");
+
+        assert!(
+            workflow.contains("linux/amd64) OCX_ARCH=x86_64 ;;")
+                && workflow.contains("linux/arm64) OCX_ARCH=aarch64 ;;"),
+            "both linux architectures must map to an ocx triple, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains("OCX_TRIPLE=\"${OCX_ARCH}-unknown-linux-${{ matrix.container_libc }}\""),
+            "the triple must combine arch with the leg's libc, got:\n{workflow}"
+        );
+        // Releases ship .tar.gz (dist-workspace.toml sets unix-archive); the
+        // .tar.xz spelling 404s and would silently leave the runner's own ocx.
+        assert!(
+            workflow.contains(&format!(
+                "https://github.com/ocx-sh/ocx/releases/download/{OCX_CONTAINER_CLI_TAG}/ocx-${{OCX_TRIPLE}}.tar.gz"
+            )),
+            "must download the pinned ocx release as .tar.gz, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn container_libc_and_shell_follow_the_image_basename() {
+        // Alpine is the only musl base in the corpus, and it ships no bash.
+        // A registry-qualified reference must classify like its bare form —
+        // getting this wrong hands Alpine a gnu ocx and a missing shell.
+        let workflow = workflow_for("mirror-container-mixed.yml");
+
+        assert!(
+            workflow.contains("container_image: \"docker.io/library/alpine:3.20\"\n            container_libc: \"musl\"\n            shell: sh\n"),
+            "a registry-qualified alpine must still infer musl + sh, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains(
+                "container_image: \"debian:12\"\n            container_libc: \"gnu\"\n            shell: bash\n"
+            ),
+            "debian must infer gnu + bash, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn container_ids_match_the_slug_push_looks_junit_files_up_by() {
+        // `pipeline push` finds each leg's result at
+        // `junit-{V}-{platform_slug}-{container_id}.xml`, computing the id with
+        // `spec::image_to_container_id` (dots slugified too). If the renderer
+        // names the file differently every container result reads as missing and
+        // the run publishes nothing while looking green.
+        let workflow = workflow_for("mirror-multi-container.yml");
+
+        for (image, expected) in [
+            ("ubuntu:24.04", "ubuntu_24_04"),
+            ("alpine:3.20", "alpine_3_20"),
+            ("fedora:40", "fedora_40"),
+        ] {
+            assert_eq!(
+                spec::image_to_container_id(image),
+                expected,
+                "slug contract with pipeline push"
+            );
+            assert!(
+                workflow.contains(&format!("container_id: {expected}\n")),
+                "matrix must carry container_id {expected}, got:\n{workflow}"
+            );
+        }
+        assert!(
+            workflow.contains(
+                "JUNIT_FILE=\"junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml\""
+            ),
+            "the JUnit filename must be keyed by container_id, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn native_legs_of_a_mixed_spec_keep_running_on_the_runner() {
+        // A spec with containers on linux and none on darwin renders both. The
+        // darwin leg carries no container keys, so `${{ matrix.container_image }}`
+        // is empty there and the wrapper takes its native branch.
+        let workflow = workflow_for("mirror-container-mixed.yml");
+
+        assert!(
+            workflow.contains(
+                "          - platform: darwin/arm64\n            platform_slug: darwin_arm64\n            runner: macos-latest\n            container_id: _native_\n            shell: bash\n"
+            ),
+            "the darwin leg must stay native with no container keys, got:\n{workflow}"
+        );
+        assert!(
+            workflow.contains("              else\n                ocx \"$@\"\n              fi"),
+            "the wrapper must fall back to the runner's ocx when no image is set, got:\n{workflow}"
+        );
+    }
+
+    #[test]
+    fn a_spec_without_containers_emits_no_container_machinery() {
+        // The companion to the golden corpus, named so a regression says why:
+        // native specs must not gain a docker prelude or container matrix keys.
+        let workflow = workflow_for("mirror-minimal.yml");
+
+        for needle in ["docker run", "container_image:", "container_libc:", "ocx_test"] {
+            assert!(
+                !workflow.contains(needle),
+                "native spec must not render `{needle}`, got:\n{workflow}"
+            );
+        }
+        assert!(
+            workflow.contains("container_id: _native_"),
+            "native legs keep the _native_ sentinel, got:\n{workflow}"
+        );
     }
 
     #[test]

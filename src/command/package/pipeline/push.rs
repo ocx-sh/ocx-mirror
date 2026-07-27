@@ -498,25 +498,11 @@ fn container_ids_from_config(config: &PlatformConfig) -> Vec<String> {
             .map(|c| {
                 c.id.clone().unwrap_or_else(|| {
                     // Default slug: image with `:` and `/` replaced by `_`.
-                    image_to_container_id(&c.image)
+                    crate::spec::image_to_container_id(&c.image)
                 })
             })
             .collect(),
     }
-}
-
-/// Slugify a container image name to a JUNIT file container_id.
-///
-/// All `:`, `/`, and `.` separators are replaced with `_`. Consecutive underscores
-/// (which can arise from registry paths containing `/`) are collapsed to one.
-///
-/// e.g. `ubuntu:24.04` → `ubuntu_24_04`, `alpine:3.20` → `alpine_3_20`.
-fn image_to_container_id(image: &str) -> String {
-    image
-        .replace([':', '/', '.'], "_")
-        // Collapse consecutive underscores (e.g. "ghcr.io/org/img" → "ghcr_io_org_img"
-        // but a double separator like "org//img" would produce "org__img" without this).
-        .replace("__", "_")
 }
 
 /// Returns the test names declared for a platform (platform-level override or top-level).

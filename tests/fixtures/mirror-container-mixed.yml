@@ -1,0 +1,55 @@
+# Mirror spec mixing container legs with native ones.
+#
+# - linux/amd64: two containers, one registry-qualified alpine (musl) and one
+#   debian with no explicit shell (inferred bash, gnu).
+# - linux/arm64: one container, exercising the aarch64 triple arm.
+# - darwin/arm64: no containers — stays a native leg in the same workflow.
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+  linux/arm64:
+    - "shfmt_v.*_linux_arm64$"
+  darwin/arm64:
+    - "shfmt_v.*_darwin_arm64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      # Registry-qualified: the libc and shell inference must key off the
+      # basename, not the leading host, or this classifies as gnu/bash.
+      - image: docker.io/library/alpine:3.20
+      # No explicit shell — inferred from the distro prefix.
+      - image: debian:12
+  linux/arm64:
+    runner: ubuntu-24.04-arm
+    containers:
+      - image: alpine:3.20
+  darwin/arm64:
+    runner: macos-latest
+
+ocx_mirror:
+  release_tag: v0.7.2

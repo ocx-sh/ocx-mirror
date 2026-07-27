@@ -462,18 +462,23 @@ fn validate_tests(tests: &[TestEntry], errors: &mut Vec<String>) {
     }
 }
 
+/// The repository basename of a container image, with the registry prefix and
+/// the tag stripped (`docker.io/library/alpine:3.20` → `alpine`).
+///
+/// Every distro-family inference keys off this one spelling, so a
+/// registry-qualified image classifies the same way its bare form does.
+fn image_basename(image: &str) -> &str {
+    // Strip the tag (everything after `:`), then take the last path component.
+    let image_name = image.split(':').next().unwrap_or(image);
+    image_name.split('/').next_back().unwrap_or(image_name)
+}
+
 /// Infer the default shell for a container image based on its image-name prefix.
 ///
 /// Returns `Some(shell)` when a well-known distro prefix matches, `None` when
 /// the image is non-standard and an explicit `shell` is required.
-fn infer_shell_from_image(image: &str) -> Option<&'static str> {
-    // Strip optional tag (everything after `:`) and optional registry prefix
-    // (everything before the last `/` component that looks like `host/repo`).
-    // We only look at the repository basename for prefix matching.
-    let image_name = image.split(':').next().unwrap_or(image);
-    // Take the last path component for matching (`ubuntu:24.04` → `ubuntu`,
-    // `docker.io/library/alpine:3.20` → `alpine`).
-    let base = image_name.split('/').next_back().unwrap_or(image_name);
+pub(crate) fn infer_shell_from_image(image: &str) -> Option<&'static str> {
+    let base = image_basename(image);
 
     // Well-known distros that default to bash.
     const BASH_PREFIXES: &[&str] = &["ubuntu", "debian", "fedora", "rocky", "opensuse"];
@@ -492,6 +497,38 @@ fn infer_shell_from_image(image: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+/// The libc family a container image's userland links against, which selects
+/// the statically-linked `ocx` release a container test leg mounts.
+///
+/// Alpine is musl; every other supported base (Debian, Ubuntu, Fedora, Rocky,
+/// openSUSE) is gnu. Running a gnu-linked `ocx` on Alpine fails with a bare
+/// "not found" from the loader, so this is the difference between a leg that
+/// tests the artifact and one that cannot start.
+///
+// ponytail: name-prefix inference, not a spec field — the corpus needs exactly
+// alpine(musl) + the glibc distros. Add an explicit `containers[].libc` to
+// `ContainerConfig` when a musl image that is not Alpine shows up.
+pub(crate) fn infer_libc_from_image(image: &str) -> &'static str {
+    if image_basename(image).starts_with("alpine") {
+        "musl"
+    } else {
+        "gnu"
+    }
+}
+
+/// Slugify a container image reference into a JUnit-filename `container_id`.
+///
+/// All `:`, `/` and `.` separators become `_`, and consecutive underscores
+/// collapse — e.g. `ubuntu:24.04` → `ubuntu_24_04`, `alpine:3.20` → `alpine_3_20`.
+///
+/// This is the join key between the two halves of a container run: the CI
+/// renderer names each leg's JUnit file with it, and `pipeline push` looks the
+/// file back up by it. The two must agree exactly or every container leg's
+/// result reads as missing and nothing is ever published — so both call this.
+pub(crate) fn image_to_container_id(image: &str) -> String {
+    image.replace([':', '/', '.'], "_").replace("__", "_")
 }
 
 /// Strip build metadata (the mirror's per-run timestamp suffix) from a version
@@ -624,6 +661,15 @@ fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut 
                     "platforms: '{key}': containers must contain at least one entry when declared"
                 ));
             } else {
+                // Container legs are `docker run --platform <key>` on a Linux
+                // runner. A macOS or Windows runner has no Linux container
+                // engine at all, so the pairing can only ever fail at run time —
+                // reject it while the maintainer is still looking at the spec.
+                if !key.starts_with("linux/") {
+                    errors.push(format!(
+                        "platforms: '{key}': containers are linux-only (tests run via `docker run`)"
+                    ));
+                }
                 for container in containers {
                     // If no explicit shell, the image must have a known default.
                     if container.shell.is_none() && infer_shell_from_image(&container.image).is_none() {
@@ -2547,6 +2593,52 @@ platforms:
                 .any(|e| e.contains("min_version") && e.contains("must be below")),
             "inverted min/max window must be rejected, got: {errors:?}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_containers_on_a_non_linux_platform() {
+        // Container legs are `docker run` on a Linux runner. A macOS or Windows
+        // runner has no Linux container engine, so the pairing can only fail at
+        // run time — after a full matrix spin-up. Reject it at generate time.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  windows/amd64:
+    runner: windows-latest
+    containers:
+      - image: ubuntu:24.04
+ocx_mirror:
+  release_tag: v0.7.2
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("containers are linux-only")),
+            "containers on a windows platform must be rejected, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn image_inference_keys_off_the_repository_basename() {
+        // A registry-qualified reference must classify like its bare form —
+        // otherwise a mirror that spells out `docker.io/library/alpine` gets a
+        // gnu ocx that cannot start under musl, and a `bash` that is not there.
+        assert_eq!(infer_libc_from_image("alpine:3.20"), "musl");
+        assert_eq!(infer_libc_from_image("docker.io/library/alpine:3.20"), "musl");
+        assert_eq!(infer_libc_from_image("ubuntu:24.04"), "gnu");
+        assert_eq!(infer_libc_from_image("fedora:40"), "gnu");
+        assert_eq!(infer_shell_from_image("docker.io/library/alpine:3.20"), Some("sh"));
+        assert_eq!(infer_shell_from_image("ghcr.io/acme/fedora:40"), Some("bash"));
+
+        // The join key with `pipeline push`: dots slugify too.
+        assert_eq!(image_to_container_id("ubuntu:24.04"), "ubuntu_24_04");
+        assert_eq!(image_to_container_id("alpine:3.20"), "alpine_3_20");
+        assert_eq!(image_to_container_id("ghcr.io/acme/img:1.0"), "ghcr_io_acme_img_1_0");
     }
 
     #[test]

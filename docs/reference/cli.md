@@ -73,7 +73,7 @@ ocx-mirror package pipeline generate ci [OPTIONS]
 | `--check` | off | Verify generated files are up to date; exit 65 on drift |
 | `--format <FMT>` | — | Output format for diagnostics (`plain`, `json`) |
 
-Rendering is idempotent. Specs with hardcoded webhook URLs, an empty `tests:` list, or `containers:` blocks (not supported by the current native-only renderer) are rejected with exit 64 before any file is written.
+Rendering is idempotent. Specs with hardcoded webhook URLs or an empty `tests:` list are rejected with exit 64 before any file is written.
 
 ### `package pipeline plan` {#pipeline-plan}
 
@@ -152,7 +152,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 |------|---------|-----------|
 | 0 | Success | — |
 | 1 | Pipeline execution failure (download, push, verify) | `sync`, `prepare`, `push` |
-| 64 | Usage error: hardcoded webhook URL, empty `tests:`, `containers:` blocks, ambiguous shell | `validate`, `pipeline generate ci` |
+| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell | `validate`, `pipeline generate ci` |
 | 65 | Data error: spec validation failed, renderer drift (`--check`), JUnit/plan/run-summary malformed | all |
 | 69 | Upstream source or target registry unreachable; Discord 5xx / timeout | `sync`, `check`, `plan`, `push`, `notify` |
 | 74 | I/O error: template render or file write failure | `pipeline generate ci`, `push` |
