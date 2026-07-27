@@ -20,6 +20,11 @@ assets:
 asset_type:
   type: binary
   name: shfmt
+metadata:
+  default: metadata.json
+# Stable published version: without this the version carries a build timestamp,
+# so no assertion could name the tag the pipeline writes.
+build_timestamp: none
 cascade: true
 versions:
   min: "3.7.0"
