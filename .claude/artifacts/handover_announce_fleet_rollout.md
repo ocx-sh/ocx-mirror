@@ -119,6 +119,21 @@ Related, from the dev loop: pin the **floating** dev tag
 (`…-dev_20260727…`). If `ocx update` keeps resolving the old digest, the deploy
 failed to advance the floating tag — fix the deploy, do not pin a timestamp.
 
+**Corollary — a breaking `mirror.yml` change rides the relock commit.** When the
+spec grammar changes, the old renderer rejects the spec *without* the change and
+the new one rejects it *with*: no ordering makes both accept it. That is fine,
+because the lock pins by digest — a repo keeps running its old renderer until
+someone runs `ocx update`. So land the spec edit and the relock in **one**
+commit per repo. Never push the spec change ahead "to get it out of the way".
+
+*And prove it rather than reasoning about it.* Before relocking, run the new
+spec against the currently pinned renderer and check it fails with the error you
+expect. On 2026-07-27, dropping `ocx_mirror:` from the pilot against its pinned
+renderer failed with `ocx_mirror.release_tag is required when any platform
+declares containers` — which turns "the pin protects us" from an argument into
+an observation, and costs one command. Any claim about ordering that you have
+not seen fail is a guess.
+
 ### R5 — The announce bot has no write on `ocx-sh/index`; the namespace must be claimed first
 
 `announce:` in `mirror.yml` names a `fork:` (`ocx-contrib/index`). The bot pushes
@@ -193,22 +208,15 @@ capture group renamed upstream — all produce the same observable as a manager
 with nothing to do, which is nothing at all. Renovate cannot tell you it found
 no files, because finding no files is legitimate.
 
-So do not review one by reading it. Run the glob and the regex against the
-working tree and assert a match — a dozen lines of Python is enough:
+So do not review one by reading it — run it. In this repository that is
+enforced, not remembered: `test/tests/test_renovate_managers.py` runs every
+manager's glob and regex against the working tree in `task verify` and fails by
+name when one matches nothing. Copy it into any repo that grows a
+`customManager`.
 
-```python
-import json, re, pathlib
-cfg = json.load(open("renovate.json"))
-for m in cfg["customManagers"]:
-    pat = m["matchStrings"][0].replace("(?<", "(?P<")   # JS → Python named groups
-    hits = [p for p in pathlib.Path(".").rglob("*")
-            if re.search(m["managerFilePatterns"][0].strip("/"), p.as_posix())
-            and p.is_file() and re.search(pat, p.read_text())]
-    assert hits, f"customManager matches nothing: {m['description']}"
-```
-
-Same reflex applies to the `paths:` globs on rule files and to any other
-config whose failure mode is "quietly does less".
+Same reflex applies to the `paths:` globs on rule files and to any other config
+whose failure mode is "quietly does less": if you cannot state what would go
+red when it breaks, it is not checked.
 
 ---
 
