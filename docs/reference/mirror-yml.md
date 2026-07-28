@@ -551,6 +551,10 @@ target:
   repository: internal/cmake
 ```
 
+A base is part of its children's effective content, so [`pipeline generate ci`][cli-generate-ci] adds every file in the `extends:` chain to the `paths:` trigger of each child's generated workflows — editing a shared base re-runs every package that inherits from it, and the drift guard covers it too.
+
+**The chain must live inside the repository.** A base above the repository root is a spec-usage error (exit 64): a `paths:` trigger can only name files the workflow's own repository contains, so the workflow would silently never run when that base changed.
+
 ## Multi-spec repositories {#multi-spec}
 
 A mirror repository can hold more than one `mirror.yml` — one per package, each in its own directory. Some upstream projects release several standalone tools from a single tag: [bazelbuild/buildtools][bazelbuild-buildtools] ships `buildifier`, `buildozer`, and `unused-deps` from one release. Mirroring each as its own repository would triplicate the CI plumbing — and the drift guard, and the secrets — for tools that share one upstream release cadence. Putting each package's spec in its own directory and passing `--spec` once per spec keeps them in one repository: [`pipeline generate ci`][cli-generate-ci] renders an independent workflow set per spec and exactly one drift guard for the whole repository.

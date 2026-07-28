@@ -940,7 +940,14 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
 
 /// Walk the `extends` chain collecting file paths: [parent, grandparent, ...].
 /// Detects circular dependencies via `HashSet<PathBuf>`.
-async fn resolve_extends_chain(spec_path: &Path, content: &str) -> Result<Vec<std::path::PathBuf>, MirrorError> {
+///
+/// Paths are as joined, not canonicalized — a chain entry may still contain
+/// `..`. Callers that compare them against another path (the CI renderer places
+/// them under the repository root) canonicalize first.
+pub(crate) async fn resolve_extends_chain(
+    spec_path: &Path,
+    content: &str,
+) -> Result<Vec<std::path::PathBuf>, MirrorError> {
     let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(content)
         .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
 
