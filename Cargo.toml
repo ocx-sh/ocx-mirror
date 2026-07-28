@@ -37,6 +37,7 @@ ocx_lib = { path = "external/ocx/crates/ocx_lib" }
 tokio = { version = "1.52", features = ["full"] }
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
 anyhow = "1.0.102"
+futures = "0.3.32"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml_ng = "0.10.0"

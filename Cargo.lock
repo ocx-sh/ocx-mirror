@@ -2168,6 +2168,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "futures",
  "hex",
  "octocrab",
  "ocx_lib",

@@ -626,6 +626,7 @@ build_timestamp: none
         PlanReport {
             schema_version: 2,
             has_new: !versions.is_empty(),
+            has_drift: false,
             versions,
             target: "ocx.sh/testtool".to_string(),
             ocx_mirror_rev: None,
