@@ -443,6 +443,78 @@ fn validate_tests(tests: &[TestEntry], errors: &mut Vec<String>) {
     }
 }
 
+/// Check that every `script:` a spec names exists, resolved from the repository
+/// root.
+///
+/// `script:` is the one spec path that is repository-root-relative:
+/// `metadata.default` and `catalog.*` resolve against the spec's own directory,
+/// but the generated workflow runs `ocx package test --script` from the checkout
+/// root. In a single-spec repository those are the same directory and the
+/// asymmetry never shows; in a multi-spec one they diverge, and the natural
+/// `script: tests/smoke.star` written inside `buildifier/mirror.yml` quietly
+/// means `<repo>/tests/smoke.star`. A path that resolves to nothing renders
+/// green here and fails as a red test leg after a publish attempt, so it is a
+/// spec error (exit 65) like a missing `metadata.default`.
+///
+/// `spec_dir` is the spec's own directory *relative to `repo_root`* — `None` for
+/// a root spec, where the near miss cannot arise.
+pub(crate) fn validate_test_scripts(spec: &MirrorSpec, repo_root: &Path, spec_dir: Option<&Path>) -> Vec<String> {
+    let mut errors = Vec::new();
+    check_test_scripts("tests", spec.tests.as_deref(), repo_root, spec_dir, &mut errors);
+
+    // Per-platform overrides carry scripts too, and nothing else validates them.
+    if let Some(platforms) = &spec.platforms {
+        let mut keys: Vec<&String> = platforms.keys().collect();
+        keys.sort();
+        for key in keys {
+            check_test_scripts(
+                &format!("platforms: '{key}': tests"),
+                platforms[key].tests.as_deref(),
+                repo_root,
+                spec_dir,
+                &mut errors,
+            );
+        }
+    }
+    errors
+}
+
+fn check_test_scripts(
+    scope: &str,
+    entries: Option<&[TestEntry]>,
+    repo_root: &Path,
+    spec_dir: Option<&Path>,
+    errors: &mut Vec<String>,
+) {
+    for entry in entries.unwrap_or_default() {
+        let Some(script) = &entry.script else { continue };
+        let resolved = repo_root.join(script);
+        if resolved.exists() {
+            continue;
+        }
+        // Name what was resolved and against what — the author wrote a path that
+        // looks right from where they were standing.
+        let mut message = format!(
+            "{scope}: entry '{}' script not found: {} resolves from the repository root as {}",
+            entry.name,
+            script.display(),
+            resolved.display(),
+        );
+        // The near miss is the actual mistake being made, so say it outright
+        // rather than leave the author to discover the asymmetry.
+        if let Some(dir) = spec_dir
+            && repo_root.join(dir).join(script).exists()
+        {
+            message.push_str(&format!(
+                " — `script:` is repository-root-relative, unlike metadata.default and catalog.*, \
+                 which resolve from the spec's directory; write {}",
+                dir.join(script).display(),
+            ));
+        }
+        errors.push(message);
+    }
+}
+
 /// The repository basename of a container image, with the registry prefix and
 /// the tag stripped (`docker.io/library/alpine:3.20` → `alpine`).
 ///
