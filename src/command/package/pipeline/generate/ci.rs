@@ -66,10 +66,14 @@ const DEFAULT_SPEC_NAME: &str = "mirror.yml";
 struct SpecSlot {
     /// Spec path relative to the repo root: `mirror.yml`, `py3.13/mirror.yml`.
     relative: PathBuf,
+    /// This spec's whole `extends:` chain, repo-root-relative, nearest base
+    /// first. Editing any of them changes what this spec renders and publishes,
+    /// so all of them belong in its `paths:` trigger.
+    extends: Vec<PathBuf>,
 }
 
 impl SpecSlot {
-    fn new(spec: &Path, repo_root: &Path) -> Result<Self, MirrorError> {
+    fn new(spec: &Path, extends: &[PathBuf], repo_root: &Path) -> Result<Self, MirrorError> {
         let relative = spec.strip_prefix(repo_root).map_err(|_| {
             MirrorError::SpecUsageError(format!(
                 "spec {} is not under the repository root {} — pass --repo-root",
@@ -77,9 +81,40 @@ impl SpecSlot {
                 repo_root.display(),
             ))
         })?;
+        // A base above the root is the same failure as a spec above the root,
+        // one step further out: `paths:` can only name files the workflow's own
+        // repository contains, so a trigger for it would silently never fire —
+        // which is exactly what putting the chain in the trigger is fixing.
+        let extends = extends
+            .iter()
+            .map(|base| {
+                base.strip_prefix(repo_root).map(Path::to_path_buf).map_err(|_| {
+                    MirrorError::SpecUsageError(format!(
+                        "spec {} extends {}, which is not under the repository root {} — \
+                         a `paths:` trigger cannot name a file outside the repository, so editing \
+                         that base would run nothing; move it under the root or pass --repo-root",
+                        spec.display(),
+                        base.display(),
+                        repo_root.display(),
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             relative: relative.to_path_buf(),
+            extends,
         })
+    }
+
+    /// The `extends` chain as `paths:` entries, dropping any base the spec's own
+    /// subtree glob already covers.
+    fn extends_entries(&self) -> Vec<String> {
+        let own_subtree = self.dir().map(|dir| format!("{}/", slash_path(dir)));
+        self.extends
+            .iter()
+            .map(|base| slash_path(base))
+            .filter(|base| !own_subtree.as_ref().is_some_and(|prefix| base.starts_with(prefix)))
+            .collect()
     }
 
     /// The spec's own directory relative to the repo root; `None` at the root.
@@ -182,11 +217,16 @@ impl GenerateCi {
             specs.push((path.clone(), load_one(path).await?));
         }
 
-        // Phase 4: place every spec under the repository root, then render.
+        // Phase 4: place every spec — and every base it extends — under the
+        // repository root, then render.
         let repo_root = self.resolve_repo_root().await?;
         let mut placed = Vec::with_capacity(specs.len());
-        for (path, spec) in specs {
-            let slot = SpecSlot::new(&canonical(&path).await?, &repo_root)?;
+        for (path, (spec, chain)) in specs {
+            let mut bases = Vec::with_capacity(chain.len());
+            for base in &chain {
+                bases.push(canonical(base).await?);
+            }
+            let slot = SpecSlot::new(&canonical(&path).await?, &bases, &repo_root)?;
             placed.push((slot, spec));
         }
         // Sorted so neither the rendered bytes nor the drift verdict depend on
@@ -235,7 +275,11 @@ impl GenerateCi {
 }
 
 /// Read, pre-flight and validate one spec file (phases 1–3).
-async fn load_one(path: &Path) -> Result<MirrorSpec, MirrorError> {
+///
+/// Returns the merged spec alongside its `extends:` chain — the merged spec has
+/// no record of where its keys came from, and the renderer needs the base paths
+/// to trigger on them.
+async fn load_one(path: &Path) -> Result<(MirrorSpec, Vec<PathBuf>), MirrorError> {
     // Phase 1: policy-level pre-flight before load_spec.
     //
     // Check for `ocx_install:` key in the raw YAML text. MirrorSpec uses
@@ -259,12 +303,13 @@ async fn load_one(path: &Path) -> Result<MirrorSpec, MirrorError> {
     }
 
     // Phase 2: load and validate spec (structural validation).
+    let chain = spec::resolve_extends_chain(path, &raw).await?;
     let spec = spec::load_spec(path).await?;
 
     // Phase 3: content-policy validation on the parsed spec.
     policy_check_notify(&spec)?;
 
-    Ok(spec)
+    Ok((spec, chain))
 }
 
 /// Resolve a path against the filesystem so spec paths and the repository root
@@ -533,11 +578,17 @@ fn native_shell_for_platform<'a>(platform: &str, config: &'a PlatformConfig) -> 
 /// subdirectory watches that subtree instead, so editing `py3.13/` never wakes
 /// the sibling specs' workflows. `root_entries` is the root spec's list minus
 /// its own workflow file, which is appended for both cases.
+///
+/// Every base in the spec's `extends:` chain is watched too: the shared base of
+/// a multi-spec repository sits *outside* every child's subtree, so a change to
+/// the platform matrix or the container set there would otherwise re-run
+/// nothing at all.
 fn trigger_paths(slot: &SpecSlot, root_entries: &[String], stem: &str) -> String {
     let mut entries = match slot.dir() {
         None => root_entries.to_vec(),
         Some(dir) => vec![format!("{}/**", slash_path(dir))],
     };
+    entries.extend(slot.extends_entries());
     entries.push(format!(".github/workflows/{}", slot.workflow_name(stem)));
 
     // A nested spec's subtree trigger only covers files under that subtree,
@@ -1141,8 +1192,13 @@ fn render_verify_generated(slots: &[&SpecSlot]) -> String {
             ]),
             Some(dir) => entries.push(format!("{}/**", slash_path(dir))),
         }
+        entries.extend(slot.extends_entries());
     }
     entries.push(".github/workflows/**".to_string());
+    // Siblings share one base, so the same path arrives once per child. Keep the
+    // first occurrence: order carries which spec brought an entry in.
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|entry| seen.insert(entry.clone()));
 
     let sources = slots.iter().map(|slot| slot.source()).collect::<Vec<_>>().join(", ");
 
@@ -1379,11 +1435,17 @@ mod tests {
         generate(work_dir, &[spec], false)
     }
 
+    /// The slot a spec at `relative` occupies, extending nothing.
+    fn slot_at(relative: &str) -> SpecSlot {
+        SpecSlot {
+            relative: PathBuf::from(relative),
+            extends: Vec::new(),
+        }
+    }
+
     /// The slot a single-spec repository's root `mirror.yml` occupies.
     fn root_slot() -> SpecSlot {
-        SpecSlot {
-            relative: PathBuf::from(DEFAULT_SPEC_NAME),
-        }
+        slot_at(DEFAULT_SPEC_NAME)
     }
 
     /// Render `mirror.yml` for an inline spec at the repository root.
@@ -3277,6 +3339,187 @@ announce:
         );
     }
 
+    // ── Shared `extends:` bases ───────────────────────────────────────────────
+
+    /// The shared base of a multi-spec repository: everything the packages have
+    /// in common and nothing that identifies one of them.
+    const EXTENDS_BASE: &str = r#"
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+build_timestamp: none
+cascade: true
+"#;
+
+    /// One package spec of such a repository.
+    ///
+    /// With `extends`, the platform matrix comes from the base; without, the
+    /// same keys are inlined — so the two render the same workflow apart from
+    /// the trigger, which is what makes the absent-base assertion meaningful.
+    fn extends_child(name: &str, extends: Option<&str>) -> String {
+        let body = format!(
+            r#"name: {name}
+target:
+  registry: ocx.sh
+  repository: {name}
+source:
+  type: github_release
+  owner: bazelbuild
+  repo: buildtools
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "{name}-linux-amd64$"
+asset_type:
+  type: binary
+  name: {name}
+tests:
+  - name: version
+    command: {name} --version
+"#
+        );
+        match extends {
+            Some(base) => format!("extends: {base}\n{body}"),
+            None => format!("{body}{EXTENDS_BASE}"),
+        }
+    }
+
+    /// Write `content` at `relative` under `dir`, creating parents.
+    fn write_file(dir: &Path, relative: &str, content: &str) -> PathBuf {
+        let dest = dir.join(relative);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, content).unwrap();
+        dest
+    }
+
+    /// The `on.<event>.paths` sequence of a rendered workflow.
+    ///
+    /// Parsed rather than string-matched: the entries share their block with a
+    /// generated comment, and only a parser can tell an entry from a note.
+    fn trigger_entries(workflow: &str, event: &str) -> Vec<String> {
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(workflow)
+            .unwrap_or_else(|e| panic!("a rendered workflow must parse: {e}\n{workflow}"));
+        parsed["on"][event]["paths"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("on.{event}.paths must be a sequence, got:\n{workflow}"))
+            .iter()
+            .map(|entry| entry.as_str().expect("path entries are strings").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_spec_that_extends_a_base_triggers_on_that_base() {
+        // The shared base sits above every child's subtree, so the subtree
+        // trigger cannot see it: editing the platform matrix there changed what
+        // every package publishes and re-ran nothing.
+        let workflows_for = |extends: Option<&str>| -> (String, String) {
+            let dir = tempdir().unwrap();
+            write_file(dir.path(), "mirror-base.yml", EXTENDS_BASE);
+            let child = write_file(
+                dir.path(),
+                "buildifier/mirror.yml",
+                &extends_child("buildifier", extends),
+            );
+            generate(dir.path(), &[child], false).expect("the child spec must render");
+            let read = |name: &str| std::fs::read_to_string(dir.path().join(".github/workflows").join(name)).unwrap();
+            (read("mirror-buildifier.yml"), read("describe-buildifier.yml"))
+        };
+
+        let (mirror, describe) = workflows_for(Some("../mirror-base.yml"));
+        assert_eq!(
+            trigger_entries(&mirror, "push"),
+            vec![
+                "buildifier/**",
+                "mirror-base.yml",
+                ".github/workflows/mirror-buildifier.yml"
+            ],
+            "a spec watches its own subtree, every base it extends, and its own workflow, got:\n{mirror}"
+        );
+        assert_eq!(
+            trigger_entries(&describe, "push"),
+            vec![
+                "buildifier/**",
+                "mirror-base.yml",
+                ".github/workflows/describe-buildifier.yml"
+            ],
+            "the base decides the target registry describe publishes to, got:\n{describe}"
+        );
+
+        // Red proof: the same package with the base's keys inlined instead of
+        // extended. Without this the assertion above would pass for a renderer
+        // that names `mirror-base.yml` unconditionally.
+        let (standalone, _) = workflows_for(None);
+        assert_eq!(
+            trigger_entries(&standalone, "push"),
+            vec!["buildifier/**", ".github/workflows/mirror-buildifier.yml"],
+            "a spec that extends nothing watches nothing extra, got:\n{standalone}"
+        );
+    }
+
+    #[test]
+    fn the_drift_guard_watches_a_shared_base_once() {
+        // The guard re-renders every spec, so a base edit changes every
+        // generated workflow in the repository — the one change the guard was
+        // blind to. Listing it once per child would be equally correct to GHA
+        // and unreadable in the committed file.
+        let dir = tempdir().unwrap();
+        write_file(dir.path(), "mirror-base.yml", EXTENDS_BASE);
+        let specs: Vec<PathBuf> = ["buildifier", "buildozer"]
+            .iter()
+            .map(|name| {
+                write_file(
+                    dir.path(),
+                    &format!("{name}/mirror.yml"),
+                    &extends_child(name, Some("../mirror-base.yml")),
+                )
+            })
+            .collect();
+        generate(dir.path(), &specs, false).expect("two specs sharing a base must render");
+
+        let guard = std::fs::read_to_string(dir.path().join(".github/workflows/verify-generated.yml")).unwrap();
+        for event in ["pull_request", "push"] {
+            assert_eq!(
+                trigger_entries(&guard, event),
+                vec![
+                    "buildifier/**",
+                    "mirror-base.yml",
+                    "buildozer/**",
+                    ".github/workflows/**"
+                ],
+                "the guard's {event} trigger must cover the shared base exactly once, got:\n{guard}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_outside_the_repository_root_is_rejected() {
+        // `paths:` names files of the workflow's own repository, so a trigger
+        // for an out-of-root base is one that can never fire — the same silent
+        // failure as an out-of-root spec, one step further out.
+        let outer = tempdir().unwrap();
+        let repo = outer.path().join("repo");
+        write_file(outer.path(), "shared/base.yml", EXTENDS_BASE);
+        let child = write_file(
+            &repo,
+            "buildifier/mirror.yml",
+            &extends_child("buildifier", Some("../../shared/base.yml")),
+        );
+
+        match generate(&repo, &[child], false) {
+            Err(MirrorError::SpecUsageError(msg)) => {
+                assert!(
+                    msg.contains("base.yml") && msg.contains("--repo-root"),
+                    "the error must name the base and the fix, got: {msg}"
+                );
+            }
+            other => panic!("a base outside the root must be a usage error, got: {other:?}"),
+        }
+        assert!(
+            !repo.join(".github/workflows").exists(),
+            "nothing may be written when the spec set is rejected"
+        );
+    }
+
     #[test]
     fn the_drift_guard_records_every_spec_the_repository_has() {
         // `--spec` appends, so a guard naming a subset would re-render only that
@@ -3396,9 +3639,7 @@ announce:
         // effect when every spec asks for it — otherwise a single
         // `allow_manual_edits` would disarm the guard for its siblings too.
         let opt_out = format!("{SHFMT_SPEC}allow_manual_edits: true\n");
-        let nested = SpecSlot {
-            relative: PathBuf::from("py3.13/mirror.yml"),
-        };
+        let nested = slot_at("py3.13/mirror.yml");
 
         let mixed = render(&[
             (root_slot(), spec_from_yaml(SHFMT_SPEC)),
@@ -3426,9 +3667,7 @@ announce:
             ("py3.13/mirror.yml", "-py3.13"),
             ("a/b/mirror.yml", "-a-b"),
         ] {
-            let slot = SpecSlot {
-                relative: PathBuf::from(relative),
-            };
+            let slot = slot_at(relative);
             assert_eq!(slot.suffix(), suffix, "suffix for {relative}");
             assert_eq!(
                 slot.workflow("mirror"),
