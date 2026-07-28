@@ -7,14 +7,26 @@ Status block and the capability table in the same commit as any work below.
 ## Status
 
 - **Initiative:** mirror-capability-cut
-- **Active step:** 1 and 2 both implemented on `feat/multi-spec-and-metadata-patch`
-- **Step state:** six commits, `cargo test` green at 535; live-registry acceptance proof is
-  the one thing outstanding, then `task verify --force`, push, PR
-- **Last update:** 2026-07-28 (after 43d8238: docs for `pipeline patch` and metadata drift)
+- **Active step:** 1 and 2 both implemented — **PR #41 open, awaiting owner merge**
+- **Step state:** `task verify --force` exits 0; 535 unit + 42 acceptance. Next is step 3
+  (authoring the bazelbuild specs), which needs a dev deploy of this branch.
+- **Last update:** 2026-07-28 (PR #41 opened)
 
-Branch commits, oldest first: `ab8816f` multi-spec render · `586493e` multi-spec docs ·
-`f6ac156` drift detection · `a4b72b0` variants/metadata key docs · `3197545` `pipeline patch`
-· `43d8238` patch docs.
+Branch `feat/multi-spec-and-metadata-patch`, commits oldest first: `ab8816f` multi-spec
+render · `586493e` multi-spec docs · `f6ac156` drift detection · `a4b72b0` variants/metadata
+key docs · `3197545` `pipeline patch` · `43d8238` patch docs · `87f9a08` this register ·
+`f800c6d` acceptance proof.
+
+**Patching evicts nothing** — the open question is closed. Both pre-patch digests (image
+index and platform manifest) still resolve after a patch, no tag disappears, and the prior
+canonical `sha256.<hex>` tag survives. The last was verified against a build of the pinned
+submodule, because the toolchain `ocx` the suite drives predates canonical tags.
+
+Gaps carried into the PR, none blocking: the patch → announce chain is unit-tested only (the
+acceptance fixture has no `announce:` block and the suite has no announce harness — the chain
+reuses the `invoke_announce` path `pipeline push` already drives, only the call site is new);
+acceptance coverage is single-platform and single-layer, so layer order, multi-platform
+patching, variant metadata selection and the unmappable-media-type refusal stay unit-only.
 
 **No `ocx` change was needed.** `ocx package push` already takes a published layer by digest
 (`LayerRef::Digest`, CLI form `sha256:<hex>.tar.xz`), accepts `--metadata` and `--cascade`,
