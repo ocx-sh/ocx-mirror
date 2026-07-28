@@ -7,9 +7,18 @@ Status block and the capability table in the same commit as any work below.
 ## Status
 
 - **Initiative:** mirror-capability-cut
-- **Active step:** 1 — metadata-only re-publish (`ocx-mirror#9`)
-- **Step state:** decisions settled, ready to plan
-- **Last update:** 2026-07-28 (after 2736cd1: chore(claude): point the register at the branch docs and the serve tasks)
+- **Active step:** 1 and 2 both implemented on `feat/multi-spec-and-metadata-patch`
+- **Step state:** six commits, `cargo test` green at 535; live-registry acceptance proof is
+  the one thing outstanding, then `task verify --force`, push, PR
+- **Last update:** 2026-07-28 (after 43d8238: docs for `pipeline patch` and metadata drift)
+
+Branch commits, oldest first: `ab8816f` multi-spec render · `586493e` multi-spec docs ·
+`f6ac156` drift detection · `a4b72b0` variants/metadata key docs · `3197545` `pipeline patch`
+· `43d8238` patch docs.
+
+**No `ocx` change was needed.** `ocx package push` already takes a published layer by digest
+(`LayerRef::Digest`, CLI form `sha256:<hex>.tar.xz`), accepts `--metadata` and `--cascade`,
+and has no tag-repoint guard. The whole cut is ocx-mirror-side.
 
 ## Goal
 
@@ -42,16 +51,26 @@ overlap is rejected at install time.
 
 ## Steps
 
-1. **`ocx-mirror#9` — `pipeline patch --metadata-only [--versions ...]`** ← current.
-   Re-emit published `(version, platform)` manifests against the spec's current metadata,
-   reusing existing layer digests. Plus metadata-drift detection in `pipeline plan`.
+1. **`ocx-mirror#9` — `pipeline patch --metadata-only`** — implemented (`3197545`).
+   Re-emits published `(version, platform)` manifests against the spec's current metadata,
+   referencing existing layers by digest; `pipeline plan` reports `metadata-drift`.
    Motivating case: the `binaries` field landed `b624a004` (2026-07-20), after the pilots
-   published, so their published metadata predates it.
-2. **`ocx-mirror#16` — buildtools shape.** Upstream ships 24 raw binaries (buildifier,
-   buildozer, unused-deps × 8 platforms; no archive). Either three separate specs (zero code)
-   or a `mirror.yml` multi-asset-per-platform shape (new feature).
+   published, so their published metadata predates it. **Outstanding:** the live-registry
+   proof that layer digests survive, the manifest digest moves, and a pre-patch `@sha256:`
+   pin still resolves. That last one is unverified by anyone so far.
+2. **`ocx-mirror#16` — buildtools shape** — decided and half-built. The owner ruled **three
+   separate packages**, which makes the multi-asset-per-platform feature unnecessary: one
+   spec per binary, so the resolver's `Ambiguous` arm is never reached. What that *did*
+   require is several specs in one repository, implemented at `ab8816f`. Spec drafts, asset
+   regexes and catalog copy are ready in
+   [`research_bazelbuild_assets.md`](./research_bazelbuild_assets.md); authoring them into
+   `ocx-contrib/mirror-bazelbuild` needs a dev deploy of this branch first, since the
+   generated workflows call the `ocx-mirror` that repo's `ocx.toml` pins.
 3. **Second pilot** — `astral-sh/python-build-standalone`, exercising the same two
-   capabilities against a large platform matrix.
+   capabilities against a large platform matrix. This is where the drift scan's cost gets
+   its real test: it is uncapped by design (a newest-N cap would hide exactly the old
+   versions that drifted) and concurrent at 64, with two `log::info!` lines making the tile
+   count visible. Bound it only if measurement there says so.
 
 ## Reading the docs
 
@@ -104,5 +123,11 @@ checks external links. Run the strict build before claiming a doc change is done
 
 ## Open decisions (owner)
 
-- **buildtools shape**: three specs vs. multi-asset `mirror.yml`. Recommendation: three specs
-  — layer reuse buys nothing across three unrelated static binaries.
+- **Where `bazel` itself lives.** The three buildtools binaries go in
+  `ocx-contrib/mirror-bazelbuild` as sibling spec directories. `bazel` is a far larger and
+  more visible package; it can join them as a fourth spec (its no-JDK build is a `variants:`
+  entry, no new code) or take its own repo. Nothing is blocked until the specs are authored.
+- **Merging this branch.** `ocx` and `ocx-mirror` PRs are the owner's to merge.
+
+*(Settled: buildtools ships as three separate packages, not one multi-asset spec — layer
+reuse buys nothing across three unrelated static binaries.)*
