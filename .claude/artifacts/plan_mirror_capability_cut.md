@@ -135,11 +135,19 @@ checks external links. Run the strict build before claiming a doc change is done
 
 ## Open decisions (owner)
 
-- **Where `bazel` itself lives.** The three buildtools binaries go in
-  `ocx-contrib/mirror-bazelbuild` as sibling spec directories. `bazel` is a far larger and
-  more visible package; it can join them as a fourth spec (its no-JDK build is a `variants:`
-  entry, no new code) or take its own repo. Nothing is blocked until the specs are authored.
 - **Merging this branch.** `ocx` and `ocx-mirror` PRs are the owner's to merge.
 
 *(Settled: buildtools ships as three separate packages, not one multi-asset spec — layer
 reuse buys nothing across three unrelated static binaries.)*
+
+*(Settled: mirror repos are grouped by upstream GitHub org, not by tool size — `bazel` is a
+fifth spec directory in `ocx-contrib/mirror-bazelbuild` alongside bazelisk, buildifier,
+buildozer and unused-deps. Its no-JDK build is **not** mirrored: `bazel_nojdk-*` needs a host
+JVM, so mirroring it would ship a package that fails at runtime for a dependency the metadata
+never declares. The bundled-JRE build is strictly simpler than an OCX dependency on a JDK
+package.)*
+
+*(Settled: `bazel` is the one package here that is not a static binary — glibc-linked with no
+upstream musl build — so its platform keys carry `+libc.glibc` and it has no Alpine container
+leg. The first publish shipped darwin×2 and windows/amd64 only, because the Linux legs red on
+Alpine; the per-`(version, platform)` push gate did its job and never published a broken tile.)*
