@@ -1863,7 +1863,7 @@ mod tests {
         let spec = install_spec("mirror-minimal.yml", dir.path());
 
         // First: write mode render
-        let write_result = generate(dir.path(), &[spec.clone()], false);
+        let write_result = generate(dir.path(), std::slice::from_ref(&spec), false);
 
         match write_result {
             Ok(()) => {
@@ -1888,7 +1888,7 @@ mod tests {
         let spec = install_spec("mirror-minimal.yml", dir.path());
 
         // Write mode first
-        let write_result = generate(dir.path(), &[spec.clone()], false);
+        let write_result = generate(dir.path(), std::slice::from_ref(&spec), false);
 
         if let Ok(()) = write_result {
             // Mutate generated file
@@ -1944,7 +1944,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let write_result = generate(dir.path(), &[spec.clone()], false);
+        let write_result = generate(dir.path(), std::slice::from_ref(&spec), false);
 
         write_result.expect("write-mode render must succeed");
         {
@@ -1974,7 +1974,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let write_result = generate(dir.path(), &[spec.clone()], false);
+        let write_result = generate(dir.path(), std::slice::from_ref(&spec), false);
 
         write_result.expect("write-mode render must succeed");
         {
@@ -2108,7 +2108,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let write_result = generate(dir.path(), &[spec.clone()], false);
+        let write_result = generate(dir.path(), std::slice::from_ref(&spec), false);
 
         if write_result.is_ok() {
             let describe_path = dir.path().join(".github/workflows/describe.yml");
@@ -2219,7 +2219,7 @@ asset_type:
         let dir = tempdir().unwrap();
         let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let write_result = generate(dir.path(), &[spec.clone()], false);
+        let write_result = generate(dir.path(), std::slice::from_ref(&spec), false);
 
         if write_result.is_ok() {
             let verify_path = dir.path().join(".github/workflows/verify-generated.yml");

@@ -30,6 +30,10 @@ class MirrorRunner:
             capture_output=True,
             text=True,
             env=self.env,
+            # Run out of the per-test scratch directory: `pipeline patch` writes
+            # its metadata sidecars to a relative `.ocx-mirror/patch-<pid>/`, and
+            # inheriting pytest's own cwd would put those in the repository.
+            cwd=str(self.temp_dir),
         )
         if check and result.returncode != 0:
             raise AssertionError(
