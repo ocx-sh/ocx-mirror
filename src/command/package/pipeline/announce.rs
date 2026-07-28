@@ -89,59 +89,115 @@ impl Announce {
 
         let report = result.map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
 
-        let line = report_line(
-            self.dry_run,
-            &report,
-            config,
-            &format!("{}/{}", spec.target.registry, spec.target.repository),
-        );
-        log::info!("{line}");
+        let target = format!("{}/{}", spec.target.registry, spec.target.repository);
+        let stranded = is_stranded(self.dry_run, &report);
+        for line in report_lines(self.dry_run, &report, config, &target) {
+            if stranded {
+                log::warn!("{line}");
+            } else {
+                log::info!("{line}");
+            }
+        }
 
         Ok(())
     }
 }
 
-/// The single line this command logs for `report`.
+/// A real run that changed the index but reported no pull request.
 ///
-/// A dry run and a real run must never be able to print the same text. The
-/// real path's `updated` and its `no pull request reported` are both
-/// legitimate outcomes of a run that *did* curate, so a dry run reusing that
-/// wording leaves a CI log in which nothing happened indistinguishable from
-/// one in which the index moved.
+/// Unreachable from a healthy `ocx package announce`: the `--fork` path only
+/// returns `updated` after `open_or_update_pull_request`, so it always carries
+/// the pull request it opened. Reaching it means the index moved and nobody
+/// was told where to review it — the one outcome of this command that is worse
+/// than a failure, because it is silent. Warn rather than info; the exit code
+/// stays 0, since the commit did land.
+fn is_stranded(dry_run: bool, report: &AnnounceReport) -> bool {
+    !dry_run && report.status == "updated" && report.pull_request_url.is_none()
+}
+
+/// The line(s) this command logs for `report`.
 ///
-/// The mode goes in the tag, not a suffix, so the distinction survives a
-/// truncated or grepped log. Every arm carries it, `unchanged` included: a
-/// marker that appears only in some arms makes its absence meaningless, and
-/// "the index already carries every tag" reads as a settled fact about a
-/// reconciliation that a dry run never attempted.
+/// Two constraints shape this. A dry run and a real run must never be able to
+/// print the same text — `updated` and `no pull request reported` are both
+/// legitimate real outcomes, so a dry run reusing that wording leaves a CI log
+/// in which nothing happened indistinguishable from one in which the index
+/// moved. And the two must not differ in *substance*: the `dry_run` workflow
+/// input defaults to true, so the common case is a maintainer who got a dry run
+/// without asking for one and needs to know what it found and how to act on it.
 ///
-/// The real-run arms are the wording other tooling and the run summary read —
-/// frozen here, and asserted byte-for-byte by the tests below.
-fn report_line(dry_run: bool, report: &AnnounceReport, config: &spec::AnnounceConfig, target: &str) -> String {
+/// The mode goes in the tag, not a suffix, so it survives a truncated or
+/// grepped log, and every arm carries it — `unchanged` included, since a marker
+/// present in only some arms makes its own absence meaningless, and "the index
+/// already carries every tag" otherwise reads as a settled fact about a
+/// reconciliation the dry run never attempted.
+///
+/// The real arms keep their existing text as a leading prefix; anything reading
+/// today's logs still matches. What is appended is what the JSON actually
+/// carries — the fork path reports no tag count at all (`written_paths` is
+/// empty by construction there), so the real run cannot say how much it
+/// curated. That is an upstream gap in `ocx package announce --format json`,
+/// not something to approximate here.
+fn report_lines(dry_run: bool, report: &AnnounceReport, config: &spec::AnnounceConfig, target: &str) -> Vec<String> {
     let package = &config.package;
     let index_repo = &config.index_repo;
     let status = report.status.as_str();
 
+    // Reserved drops (`__ocx.*`, canonical `<alg>.<hex>`) are a reported fact of
+    // a successful announce and invisible today. Count only — the canonical tags
+    // alone run one per published digest, so the list is unbounded.
+    let dropped = match report.reserved_tags_dropped.len() {
+        0 => String::new(),
+        n => format!(" (dropped {n} reserved tag(s))"),
+    };
+
     if dry_run {
-        // One arm for every status: a dry run curates nothing whatever the
-        // index would have said, and `status` still tells the operator which
-        // way a real run would go.
-        return format!(
-            "[announce:dry-run] {package} — nothing was curated and no pull request was opened; \
-             a real run would report {status} against {index_repo}"
-        );
+        // `--out` writes the whole file set on every run, `unchanged` included,
+        // so this count is the size of the curated set — never a delta. It is
+        // bound to the `updated` arm, where a real run would in fact commit it.
+        // Objects are keyed by manifest digest, so aliased tags (`1`, `1.2.3`,
+        // `latest` on one image) share one: this counts files, not tags.
+        let would_change = match (status, report.written_paths.len()) {
+            ("unchanged", _) => format!("would report unchanged: the index already carries every tag {target} holds"),
+            (status, 0) => format!("would report {status}"),
+            (status, files) => {
+                format!(
+                    "would report {status} and commit {files} index file(s) (root + one object per distinct manifest)"
+                )
+            }
+        };
+        return vec![
+            format!(
+                "[announce:dry-run] {package} → {index_repo}: nothing was pushed — no commit, no pull request, no index change. A real run {would_change}.{dropped}"
+            ),
+            format!(
+                "[announce:dry-run] {package} — re-dispatch with the `dry_run` input unticked (it defaults to true), or without `--dry-run`, to announce for real."
+            ),
+        ];
     }
 
     // Same reporting shape as the push job's `run_announce`: `unchanged` with
     // no pull request is the no-op, and must not read as a curation that
     // happened.
-    match (status, report.pull_request_url.as_deref()) {
+    let line = match (status, report.pull_request_url.as_deref()) {
         ("unchanged", None) => format!("[announce] {package} — index already carries every tag {target} holds"),
+        // `updated` here means the index moved with nothing to review it — see
+        // `is_stranded`, which also raises the log level.
+        ("updated", None) => format!(
+            "[announce] {package} → {index_repo} (updated, no pull request reported) — the index change was \
+             committed but nothing was opened to review it"
+        ),
+        // `unchanged` *with* a pull request: this run curated nothing, and the
+        // pull request it names carries commits an earlier run stranded.
+        ("unchanged", Some(pull_request_url)) => format!(
+            "[announce] {package} → {index_repo} (unchanged, {pull_request_url}) — this run changed nothing; \
+             the pull request carries an earlier run's commits"
+        ),
         (status, pull_request_url) => {
             let pull_request_url = pull_request_url.unwrap_or("no pull request reported");
             format!("[announce] {package} → {index_repo} ({status}, {pull_request_url})")
         }
-    }
+    };
+    vec![format!("{line}{dropped}")]
 }
 
 #[cfg(test)]
@@ -183,68 +239,159 @@ mod tests {
         AnnounceReport {
             status: status.to_string(),
             pull_request_url: pull_request_url.map(str::to_string),
+            written_paths: Vec::new(),
+            reserved_tags_dropped: Vec::new(),
+        }
+    }
+
+    /// A `--out` (dry-run) report: `ocx` writes the root plus one object per
+    /// distinct curated tag, and never a pull request URL.
+    fn out_report(status: &str, files: usize) -> AnnounceReport {
+        AnnounceReport {
+            written_paths: (0..files)
+                .map(|i| format!("p/bazelbuild/buildifier/o/sha256/{i}.json"))
+                .collect(),
+            ..report(status, None)
         }
     }
 
     const TARGET: &str = "ghcr.io/ocx-sh/bazelbuild-buildifier";
 
+    fn line(dry_run: bool, report: &AnnounceReport) -> String {
+        report_lines(dry_run, report, &config(), TARGET).join("\n")
+    }
+
     /// The defect: a dry run printed the line a real run prints. Asserted as a
-    /// *pair* over every status the announce reports — a test that only pinned
+    /// *pair* over every outcome the announce reports — a test that only pinned
     /// the dry-run wording would still pass if the real path drifted onto it.
     #[test]
     fn a_dry_run_and_a_real_run_never_report_the_same_line() {
         for status in ["updated", "unchanged"] {
             for pull_request_url in [None, Some("https://github.com/ocx-sh/index/pull/7")] {
-                let report = report(status, pull_request_url);
-                let dry = report_line(true, &report, &config(), TARGET);
-                let real = report_line(false, &report, &config(), TARGET);
+                for files in [0, 16] {
+                    let report = AnnounceReport {
+                        pull_request_url: pull_request_url.map(str::to_string),
+                        ..out_report(status, files)
+                    };
+                    let dry = line(true, &report);
+                    let real = line(false, &report);
 
-                assert_ne!(dry, real, "status={status}, pull_request_url={pull_request_url:?}");
-                assert!(
-                    dry.starts_with("[announce:dry-run] "),
-                    "a dry run must name its mode up front, got: {dry}"
-                );
-                assert!(
-                    !real.contains("dry-run") && !real.contains("dry run"),
-                    "the real path must not claim to be a dry run, got: {real}"
-                );
+                    assert_ne!(dry, real, "status={status}, pr={pull_request_url:?}, files={files}");
+                    assert!(
+                        dry.lines().all(|l| l.starts_with("[announce:dry-run] ")),
+                        "every dry-run line must name its mode up front, got: {dry}"
+                    );
+                    assert!(
+                        !real.contains("dry-run") && !real.contains("dry run"),
+                        "the real path must not claim to be a dry run, got: {real}"
+                    );
+                }
             }
         }
     }
 
-    /// `unchanged` + no pull request is the arm that already read as a settled
-    /// fact in both modes. It is distinguished too: the dry run reports what a
-    /// real run *would* say, never that the index was found current.
+    /// The `dry_run` input defaults to true, so the common case is a maintainer
+    /// who did not ask for a dry run. Each line must say nothing was pushed,
+    /// what a real run would do, and how to get one.
     #[test]
-    fn the_dry_run_disclaims_curation_on_every_status() {
-        for status in ["updated", "unchanged"] {
-            let line = report_line(true, &report(status, None), &config(), TARGET);
-            assert_eq!(
-                line,
-                format!(
-                    "[announce:dry-run] bazelbuild/buildifier — nothing was curated and no pull request \
-                     was opened; a real run would report {status} against ocx-sh/index"
-                ),
-                "got: {line}"
-            );
+    fn the_dry_run_says_nothing_was_pushed_what_would_change_and_the_way_out() {
+        let updated = report_lines(true, &out_report("updated", 16), &config(), TARGET);
+        assert_eq!(
+            updated[0],
+            "[announce:dry-run] bazelbuild/buildifier → ocx-sh/index: nothing was pushed — no commit, \
+             no pull request, no index change. A real run would report updated and commit 16 index \
+             file(s) (root + one object per distinct manifest).",
+            "got: {updated:?}"
+        );
+        assert_eq!(
+            updated[1],
+            "[announce:dry-run] bazelbuild/buildifier — re-dispatch with the `dry_run` input unticked \
+             (it defaults to true), or without `--dry-run`, to announce for real.",
+            "the way out is the part a merely-distinguishable message misses, got: {updated:?}"
+        );
+
+        // `--out` writes every file whatever the status, so the count is the
+        // size of the curated set. Claiming a real run would commit it when it
+        // would commit nothing is the same false-evidence class as the tag.
+        let unchanged = report_lines(true, &out_report("unchanged", 16), &config(), TARGET);
+        assert!(
+            unchanged[0].ends_with(&format!(
+                "A real run would report unchanged: the index already carries every tag {TARGET} holds."
+            )),
+            "an unchanged dry run must not read as 16 pending files, got: {unchanged:?}"
+        );
+        assert_eq!(unchanged[1], updated[1], "the way out does not depend on the status");
+    }
+
+    /// The real-run text anything reads today stays a leading prefix; substance
+    /// is appended, never substituted. Frozen so the dry-run fix cannot be
+    /// "kept" by quietly moving the real path onto it instead.
+    #[test]
+    fn the_real_run_keeps_todays_wording_as_its_prefix() {
+        let cases = [
+            (
+                report("unchanged", None),
+                format!("[announce] bazelbuild/buildifier — index already carries every tag {TARGET} holds"),
+            ),
+            (
+                report("unchanged", Some("https://x/1")),
+                "[announce] bazelbuild/buildifier → ocx-sh/index (unchanged, https://x/1)".to_string(),
+            ),
+            (
+                report("updated", Some("https://x/1")),
+                "[announce] bazelbuild/buildifier → ocx-sh/index (updated, https://x/1)".to_string(),
+            ),
+            (
+                report("updated", None),
+                "[announce] bazelbuild/buildifier → ocx-sh/index (updated, no pull request reported)".to_string(),
+            ),
+        ];
+        for (report, prefix) in cases {
+            let line = line(false, &report);
+            assert!(line.starts_with(&prefix), "expected prefix {prefix:?}, got: {line}");
+            assert_eq!(line.lines().count(), 1, "the real path stays one line, got: {line}");
         }
     }
 
-    /// The real-run wording is the contract other tooling reads. Frozen so the
-    /// fix above cannot be "kept" by quietly moving the real path instead.
+    /// `updated` with no pull request cannot come from a healthy `ocx package
+    /// announce` — the fork path returns the pull request it opened. It means a
+    /// live index change nobody was told to review, so it is a warn, and only
+    /// on the real path: for a dry run it is the expected shape.
     #[test]
-    fn the_real_run_wording_is_unchanged() {
-        assert_eq!(
-            report_line(false, &report("unchanged", None), &config(), TARGET),
-            format!("[announce] bazelbuild/buildifier — index already carries every tag {TARGET} holds")
+    fn an_index_change_with_no_pull_request_is_loud_only_on_the_real_path() {
+        assert!(is_stranded(false, &report("updated", None)));
+        assert!(
+            !is_stranded(true, &out_report("updated", 16)),
+            "expected shape for a dry run"
         );
-        assert_eq!(
-            report_line(false, &report("unchanged", Some("https://x/1")), &config(), TARGET),
-            "[announce] bazelbuild/buildifier → ocx-sh/index (unchanged, https://x/1)"
+        assert!(!is_stranded(false, &report("updated", Some("https://x/1"))));
+        assert!(!is_stranded(false, &report("unchanged", None)));
+
+        assert!(
+            line(false, &report("updated", None)).contains("nothing was opened to review it"),
+            "the stranded case must say what is wrong, not just omit a URL"
         );
-        assert_eq!(
-            report_line(false, &report("updated", None), &config(), TARGET),
-            "[announce] bazelbuild/buildifier → ocx-sh/index (updated, no pull request reported)"
-        );
+    }
+
+    /// Dropped reserved tags are a reported fact of a successful announce and
+    /// invisible in the log today. Count only: canonical `<alg>.<hex>` tags run
+    /// one per published digest, so the list has no bound.
+    #[test]
+    fn dropped_reserved_tags_are_counted_on_both_paths() {
+        let dropped = AnnounceReport {
+            reserved_tags_dropped: vec!["__ocx.desc".to_string(), format!("sha256.{}", "a".repeat(64))],
+            ..out_report("updated", 16)
+        };
+        for dry_run in [true, false] {
+            let line = line(dry_run, &dropped);
+            assert!(
+                line.contains("(dropped 2 reserved tag(s))"),
+                "dry_run={dry_run}, got: {line}"
+            );
+            assert!(
+                !line.contains("a".repeat(64).as_str()),
+                "the list is unbounded: count only"
+            );
+        }
     }
 }
