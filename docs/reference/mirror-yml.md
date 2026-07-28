@@ -590,22 +590,26 @@ writes:
 .github/workflows/
 ├── mirror.yml                            # bazelisk — byte-identical to before
 ├── describe.yml
+├── patch.yml
 ├── announce-from-registry.yml
 ├── mirror-buildifier.yml
 ├── describe-buildifier.yml
+├── patch-buildifier.yml
 ├── announce-from-registry-buildifier.yml
 ├── mirror-buildozer.yml
 ├── describe-buildozer.yml
+├── patch-buildozer.yml
 ├── announce-from-registry-buildozer.yml
 ├── mirror-unused-deps.yml
 ├── describe-unused-deps.yml
+├── patch-unused-deps.yml
 ├── announce-from-registry-unused-deps.yml
 └── verify-generated.yml                  # one guard, names all four specs
 ```
 
 Naming a nested spec file `mirror.yml` is convention, not a requirement — the generated filenames derive from the spec's **directory**, never its filename (below). Keep the filename anyway: it matches every other spec in the repository, and it is the directory — not the name — that `--repo-root`'s default and the collision check both reason about.
 
-**Generated file names.** A spec at the repository root keeps today's filenames byte for byte — `mirror.yml`, `describe.yml`, `announce-from-registry.yml` — so a repository that adds its first nested spec never has to touch the workflows it already published. A spec anywhere else gets every filename suffixed with its directory, `/` joined by `-`:
+**Generated file names.** A spec at the repository root keeps today's filenames byte for byte — `mirror.yml`, `describe.yml`, `patch.yml`, `announce-from-registry.yml` — so a repository that adds its first nested spec never has to touch the workflows it already published. A spec anywhere else gets every filename suffixed with its directory, `/` joined by `-`:
 
 | Spec path (relative to repo root) | Suffix | `mirror.yml` becomes |
 |---|---|---|
@@ -615,11 +619,11 @@ Naming a nested spec file `mirror.yml` is convention, not a requirement — the 
 
 Because the suffix comes from the directory alone, **a directory may hold only one spec** — two specs sharing a directory, whatever their filenames, would render the same workflow set and silently overwrite each other. `generate ci` rejects this with exit 64 before writing anything.
 
-Every generated pipeline invocation in a nested spec's workflows names its own spec explicitly — `pipeline plan --spec buildifier/mirror.yml`, and likewise for `prepare`, `push`, `describe`, `announce`. The root spec's invocations never carry `--spec`: its path is exactly what every subcommand already defaults to, which is what keeps the root workflows byte-identical.
+Every generated pipeline invocation in a nested spec's workflows names its own spec explicitly — `pipeline plan --spec buildifier/mirror.yml`, and likewise for `prepare`, `push`, `describe`, `announce`, `patch`. The root spec's invocations never carry `--spec`: its path is exactly what every subcommand already defaults to, which is what keeps the root workflows byte-identical.
 
 **`--repo-root`.** Generated files are written under `--repo-root`, and every filename above is computed relative to it. Left unset, it defaults to the deepest directory every `--spec` given shares — for a single spec that is simply its parent directory, so `generate ci --spec /elsewhere/repo/mirror.yml` still writes into that repository rather than the current directory. A spec that does not resolve under `--repo-root` (explicit or inferred) is rejected with exit 64, naming `--repo-root` as the fix.
 
-**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` and `announce-from-registry-<dir>.yml` follow the same rule for their own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested), and each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
+**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` follows the same rule for its own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested); `patch-<dir>.yml` and `announce-from-registry-<dir>.yml` have no path triggers at all, being dispatch-only. Each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
 
 **One drift guard per repository.** `verify-generated.yml` is emitted once no matter how many specs the repository holds. Its committed `paths:` list is the union of every spec's own triggers, and the `generate ci --check` command line it bakes in names every spec explicitly with `--spec` as soon as there is more than one — `--spec` appends rather than replaces, so a guard naming only a subset would silently stop checking the rest while staying green. The guard also reds when a `.github/workflows/*.yml` file carries the `# Generated by ocx-mirror` header but is not in the current spec set's output — the file a dropped spec leaves behind, which would otherwise keep running on schedule against a spec that no longer exists. Hand-written workflows without that header are never inspected.
 

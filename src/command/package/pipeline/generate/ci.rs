@@ -47,6 +47,7 @@ const WORKFLOW_TEMPLATE: &str = include_str!("templates/workflow.yml");
 const DESCRIBE_TEMPLATE: &str = include_str!("templates/describe.yml");
 const VERIFY_GENERATED_TEMPLATE: &str = include_str!("templates/verify-generated.yml");
 const ANNOUNCE_FROM_REGISTRY_TEMPLATE: &str = include_str!("templates/announce-from-registry.yml");
+const PATCH_TEMPLATE: &str = include_str!("templates/patch.yml");
 
 // ── Spec placement ───────────────────────────────────────────────────────────
 
@@ -181,9 +182,10 @@ fn slash_path(path: &Path) -> String {
 ///
 /// One repository may hold several specs; `--spec` repeats. Generated
 /// filenames derive from where each spec sits under the repository root:
-/// `<root>/mirror.yml` renders `mirror.yml`, `describe.yml` and
-/// `announce-from-registry.yml`, while `<root>/py3.13/mirror.yml` renders the
-/// same three suffixed `-py3.13`. The `verify-generated.yml` drift guard is
+/// `<root>/mirror.yml` renders `mirror.yml`, `describe.yml`, `patch.yml` and —
+/// when it announces — `announce-from-registry.yml`, while
+/// `<root>/py3.13/mirror.yml` renders the same set suffixed `-py3.13`. The
+/// `verify-generated.yml` drift guard is
 /// emitted once per repository and bakes in the full spec list, so the
 /// committed file is the record of which specs the repository has.
 ///
@@ -760,16 +762,23 @@ fn render_discover_permissions(spec: &MirrorSpec) -> &'static str {
     }
 }
 
-/// `permissions:` block for the describe job.
+/// `permissions:` block for a job that checks out, installs ocx and writes to
+/// the target registry: the describe job and the patch job.
 ///
 /// `pipeline describe` pushes the catalog metadata as an `__ocx.desc` referrer
-/// on the target repository, so GHCR needs `packages: write` here — the read
-/// scope discover gets is not enough.
-const GHCR_DESCRIBE_PERMISSIONS: &str = "    permissions:\n      contents: read\n      packages: write\n";
+/// and `pipeline patch` re-emits published manifests, so GHCR needs
+/// `packages: write` for both — the read scope discover gets is not enough.
+/// Neither job runs tests, resolves a job URL or comments on a pull request, so
+/// none of the push job's other three scopes are paid for here; naming any
+/// permission sets every unnamed one to `none`, which is what makes that
+/// omission real rather than decorative. The announce a patch chains into
+/// writes to the *index* repository through `OCX_ANNOUNCE_TOKEN`, never through
+/// this job's `GITHUB_TOKEN`.
+const GHCR_REGISTRY_WRITE_PERMISSIONS: &str = "    permissions:\n      contents: read\n      packages: write\n";
 
-fn render_describe_permissions(spec: &MirrorSpec) -> &'static str {
+fn render_registry_write_permissions(spec: &MirrorSpec) -> &'static str {
     if spec.target.registry == GHCR_REGISTRY {
-        GHCR_DESCRIBE_PERMISSIONS
+        GHCR_REGISTRY_WRITE_PERMISSIONS
     } else {
         ""
     }
@@ -1144,7 +1153,7 @@ fn render_describe(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
         .replace("{TRIGGER_PATHS}", &triggers)
-        .replace("{DESCRIBE_PERMISSIONS}", render_describe_permissions(spec))
+        .replace("{DESCRIBE_PERMISSIONS}", render_registry_write_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
 }
@@ -1169,6 +1178,33 @@ fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
         .replace("{ANNOUNCE_PERMISSIONS}", render_discover_permissions(spec))
+        .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+}
+
+/// Render the `patch.yml` metadata-correction workflow.
+///
+/// Dispatch-only, and deliberately not wired to `pipeline plan`'s `has_drift`
+/// output: a drift finding says the published metadata no longer matches the
+/// spec, and whether that is worth re-emitting every affected manifest is a
+/// maintainer's call. The point of generating it at all is that patching
+/// otherwise needs registry push credentials and an index token on somebody's
+/// laptop, which is not how any other pipeline verb is run.
+///
+/// The three `workflow_dispatch` inputs are the command's whole selection
+/// surface; the run step turns each present one into its flag and each absent
+/// one into nothing, so an empty dispatch patches every published version.
+///
+/// Takes the same `packages: write` block describe does — this job re-emits
+/// manifests on the target repository. The announce it chains into writes to
+/// the index repository with `OCX_ANNOUNCE_TOKEN`.
+fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
+    PATCH_TEMPLATE
+        .replace("{OCX_MIRROR_VERSION}", VERSION)
+        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_SOURCE}", &slot.source())
+        .replace("{SPEC_ARG}", &slot.spec_arg())
+        .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
+        .replace("{PATCH_PERMISSIONS}", render_registry_write_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
 }
 
@@ -1230,6 +1266,10 @@ fn render_spec(spec: &MirrorSpec, slot: &SpecSlot) -> BTreeMap<PathBuf, String> 
 
     files.insert(slot.workflow("mirror"), render_workflow(spec, slot));
     files.insert(slot.workflow("describe"), render_describe(spec, slot));
+    // Emitted for every spec, with no opt-in: any published mirror can have its
+    // metadata drift, and a repository only discovers it needs the workflow at
+    // the moment it already needs to have dispatched it.
+    files.insert(slot.workflow("patch"), render_patch(spec, slot));
 
     // Index catch-up workflow: only a mirror that announces has an index entry
     // to catch up. Emitted for every such mirror — there is no separate opt-in,
@@ -1559,6 +1599,196 @@ mod tests {
                 .count();
             assert!(with_image > 0, "{fixture} must render container legs");
         }
+    }
+
+    /// Render a fixture and parse one of its generated workflows.
+    fn parse_workflow(fixture: &str, name: &str) -> serde_yaml_ng::Value {
+        let dir = tempdir().unwrap();
+        render_fixture(fixture, dir.path()).unwrap_or_else(|e| panic!("{fixture} must render: {e}"));
+        let rendered = std::fs::read_to_string(dir.path().join(".github/workflows").join(name)).unwrap();
+        serde_yaml_ng::from_str(&rendered).unwrap_or_else(|e| panic!("{name} must be parseable YAML: {e}\n{rendered}"))
+    }
+
+    #[test]
+    fn patch_is_dispatch_only_and_exposes_the_whole_selection_surface() {
+        // Patching re-emits published manifests, so anything but an explicit
+        // human dispatch — a schedule, a push, a wire to `plan`'s has_drift —
+        // would republish the corpus on somebody else's timetable.
+        let parsed = parse_workflow("mirror-ghcr-announce.yml", "patch.yml");
+
+        let triggers = &parsed["on"];
+        assert_eq!(
+            triggers
+                .as_mapping()
+                .unwrap_or_else(|| panic!("triggers must be a mapping, got: {triggers:?}"))
+                .keys()
+                .map(|k| k.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["workflow_dispatch"],
+            "patch must be dispatch-only — no push, no schedule",
+        );
+
+        // The command's selection surface is these three flags; an input the
+        // workflow does not expose is a patch a maintainer can only run from a
+        // laptop, which is the gap this workflow closes.
+        let inputs = &triggers["workflow_dispatch"]["inputs"];
+        assert_eq!(
+            inputs
+                .as_mapping()
+                .unwrap_or_else(|| panic!("inputs must be a mapping, got: {inputs:?}"))
+                .keys()
+                .map(|k| k.as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["version", "min_version", "max_version"],
+        );
+
+        // Naming any permission sets every unnamed one to `none`, so this map is
+        // the job's whole token. `packages: write` re-emits the manifests;
+        // `contents: read` is checkout + setup-ocx. The push job's `actions`,
+        // `checks` and `pull-requests` scopes buy steps this job does not run.
+        let permissions = &parsed["jobs"]["patch"]["permissions"];
+        assert_eq!(
+            permissions
+                .as_mapping()
+                .unwrap_or_else(|| panic!("a ghcr patch job must name its permissions, got: {permissions:?}"))
+                .iter()
+                .map(|(k, v)| (k.as_str().unwrap(), v.as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            vec![("contents", "read"), ("packages", "write")],
+        );
+
+        // A successful patch chains into announce, which authenticates against
+        // the index repository with this secret and nothing else.
+        assert_eq!(
+            patch_step(&parsed)["env"]["OCX_ANNOUNCE_TOKEN"].as_str(),
+            Some("${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
+        );
+    }
+
+    /// The `patch.yml` step that runs the command.
+    fn patch_step(parsed: &serde_yaml_ng::Value) -> &serde_yaml_ng::Value {
+        parsed["jobs"]["patch"]["steps"]
+            .as_sequence()
+            .expect("patch job must have steps")
+            .iter()
+            .find(|step| step.get("env").is_some())
+            .expect("one step must carry the patch environment")
+    }
+
+    /// Run `patch.yml`'s command step against a stub `ocx-mirror`, returning the
+    /// argv it was invoked with.
+    ///
+    /// The step body carries no `${{ }}` — every dispatch input reaches it
+    /// through `env:` — so it is the actual shell GitHub would run, not a
+    /// paraphrase of it. Asserting on the script text instead would only prove
+    /// the template says what the template says.
+    fn patch_argv(inputs: &[(&str, &str)]) -> Vec<String> {
+        let parsed = parse_workflow("mirror-ghcr-announce.yml", "patch.yml");
+        let script = patch_step(&parsed)["run"]
+            .as_str()
+            .expect("the step must carry a run block");
+
+        let dir = tempdir().unwrap();
+        let argv_file = dir.path().join("argv");
+        let stub = dir.path().join("ocx-mirror");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/usr/bin/env bash\nfor arg in \"$@\"; do printf '%s\\n' \"${{arg}}\" >> {}; done\n",
+                argv_file.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let script_path = dir.path().join("step.sh");
+        std::fs::write(&script_path, script).unwrap();
+
+        let mut command = std::process::Command::new("bash");
+        command
+            .arg(&script_path)
+            .current_dir(dir.path())
+            .env(
+                "PATH",
+                format!("{}:{}", dir.path().display(), std::env::var("PATH").unwrap()),
+            )
+            // GitHub always sets a dispatch input's env var; an omitted input
+            // arrives as the empty string, never as an absent variable.
+            .env("VERSIONS", "")
+            .env("MIN_VERSION", "")
+            .env("MAX_VERSION", "");
+        for (key, value) in inputs {
+            command.env(key, value);
+        }
+
+        let output = command.output().expect("the step script must run under bash");
+        assert!(
+            output.status.success(),
+            "the step script exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+        std::fs::read_to_string(&argv_file)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_patch_dispatch_names_no_selection_at_all() {
+        // The documented default is "patch everything published", and it is
+        // reached by passing no selection flag. A `--min-version ""` emitted for
+        // an omitted input would silently narrow the run instead — a maintainer
+        // who dispatched with empty fields would get a subset and no sign of it.
+        assert_eq!(patch_argv(&[]), vec!["package", "pipeline", "patch", "--metadata-only"],);
+    }
+
+    #[test]
+    fn patch_dispatch_inputs_become_the_command_line_selection() {
+        // `--version` repeats on the CLI but a dispatch input is one string, so
+        // the step splits it. Both separators, and a run of them, resolve to one
+        // flag per version; the bounds pass through as themselves.
+        assert_eq!(
+            patch_argv(&[
+                ("VERSIONS", "3.29.0, 3.28.0 3.27.0"),
+                ("MIN_VERSION", "3.0.0"),
+                ("MAX_VERSION", "4.0.0"),
+            ]),
+            vec![
+                "package",
+                "pipeline",
+                "patch",
+                "--metadata-only",
+                "--version",
+                "3.29.0",
+                "--version",
+                "3.28.0",
+                "--version",
+                "3.27.0",
+                "--min-version",
+                "3.0.0",
+                "--max-version",
+                "4.0.0",
+            ],
+        );
+
+        // A bound on its own must not drag an empty `--version` along with it.
+        assert_eq!(
+            patch_argv(&[("MIN_VERSION", "3.0.0")]),
+            vec![
+                "package",
+                "pipeline",
+                "patch",
+                "--metadata-only",
+                "--min-version",
+                "3.0.0"
+            ],
+        );
     }
 
     #[test]
@@ -3243,6 +3473,8 @@ announce:
                 "describe.yml",
                 "mirror-py3.13.yml",
                 "mirror.yml",
+                "patch-py3.13.yml",
+                "patch.yml",
                 "verify-generated.yml",
             ],
             "each spec owns a workflow set named after its directory, and the \
@@ -3298,6 +3530,10 @@ announce:
         assert!(
             read("announce-from-registry-py3.13.yml").contains("pipeline announce --spec py3.13/mirror.yml --dry-run"),
             "announce must name its own spec"
+        );
+        assert!(
+            read("patch-py3.13.yml").contains("pipeline patch --spec py3.13/mirror.yml --metadata-only"),
+            "patch must name its own spec"
         );
 
         // The root spec is the one path `--spec` already defaults to, so it
@@ -3735,6 +3971,7 @@ tests:
                         ".github/workflows/announce-from-registry-py3.13.yml",
                         ".github/workflows/describe-py3.13.yml",
                         ".github/workflows/mirror-py3.13.yml",
+                        ".github/workflows/patch-py3.13.yml",
                     ],
                     "every workflow of the dropped spec is stale — and nothing else"
                 );
