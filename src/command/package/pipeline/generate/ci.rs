@@ -3457,6 +3457,39 @@ tests:
     }
 
     #[test]
+    fn a_base_inside_the_specs_own_subtree_adds_no_entry() {
+        // The subtree glob already covers a base under the spec's own directory.
+        // The sibling case is what keeps that check honest: `buildifier-extra/`
+        // shares a prefix with `buildifier/` and is not under it.
+        for (base_at, base_ref, expected) in [
+            ("buildifier/base.yml", "./base.yml", vec!["buildifier/**"]),
+            (
+                "buildifier-extra/base.yml",
+                "../buildifier-extra/base.yml",
+                vec!["buildifier/**", "buildifier-extra/base.yml"],
+            ),
+        ] {
+            let dir = tempdir().unwrap();
+            write_file(dir.path(), base_at, EXTENDS_BASE);
+            let child = write_file(
+                dir.path(),
+                "buildifier/mirror.yml",
+                &extends_child("buildifier", Some(base_ref)),
+            );
+            generate(dir.path(), &[child], false).expect("the child spec must render");
+            let workflow = std::fs::read_to_string(dir.path().join(".github/workflows/mirror-buildifier.yml")).unwrap();
+
+            let mut expected = expected;
+            expected.push(".github/workflows/mirror-buildifier.yml");
+            assert_eq!(
+                trigger_entries(&workflow, "push"),
+                expected,
+                "trigger for a spec extending {base_ref}, got:\n{workflow}"
+            );
+        }
+    }
+
+    #[test]
     fn the_drift_guard_watches_a_shared_base_once() {
         // The guard re-renders every spec, so a base edit changes every
         // generated workflow in the repository — the one change the guard was
