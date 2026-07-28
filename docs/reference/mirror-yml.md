@@ -144,6 +144,8 @@ metadata:
 
 Both paths resolve against the directory holding the spec file, never the repository root — the same rule [`catalog`](#catalog) follows, and the opposite of [`tests.script`](#multi-spec-script-path). Every path is checked for existence when the spec loads; a missing file is a spec-load failure (exit 65), not a runtime surprise.
 
+Editing this file only changes what *future* pushes publish. `pipeline plan` compares it against what already-published versions record and reports any mismatch as a `metadata-drift` entry; [`pipeline patch`][cli-patch] then republishes the corrected metadata against those versions' existing layers, with no re-download and no re-upload. There is no key here for *which* versions to patch — that range is a flag on the `patch` command line, not spec state, since a stored range would need a ledger to track what it had already covered.
+
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
 `build_timestamp` controls the tag a mirrored version is published under. Each `(version, platform)` push writes a **primary tag** for that version; with `cascade: true` (the default) it also re-points the **rolling tags** `X.Y`, `X`, and `latest` to the newest build.
@@ -728,3 +730,4 @@ notify:
 [cli-announce]: ./cli.md#pipeline-announce
 [cli-generate-ci]: ./cli.md#pipeline-generate-ci
 [cli-describe]: ./cli.md#pipeline-describe
+[cli-patch]: ./cli.md#pipeline-patch

@@ -57,7 +57,7 @@ ocx-mirror schema <TARGET>
 
 ## `package pipeline` {#pipeline}
 
-Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe` and `announce` each own a standalone workflow outside that chain. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
+Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe` and `announce` each own a standalone workflow outside that chain. `patch` has no generated job at all — it is dispatched by hand against an already-published mirror. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
@@ -88,6 +88,23 @@ ocx-mirror package pipeline plan [OPTIONS]
 |------|---------|-------------|
 | `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
 | `--format <FMT>` | auto | `plain` or `json`. Without the flag, JSON is selected automatically when `GITHUB_ACTIONS=true`. |
+
+Alongside `new` (not yet published) and `backfill-partial` (published for some platforms, missing for others), a plan entry can carry kind `metadata-drift`: a published `(version, platform)` whose config blob no longer matches what the spec would publish today. Drift is only ever reported, never acted on — a version already scheduled as `new` or `backfill-partial` is never also reported as drifted, since its next push writes current metadata anyway.
+
+The JSON document is `schema_version: 3` and adds a `has_drift` flag alongside `has_new`:
+
+```json
+{
+  "schema_version": 3,
+  "has_new": true,
+  "has_drift": false,
+  "versions": [...],
+  "target": "ocx.sh/cmake",
+  "ocx_mirror_rev": "abc123..."
+}
+```
+
+`has_new` deliberately ignores drift-only versions — the generated workflow's `discover` job gates the download-and-build jobs on it, and a drift fix has nothing to download. The `discover` job also drops every `metadata-drift` entry before building the `prepare` matrix: a drift entry carries no resolved assets, so a `prepare` leg for one would abort looking for a bundle nothing wrote. `has_drift` surfaces the finding for a human to act on with [`pipeline patch`](#pipeline-patch).
 
 ### `package pipeline prepare` {#pipeline-prepare}
 
@@ -162,6 +179,34 @@ ocx-mirror package pipeline announce [OPTIONS]
 
 Needs [`OCX_ANNOUNCE_TOKEN`][env-announce-token] unless `--dry-run` is set. Exits 64 when the spec has no `announce:` block — there is no index package to announce into.
 
+### `package pipeline patch` {#pipeline-patch}
+
+Correct the published metadata of versions the registry already holds, without re-downloading or re-uploading anything. Package metadata lives in the OCI config blob, never in a layer, so a fix is a manifest re-emission that re-references the existing layers by digest — the only bytes uploaded are a config blob the size of `metadata.json`. This is the retroactive counterpart to a `metadata-drift` entry in [`pipeline plan`](#pipeline-plan): fix `metadata.json` (or the spec's `metadata:` block) in the mirror repo, then run `patch` to reach every version already published under the old, wrong metadata — the alternative, deleting tags and re-mirroring, costs hours of upstream download and orphans anyone pinned to a digest.
+
+CLI-only; there is no `patch` job in the generated workflow, and dispatching it is a human decision.
+
+```sh
+ocx-mirror package pipeline patch --metadata-only [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
+| `--metadata-only` | — | Required. Republish the metadata blob and nothing else — currently the only mode. |
+| `--version <VERSION>` | — | Patch this published version. Repeatable. Matches the leaf tag verbatim or by its version core, so `--version 3.29.0` selects `3.29.0_20260610` on a build-stamped mirror. Composes with `--min-version`/`--max-version` as a union. A version the registry does not publish is a usage error (exit 64), not a silent no-op. |
+| `--min-version <VERSION>` | — | Lowest published version to patch, inclusive. Compared on the version core, so it covers every build stamp of the version it names. |
+| `--max-version <VERSION>` | — | Highest published version to patch, exclusive. Compared on the version core, so it excludes every build stamp of the version it names. |
+
+Omitting `--version`, `--min-version`, and `--max-version` all at once patches every published version.
+
+**Only leaf tags are patched.** A cascade alias (`3.29`, `3.29.0` on a build-stamped mirror, `latest`) shares its leaf's child manifests and re-cascades from it automatically once the leaf is patched, so naming an alias in `--version` is a usage error rather than a silent no-op or a wasted duplicate run.
+
+**Idempotent.** A `(version, platform)` whose published config blob already matches what the spec would publish today is skipped — settled from the config descriptor's digest, with no registry blob fetch for the common case. There is no ledger and no stored range: the comparison against the currently published bytes is the entire mechanism, which is also why the version range lives only on this command line and not in `mirror.yml` — a stored range would need a ledger to know what it had already covered.
+
+**Announces on success.** A run that republished anything ends by announcing (the same `--tags-from-registry` path as [`pipeline announce`](#pipeline-announce)), because the re-emitted manifests are live under digests the index does not yet know. An announce that fails after a successful patch fails the command loudly: that is the state where the index still points at digests the patch just replaced.
+
+**Layer pins are never disturbed.** Layer digests are unchanged by a metadata patch, so no layer is ever orphaned; the patched manifest gets its own canonical `sha256:<hex>` tag alongside the version tag.
+
 ## Exit codes {#exit-codes}
 
 Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
@@ -169,10 +214,10 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 | Code | Meaning | Raised by |
 |------|---------|-----------|
 | 0 | Success | — |
-| 1 | Pipeline execution failure (download, push, verify) | `sync`, `prepare`, `push` |
-| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root` | `validate`, `pipeline generate ci`, `pipeline announce` |
+| 1 | Pipeline execution failure (download, push, verify, republish, or a failed post-patch announce) | `sync`, `prepare`, `push`, `pipeline patch` |
+| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root`, an unparseable `--version`/`--min-version`/`--max-version`, a `--version` the registry does not publish or that names a cascade alias | `validate`, `pipeline generate ci`, `pipeline announce`, `pipeline patch` |
 | 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed | all |
-| 69 | Upstream source or target registry unreachable; Discord 5xx / timeout | `sync`, `check`, `plan`, `push`, `notify` |
+| 69 | Upstream source or target registry unreachable; Discord 5xx / timeout | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch` |
 | 74 | I/O error: template render or file write failure | `pipeline generate ci`, `push` |
 | 77 | Discord 401/403 — webhook secret likely rotated | `pipeline notify` |
 | 79 | Spec file not found | all |
