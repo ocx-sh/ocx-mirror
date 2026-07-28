@@ -9,7 +9,9 @@
 | `name` | string | Yes | Tool name, used in log output and notify messages |
 | `target` | object | Yes | OCI registry and repository to push to |
 | `source` | object | Yes | Upstream release source ([GitHub Releases][github-releases] or URL index) |
-| `assets` | object | Yes | Platform → regex list mapping for selecting upstream release archives |
+| `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. *Mutually exclusive with `variants` — exactly one of the two is required. |
+| `variants` | array | No* | Alternate asset sets for the same tool, each producing its own version-tag prefix. *Mutually exclusive with `assets` — exactly one of the two is required. See [`variants`](#variants). |
+| `metadata` | object | No | Path(s) to the package metadata JSON, with optional per-platform overrides. See [`metadata`](#metadata). |
 | `asset_type` | string | No | `Archive` (default) or `Binary` |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
@@ -86,6 +88,61 @@ assets:
 ```
 
 `libc.glibc` and `libc.musl` are the recognized flavors. The two keys are distinct platforms — each needs its own regex list, and each publishes as its own image-index entry. A key with no `+libc.` tag carries no libc requirement and resolves for any host (the pre-libc behavior). Quote keys containing `+` so YAML parses them as strings.
+
+## `variants` {#variants}
+
+Some tools publish more than one build flavor from the same release — a PGO/LTO-optimized build alongside a regular one, a `slim` image alongside the full one. `variants:` replaces top-level `assets:` with a named list of asset sets, each becoming its own version-tag prefix (`slim-3.13.9` vs. the bare `3.13.9`), so the flavors share one `mirror.yml` and one generated pipeline instead of splitting into a spec per flavor.
+
+```yaml
+variants:
+  - default: true
+    assets:
+      linux/amd64: ["cpython-.*-x86_64-unknown-linux-gnu\\.tar\\.zst"]
+  - name: pgo.lto
+    assets:
+      linux/amd64: ["cpython-.*-x86_64-unknown-linux-gnu-pgo\\+lto\\.tar\\.zst"]
+    metadata:
+      default: metadata-pgo-lto.json
+```
+
+**Fields (per entry):**
+
+| Field | Type | Required | Description |
+|-------|------|----------|--------------|
+| `name` | string | Yes, unless `default: true` | Tag prefix for this variant's versions. Must match `^[a-z][a-z0-9.]*$`; `latest` is reserved and rejected — it would collide with the cascade alias the default variant already produces. |
+| `default` | boolean | No | Marks the variant whose tags publish unprefixed (`3.13.9`, not `<name>-3.13.9`). Exactly one variant must set this. |
+| `assets` | object | Yes | This variant's platform → regex mapping, same shape as top-level [`assets`](#assets). |
+| `metadata` | object | No | Overrides the top-level [`metadata`](#metadata) for this variant only. |
+| `asset_type` | string | No | Overrides the top-level `asset_type` for this variant only. |
+
+**Rules:**
+
+- Mutually exclusive with top-level `assets:` — a spec sets exactly one of the two.
+- At least one variant is required; exactly one must set `default: true`.
+- Only the default variant may omit `name`. A non-default variant without one is rejected.
+- Two variants with the same name (or two unnamed variants) are rejected as duplicates.
+- A variant that omits `metadata` or `asset_type` inherits the spec's top-level value.
+
+## `metadata` {#metadata}
+
+Points at the package metadata JSON that `ocx package test` and `ocx add` use to install a mirrored bundle — the `env`/`type` document, not anything CI-specific.
+
+```yaml
+metadata:
+  default: metadata.json
+  platforms:
+    darwin/amd64: metadata-darwin.json
+    darwin/arm64: metadata-darwin.json
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|--------------|
+| `default` | string | Yes, when `metadata:` is present | Path to the metadata file, relative to the spec's own directory. |
+| `platforms` | object | No | Platform key → metadata path, relative to the spec's own directory. A listed platform uses this file instead of `default` — for a tool whose install layout differs by platform (e.g. a macOS `.app` bundle needs a different `PATH` entry than the Linux layout). |
+
+Both paths resolve against the directory holding the spec file, never the repository root — the same rule [`catalog`](#catalog) follows, and the opposite of [`tests.script`](#multi-spec-script-path). Every path is checked for existence when the spec loads; a missing file is a spec-load failure (exit 65), not a runtime surprise.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
@@ -572,7 +629,7 @@ tests:
     script: buildifier/tests/smoke.star
 ```
 
-not `tests/smoke.star`. `metadata.default` and [`catalog.readme` / `catalog.logo`](#catalog) work the other way — both resolve against the spec's own directory — so the same-looking relative path means something different depending on which key it sits under. The nested workflow's own trigger-path comment says as much, so the gap is visible without opening this page:
+not `tests/smoke.star`. [`metadata.default`](#metadata) and [`catalog.readme` / `catalog.logo`](#catalog) work the other way — both resolve against the spec's own directory — so the same-looking relative path means something different depending on which key it sits under. The nested workflow's own trigger-path comment says as much, so the gap is visible without opening this page:
 
 ```yaml
     paths:
