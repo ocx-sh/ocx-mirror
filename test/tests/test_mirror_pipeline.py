@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -115,6 +116,132 @@ def test_pipeline_generate_ci_produces_yaml(mirror_binary: Path, pipeline_spec: 
     # reason; not worth a new dependency on its own.
     assert "on:" in content, "Generated workflow must have 'on:' trigger"
     assert "jobs:" in content, "Generated workflow must have 'jobs:'"
+
+
+# ---------------------------------------------------------------------------
+# §3.8: Multi-spec repositories
+#
+# Unit tests cover the renderer and the naming rules. What only a filesystem can
+# witness is that a real spec pair on disk renders workflows the drift guard
+# then accepts — the generate → check round trip every mirror repo's CI runs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def two_spec_repo(tmp_path: Path) -> Path:
+    """A repository holding two mirror specs, each in its own subdirectory.
+
+    The asset port is a literal rather than a live server's: `generate ci` never
+    fetches, but the URL still has to parse or `load_spec` rejects the spec.
+    """
+    repo = tmp_path / "repo"
+    for directory in ("shfmt", "shellcheck"):
+        spec_dir = repo / directory
+        shutil.copytree(FIXTURES_DIR, spec_dir)
+        spec = spec_dir / "mirror.yml"
+        spec.write_text(
+            spec.read_text()
+            .replace("__ASSET_PORT__", "9999")
+            .replace("test-shfmt-pipeline", f"test-{directory}-pipeline")
+            .replace("name: shfmt", f"name: {directory}")
+        )
+    return repo
+
+
+def _generate_ci(mirror_binary: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(mirror_binary), "package", "pipeline", "generate", "ci", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_generate_ci_renders_one_workflow_set_per_spec(
+    mirror_binary: Path, two_spec_repo: Path
+) -> None:
+    """§3.8: two specs in subdirectories render two suffixed workflow sets,
+    and `--check` accepts them immediately afterwards.
+
+    The round trip is the claim: a renderer whose output its own drift guard
+    rejects would red every mirror repo's CI on the commit that generated it.
+    """
+    spec_args = [
+        "--spec", str(two_spec_repo / "shfmt" / "mirror.yml"),
+        "--spec", str(two_spec_repo / "shellcheck" / "mirror.yml"),
+    ]
+
+    result = _generate_ci(mirror_binary, *spec_args)
+    assert result.returncode == 0, f"generate ci failed (rc={result.returncode}): {result.stderr}"
+
+    workflows = two_spec_repo / ".github" / "workflows"
+    for name in ("mirror-shfmt.yml", "describe-shfmt.yml", "mirror-shellcheck.yml",
+                 "describe-shellcheck.yml", "verify-generated.yml"):
+        assert (workflows / name).exists(), f"{name} was not rendered: {sorted(workflows.iterdir())}"
+    # Unsuffixed names belong to a repo-root spec, which this repository has
+    # none of; their presence would mean one spec overwrote the other.
+    assert not (workflows / "mirror.yml").exists()
+    assert not (workflows / "describe.yml").exists()
+
+    # Each spec's workflows drive their own spec — a set pointing at the other's
+    # would mirror the wrong tool under the right workflow name.
+    assert "--spec shfmt/mirror.yml" in (workflows / "mirror-shfmt.yml").read_text()
+    assert "--spec shellcheck/mirror.yml" in (workflows / "mirror-shellcheck.yml").read_text()
+
+    check = _generate_ci(mirror_binary, *spec_args, "--check")
+    assert check.returncode == 0, f"--check must be green on freshly generated files: {check.stderr}"
+
+
+def test_generate_ci_check_reds_on_a_hand_edited_workflow(
+    mirror_binary: Path, two_spec_repo: Path
+) -> None:
+    """§3.8 / R4: the drift guard covers every spec's workflows, not just the
+    first one's.
+
+    The red half of the round trip above: without it, a `--check` that passed
+    unconditionally would satisfy that test.
+    """
+    spec_args = [
+        "--spec", str(two_spec_repo / "shfmt" / "mirror.yml"),
+        "--spec", str(two_spec_repo / "shellcheck" / "mirror.yml"),
+    ]
+    assert _generate_ci(mirror_binary, *spec_args).returncode == 0
+
+    edited = two_spec_repo / ".github" / "workflows" / "mirror-shellcheck.yml"
+    edited.write_text(edited.read_text() + "\n# hand-edited\n")
+
+    check = _generate_ci(mirror_binary, *spec_args, "--check")
+
+    assert check.returncode == 65, f"drift must exit 65, got {check.returncode}: {check.stderr}"
+    assert "drift: .github/workflows/mirror-shellcheck.yml" in check.stderr, check.stderr
+
+
+def test_generate_ci_check_reds_on_a_workflow_left_by_a_dropped_spec(
+    mirror_binary: Path, two_spec_repo: Path
+) -> None:
+    """§3.8 / R4: deleting a spec must not leave its workflows running.
+
+    A dropped spec's `mirror-<dir>.yml` keeps its schedule and keeps mirroring
+    on a spec nobody maintains, so the guard reports it as stale rather than
+    ignoring a file it no longer renders.
+    """
+    assert _generate_ci(
+        mirror_binary,
+        "--spec", str(two_spec_repo / "shfmt" / "mirror.yml"),
+        "--spec", str(two_spec_repo / "shellcheck" / "mirror.yml"),
+    ).returncode == 0
+
+    # The repo root is stated explicitly: with one spec it would otherwise
+    # resolve to that spec's own directory, and the check would be looking at an
+    # empty `.github/` rather than at the repository's.
+    check = _generate_ci(
+        mirror_binary,
+        "--repo-root", str(two_spec_repo),
+        "--spec", str(two_spec_repo / "shfmt" / "mirror.yml"),
+        "--check",
+    )
+
+    assert check.returncode == 65, f"a stale workflow must exit 65, got {check.returncode}: {check.stderr}"
+    assert "stale: .github/workflows/mirror-shellcheck.yml" in check.stderr, check.stderr
 
 
 def test_pipeline_plan_reports_the_unmirrored_version(
@@ -281,8 +408,9 @@ def test_pipeline_notify_is_silent_for_an_all_skipped_run(
         ["push"],
         ["notify"],
         ["announce"],
+        ["patch"],
     ],
-    ids=["group", "generate-ci", "plan", "prepare", "push", "notify", "announce"],
+    ids=["group", "generate-ci", "plan", "prepare", "push", "notify", "announce", "patch"],
 )
 def test_pipeline_subcommand_is_registered(mirror_binary: Path, subcommand: list[str]) -> None:
     """§3.8: every pipeline subcommand answers `--help`.

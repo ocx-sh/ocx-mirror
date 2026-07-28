@@ -96,22 +96,41 @@ def mirror(mirror_binary: Path, registry: str, tmp_path: Path) -> MirrorRunner:
 
 @pytest.fixture()
 def unique_mirror_repo(request: pytest.FixtureRequest) -> str:
-    """Generate a unique OCI repository name for mirror tests."""
+    """Generate a unique OCI repository name for mirror tests.
+
+    The truncation is trailing-separator safe: an OCI repository name may not
+    end in `_`, so a test whose name happens to have one at character 40 would
+    otherwise publish into a repository every registry rejects with a 404 on
+    the blob-upload endpoint — a failure that reads like a broken registry.
+    """
     short_id = uuid4().hex[:8]
-    name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40]
+    name = re.sub(r"[^a-z0-9_]", "", request.node.name.lower())[:40].rstrip("_")
     return f"m_{short_id}_{name}"
 
 
 @pytest.fixture()
 def asset_server(tmp_path: Path):
-    """Start a local HTTP server serving files from tmp_path/assets/."""
+    """Start a local HTTP server serving files from tmp_path/assets/.
+
+    Every request is recorded on ``.requests`` as ``"<METHOD> <path>"``. That
+    list is what makes "the patch fetched nothing upstream" an assertion rather
+    than an inference: a run that downloaded is visible here, and the publish
+    leg's own entries prove the recorder was live.
+    """
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir()
+    requests: list[str] = []
 
-    handler = http.server.SimpleHTTPRequestHandler
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def send_head(self):
+            # Both GET and HEAD route through here, so one override sees every
+            # read of an upstream asset regardless of how it was requested.
+            requests.append(f"{self.command} {self.path}")
+            return super().send_head()
+
     httpd = http.server.HTTPServer(
         ("127.0.0.1", 0),
-        lambda *args: handler(*args, directory=str(assets_dir)),
+        lambda *args: Handler(*args, directory=str(assets_dir)),
     )
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -122,6 +141,7 @@ def asset_server(tmp_path: Path):
             self.dir = assets_dir
             self.port = port
             self.base_url = f"http://127.0.0.1:{port}"
+            self.requests = requests
 
         def url(self, path: str) -> str:
             return f"{self.base_url}/{path}"
