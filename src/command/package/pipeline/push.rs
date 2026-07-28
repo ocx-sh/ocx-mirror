@@ -1177,11 +1177,20 @@ pub(crate) async fn invoke_announce(
 /// pull request: an announce whose branch is ahead of the index base ensures
 /// one without committing anything, and those tags are as pending as a fresh
 /// run's. Only `unchanged` *and* no pull request means nothing happened.
+///
+/// `written_paths` is populated only in `--out` mode — the root plus one object
+/// per distinct curated tag, which is the file set a real run would commit. The
+/// `--fork` path returns it empty by construction, so it is the *dry run's*
+/// only quantitative fact and never the real run's.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct AnnounceReport {
     pub(crate) status: String,
     #[serde(default)]
     pub(crate) pull_request_url: Option<String>,
+    #[serde(default)]
+    pub(crate) written_paths: Vec<String>,
+    #[serde(default)]
+    pub(crate) reserved_tags_dropped: Vec<String>,
 }
 
 /// Resolve the path to the `ocx` binary.
