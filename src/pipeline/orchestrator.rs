@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use ocx_lib::cli::progress::{ProgressManager, Spinner};
 use ocx_lib::log;
+use ocx_lib::oci::Platform;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
@@ -23,6 +24,7 @@ use super::progress;
 use super::push;
 use super::verify;
 use crate::error::MirrorError;
+use crate::spec::{MetadataConfig, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// A task that completed the prepare phase (download + verify + bundle).
@@ -66,6 +68,60 @@ pub struct BundleEntry {
 pub struct VersionManifest {
     pub version: String,
     pub bundles: Vec<BundleEntry>,
+}
+
+/// The metadata a fresh publish would record for one `(version, platform)`.
+///
+/// Both forms come from the same resolved spec file, and both are needed
+/// because they land in different places: [`published`](Self::published) is the
+/// projection that becomes the OCI config blob, while
+/// [`sidecar_json`](Self::sidecar_json) is the platform-stamped file that
+/// `ocx package push --metadata` reads.
+pub(crate) struct ExpectedMetadata {
+    /// Published projection — byte-for-byte the config blob a push writes.
+    pub published: Metadata,
+    /// `-metadata.json` sidecar, with the platform recorded.
+    pub sidecar_json: String,
+}
+
+/// Computes the metadata a fresh publish of `platform` would produce today.
+///
+/// Download-free: reads the spec's metadata files and nothing else. `pipeline
+/// plan` compares this against what the registry currently records to detect
+/// drift, and `pipeline patch` re-publishes against it — so a spec fix reaches
+/// already-published versions without anyone deleting a tag.
+///
+/// The sidecar goes through [`package::sidecar_json`] rather than a plain
+/// serialization: it is what stamps the `platform` field, and `ocx package
+/// push --metadata` exits 65 on a sidecar that lacks one.
+pub(crate) fn expected_metadata(
+    config: &MetadataConfig,
+    platform: &Platform,
+    spec_dir: &Path,
+) -> Result<ExpectedMetadata> {
+    let authoring = package::resolve_metadata(config, &platform.to_string(), spec_dir)?;
+    let sidecar_json = package::sidecar_json(&authoring, platform)?;
+    // The published projection is also where a dependency declared only as a
+    // `platforms` pin map collapses to this platform's pin.
+    let published = authoring.to_published(platform)?;
+    Ok(ExpectedMetadata {
+        published,
+        sidecar_json,
+    })
+}
+
+/// The metadata configuration that governs `version`'s variant.
+///
+/// A variant-prefixed tag (`slim-3.13.9`) is published from its own variant's
+/// `metadata:` block where it has one, falling back to the spec-level block —
+/// the same resolution [`MirrorSpec::effective_variants`] performs for a sync
+/// run. Returns `None` when the tag names a variant the spec no longer
+/// declares, or when neither the variant nor the spec declares metadata.
+pub(crate) fn metadata_config_for(spec: &MirrorSpec, version: &Version) -> Option<MetadataConfig> {
+    spec.effective_variants()
+        .into_iter()
+        .find(|variant| variant.name.as_deref() == version.variant())
+        .and_then(|variant| variant.metadata)
 }
 
 /// Prepare all platforms for a single version: download, verify, and bundle.
@@ -435,9 +491,8 @@ pub(crate) async fn prepare_task(
     let bundle_path = task_dir.join("bundle.tar.xz");
 
     // Resolve metadata once (needed for both bundle and push)
-    let platform_str = task.platform.to_string();
-    let metadata = match &task.metadata_config {
-        Some(config) => package::resolve_metadata(config, &platform_str, &task.spec_dir)?,
+    let expected = match &task.metadata_config {
+        Some(config) => expected_metadata(config, &task.platform, &task.spec_dir)?,
         None => anyhow::bail!("no metadata configuration provided in spec"),
     };
 
@@ -445,13 +500,11 @@ pub(crate) async fn prepare_task(
     // generated CI workflow's `cp` step copies the correct per-platform file
     // (not the spec-level default metadata.json from the working directory).
     // Written before the early-exit check so resume runs also refresh the file.
-    let metadata_json = package::sidecar_json(&metadata, &task.platform)?;
-    tokio::fs::write(task_dir.join("metadata.json"), metadata_json).await?;
+    tokio::fs::write(task_dir.join("metadata.json"), &expected.sidecar_json).await?;
 
     // The in-process push carries the platform beside the metadata in `Info`,
-    // so it needs the published projection — which is also where a dependency
-    // declared only as a `platforms` pin map collapses to this platform's pin.
-    let metadata = metadata.to_published(&task.platform)?;
+    // so it needs the published projection.
+    let metadata = expected.published;
 
     if bundle_path.exists() {
         // Resume: bundle already exists, metadata.json already written above.
