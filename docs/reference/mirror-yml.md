@@ -22,8 +22,9 @@
 | `notify` | object | No | Discord webhook notification settings |
 | `announce` | object | No | Index announce settings. See [`announce`](#announce). |
 | `annotations` | object | No | Extra OCI annotations written onto every published image index. See [`annotations`](#annotations). |
+| `catalog` | object | No | README + logo published as registry catalog metadata. See [`catalog`](#catalog). |
 
-The `tests`, `platforms`, `ocx_mirror`, `notify`, and `announce` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
+The `tests`, `platforms`, `ocx_mirror`, `notify`, `announce`, and `catalog` keys are used only by `ocx-mirror package pipeline` subcommands. `sync` and `check` ignore them.
 
 ## `target` {#target}
 
@@ -120,15 +121,22 @@ tests:
   - name: version
     command: cmake --version
   - name: smoke
-    command: bash ./tests/smoke.sh
+    script: tests/smoke.star
 ```
+
+Each entry sets exactly one of three mutually exclusive fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `command` | string | Single-line shell command, executed verbatim in the leg's configured shell. Multi-line logic must live in a repository file invoked via shell (`bash ./tests/smoke.sh`, `pwsh -File ./tests/smoke.ps1`). |
+| `script` | string | Path to a [Starlark][starlark] `.star` file, run via `ocx package test --script`. **Resolves from the repository root**, not from the spec's own directory — see [`script:` resolves from the repository root](#multi-spec-script-path) for where that matters in a multi-spec repository. |
+| `script_inline` | string | Starlark source given inline (YAML `\|` block scalar), piped to `ocx package test --script -`. |
 
 **Rules:**
 
 - Required: must contain at least one entry when used with `pipeline generate ci`.
 - `name` must be unique within the file and must match `^[a-zA-Z][a-zA-Z0-9_-]*$`. The name appears as the JUnit test-case name, so it must be stable across runs.
-- `command` is a single-line string. Multi-line scripts must be files in the mirror repository and invoked via shell (`bash ./tests/smoke.sh`, `pwsh -File ./tests/smoke.ps1`).
-- No `script` field or auto-detection — command-only by design.
+- Exactly one of `command`, `script`, `script_inline` per entry — zero set or more than one set is rejected at validation time.
 
 **Environment exposed to every test command:**
 
@@ -448,6 +456,31 @@ Its `ocx-mirror` entry point is [`pipeline announce`][cli-announce]; the same co
 - `package` must be a `<namespace>/<package>` pair of lowercase alphanumerics with `.`, `_` or `-`. A bare tool name is rejected with exit code 65 (`DataError`).
 - `fork` and `index_repo` must each be an `<owner>/<repo>` pair. A pasted URL is rejected the same way.
 
+## `catalog` {#catalog}
+
+Configures the README and logo [`pipeline describe`][cli-describe] publishes to the target registry as the `__ocx.desc` referrer tag. Optional — omit the block and the defaults below apply.
+
+```yaml
+catalog:
+  readme: docs/catalog.md
+  logo: brand/logo.png
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|--------------|
+| `readme` | string | No | Path to the README, relative to the spec's own directory. Defaults to `CATALOG.md`. |
+| `logo` | string | No | Path to the logo, relative to the spec's own directory. When unset, the resolver probes `logo.svg` then `logo.png` in that same directory — SVG wins when both exist. |
+
+Both paths resolve against the directory holding the spec file, never the repository root — see [`catalog:` resolves from the spec's own directory](#multi-spec-catalog-path) for where that matters in a multi-spec repository.
+
+**Validation:**
+
+- `deny_unknown_fields` — a key other than `readme` or `logo` under `catalog:` is a spec-load failure (exit 65), not a silently-ignored typo.
+
+When the resolved README does not exist on disk, `pipeline describe` logs and exits 0 — the workflow is a no-op until catalog content lands in the repository.
+
 ## Spec inheritance {#inheritance}
 
 `mirror.yml` files support an `extends:` key for shallow merge from a parent spec. Child keys override parent keys at the top level. This is useful for sharing `source` and `assets` across variants of the same tool.
@@ -458,6 +491,108 @@ target:
   registry: private.registry.example.com
   repository: internal/cmake
 ```
+
+## Multi-spec repositories {#multi-spec}
+
+A mirror repository can hold more than one `mirror.yml` — one per package, each in its own directory. Some upstream projects release several standalone tools from a single tag: [bazelbuild/buildtools][bazelbuild-buildtools] ships `buildifier`, `buildozer`, and `unused-deps` from one release. Mirroring each as its own repository would triplicate the CI plumbing — and the drift guard, and the secrets — for tools that share one upstream release cadence. Putting each package's spec in its own directory and passing `--spec` once per spec keeps them in one repository: [`pipeline generate ci`][cli-generate-ci] renders an independent workflow set per spec and exactly one drift guard for the whole repository.
+
+**Repository layout.** `ocx-contrib/mirror-bazelbuild` already mirrors `bazelisk` from a `mirror.yml` at its root. Adding the three `buildtools` binaries means one directory per package, each holding its own `mirror.yml` and `CATALOG.md`, sharing the repository's one logo:
+
+```
+mirror-bazelbuild/
+├── mirror.yml                # bazelisk — stays at the repo root, unchanged
+├── logo.svg                  # shared by every spec in the repository
+├── buildifier/
+│   ├── mirror.yml
+│   └── CATALOG.md
+├── buildozer/
+│   ├── mirror.yml
+│   └── CATALOG.md
+└── unused-deps/
+    ├── mirror.yml
+    └── CATALOG.md
+```
+
+```sh
+ocx-mirror package pipeline generate ci \
+  --spec mirror.yml \
+  --spec buildifier/mirror.yml \
+  --spec buildozer/mirror.yml \
+  --spec unused-deps/mirror.yml
+```
+
+writes:
+
+```
+.github/workflows/
+├── mirror.yml                            # bazelisk — byte-identical to before
+├── describe.yml
+├── announce-from-registry.yml
+├── mirror-buildifier.yml
+├── describe-buildifier.yml
+├── announce-from-registry-buildifier.yml
+├── mirror-buildozer.yml
+├── describe-buildozer.yml
+├── announce-from-registry-buildozer.yml
+├── mirror-unused-deps.yml
+├── describe-unused-deps.yml
+├── announce-from-registry-unused-deps.yml
+└── verify-generated.yml                  # one guard, names all four specs
+```
+
+Naming a nested spec file `mirror.yml` is convention, not a requirement — the generated filenames derive from the spec's **directory**, never its filename (below). Keep the filename anyway: it matches every other spec in the repository, and it is the directory — not the name — that `--repo-root`'s default and the collision check both reason about.
+
+**Generated file names.** A spec at the repository root keeps today's filenames byte for byte — `mirror.yml`, `describe.yml`, `announce-from-registry.yml` — so a repository that adds its first nested spec never has to touch the workflows it already published. A spec anywhere else gets every filename suffixed with its directory, `/` joined by `-`:
+
+| Spec path (relative to repo root) | Suffix | `mirror.yml` becomes |
+|---|---|---|
+| `mirror.yml` | *(none)* | `mirror.yml` |
+| `buildifier/mirror.yml` | `-buildifier` | `mirror-buildifier.yml` |
+| `a/b/mirror.yml` | `-a-b` | `mirror-a-b.yml` |
+
+Because the suffix comes from the directory alone, **a directory may hold only one spec** — two specs sharing a directory, whatever their filenames, would render the same workflow set and silently overwrite each other. `generate ci` rejects this with exit 64 before writing anything.
+
+Every generated pipeline invocation in a nested spec's workflows names its own spec explicitly — `pipeline plan --spec buildifier/mirror.yml`, and likewise for `prepare`, `push`, `describe`, `announce`. The root spec's invocations never carry `--spec`: its path is exactly what every subcommand already defaults to, which is what keeps the root workflows byte-identical.
+
+**`--repo-root`.** Generated files are written under `--repo-root`, and every filename above is computed relative to it. Left unset, it defaults to the deepest directory every `--spec` given shares — for a single spec that is simply its parent directory, so `generate ci --spec /elsewhere/repo/mirror.yml` still writes into that repository rather than the current directory. A spec that does not resolve under `--repo-root` (explicit or inferred) is rejected with exit 64, naming `--repo-root` as the fix.
+
+**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` and `announce-from-registry-<dir>.yml` follow the same rule for their own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested), and each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
+
+**One drift guard per repository.** `verify-generated.yml` is emitted once no matter how many specs the repository holds. Its committed `paths:` list is the union of every spec's own triggers, and the `generate ci --check` command line it bakes in names every spec explicitly with `--spec` as soon as there is more than one — `--spec` appends rather than replaces, so a guard naming only a subset would silently stop checking the rest while staying green. The guard also reds when a `.github/workflows/*.yml` file carries the `# Generated by ocx-mirror` header but is not in the current spec set's output — the file a dropped spec leaves behind, which would otherwise keep running on schedule against a spec that no longer exists. Hand-written workflows without that header are never inspected.
+
+`allow_manual_edits: true` disarms the guard only when **every** spec in the repository sets it; a partial opt-out still emits the guard — covering every spec, including the ones that opted out — and `generate` prints a warning naming the dissenters.
+
+### `script:` resolves from the repository root {#multi-spec-script-path}
+
+A [`tests`](#tests) entry's `script:` path is read relative to where the workflow checks the repository out — the repository root — never the spec's own directory. In a single-spec repository the two coincide, so the distinction is invisible. In a multi-spec repository it is not: `buildifier/mirror.yml` must write
+
+```yaml
+tests:
+  - name: smoke
+    script: buildifier/tests/smoke.star
+```
+
+not `tests/smoke.star`. `metadata.default` and [`catalog.readme` / `catalog.logo`](#catalog) work the other way — both resolve against the spec's own directory — so the same-looking relative path means something different depending on which key it sits under. The nested workflow's own trigger-path comment says as much, so the gap is visible without opening this page:
+
+```yaml
+    paths:
+      # `script:` paths resolve from the repository root, not from buildifier/ —
+      # keep this spec's scripts under buildifier/ so editing one triggers this run.
+      - buildifier/**
+      - .github/workflows/mirror-buildifier.yml
+```
+
+### `catalog:` resolves from the spec's own directory {#multi-spec-catalog-path}
+
+[`catalog.readme` and `catalog.logo`](#catalog) resolve against the directory holding the spec file — the opposite of `script:` above. A logo shared at the repository root is invisible to a nested spec's default probe (`logo.svg`, then `logo.png`, looked for only in `buildifier/`), so every nested spec that wants the shared logo has to say so explicitly:
+
+```yaml
+# buildifier/mirror.yml
+catalog:
+  logo: ../logo.svg
+```
+
+`catalog:` is `deny_unknown_fields`, so a key from the wrong block — `default:` where `readme:` was meant, for instance — is a spec-load failure (exit 65), not a silently-ignored typo.
 
 ## Example: complete spec {#example}
 
@@ -524,6 +659,8 @@ notify:
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 [index-repo]: https://github.com/ocx-sh/index
+[starlark]: https://github.com/bazelbuild/starlark
+[bazelbuild-buildtools]: https://github.com/bazelbuild/buildtools
 
 <!-- internal -->
 [env-read]: ./environment.md#annotation-env
@@ -532,3 +669,5 @@ notify:
 [cmd-pipeline]: ./cli.md#pipeline
 [cmd-sync]: ./cli.md#sync
 [cli-announce]: ./cli.md#pipeline-announce
+[cli-generate-ci]: ./cli.md#pipeline-generate-ci
+[cli-describe]: ./cli.md#pipeline-describe
