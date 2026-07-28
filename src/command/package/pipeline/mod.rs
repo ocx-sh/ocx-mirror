@@ -3,7 +3,7 @@
 
 //! `ocx-mirror package pipeline` subcommand group.
 //!
-//! Seven subcommands implement the pre-publish multi-runner test pipeline:
+//! Eight subcommands implement the pre-publish multi-runner test pipeline:
 //!
 //! | Subcommand | GHA job | Purpose |
 //! |---|---|---|
@@ -14,11 +14,13 @@
 //! | `notify` | `notify` | Post Discord webhook summary |
 //! | `describe` | `describe` | Publish catalog metadata (README + logo) to the registry |
 //! | `announce` | `announce` | Announce every tag the registry holds into the index (dispatch-only) |
+//! | `patch` | (none) | Republish published metadata against the existing layers (CLI-only) |
 
 pub mod announce;
 pub mod describe;
 pub mod generate;
 pub mod notify;
+pub mod patch;
 pub mod plan;
 pub mod prepare;
 pub mod push;
@@ -51,6 +53,10 @@ pub enum PipelineCommand {
 
     /// Announce every tag the registry currently holds into the index.
     Announce(announce::Announce),
+
+    /// Republish the metadata of already-published versions, reusing their
+    /// layers.
+    Patch(patch::Patch),
 }
 
 impl PipelineCommand {
@@ -65,6 +71,7 @@ impl PipelineCommand {
             Self::Notify(cmd) => cmd.execute(printer).await,
             Self::Describe(cmd) => cmd.execute(printer).await,
             Self::Announce(cmd) => cmd.execute(printer).await,
+            Self::Patch(cmd) => cmd.execute(printer).await,
         }
     }
 }
