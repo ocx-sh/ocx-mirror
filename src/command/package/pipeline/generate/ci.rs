@@ -48,21 +48,122 @@ const DESCRIBE_TEMPLATE: &str = include_str!("templates/describe.yml");
 const VERIFY_GENERATED_TEMPLATE: &str = include_str!("templates/verify-generated.yml");
 const ANNOUNCE_FROM_REGISTRY_TEMPLATE: &str = include_str!("templates/announce-from-registry.yml");
 
+// ── Spec placement ───────────────────────────────────────────────────────────
+
+/// What `--spec` defaults to, and therefore the one spec path a generated
+/// invocation can leave unsaid.
+const DEFAULT_SPEC_PATH: &str = "./mirror.yml";
+
+/// The repo-root-relative spec path that `DEFAULT_SPEC_PATH` names.
+const DEFAULT_SPEC_NAME: &str = "mirror.yml";
+
+/// Where one spec's generated workflows land, and how they refer back to it.
+///
+/// Everything is derived from the spec's path *relative to the repository
+/// root* — never from its position in the argument list, so passing the same
+/// specs in a different order renders the same bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpecSlot {
+    /// Spec path relative to the repo root: `mirror.yml`, `py3.13/mirror.yml`.
+    relative: PathBuf,
+}
+
+impl SpecSlot {
+    fn new(spec: &Path, repo_root: &Path) -> Result<Self, MirrorError> {
+        let relative = spec.strip_prefix(repo_root).map_err(|_| {
+            MirrorError::SpecUsageError(format!(
+                "spec {} is not under the repository root {} — pass --repo-root",
+                spec.display(),
+                repo_root.display(),
+            ))
+        })?;
+        Ok(Self {
+            relative: relative.to_path_buf(),
+        })
+    }
+
+    /// The spec's own directory relative to the repo root; `None` at the root.
+    fn dir(&self) -> Option<&Path> {
+        self.relative.parent().filter(|dir| !dir.as_os_str().is_empty())
+    }
+
+    /// Filename suffix for this spec's workflows — empty at the repo root,
+    /// `-py3.13` for `py3.13/mirror.yml`, `-a-b` for `a/b/mirror.yml`.
+    fn suffix(&self) -> String {
+        match self.dir() {
+            None => String::new(),
+            Some(dir) => format!("-{}", slash_path(dir).replace('/', "-")),
+        }
+    }
+
+    /// Repo-root-relative path of one of this spec's generated workflows.
+    fn workflow(&self, stem: &str) -> PathBuf {
+        PathBuf::from(format!(".github/workflows/{}", self.workflow_name(stem)))
+    }
+
+    /// Bare filename of one of this spec's generated workflows.
+    fn workflow_name(&self, stem: &str) -> String {
+        format!("{stem}{}.yml", self.suffix())
+    }
+
+    /// The spec path as the generated workflows spell it: repo-root-relative
+    /// and `/`-separated, because they are read on a Linux runner.
+    fn source(&self) -> String {
+        slash_path(&self.relative)
+    }
+
+    /// `--spec <path>` threaded into this spec's generated invocations.
+    ///
+    /// Empty for the repo-root `mirror.yml`, whose path is exactly what every
+    /// pipeline command already defaults to — omitting it is what keeps the
+    /// published mirror repositories byte-identical to what they have
+    /// committed. Any other location is named explicitly.
+    fn spec_arg(&self) -> String {
+        if self.is_default() {
+            String::new()
+        } else {
+            format!(" --spec {}", self.source())
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        self.relative == Path::new(DEFAULT_SPEC_NAME)
+    }
+}
+
+/// `Path` → `/`-separated string. Generated workflows run on a Linux runner,
+/// so the separator is never the generating host's.
+fn slash_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 // ── Public struct ────────────────────────────────────────────────────────────
 
 /// Generate (or check) the CI workflow files for a mirror repository.
 ///
-/// In write mode: renders `.github/workflows/mirror.yml`,
-/// `.github/workflows/describe.yml`, and — unless the spec sets
-/// `allow_manual_edits: true` — the `verify-generated.yml` drift guard.
+/// One repository may hold several specs; `--spec` repeats. Generated
+/// filenames derive from where each spec sits under the repository root:
+/// `<root>/mirror.yml` renders `mirror.yml`, `describe.yml` and
+/// `announce-from-registry.yml`, while `<root>/py3.13/mirror.yml` renders the
+/// same three suffixed `-py3.13`. The `verify-generated.yml` drift guard is
+/// emitted once per repository and bakes in the full spec list, so the
+/// committed file is the record of which specs the repository has.
 ///
 /// In `--check` mode: exits 65 (DataError) if any generated file drifts from
-/// what would be produced; emits path-only hints to stderr.
+/// what would be produced, or if a generated workflow belongs to no spec any
+/// more; emits path-only hints to stderr.
 #[derive(clap::Parser)]
 pub struct GenerateCi {
-    /// Path to the mirror spec file.
-    #[arg(long, default_value = "./mirror.yml")]
-    pub spec: PathBuf,
+    /// Path to the mirror spec file; repeat once per spec the repository holds.
+    #[arg(long, default_value = DEFAULT_SPEC_PATH)]
+    pub spec: Vec<PathBuf>,
+
+    /// Repository root the workflows are written under [default: the directory every spec shares].
+    #[arg(long)]
+    pub repo_root: Option<PathBuf>,
 
     /// Check mode: verify generated files are up-to-date; exit 65 on drift.
     #[arg(long)]
@@ -75,58 +176,183 @@ pub struct GenerateCi {
 
 impl GenerateCi {
     pub async fn execute(&self, _printer: &DataInterface) -> Result<(), MirrorError> {
-        // Phase 1: policy-level pre-flight before load_spec.
-        //
-        // Check for `ocx_install:` key in the raw YAML text. MirrorSpec uses
-        // `#[serde(deny_unknown_fields)]` so load_spec would emit SpecInvalid (65),
-        // but plan §1.8 requires SpecUsageError (64) for this specific case.
-        // Peeking the raw bytes lets us intercept before serde rejects it.
-        let raw = tokio::fs::read_to_string(&self.spec)
-            .await
-            .map_err(|e| MirrorError::SpecNotFound(format!("{}: {e}", self.spec.display())))?;
-
-        if raw.lines().any(|line| {
-            let trimmed = line.trim_start();
-            trimmed.starts_with("ocx_install:") || trimmed == "ocx_install:"
-        }) {
-            return Err(MirrorError::SpecUsageError(
-                "ocx binary is installed via direct release download; \
-                 remove `ocx_install:` block. \
-                 Override `OCX_BINARY_OVERRIDE` env var at workflow level for integration tests"
-                    .to_string(),
-            ));
+        // Phases 1–3 per spec: raw pre-flight, structural load, content policy.
+        let mut specs = Vec::with_capacity(self.spec.len());
+        for path in &self.spec {
+            specs.push((path.clone(), load_one(path).await?));
         }
 
-        // Phase 2: load and validate spec (structural validation).
-        let spec = spec::load_spec(&self.spec).await?;
-
-        // Phase 3: content-policy validation on the parsed spec.
-        policy_check_notify(&spec)?;
-
-        if let Some(warning) = ghcr_owner_warning(&spec, std::env::var("GITHUB_REPOSITORY").ok().as_deref()) {
-            eprintln!("warning: {warning}");
+        // Phase 4: place every spec under the repository root, then render.
+        let repo_root = self.resolve_repo_root().await?;
+        let mut placed = Vec::with_capacity(specs.len());
+        for (path, spec) in specs {
+            let slot = SpecSlot::new(&canonical(&path).await?, &repo_root)?;
+            placed.push((slot, spec));
         }
+        // Sorted so neither the rendered bytes nor the drift verdict depend on
+        // the order the specs were passed in.
+        placed.sort_by(|(a, _), (b, _)| a.relative.cmp(&b.relative));
+        reject_colliding_slots(&placed)?;
 
-        // Phase 4: render all generated files.
-        let repo_root = self.spec.parent().unwrap_or(Path::new("."));
-        let files = render(&spec, repo_root)?;
-
-        // Surface the discouraged opt-out so it is never silently in effect: the
-        // drift guard is the only thing that keeps the generated workflows honest.
-        if spec.allow_manual_edits {
-            eprintln!(
-                "note: allow_manual_edits is set — the generated-workflow drift guard \
-                 (verify-generated.yml) is not emitted; hand-edits to generated workflows \
-                 go unchecked (discouraged)"
-            );
+        let named = placed.len() > 1;
+        for (slot, spec) in &placed {
+            if let Some(warning) = ghcr_owner_warning(spec, std::env::var("GITHUB_REPOSITORY").ok().as_deref()) {
+                eprintln!("warning: {}{warning}", label(slot, named));
+            }
         }
+        report_manual_edits(&placed);
+
+        let files = render(&placed);
 
         // Phase 5: write or check.
         if self.check {
-            check_drift(&files, repo_root).await
+            check_drift(&files, &repo_root).await
         } else {
-            write_files(&files, repo_root).await
+            write_files(&files, &repo_root).await
         }
+    }
+
+    /// The directory the generated workflows are written under.
+    ///
+    /// An explicit `--repo-root` wins. Otherwise it is the deepest directory
+    /// every `--spec` shares, which for a single-spec repository is the spec's
+    /// own parent — so `generate ci --spec /elsewhere/repo/mirror.yml` still
+    /// writes into that repository rather than into the current directory.
+    async fn resolve_repo_root(&self) -> Result<PathBuf, MirrorError> {
+        if let Some(root) = &self.repo_root {
+            return canonical(root).await;
+        }
+        let mut shared: Option<PathBuf> = None;
+        for path in &self.spec {
+            let parent = canonical(spec_parent(path)).await?;
+            shared = Some(match shared {
+                None => parent,
+                Some(current) => common_ancestor(&current, &parent),
+            });
+        }
+        shared.ok_or_else(|| MirrorError::SpecUsageError("no --spec given".to_string()))
+    }
+}
+
+/// Read, pre-flight and validate one spec file (phases 1–3).
+async fn load_one(path: &Path) -> Result<MirrorSpec, MirrorError> {
+    // Phase 1: policy-level pre-flight before load_spec.
+    //
+    // Check for `ocx_install:` key in the raw YAML text. MirrorSpec uses
+    // `#[serde(deny_unknown_fields)]` so load_spec would emit SpecInvalid (65),
+    // but plan §1.8 requires SpecUsageError (64) for this specific case.
+    // Peeking the raw bytes lets us intercept before serde rejects it.
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| MirrorError::SpecNotFound(format!("{}: {e}", path.display())))?;
+
+    if raw.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("ocx_install:") || trimmed == "ocx_install:"
+    }) {
+        return Err(MirrorError::SpecUsageError(
+            "ocx binary is installed via direct release download; \
+             remove `ocx_install:` block. \
+             Override `OCX_BINARY_OVERRIDE` env var at workflow level for integration tests"
+                .to_string(),
+        ));
+    }
+
+    // Phase 2: load and validate spec (structural validation).
+    let spec = spec::load_spec(path).await?;
+
+    // Phase 3: content-policy validation on the parsed spec.
+    policy_check_notify(&spec)?;
+
+    Ok(spec)
+}
+
+/// Resolve a path against the filesystem so spec paths and the repository root
+/// are comparable regardless of which of them the caller spelled relatively.
+async fn canonical(path: &Path) -> Result<PathBuf, MirrorError> {
+    tokio::fs::canonicalize(path)
+        .await
+        .map_err(|e| MirrorError::SpecUsageError(format!("cannot resolve {}: {e}", path.display())))
+}
+
+/// The directory holding `spec`, with a bare filename resolving to `.`.
+fn spec_parent(spec: &Path) -> &Path {
+    match spec.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
+}
+
+/// Deepest directory both paths lie under. Both are canonical, so they share at
+/// least the filesystem root.
+fn common_ancestor(a: &Path, b: &Path) -> PathBuf {
+    a.components()
+        .zip(b.components())
+        .take_while(|(x, y)| x == y)
+        .map(|(x, _)| x)
+        .collect()
+}
+
+/// Reject two specs that would render the same workflow set.
+///
+/// Output names come from the spec's *directory*, so two specs sharing one
+/// directory would silently overwrite each other — the exact failure repeatable
+/// `--spec` exists to fix. Expects `placed` sorted by relative path.
+fn reject_colliding_slots(placed: &[(SpecSlot, MirrorSpec)]) -> Result<(), MirrorError> {
+    for pair in placed.windows(2) {
+        let (first, second) = (&pair[0].0, &pair[1].0);
+        if first.suffix() == second.suffix() {
+            return Err(MirrorError::SpecUsageError(format!(
+                "specs `{}` and `{}` would render the same workflow files — \
+                 generated names derive from the spec's directory, so each spec needs its own",
+                first.source(),
+                second.source(),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// `"<spec>: "` when the run covers several specs, so a warning names the one
+/// it is about; empty for the single-spec repository, where it would be noise.
+fn label(slot: &SpecSlot, named: bool) -> String {
+    if named {
+        format!("{}: ", slot.source())
+    } else {
+        String::new()
+    }
+}
+
+/// Surface the discouraged `allow_manual_edits` opt-out so it is never silently
+/// in effect: the drift guard is the only thing keeping generated workflows
+/// honest.
+///
+/// One guard covers the whole repository, so a repository whose specs disagree
+/// gets the guard — the strictest spec wins, and the opt-out only takes effect
+/// when every spec asks for it. Naming the dissenters is what makes an
+/// unexpectedly-present guard explicable.
+fn report_manual_edits(placed: &[(SpecSlot, MirrorSpec)]) {
+    let opted_out: Vec<String> = placed
+        .iter()
+        .filter(|(_, spec)| spec.allow_manual_edits)
+        .map(|(slot, _)| slot.source())
+        .collect();
+    if opted_out.is_empty() {
+        return;
+    }
+    if opted_out.len() == placed.len() {
+        eprintln!(
+            "note: allow_manual_edits is set — the generated-workflow drift guard \
+             (verify-generated.yml) is not emitted; hand-edits to generated workflows \
+             go unchecked (discouraged)"
+        );
+    } else {
+        eprintln!(
+            "warning: allow_manual_edits is set on {} but not on every spec — one drift guard \
+             covers the whole repository, so verify-generated.yml is emitted anyway and \
+             hand-edits to those specs' workflows still fail CI",
+            opted_out.join(", "),
+        );
     }
 }
 
@@ -301,10 +527,50 @@ fn native_shell_for_platform<'a>(platform: &str, config: &'a PlatformConfig) -> 
     }
 }
 
+/// Render `on.*.paths` entries for one spec.
+///
+/// A repo-root spec keeps the repo-wide list it has always had. A spec in a
+/// subdirectory watches that subtree instead, so editing `py3.13/` never wakes
+/// the sibling specs' workflows. `root_entries` is the root spec's list minus
+/// its own workflow file, which is appended for both cases.
+fn trigger_paths(slot: &SpecSlot, root_entries: &[String], stem: &str) -> String {
+    let mut entries = match slot.dir() {
+        None => root_entries.to_vec(),
+        Some(dir) => vec![format!("{}/**", slash_path(dir))],
+    };
+    entries.push(format!(".github/workflows/{}", slot.workflow_name(stem)));
+
+    // A nested spec's subtree trigger only covers files under that subtree,
+    // while a test's `script:` path resolves from the repository root — unlike
+    // `metadata.default` and `catalog.*`, which resolve against the spec's own
+    // directory. Say so where the gap is, or the first Starlark test in a
+    // subdirectory spec silently stops triggering its own workflow.
+    let note = match slot.dir() {
+        None => String::new(),
+        Some(dir) => format!(
+            "      # `script:` paths resolve from the repository root, not from {0}/ —\n\
+             \x20     # keep this spec's scripts under {0}/ so editing one triggers this run.\n",
+            slash_path(dir),
+        ),
+    };
+
+    format!("{note}{}", indent_entries(&entries))
+}
+
+/// Format path entries as a YAML sequence under `paths:` (no trailing newline —
+/// the templates supply the surrounding lines).
+fn indent_entries(entries: &[String]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("      - {entry}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Render the GHA workflow YAML from a parsed spec.
 ///
 /// Substitution uses a simple `str::replace` chain — no templating engine dep.
-fn render_workflow(spec: &MirrorSpec) -> String {
+fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     let schedule_block = spec
         .versions
         .as_ref()
@@ -338,9 +604,23 @@ fn render_workflow(spec: &MirrorSpec) -> String {
     let test_run_steps = render_test_run_steps(&matrix);
     let target_identifier = spec.target.reference();
 
+    let triggers = trigger_paths(
+        slot,
+        &[
+            slot.source(),
+            "scripts/**".to_string(),
+            "tests/**".to_string(),
+            "metadata*.json".to_string(),
+        ],
+        "mirror",
+    );
+
     WORKFLOW_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_SOURCE}", &slot.source())
+        .replace("{SPEC_ARG}", &slot.spec_arg())
+        .replace("{TRIGGER_PATHS}", &triggers)
         .replace("{MIRROR_NAME}", &spec.name)
         .replace("{SCHEDULE_BLOCK}", &schedule_block)
         .replace("{TEST_MATRIX_ENTRIES}", &matrix_entries)
@@ -785,10 +1065,20 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
 /// `logo.*`, or `mirror.yml` and invokes
 /// `ocx-mirror package pipeline describe` to publish the README + logo to the
 /// `__ocx.desc` referrer tag on the target repository.
-fn render_describe(spec: &MirrorSpec) -> String {
+fn render_describe(spec: &MirrorSpec, slot: &SpecSlot) -> String {
+    let triggers = trigger_paths(
+        slot,
+        &["CATALOG.md".to_string(), "logo.*".to_string(), slot.source()],
+        "describe",
+    );
+
     DESCRIBE_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_SOURCE}", &slot.source())
+        .replace("{SPEC_ARG}", &slot.spec_arg())
+        .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
+        .replace("{TRIGGER_PATHS}", &triggers)
         .replace("{DESCRIBE_PERMISSIONS}", render_describe_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
@@ -806,34 +1096,70 @@ fn render_describe(spec: &MirrorSpec) -> String {
 /// all land on the index repository, through `OCX_ANNOUNCE_TOKEN`, never through
 /// the job's own `GITHUB_TOKEN`. Handing it `packages: write` would grant the
 /// one scope that could overwrite the very artifacts it exists to describe.
-fn render_announce_from_registry(spec: &MirrorSpec) -> String {
+fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     ANNOUNCE_FROM_REGISTRY_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_SOURCE}", &slot.source())
+        .replace("{SPEC_ARG}", &slot.spec_arg())
+        .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
         .replace("{ANNOUNCE_PERMISSIONS}", render_discover_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+}
+
+/// The `--spec` arguments the drift guard re-renders the repository with.
+///
+/// Empty for the lone repo-root `mirror.yml`, whose path is what `--spec`
+/// already defaults to — that is what keeps every published mirror's committed
+/// guard byte-identical. As soon as the repository holds a spec the default
+/// cannot name, *every* spec is listed: `--spec` appends, so naming one would
+/// silently drop the rest and the guard would check a subset while looking green.
+fn verify_spec_args(slots: &[&SpecSlot]) -> String {
+    if slots.iter().all(|slot| slot.is_default()) {
+        return String::new();
+    }
+    slots.iter().map(|slot| format!(" --spec {}", slot.source())).collect()
 }
 
 /// Render the `verify-generated.yml` drift-guard workflow.
 ///
 /// The workflow runs `ocx-mirror package pipeline generate ci --check` on pull requests
-/// and pushes, so a hand-edit to any generated workflow fails CI. Emitted unless
-/// the spec opts out via `allow_manual_edits` (see [`render`]); only the header
-/// placeholders need substitution — the body is spec-independent.
-fn render_verify_generated() -> String {
+/// and pushes, so a hand-edit to any generated workflow fails CI. Exactly one is
+/// emitted per repository — it names every spec, and its path triggers are the
+/// union of theirs, which makes the committed file the record of what the
+/// repository mirrors. Emitted unless *every* spec opts out via
+/// `allow_manual_edits` (see [`render`]).
+fn render_verify_generated(slots: &[&SpecSlot]) -> String {
+    let mut entries = Vec::new();
+    for slot in slots {
+        match slot.dir() {
+            None => entries.extend([
+                slot.source(),
+                "scripts/**".to_string(),
+                "tests/**".to_string(),
+                "metadata*.json".to_string(),
+            ]),
+            Some(dir) => entries.push(format!("{}/**", slash_path(dir))),
+        }
+    }
+    entries.push(".github/workflows/**".to_string());
+
+    let sources = slots.iter().map(|slot| slot.source()).collect::<Vec<_>>().join(", ");
+
     VERIFY_GENERATED_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
         .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_SOURCE}", &sources)
+        .replace("{SPEC_ARGS}", &verify_spec_args(slots))
+        .replace("{TRIGGER_PATHS}", &indent_entries(&entries))
 }
 
-/// Build the full map of relative path → file content for all generated files.
-///
-/// Keys are relative to the repo root (i.e. the spec file's parent directory).
-fn render(spec: &MirrorSpec, _repo_root: &Path) -> Result<BTreeMap<PathBuf, String>, MirrorError> {
+/// Build the map of repo-root-relative path → file content for one spec.
+fn render_spec(spec: &MirrorSpec, slot: &SpecSlot) -> BTreeMap<PathBuf, String> {
     let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
 
-    files.insert(PathBuf::from(".github/workflows/mirror.yml"), render_workflow(spec));
-    files.insert(PathBuf::from(".github/workflows/describe.yml"), render_describe(spec));
+    files.insert(slot.workflow("mirror"), render_workflow(spec, slot));
+    files.insert(slot.workflow("describe"), render_describe(spec, slot));
 
     // Index catch-up workflow: only a mirror that announces has an index entry
     // to catch up. Emitted for every such mirror — there is no separate opt-in,
@@ -841,22 +1167,35 @@ fn render(spec: &MirrorSpec, _repo_root: &Path) -> Result<BTreeMap<PathBuf, Stri
     // the one that needs it, and it cannot know that about itself.
     if spec.announce.is_some() {
         files.insert(
-            PathBuf::from(".github/workflows/announce-from-registry.yml"),
-            render_announce_from_registry(spec),
+            slot.workflow("announce-from-registry"),
+            render_announce_from_registry(spec, slot),
         );
     }
 
-    // Drift-guard workflow: emitted unless the spec opts out (discouraged). When
-    // present it runs `generate ci --check` in CI, failing on any hand-edit to a
-    // generated workflow. Skipping it means the repo owns its workflows by hand.
-    if !spec.allow_manual_edits {
+    files
+}
+
+/// Build the full map of relative path → file content for every generated file.
+///
+/// Keys are relative to the repository root. Every spec contributes its own
+/// workflow set; the repository contributes one drift guard, skipped only when
+/// *all* specs opt out via `allow_manual_edits` (discouraged) — a single guard
+/// covers every workflow, so one spec still wanting it is enough to emit it.
+fn render(placed: &[(SpecSlot, MirrorSpec)]) -> BTreeMap<PathBuf, String> {
+    let mut files: BTreeMap<PathBuf, String> = BTreeMap::new();
+    for (slot, spec) in placed {
+        files.extend(render_spec(spec, slot));
+    }
+
+    if placed.iter().any(|(_, spec)| !spec.allow_manual_edits) {
+        let slots: Vec<&SpecSlot> = placed.iter().map(|(slot, _)| slot).collect();
         files.insert(
             PathBuf::from(".github/workflows/verify-generated.yml"),
-            render_verify_generated(),
+            render_verify_generated(&slots),
         );
     }
 
-    Ok(files)
+    files
 }
 
 // ── Writer ────────────────────────────────────────────────────────────────────
@@ -913,12 +1252,50 @@ fn normalize_for_drift(content: &str) -> std::borrow::Cow<'_, str> {
     USES_REF_RE.replace_all(content, "${keep}")
 }
 
+/// First line of every file this renderer writes.
+const GENERATED_HEADER: &str = "# Generated by ocx-mirror";
+
+/// Generated workflows on disk that the current spec set no longer renders.
+///
+/// Dropping a spec leaves its workflows behind, and a mirror workflow whose
+/// spec no longer exists keeps running on schedule against a spec that is gone.
+/// Only files carrying the generated header are considered, so a repository's
+/// hand-written workflows are never touched.
+async fn stale_generated(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Vec<String> {
+    let workflows_dir = repo_root.join(".github/workflows");
+    let Ok(mut entries) = tokio::fs::read_dir(&workflows_dir).await else {
+        return Vec::new();
+    };
+
+    let mut stale = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext == "yml" || ext == "yaml") {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(repo_root) else {
+            continue;
+        };
+        if files.contains_key(relative) {
+            continue;
+        }
+        if tokio::fs::read_to_string(&path)
+            .await
+            .is_ok_and(|content| content.starts_with(GENERATED_HEADER))
+        {
+            stale.push(slash_path(relative));
+        }
+    }
+    stale.sort();
+    stale
+}
+
 /// Compare the expected generated files against what is on disk.
 ///
-/// Returns `RendererDrift` if any file is missing or has different content,
-/// after normalizing `uses:` action pins on both sides (see
-/// [`normalize_for_drift`]). Drift hints are path-only — never expose file
-/// contents to stderr (secret-hygiene rule R3).
+/// Returns `RendererDrift` if any file is missing, has different content — after
+/// normalizing `uses:` action pins on both sides (see [`normalize_for_drift`]) —
+/// or is a generated workflow no spec renders any more. Drift hints are
+/// path-only — never expose file contents to stderr (secret-hygiene rule R3).
 async fn check_drift(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Result<(), MirrorError> {
     let mut drifted: Vec<String> = Vec::new();
 
@@ -927,23 +1304,27 @@ async fn check_drift(files: &BTreeMap<PathBuf, String>, repo_root: &Path) -> Res
         match tokio::fs::read_to_string(&on_disk_path).await {
             Ok(actual) => {
                 if normalize_for_drift(&actual) != normalize_for_drift(expected) {
+                    // Emit path-only hint; content never printed (R3).
+                    eprintln!("drift: {}", relative_path.display());
                     drifted.push(relative_path.display().to_string());
                 }
             }
             Err(_) => {
                 // Missing file counts as drift.
+                eprintln!("drift: {}", relative_path.display());
                 drifted.push(relative_path.display().to_string());
             }
         }
     }
 
+    for path in stale_generated(files, repo_root).await {
+        eprintln!("stale: {path}");
+        drifted.push(path);
+    }
+
     if drifted.is_empty() {
         Ok(())
     } else {
-        for path in &drifted {
-            // Emit path-only hint; content never printed (R3).
-            eprintln!("drift: {path}");
-        }
         Err(MirrorError::RendererDrift(drifted))
     }
 }
@@ -959,24 +1340,60 @@ mod tests {
 
     // ── §3.3 S3: Golden tests for ocx-mirror generate ci ──────────────────
 
-    /// Copy a fixture file into `work_dir` and run `GenerateCi::execute()` with
-    /// the spec pointing at the copy. This ensures generated files land in
-    /// `work_dir` (spec parent = work_dir) rather than the fixtures directory.
-    ///
-    /// Returns `Err(MirrorError)` if the renderer rejects the spec.
-    fn render_fixture(fixture_name: &str, work_dir: &Path) -> Result<(), MirrorError> {
+    /// Copy a fixture into `work_dir` at `relative`, creating parents.
+    fn install_spec_at(fixture_name: &str, work_dir: &Path, relative: &str) -> PathBuf {
         let fixture_src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/")).join(fixture_name);
-        let spec_dest = work_dir.join(fixture_name);
+        let spec_dest = work_dir.join(relative);
+        std::fs::create_dir_all(spec_dest.parent().unwrap()).unwrap();
         std::fs::copy(&fixture_src, &spec_dest).expect("failed to copy fixture into work_dir");
+        spec_dest
+    }
 
+    /// Copy a fixture into `work_dir` as the repository's root `mirror.yml`.
+    ///
+    /// That is the layout every published mirror repository has, and the one
+    /// the goldens are pinned to: a repo-root `mirror.yml` is the single spec
+    /// path the generated invocations may leave unsaid.
+    fn install_spec(fixture_name: &str, work_dir: &Path) -> PathBuf {
+        install_spec_at(fixture_name, work_dir, "mirror.yml")
+    }
+
+    /// Run `generate ci` over `specs` with `repo_root` as the repository root.
+    fn generate(repo_root: &Path, specs: &[PathBuf], check: bool) -> Result<(), MirrorError> {
         let cmd = GenerateCi {
-            spec: spec_dest,
-            check: false,
+            spec: specs.to_vec(),
+            repo_root: Some(repo_root.to_path_buf()),
+            check,
             format: None,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
         rt.block_on(async { cmd.execute(&printer).await })
+    }
+
+    /// Install a fixture as `work_dir/mirror.yml` and render it there.
+    ///
+    /// Returns `Err(MirrorError)` if the renderer rejects the spec.
+    fn render_fixture(fixture_name: &str, work_dir: &Path) -> Result<(), MirrorError> {
+        let spec = install_spec(fixture_name, work_dir);
+        generate(work_dir, &[spec], false)
+    }
+
+    /// The slot a single-spec repository's root `mirror.yml` occupies.
+    fn root_slot() -> SpecSlot {
+        SpecSlot {
+            relative: PathBuf::from(DEFAULT_SPEC_NAME),
+        }
+    }
+
+    /// Render `mirror.yml` for an inline spec at the repository root.
+    fn workflow_of(yaml: &str) -> String {
+        render_workflow(&spec_from_yaml(yaml), &root_slot())
+    }
+
+    /// Render `describe.yml` for an inline spec at the repository root.
+    fn describe_of(yaml: &str) -> String {
+        render_describe(&spec_from_yaml(yaml), &root_slot())
     }
 
     #[test]
@@ -1443,37 +1860,15 @@ mod tests {
         let dir = tempdir().unwrap();
 
         // Copy the spec into the temp dir so generated files land there.
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
-
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
         // First: write mode render
-        let write_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest.clone(),
-                check: false,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let write_result = generate(dir.path(), &[spec.clone()], false);
 
         match write_result {
             Ok(()) => {
                 // Second: check mode — must return Ok(()) on no drift
-                let check_result = rt.block_on(async {
-                    let cmd = GenerateCi {
-                        spec: spec_dest,
-                        check: true,
-                        format: None,
-                    };
-                    cmd.execute(&printer).await
-                });
+                let check_result = generate(dir.path(), &[spec], true);
                 assert!(
                     check_result.is_ok(),
                     "check mode after fresh render must exit 0, got: {:?}",
@@ -1490,25 +1885,10 @@ mod tests {
     fn check_mode_exits_65_on_drift() {
         // §3.4: --check after mutating one line → exit 65 (DataError) with stderr hint
         let dir = tempdir().unwrap();
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
-
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
         // Write mode first
-        let write_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest.clone(),
-                check: false,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let write_result = generate(dir.path(), &[spec.clone()], false);
 
         if let Ok(()) = write_result {
             // Mutate generated file
@@ -1519,14 +1899,7 @@ mod tests {
                 std::fs::write(&workflow_path, content).unwrap();
 
                 // Check mode must return RendererDrift → exit 65
-                let check_result = rt.block_on(async {
-                    let cmd = GenerateCi {
-                        spec: spec_dest,
-                        check: true,
-                        format: None,
-                    };
-                    cmd.execute(&printer).await
-                });
+                let check_result = generate(dir.path(), &[spec], true);
 
                 match check_result {
                     Err(MirrorError::RendererDrift(paths)) => {
@@ -1569,24 +1942,9 @@ mod tests {
         // A downstream Renovate bump rewrites `uses: owner/action@<sha>  # vX`
         // in place. The drift guard must stay green — the mirror repo owns pins.
         let dir = tempdir().unwrap();
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let write_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest.clone(),
-                check: false,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let write_result = generate(dir.path(), &[spec.clone()], false);
 
         write_result.expect("write-mode render must succeed");
         {
@@ -1600,14 +1958,7 @@ mod tests {
             assert_ne!(bumped, content, "fixture must contain the checkout pin to bump");
             std::fs::write(&workflow_path, bumped).unwrap();
 
-            let check_result = rt.block_on(async {
-                let cmd = GenerateCi {
-                    spec: spec_dest,
-                    check: true,
-                    format: None,
-                };
-                cmd.execute(&printer).await
-            });
+            let check_result = generate(dir.path(), &[spec], true);
             assert!(
                 check_result.is_ok(),
                 "bumped action pin must not trip drift, got: {:?}",
@@ -1621,24 +1972,9 @@ mod tests {
         // Normalizing the pin must NOT weaken the guard against swapping the
         // action itself — changing owner/name is a hand-edit and must red.
         let dir = tempdir().unwrap();
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let write_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest.clone(),
-                check: false,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let write_result = generate(dir.path(), &[spec.clone()], false);
 
         write_result.expect("write-mode render must succeed");
         {
@@ -1648,14 +1984,7 @@ mod tests {
             assert_ne!(swapped, content, "fixture must contain a checkout `uses:` to swap");
             std::fs::write(&workflow_path, swapped).unwrap();
 
-            let check_result = rt.block_on(async {
-                let cmd = GenerateCi {
-                    spec: spec_dest,
-                    check: true,
-                    format: None,
-                };
-                cmd.execute(&printer).await
-            });
+            let check_result = generate(dir.path(), &[spec], true);
             match check_result {
                 Err(MirrorError::RendererDrift(paths)) => {
                     assert!(
@@ -1673,25 +2002,10 @@ mod tests {
     fn check_mode_exits_65_on_missing_generated_file() {
         // §3.4: --check with missing generated file → exit 65 with hint
         let dir = tempdir().unwrap();
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
-
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
         // Run check mode without prior render — files don't exist → must detect drift
-        let check_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest,
-                check: true,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let check_result = generate(dir.path(), &[spec], true);
 
         match check_result {
             Err(MirrorError::RendererDrift(_)) => {
@@ -1792,24 +2106,9 @@ mod tests {
     #[test]
     fn check_mode_detects_describe_yml_drift() {
         let dir = tempdir().unwrap();
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let write_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest.clone(),
-                check: false,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let write_result = generate(dir.path(), &[spec.clone()], false);
 
         if write_result.is_ok() {
             let describe_path = dir.path().join(".github/workflows/describe.yml");
@@ -1818,14 +2117,7 @@ mod tests {
             content.push_str("\n# drift injection\n");
             std::fs::write(&describe_path, content).unwrap();
 
-            let check_result = rt.block_on(async {
-                let cmd = GenerateCi {
-                    spec: spec_dest,
-                    check: true,
-                    format: None,
-                };
-                cmd.execute(&printer).await
-            });
+            let check_result = generate(dir.path(), &[spec], true);
 
             match check_result {
                 Err(MirrorError::RendererDrift(paths)) => {
@@ -1894,7 +2186,7 @@ asset_type:
     fn verify_generated_emitted_by_default_in_render_map() {
         // Field absent → default false → drift guard present in the render map.
         let spec = spec_from_yaml(SHFMT_SPEC);
-        let files = render(&spec, Path::new(".")).unwrap();
+        let files = render(&[(root_slot(), spec)]);
         assert!(
             files.contains_key(Path::new(".github/workflows/verify-generated.yml")),
             "verify-generated.yml must be in the render map by default"
@@ -1906,7 +2198,7 @@ asset_type:
         // Opt-out: `allow_manual_edits: true` drops the drift guard but keeps the
         // two primary generated workflows.
         let spec = spec_from_yaml(&format!("{SHFMT_SPEC}allow_manual_edits: true\n"));
-        let files = render(&spec, Path::new(".")).unwrap();
+        let files = render(&[(root_slot(), spec)]);
         assert!(
             files.contains_key(Path::new(".github/workflows/mirror.yml")),
             "mirror.yml must still be rendered when opting out"
@@ -1925,24 +2217,9 @@ asset_type:
     fn check_mode_detects_verify_generated_drift() {
         // A hand-edit to verify-generated.yml itself must be caught by `--check`.
         let dir = tempdir().unwrap();
-        let fixture_src = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/fixtures/mirror-minimal.yml"
-        ));
-        let spec_dest = dir.path().join("mirror-minimal.yml");
-        std::fs::copy(fixture_src, &spec_dest).unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
 
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-
-        let write_result = rt.block_on(async {
-            let cmd = GenerateCi {
-                spec: spec_dest.clone(),
-                check: false,
-                format: None,
-            };
-            cmd.execute(&printer).await
-        });
+        let write_result = generate(dir.path(), &[spec.clone()], false);
 
         if write_result.is_ok() {
             let verify_path = dir.path().join(".github/workflows/verify-generated.yml");
@@ -1951,14 +2228,7 @@ asset_type:
             content.push_str("\n# drift injection\n");
             std::fs::write(&verify_path, content).unwrap();
 
-            let check_result = rt.block_on(async {
-                let cmd = GenerateCi {
-                    spec: spec_dest,
-                    check: true,
-                    format: None,
-                };
-                cmd.execute(&printer).await
-            });
+            let check_result = generate(dir.path(), &[spec], true);
 
             match check_result {
                 Err(MirrorError::RendererDrift(paths)) => {
@@ -2211,7 +2481,7 @@ notify:
     #[test]
     fn render_injects_discord_user_id_into_notify_env() {
         let spec = spec_from_yaml(NOTIFY_SPEC_WITH_USER_ID);
-        let workflow = render_workflow(&spec);
+        let workflow = render_workflow(&spec, &root_slot());
         assert!(
             workflow.contains("OCX_MIRROR_DISCORD_USER_ID: \"123456789012345678\""),
             "notify env must inline the configured user id; workflow:\n{workflow}"
@@ -2223,7 +2493,7 @@ notify:
     #[test]
     fn render_omits_discord_user_id_when_unset() {
         let spec = spec_from_yaml(SHFMT_SPEC);
-        let workflow = render_workflow(&spec);
+        let workflow = render_workflow(&spec, &root_slot());
         assert!(
             !workflow.contains("OCX_MIRROR_DISCORD_USER_ID"),
             "no user-id env line when user_id is unset"
@@ -2242,7 +2512,7 @@ notify:
         // id: creds that probes OCX_MIRROR_REGISTRY_TOKEN via env-var injection
         // without echoing the secret value. The auth steps are rendered per
         // target registry, so this asserts on the rendered workflow.
-        let template = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let template = workflow_of(SHFMT_SPEC);
         let template = template.as_str();
         assert!(
             template.contains("name: Detect registry credentials"),
@@ -2274,7 +2544,7 @@ notify:
     fn push_job_login_step_has_creds_guard() {
         // The docker-login step in the push job must be guarded so it is skipped
         // when no credentials are present.
-        let template = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let template = workflow_of(SHFMT_SPEC);
         let template = template.as_str();
         // The login step and its guard must both be present in the workflow.
         assert!(
@@ -2287,7 +2557,7 @@ notify:
     fn push_job_push_step_has_creds_guard() {
         // The 'Push' step (ocx-mirror package pipeline push) must also be guarded so the
         // run-summary.json is only written when credentials are available.
-        let template = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let template = workflow_of(SHFMT_SPEC);
         let template = template.as_str();
         // Count occurrences: both login and push steps must have the guard.
         let guard = "if: ${{ steps.creds.outputs.have == 'true' }}";
@@ -2353,7 +2623,7 @@ notify:
         // describe.yml must also guard the docker-login so a repo with no secrets
         // goes green on the describe job. The steps come from the shared
         // renderer, so assert on the rendered workflow, not on the template.
-        let describe = render_describe(&spec_from_yaml(SHFMT_SPEC));
+        let describe = describe_of(SHFMT_SPEC);
         assert!(
             describe.contains("name: Detect registry credentials"),
             "describe workflow must contain 'Detect registry credentials' step"
@@ -2372,7 +2642,7 @@ notify:
     fn describe_workflow_login_and_publish_steps_have_creds_guard() {
         // Both the docker-login and the 'Publish catalog metadata' step in
         // describe.yml must carry the creds guard.
-        let describe = render_describe(&spec_from_yaml(SHFMT_SPEC));
+        let describe = describe_of(SHFMT_SPEC);
         let guard = "if: ${{ steps.creds.outputs.have == 'true' }}";
         let count = describe.matches(guard).count();
         assert!(
@@ -2429,8 +2699,13 @@ notify:
                 "prepare must pass --plan plan.json so the source is never re-crawled"
             );
             assert!(
-                content.contains("jq -c '[.versions[] | {version, platforms, kind}]'"),
-                "versions output must be projected so asset URLs stay out of the matrix JSON"
+                content.contains(
+                    "jq -c '[.versions[] | select(.kind != \"metadata-drift\") | {version, platforms, kind}]'"
+                ),
+                "versions output must be projected so asset URLs stay out of the matrix JSON, \
+                 and must drop metadata-drift entries — they carry no assets, so a prepare leg \
+                 for one aborts on `carries no resolved assets` whenever some other version in \
+                 the same run is genuinely new"
             );
         }
     }
@@ -2511,7 +2786,7 @@ announce:
         // download-artifact / upload-artifact use the runtime token for
         // same-run artifacts and need no scope here; the announce authenticates
         // with OCX_ANNOUNCE_TOKEN, not with GITHUB_TOKEN.
-        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+        let workflow = workflow_of(GHCR_SPEC);
 
         assert!(
             workflow.contains(
@@ -2528,7 +2803,7 @@ announce:
 
     #[test]
     fn ghcr_target_logs_in_with_github_token() {
-        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+        let workflow = workflow_of(GHCR_SPEC);
 
         assert!(
             workflow.contains("      packages: write\n"),
@@ -2560,7 +2835,7 @@ announce:
         // GITHUB_TOKEN is present on every run. If the probe kept testing for
         // OCX_MIRROR_REGISTRY_TOKEN, every GHCR push would take the "no creds"
         // branch and skip while still reporting success.
-        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+        let workflow = workflow_of(GHCR_SPEC);
 
         assert!(
             workflow.contains("run: echo \"have=true\" >> \"${GITHUB_OUTPUT}\"\n"),
@@ -2588,7 +2863,7 @@ announce:
         // not-found as an empty target (issue #157), so an unauthenticated
         // discover aborts the run before the push that would create the
         // package — the target could never come into existence.
-        let discover = discover_job(&render_workflow(&spec_from_yaml(GHCR_SPEC)));
+        let discover = discover_job(&workflow_of(GHCR_SPEC));
 
         assert!(
             discover.contains("docker login ghcr.io"),
@@ -2613,7 +2888,7 @@ announce:
     fn non_ghcr_discover_stays_anonymous_and_unprivileged() {
         // A public ocx.sh target lists tags anonymously, and the shared
         // OCX_MIRROR_REGISTRY_* secrets stay confined to the push job.
-        let discover = discover_job(&render_workflow(&spec_from_yaml(SHFMT_SPEC)));
+        let discover = discover_job(&workflow_of(SHFMT_SPEC));
 
         assert!(
             !discover.contains("docker login"),
@@ -2631,7 +2906,7 @@ announce:
         // the target. Switching the target host to ghcr.io without switching
         // the credential left it feeding ocx.sh org-secret credentials to
         // ghcr.io — a login that cannot succeed, and a scope the job never got.
-        let describe = render_describe(&spec_from_yaml(GHCR_SPEC));
+        let describe = describe_of(GHCR_SPEC);
 
         assert!(
             describe.contains("docker login ghcr.io"),
@@ -2653,7 +2928,7 @@ announce:
 
     #[test]
     fn non_ghcr_describe_keeps_the_org_secret_login_and_adds_no_permissions() {
-        let describe = render_describe(&spec_from_yaml(SHFMT_SPEC));
+        let describe = describe_of(SHFMT_SPEC);
 
         assert!(
             describe.contains("docker login ocx.sh"),
@@ -2671,7 +2946,7 @@ announce:
 
     #[test]
     fn non_ghcr_target_keeps_the_registry_secret_login_and_adds_no_permissions() {
-        let workflow = render_workflow(&spec_from_yaml(SHFMT_SPEC));
+        let workflow = workflow_of(SHFMT_SPEC);
 
         assert!(
             workflow.contains("docker login ocx.sh"),
@@ -2696,7 +2971,7 @@ announce:
         // The announce happens inside `ocx-mirror package pipeline push`, so
         // the token has to reach that step's env — there is no separate job.
         for spec in [SHFMT_SPEC, GHCR_SPEC] {
-            let workflow = render_workflow(&spec_from_yaml(spec));
+            let workflow = workflow_of(spec);
             assert!(
                 workflow.contains("OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
                 "push step must carry OCX_ANNOUNCE_TOKEN, got:\n{workflow}"
@@ -2707,7 +2982,7 @@ announce:
     #[test]
     fn every_placeholder_is_substituted_for_both_registries() {
         for spec in [SHFMT_SPEC, GHCR_SPEC] {
-            let workflow = render_workflow(&spec_from_yaml(spec));
+            let workflow = workflow_of(spec);
             assert!(
                 !workflow.contains("{PUSH_PERMISSIONS}") && !workflow.contains("{REGISTRY_AUTH_STEPS}"),
                 "unsubstituted placeholder in:\n{workflow}"
@@ -2748,7 +3023,7 @@ announce:
         // The tags file is the exact `--tags-from-file` the index call received.
         // Uploading only run-summary.json leaves nothing to reconstruct a
         // failed announce from.
-        let workflow = render_workflow(&spec_from_yaml(GHCR_SPEC));
+        let workflow = workflow_of(GHCR_SPEC);
 
         assert!(
             workflow
@@ -2849,5 +3124,340 @@ announce:
                  rendering a native spec would see this change"
             );
         }
+    }
+
+    // ── Multi-spec repositories ───────────────────────────────────────────────
+
+    /// A repository holding a root spec and a nested one, rendered.
+    ///
+    /// `mirror-ghcr-announce.yml` is the nested spec because it also emits an
+    /// `announce-from-registry` workflow, so the suffixing is exercised on all
+    /// three per-spec files rather than just two.
+    fn two_spec_repo(dir: &Path) -> Vec<PathBuf> {
+        let root = install_spec("mirror-minimal.yml", dir);
+        let nested = install_spec_at("mirror-ghcr-announce.yml", dir, "py3.13/mirror.yml");
+        vec![root, nested]
+    }
+
+    fn workflows_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir.join(".github/workflows"))
+            .expect("renderer must write .github/workflows")
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn two_specs_render_two_workflow_sets_and_one_drift_guard() {
+        // The bug repeatable `--spec` exists to fix: rendering the second spec
+        // used to overwrite the first, because every filename was fixed.
+        let dir = tempdir().unwrap();
+        let specs = two_spec_repo(dir.path());
+        generate(dir.path(), &specs, false).expect("two specs must render");
+
+        assert_eq!(
+            workflows_in(dir.path()),
+            vec![
+                "announce-from-registry-py3.13.yml",
+                "describe-py3.13.yml",
+                "describe.yml",
+                "mirror-py3.13.yml",
+                "mirror.yml",
+                "verify-generated.yml",
+            ],
+            "each spec owns a workflow set named after its directory, and the \
+             repository owns exactly one drift guard"
+        );
+
+        generate(dir.path(), &specs, true).expect("--check must be green right after a render");
+    }
+
+    #[test]
+    fn spec_argument_order_does_not_change_what_is_rendered() {
+        // Output that depended on argument order would make the drift guard —
+        // which passes the specs in one fixed order — red for anyone who typed
+        // them differently.
+        let forward = tempdir().unwrap();
+        let reverse = tempdir().unwrap();
+        let mut specs = two_spec_repo(forward.path());
+        generate(forward.path(), &specs, false).unwrap();
+
+        let mut reversed = two_spec_repo(reverse.path());
+        reversed.reverse();
+        generate(reverse.path(), &reversed, false).unwrap();
+
+        specs.sort();
+        for name in workflows_in(forward.path()) {
+            let a = std::fs::read_to_string(forward.path().join(".github/workflows").join(&name)).unwrap();
+            let b = std::fs::read_to_string(reverse.path().join(".github/workflows").join(&name)).unwrap();
+            assert_eq!(a, b, "{name} differs when the specs are passed in the other order");
+        }
+    }
+
+    #[test]
+    fn a_nested_spec_names_itself_in_every_generated_invocation() {
+        // Without `--spec`, every pipeline command in the nested spec's
+        // workflows would fall back to the repo-root `mirror.yml` and mirror
+        // the wrong tool while looking perfectly green.
+        let dir = tempdir().unwrap();
+        generate(dir.path(), &two_spec_repo(dir.path()), false).unwrap();
+
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(".github/workflows").join(name)).unwrap();
+
+        let mirror = read("mirror-py3.13.yml");
+        for command in ["plan", "prepare", "push"] {
+            assert!(
+                mirror.contains(&format!("pipeline {command} --spec py3.13/mirror.yml")),
+                "`pipeline {command}` must name its own spec, got:\n{mirror}"
+            );
+        }
+        assert!(
+            read("describe-py3.13.yml").contains("pipeline describe --spec py3.13/mirror.yml"),
+            "describe must name its own spec"
+        );
+        assert!(
+            read("announce-from-registry-py3.13.yml").contains("pipeline announce --spec py3.13/mirror.yml --dry-run"),
+            "announce must name its own spec"
+        );
+
+        // The root spec is the one path `--spec` already defaults to, so it
+        // stays unsaid — that is what keeps the published corpus byte-identical.
+        let root = read("mirror.yml");
+        assert!(
+            !root.contains("--spec"),
+            "the repo-root spec must not name itself, got:\n{root}"
+        );
+    }
+
+    #[test]
+    fn a_nested_spec_triggers_only_on_its_own_subtree() {
+        // Repo-wide triggers would wake every spec's workflow on every commit —
+        // forty mirror runs for a one-line change in one subdirectory.
+        let dir = tempdir().unwrap();
+        generate(dir.path(), &two_spec_repo(dir.path()), false).unwrap();
+
+        let nested = std::fs::read_to_string(dir.path().join(".github/workflows/mirror-py3.13.yml")).unwrap();
+        assert!(
+            nested.contains("      - py3.13/**\n      - .github/workflows/mirror-py3.13.yml\n"),
+            "a nested spec watches its own subtree and its own workflow, got:\n{nested}"
+        );
+        // `script:` resolves from the repo root while this trigger covers only
+        // the subtree — the gap has to be stated where it bites.
+        assert!(
+            nested.contains("# `script:` paths resolve from the repository root, not from py3.13/"),
+            "the subtree trigger must warn about repo-root-relative script paths, got:\n{nested}"
+        );
+        // That note is injected *inside* a YAML sequence, so a string assertion
+        // cannot see whether it corrupted the sequence. Parsing can.
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&nested)
+            .unwrap_or_else(|e| panic!("a nested spec must render parseable YAML: {e}\n{nested}"));
+        let paths = parsed["on"]["push"]["paths"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("push.paths must survive as a sequence, got:\n{nested}"));
+        assert_eq!(
+            paths.iter().map(|p| p.as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["py3.13/**", ".github/workflows/mirror-py3.13.yml"],
+            "the comment must not become an entry"
+        );
+        assert!(
+            !nested.contains("- scripts/**"),
+            "a nested spec must not claim the repository-wide paths, got:\n{nested}"
+        );
+
+        let describe = std::fs::read_to_string(dir.path().join(".github/workflows/describe-py3.13.yml")).unwrap();
+        assert!(
+            describe.contains("      - py3.13/**\n      - .github/workflows/describe-py3.13.yml\n"),
+            "got:\n{describe}"
+        );
+        assert!(
+            describe.contains("name: describe-py3.13\n"),
+            "sibling describes need distinct workflow names — `concurrency.group` keys \
+             on `github.workflow`, so identical names would serialise them, got:\n{describe}"
+        );
+    }
+
+    #[test]
+    fn the_drift_guard_records_every_spec_the_repository_has() {
+        // `--spec` appends, so a guard naming a subset would re-render only that
+        // subset and call the rest green. The committed guard is the record of
+        // what the repository mirrors.
+        let dir = tempdir().unwrap();
+        generate(dir.path(), &two_spec_repo(dir.path()), false).unwrap();
+        let guard = std::fs::read_to_string(dir.path().join(".github/workflows/verify-generated.yml")).unwrap();
+
+        assert!(
+            guard.contains(
+                "ocx-mirror package pipeline generate ci --check --spec mirror.yml --spec py3.13/mirror.yml\n"
+            ),
+            "the guard must re-render every spec, got:\n{guard}"
+        );
+        assert!(
+            guard.contains(
+                "    paths:\n      - mirror.yml\n      - scripts/**\n      - tests/**\n      \
+                 - metadata*.json\n      - py3.13/**\n      - .github/workflows/**\n"
+            ),
+            "the guard's triggers must be the union of the specs', got:\n{guard}"
+        );
+    }
+
+    #[test]
+    fn hand_editing_a_nested_workflow_reds_the_check_by_name() {
+        let dir = tempdir().unwrap();
+        let specs = two_spec_repo(dir.path());
+        generate(dir.path(), &specs, false).unwrap();
+
+        let edited = dir.path().join(".github/workflows/mirror-py3.13.yml");
+        let mut content = std::fs::read_to_string(&edited).unwrap();
+        content.push_str("\n# hand edit\n");
+        std::fs::write(&edited, content).unwrap();
+
+        match generate(dir.path(), &specs, true) {
+            Err(MirrorError::RendererDrift(paths)) => {
+                assert_eq!(
+                    paths,
+                    vec![".github/workflows/mirror-py3.13.yml"],
+                    "only the hand-edited file may be reported"
+                );
+            }
+            other => panic!("a hand-edited nested workflow must red, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dropping_a_spec_leaves_its_workflows_stale() {
+        // Without the stale sweep the dropped spec's `mirror-py3.13.yml` keeps
+        // running on schedule against a spec that no longer exists, and the
+        // drift guard — which only ever compared files it renders — stays green.
+        let dir = tempdir().unwrap();
+        let specs = two_spec_repo(dir.path());
+        generate(dir.path(), &specs, false).unwrap();
+
+        // Hand-written workflows have no generated header and must be ignored.
+        std::fs::write(dir.path().join(".github/workflows/release.yml"), "name: release\n").unwrap();
+
+        match generate(dir.path(), &specs[..1], true) {
+            Err(MirrorError::RendererDrift(paths)) => {
+                assert_eq!(
+                    paths,
+                    vec![
+                        // The committed guard still names the dropped spec —
+                        // that is exactly how the repository records what it
+                        // mirrors, so it drifts too.
+                        ".github/workflows/verify-generated.yml",
+                        ".github/workflows/announce-from-registry-py3.13.yml",
+                        ".github/workflows/describe-py3.13.yml",
+                        ".github/workflows/mirror-py3.13.yml",
+                    ],
+                    "every workflow of the dropped spec is stale — and nothing else"
+                );
+            }
+            other => panic!("dropping a spec must red on its leftover workflows, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_specs_in_one_directory_are_rejected() {
+        // Names derive from the directory, so these two would overwrite each
+        // other — silently, which is the whole failure being fixed.
+        let dir = tempdir().unwrap();
+        let first = install_spec("mirror-minimal.yml", dir.path());
+        let second = install_spec_at("mirror-ghcr-announce.yml", dir.path(), "other.yml");
+
+        match generate(dir.path(), &[first, second], false) {
+            Err(MirrorError::SpecUsageError(msg)) => {
+                assert!(msg.contains("mirror.yml") && msg.contains("other.yml"), "got: {msg}");
+            }
+            other => panic!("two specs in one directory must be a usage error, got: {other:?}"),
+        }
+        assert!(
+            !dir.path().join(".github/workflows").exists(),
+            "nothing may be written when the spec set is rejected"
+        );
+    }
+
+    #[test]
+    fn a_spec_outside_the_repository_root_is_rejected() {
+        let repo = tempdir().unwrap();
+        let elsewhere = tempdir().unwrap();
+        let outside = install_spec("mirror-minimal.yml", elsewhere.path());
+
+        match generate(repo.path(), &[outside], false) {
+            Err(MirrorError::SpecUsageError(msg)) => {
+                assert!(msg.contains("--repo-root"), "the error must name the fix, got: {msg}");
+            }
+            other => panic!("a spec outside the root must be a usage error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_drift_guard_survives_one_spec_opting_out() {
+        // One guard covers the whole repository, so the opt-out only takes
+        // effect when every spec asks for it — otherwise a single
+        // `allow_manual_edits` would disarm the guard for its siblings too.
+        let opt_out = format!("{SHFMT_SPEC}allow_manual_edits: true\n");
+        let nested = SpecSlot {
+            relative: PathBuf::from("py3.13/mirror.yml"),
+        };
+
+        let mixed = render(&[
+            (root_slot(), spec_from_yaml(SHFMT_SPEC)),
+            (nested.clone(), spec_from_yaml(&opt_out)),
+        ]);
+        assert!(
+            mixed.contains_key(Path::new(".github/workflows/verify-generated.yml")),
+            "one spec still wanting the guard is enough to emit it"
+        );
+
+        let all_out = render(&[
+            (root_slot(), spec_from_yaml(&opt_out)),
+            (nested, spec_from_yaml(&opt_out)),
+        ]);
+        assert!(
+            !all_out.contains_key(Path::new(".github/workflows/verify-generated.yml")),
+            "the guard is dropped only when every spec opts out"
+        );
+    }
+
+    #[test]
+    fn workflow_names_derive_from_the_spec_directory() {
+        for (relative, suffix) in [
+            ("mirror.yml", ""),
+            ("py3.13/mirror.yml", "-py3.13"),
+            ("a/b/mirror.yml", "-a-b"),
+        ] {
+            let slot = SpecSlot {
+                relative: PathBuf::from(relative),
+            };
+            assert_eq!(slot.suffix(), suffix, "suffix for {relative}");
+            assert_eq!(
+                slot.workflow("mirror"),
+                PathBuf::from(format!(".github/workflows/mirror{suffix}.yml")),
+                "workflow path for {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_repo_root_defaults_to_the_directory_the_specs_share() {
+        // `generate ci --spec /elsewhere/repo/mirror.yml` has to write into that
+        // repository. Defaulting the root to the process's own directory would
+        // scatter generated workflows wherever the command happened to run.
+        let dir = tempdir().unwrap();
+        let spec = install_spec("mirror-minimal.yml", dir.path());
+        let cmd = GenerateCi {
+            spec: vec![spec],
+            repo_root: None,
+            check: false,
+            format: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        rt.block_on(async { cmd.execute(&printer).await }).unwrap();
+
+        assert!(
+            dir.path().join(".github/workflows/mirror.yml").exists(),
+            "the workflows must land next to the spec"
+        );
     }
 }
