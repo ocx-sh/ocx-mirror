@@ -324,7 +324,7 @@ impl Push {
         // one per version or per platform. Concurrent announces on the same
         // package are a race the index singleflight exists to survive; there
         // is no reason to generate one from inside a single run.
-        let announce_token = std::env::var(ENV_ANNOUNCE_TOKEN).ok().filter(|t| !t.trim().is_empty());
+        let announce_token = announce_token();
         summary.announce = run_announce(
             spec.announce.as_ref(),
             &summary.versions,
@@ -899,7 +899,17 @@ async fn invoke_push(
 
 /// GitHub Actions secret carrying the token `ocx package announce` uses to
 /// push the fork branch and open the index pull request.
-const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
+pub(crate) const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
+
+/// The configured announce token, or `None` when the secret is absent or blank.
+///
+/// A repository without it is a valid configuration — forks and test repos —
+/// so every caller degrades on `None` rather than failing: the packages are in
+/// the registry either way, and an announce that was never attempted must not
+/// red a run that published exactly what it was asked to.
+pub(crate) fn announce_token() -> Option<String> {
+    std::env::var(ENV_ANNOUNCE_TOKEN).ok().filter(|t| !t.trim().is_empty())
+}
 
 /// Tags this run should announce: the union of `cascade_tags_written` across
 /// every version that actually published, in run order, deduped.
@@ -1273,6 +1283,25 @@ mod tests {
     fn job_url_env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn a_blank_announce_token_reads_as_no_token_at_all() {
+        // Both `push` and `patch` decide whether to announce on this one
+        // predicate, and both degrade on `None`. A GitHub secret that is
+        // configured-but-empty arrives as `""`, so treating "set" as "usable"
+        // would send every such repository into an announce that can only 401.
+        let _guard = job_url_env_lock();
+
+        // SAFETY: test-only process env, serialised by the lock above.
+        unsafe { std::env::set_var(ENV_ANNOUNCE_TOKEN, "gh-token") };
+        assert_eq!(announce_token().as_deref(), Some("gh-token"));
+
+        unsafe { std::env::set_var(ENV_ANNOUNCE_TOKEN, "   ") };
+        assert_eq!(announce_token(), None, "a blank secret is not a credential");
+
+        unsafe { std::env::remove_var(ENV_ANNOUNCE_TOKEN) };
+        assert_eq!(announce_token(), None);
     }
 
     // ── `ocx package push` argv assembly ──────────────────────────────────

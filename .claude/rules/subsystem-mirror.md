@@ -159,7 +159,7 @@ concurrency:
 
 ### R4: Generated drift guard (`verify-generated.yml`)
 
-`pipeline generate ci` emits a third workflow, `.github/workflows/verify-generated.yml`, alongside `mirror.yml` + `describe.yml`. On `pull_request` + push to `main` it runs `ocx-mirror package pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
+`pipeline generate ci` emits `.github/workflows/verify-generated.yml` alongside each spec's `mirror.yml` + `describe.yml` + `patch.yml` (+ `announce-from-registry.yml` when the spec announces). On `pull_request` + push to `main` it runs `ocx-mirror package pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
 
 **Pins are mirror-repo-owned.** Before diffing, `check_drift` normalizes every `uses: owner/action@<ref>` line (`normalize_for_drift` in `ci.rs`), stripping the `@<ref>` digest/tag and any trailing `# vX` comment. A downstream Renovate/Dependabot bump of an action pin therefore does **not** trip the guard — the mirror repo owns its pins. The `owner/action` identity is preserved, so swapping in a *different* action, or any change to step logic, still reds. Templates ship a known-good seed pin (incl. `ocx-sh/setup-ocx`, SHA-pinned) for the first render.
 

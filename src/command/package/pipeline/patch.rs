@@ -22,7 +22,9 @@
 //! A run that changed anything ends by announcing, because re-emitting a
 //! manifest changes its digest and leaves the index root pointing at the digests
 //! it replaced. A patched mirror whose index is stale is worse than an unpatched
-//! one, so a failed announce fails the command.
+//! one, so a failed announce fails the command — but an *absent*
+//! `OCX_ANNOUNCE_TOKEN` does not: a repository without the secret is a valid
+//! configuration, and it degrades to a notice exactly as `pipeline push` does.
 //!
 //! # Errors
 //!
@@ -45,7 +47,8 @@ use ocx_lib::publisher::{ArchiveMediaType, Publisher};
 
 use crate::command::package::pipeline::plan::{image_drifted, leaf_versions};
 use crate::command::package::pipeline::push::{
-    ANNOUNCE_TIMEOUT, TagSource, build_push_args, forward_ocx_env, invoke_announce, resolve_ocx_binary,
+    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, build_push_args, forward_ocx_env, invoke_announce,
+    resolve_ocx_binary,
 };
 use crate::command::package::target_registry::{self, PublishedImage};
 use crate::error::MirrorError;
@@ -185,25 +188,39 @@ impl Patch {
         // leaving them unannounced is the stale-index state this chain exists to
         // prevent. An absent `announce:` block means there is no index package
         // to announce into, which is not a failure.
+        //
+        // No `OCX_ANNOUNCE_TOKEN` is a valid configuration — forks and test
+        // repositories — and degrades exactly as the push job's announce does:
+        // recorded, not fatal. Failing here would red a run whose manifests
+        // already landed, over an announce that was never attempted.
         if republished > 0
             && let Some(config) = spec.announce.as_ref()
         {
+            if announce_token().is_none() {
+                println!(
+                    "::notice title=Index announce skipped::No {ENV_ANNOUNCE_TOKEN} secret — \
+                     {} republished {republished} manifest(s) but the index was not updated.",
+                    config.package,
+                );
+            }
             // `--tags-from-registry`, the same path `pipeline announce` drives:
             // a cascade re-points aliases the patch never named, so the tag set
             // to re-observe is the repository's, not the run's.
-            match invoke_announce(config, &TagSource::FromRegistry, None, &ocx_binary, ANNOUNCE_TIMEOUT).await {
-                Ok(report) => log::info!(
-                    "[announce] {} → {} ({}, {})",
-                    config.package,
-                    config.index_repo,
-                    report.status,
-                    report.pull_request_url.as_deref().unwrap_or("no pull request reported"),
-                ),
-                Err(error) => failures.push(format!(
-                    "index announce for {} failed: {error} — {republished} republished manifest(s) are live \
-                     and the index still points at the digests they replaced",
-                    config.package,
-                )),
+            else {
+                match invoke_announce(config, &TagSource::FromRegistry, None, &ocx_binary, ANNOUNCE_TIMEOUT).await {
+                    Ok(report) => log::info!(
+                        "[announce] {} → {} ({}, {})",
+                        config.package,
+                        config.index_repo,
+                        report.status,
+                        report.pull_request_url.as_deref().unwrap_or("no pull request reported"),
+                    ),
+                    Err(error) => failures.push(format!(
+                        "index announce for {} failed: {error} — {republished} republished manifest(s) are live \
+                         and the index still points at the digests they replaced",
+                        config.package,
+                    )),
+                }
             }
         }
 

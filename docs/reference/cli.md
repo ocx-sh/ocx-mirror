@@ -57,11 +57,11 @@ ocx-mirror schema <TARGET>
 
 ## `package pipeline` {#pipeline}
 
-Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe` and `announce` each own a standalone workflow outside that chain. `patch` has no generated job at all — it is dispatched by hand against an already-published mirror. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
+Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce` and `patch` each own a standalone workflow outside that chain; the `patch` and `announce` ones are `workflow_dispatch` only, because both act on an already-published mirror on a maintainer's decision. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
-Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` pair, plus `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
+Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` / `patch.yml` set, plus `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
 
 ```sh
 ocx-mirror package pipeline generate ci [OPTIONS]
@@ -183,7 +183,13 @@ Needs [`OCX_ANNOUNCE_TOKEN`][env-announce-token] unless `--dry-run` is set. Exit
 
 Correct the published metadata of versions the registry already holds, without re-downloading or re-uploading anything. Package metadata lives in the OCI config blob, never in a layer, so a fix is a manifest re-emission that re-references the existing layers by digest — the only bytes uploaded are a config blob the size of `metadata.json`. This is the retroactive counterpart to a `metadata-drift` entry in [`pipeline plan`](#pipeline-plan): fix `metadata.json` (or the spec's `metadata:` block) in the mirror repo, then run `patch` to reach every version already published under the old, wrong metadata — the alternative, deleting tags and re-mirroring, costs hours of upstream download and orphans anyone pinned to a digest.
 
-CLI-only; there is no `patch` job in the generated workflow, and dispatching it is a human decision.
+Runs from the generated `patch.yml` workflow, which is `workflow_dispatch` only — never scheduled, and deliberately not wired to `pipeline plan`'s `has_drift` output. Whether a drift finding is worth re-emitting manifests over is a maintainer's decision; the workflow exists so that acting on it does not need registry push credentials and an index token on somebody's laptop. Dispatch it from the repository's **Actions** tab, or:
+
+```sh
+gh workflow run patch.yml --repo <owner>/<mirror> -f version=3.29.0
+```
+
+Its three inputs are this command's selection flags. `version` takes one or several versions, separated by spaces or commas, and becomes one `--version` flag each; `min_version` and `max_version` pass through. An input left empty contributes no flag at all, so dispatching with every field blank patches every published version.
 
 ```sh
 ocx-mirror package pipeline patch --metadata-only [OPTIONS]
@@ -203,7 +209,7 @@ Omitting `--version`, `--min-version`, and `--max-version` all at once patches e
 
 **Idempotent.** A `(version, platform)` whose published config blob already matches what the spec would publish today is skipped — settled from the config descriptor's digest, with no registry blob fetch for the common case. There is no ledger and no stored range: the comparison against the currently published bytes is the entire mechanism, which is also why the version range lives only on this command line and not in `mirror.yml` — a stored range would need a ledger to know what it had already covered.
 
-**Announces on success.** A run that republished anything ends by announcing (the same `--tags-from-registry` path as [`pipeline announce`](#pipeline-announce)), because the re-emitted manifests are live under digests the index does not yet know. An announce that fails after a successful patch fails the command loudly: that is the state where the index still points at digests the patch just replaced.
+**Announces on success.** A run that republished anything ends by announcing (the same `--tags-from-registry` path as [`pipeline announce`](#pipeline-announce)), because the re-emitted manifests are live under digests the index does not yet know. An announce that fails after a successful patch fails the command loudly: that is the state where the index still points at digests the patch just replaced. An *absent* [`OCX_ANNOUNCE_TOKEN`][env-announce-token] does not fail it — a repository without the secret is a valid configuration, and the skip is recorded as a notice, exactly as in [`pipeline push`](#pipeline-push).
 
 **Layer pins are never disturbed.** Layer digests are unchanged by a metadata patch, so no layer is ever orphaned; the patched manifest gets its own canonical `sha256:<hex>` tag alongside the version tag.
 

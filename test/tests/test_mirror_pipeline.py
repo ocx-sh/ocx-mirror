@@ -174,13 +174,15 @@ def test_generate_ci_renders_one_workflow_set_per_spec(
     assert result.returncode == 0, f"generate ci failed (rc={result.returncode}): {result.stderr}"
 
     workflows = two_spec_repo / ".github" / "workflows"
-    for name in ("mirror-shfmt.yml", "describe-shfmt.yml", "mirror-shellcheck.yml",
-                 "describe-shellcheck.yml", "verify-generated.yml"):
+    for name in ("mirror-shfmt.yml", "describe-shfmt.yml", "patch-shfmt.yml",
+                 "mirror-shellcheck.yml", "describe-shellcheck.yml", "patch-shellcheck.yml",
+                 "verify-generated.yml"):
         assert (workflows / name).exists(), f"{name} was not rendered: {sorted(workflows.iterdir())}"
     # Unsuffixed names belong to a repo-root spec, which this repository has
     # none of; their presence would mean one spec overwrote the other.
     assert not (workflows / "mirror.yml").exists()
     assert not (workflows / "describe.yml").exists()
+    assert not (workflows / "patch.yml").exists()
 
     # Each spec's workflows drive their own spec — a set pointing at the other's
     # would mirror the wrong tool under the right workflow name.

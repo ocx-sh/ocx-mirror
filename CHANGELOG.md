@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pipeline generate ci` now emits a `patch.yml` workflow per spec, `workflow_dispatch` only, with `version` / `min_version` / `max_version` inputs that become `pipeline patch --metadata-only`'s selection flags; dispatching with every field empty patches every published version. Correcting published metadata no longer needs registry push credentials and an index token on a maintainer's machine *(mirror)*
+
 ### Changed
+
+- `pipeline patch` no longer fails when `OCX_ANNOUNCE_TOKEN` is absent: the closing announce is recorded as skipped, the same degradation `pipeline push` has. An announce that is attempted and fails still fails the command *(mirror)*
 
 - Discord notify now sends one message per published version instead of batching up to 10 embeds; consecutive messages are paced and HTTP 429 rate-limits are retried per the `retry_after` hint (#10) *(mirror)*
 - `pipeline generate ci` now rejects a `tests[].script:` path that does not exist, resolved from the repository root (exit 65, as for a missing `metadata.default`); per-platform test overrides are checked too, and a script sitting where a spec-directory-relative reading would put it is named in the error *(mirror)*
