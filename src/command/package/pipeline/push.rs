@@ -798,11 +798,16 @@ fn parse_bundle_filename(name: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Build the `ocx package push` argv for one bundle. Pure and unit-testable —
-/// locks the flag order and the `--annotation KEY=VALUE` tail without spawning
-/// a subprocess.
+/// Build the `ocx package push` argv. Pure and unit-testable — locks the flag
+/// order and the `--annotation KEY=VALUE` tail without spawning a subprocess.
 ///
 /// `--format` is a global ocx flag and must precede the subcommand.
+///
+/// `layers` are positional layer references in manifest order, each either a
+/// path to a built bundle (the push job) or a `sha256:<hex>.<ext>` reference to
+/// a layer the registry already holds (`pipeline patch`). `metadata` names the
+/// sidecar to publish; `None` lets `ocx` derive it from the first file layer,
+/// which is what the push job relies on.
 ///
 /// `cascade` decides whether this push also moves the rolling `latest` / `X` /
 /// `X.Y` aliases onto the version's image index. Without it the push writes the
@@ -817,17 +822,14 @@ fn parse_bundle_filename(name: &str) -> Option<(&str, &str)> {
 /// `--new` tells `ocx package push` to treat that failure as an empty tag set
 /// instead of aborting. It is a no-op once the repository exists (the tag
 /// list then succeeds and is used), so the mirror always passes it.
-fn build_push_args(
+pub(crate) fn build_push_args(
     platform: &str,
     target_ref: &str,
-    bundle_path: &Path,
+    layers: &[&str],
+    metadata: Option<&Path>,
     annotations: &BTreeMap<String, String>,
     cascade: bool,
 ) -> Result<Vec<String>, String> {
-    let bundle = bundle_path
-        .to_str()
-        .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?;
-
     let mut args: Vec<String> = ["--format", "json", "package", "push"]
         .iter()
         .map(|s| (*s).to_string())
@@ -836,10 +838,18 @@ fn build_push_args(
         args.push("--cascade".to_string());
     }
     args.extend(
-        ["--new", "-p", platform, "-i", target_ref, bundle]
+        ["--new", "-p", platform, "-i", target_ref]
             .iter()
             .map(|s| (*s).to_string()),
     );
+    if let Some(path) = metadata {
+        let sidecar = path
+            .to_str()
+            .ok_or_else(|| format!("metadata path is not valid UTF-8: {}", path.display()))?;
+        args.push("--metadata".to_string());
+        args.push(sidecar.to_string());
+    }
+    args.extend(layers.iter().map(|layer| (*layer).to_string()));
 
     args.extend(crate::annotations::push_args(annotations));
 
@@ -860,8 +870,11 @@ async fn invoke_push(
 ) -> Result<PushReport, String> {
     let ocx_binary = resolve_ocx_binary()?;
 
+    let bundle = bundle_path
+        .to_str()
+        .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?;
     let annotations = crate::annotations::build_annotations(&spec.annotations);
-    let args = build_push_args(platform, target_ref, bundle_path, &annotations, cascade)?;
+    let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade)?;
 
     let mut cmd = tokio::process::Command::new(&ocx_binary);
     cmd.args(&args);
@@ -1240,9 +1253,23 @@ mod tests {
     use super::*;
     use crate::run_summary::VersionStatus;
 
-    /// Serialises tests that mutate the shared `OCX_MIRROR_JOB_URL` process env
-    /// var. Without it two stamping tests race: one removes the var before the
-    /// other's `push` reads it at startup, dropping the expected stamp.
+    /// Serialises every test that drives a push against the process env it
+    /// reads — `OCX_MIRROR_JOB_URL`, `OCX_BINARY_PIN` and the announce token.
+    ///
+    /// Without it two stamping tests race: one removes `OCX_MIRROR_JOB_URL`
+    /// before the other's `push` reads it at startup, dropping the expected
+    /// stamp. `OCX_BINARY_PIN` is worse than a dropped stamp — [`invoke_push`]
+    /// resolves it per subprocess, so a test whose premise is "no `ocx` is
+    /// reachable" silently runs a *neighbouring* test's stand-in and merges its
+    /// platforms into that test's stand-in registry. That failed roughly one run
+    /// in twelve as a rolling alias carrying a version from another fixture.
+    ///
+    /// Every test that drives a push must hold this, whether or not it touches
+    /// the environment itself — the tests that DO set these vars are the hazard
+    /// to the ones that merely assume a clean environment. `std::sync::Mutex` is
+    /// not reentrant, so it is taken by the test rather than by
+    /// [`run_push_cmd`]: the tests that mutate env need it across a wider span
+    /// (set → push → assert) and would deadlock against an inner acquisition.
     fn job_url_env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|p| p.into_inner())
@@ -1263,7 +1290,8 @@ mod tests {
         let args = build_push_args(
             "linux/amd64",
             "ghcr.io/ocx-sh/shfmt:3.8.0",
-            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &["/bundles/shfmt.tar.xz"],
+            None,
             &annotations,
             true,
         )
@@ -1296,7 +1324,8 @@ mod tests {
         let args = build_push_args(
             "linux/amd64",
             "ghcr.io/ocx-sh/shfmt:3.8.0",
-            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &["/bundles/shfmt.tar.xz"],
+            None,
             &BTreeMap::new(),
             true,
         )
@@ -1315,7 +1344,8 @@ mod tests {
         let args = build_push_args(
             "linux/amd64",
             "ghcr.io/ocx-sh/shfmt:3.8.0",
-            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &["/bundles/shfmt.tar.xz"],
+            None,
             &BTreeMap::new(),
             false,
         )
@@ -1366,7 +1396,8 @@ mod tests {
         let args = build_push_args(
             "linux/amd64",
             "ghcr.io/ocx-sh/shfmt:3.8.0",
-            std::path::Path::new("/bundles/shfmt.tar.xz"),
+            &["/bundles/shfmt.tar.xz"],
+            None,
             &annotations,
             true,
         )
@@ -1455,6 +1486,7 @@ mod tests {
 
     #[test]
     fn and_across_containers_all_green_is_green() {
+        let _env_lock = job_url_env_lock();
         // §3.7: 3 containers all green → (V, P) green
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
@@ -1595,6 +1627,7 @@ mod tests {
 
     #[test]
     fn missing_junit_file_marks_platform_failed() {
+        let _env_lock = job_url_env_lock();
         // §3.7: 1 missing JUNIT file → VpDecision::Red with reason missing_junit
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
@@ -1712,6 +1745,7 @@ mod tests {
 
     #[test]
     fn push_cmd_execute_writes_run_summary() {
+        let _env_lock = job_url_env_lock();
         // §3.7: Push::execute writes run-summary.json with schema_version=1.
         let spec_path = std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -1767,6 +1801,7 @@ mod tests {
     // `summarise` step uses `if: always()` to write outputs.
     #[test]
     fn push_returns_err_whenever_any_red_even_with_partial_publish() {
+        let _env_lock = job_url_env_lock();
         // Test exercises the all-red sub-case (no bundles → no greens) but
         // the exit policy applies to partial-publish runs as well: any_red
         // → ExecutionFailed, regardless of whether some platforms published.
@@ -1823,6 +1858,7 @@ mod tests {
     // container) was reported "missing junit for container _native_".
     #[test]
     fn run_loop_resolves_containers_against_spec_when_bundles_are_slug_keyed() {
+        let _env_lock = job_url_env_lock();
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
         let summary_path = tempdir().unwrap().path().join("run-summary.json");
@@ -1912,6 +1948,7 @@ mod tests {
     /// producing whenever two places compute the slug independently.
     #[test]
     fn run_loop_resolves_a_libc_bearing_platform_back_from_its_bundle_slug() {
+        let _env_lock = job_url_env_lock();
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
         let summary_path = tempdir().unwrap().path().join("run-summary.json");
@@ -3713,6 +3750,7 @@ esac
 
     #[test]
     fn run_summary_omits_announce_when_the_run_never_announced() {
+        let _env_lock = job_url_env_lock();
         // `pipeline notify` reads this file; an absent announce must not
         // appear as a null field it has to special-case.
         let spec_path = std::path::Path::new(concat!(
