@@ -45,6 +45,7 @@ use ocx_lib::oci::{ClientBuilder, Descriptor, Identifier};
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::{ArchiveMediaType, Publisher};
 
+use crate::command::package::pipeline::announce;
 use crate::command::package::pipeline::plan::{image_drifted, leaf_versions};
 use crate::command::package::pipeline::push::{
     ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, build_push_args, forward_ocx_env, invoke_announce,
@@ -208,13 +209,21 @@ impl Patch {
             // to re-observe is the repository's, not the run's.
             else {
                 match invoke_announce(config, &TagSource::FromRegistry, None, &ocx_binary, ANNOUNCE_TIMEOUT).await {
-                    Ok(report) => log::info!(
-                        "[announce] {} → {} ({}, {})",
-                        config.package,
-                        config.index_repo,
-                        report.status,
-                        report.pull_request_url.as_deref().unwrap_or("no pull request reported"),
-                    ),
+                    // Always a real run (`out: None`), and reported through the
+                    // same formatter `pipeline announce` uses — a patch-driven
+                    // announce that curated nothing must not read differently
+                    // from one that did just because a different command drove it.
+                    Ok(report) => {
+                        let target = format!("{}/{}", spec.target.registry, spec.target.repository);
+                        let stranded = announce::is_stranded(false, &report);
+                        for line in announce::report_lines(false, &report, config, &target) {
+                            if stranded {
+                                log::warn!("{line}");
+                            } else {
+                                log::info!("{line}");
+                            }
+                        }
+                    }
                     Err(error) => failures.push(format!(
                         "index announce for {} failed: {error} — {republished} republished manifest(s) are live \
                          and the index still points at the digests they replaced",
