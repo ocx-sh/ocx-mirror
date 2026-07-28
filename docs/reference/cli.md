@@ -61,7 +61,7 @@ Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
-Render (or check) the CI workflow files for a mirror repository. Writes `.github/workflows/mirror.yml`, `describe.yml`, and — unless the spec sets `allow_manual_edits: true` — the `verify-generated.yml` drift guard. A spec with an [`announce:`][spec-announce] block also gets `announce-from-registry.yml`.
+Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` pair, plus `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
 
 ```sh
 ocx-mirror package pipeline generate ci [OPTIONS]
@@ -69,11 +69,12 @@ ocx-mirror package pipeline generate ci [OPTIONS]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
+| `--spec <PATH>` | `./mirror.yml` | Path to a mirror spec file; repeat once per spec the repository holds |
+| `--repo-root <DIR>` | the directory every `--spec` shares | Repository root the workflows are written under, and generated filenames are computed relative to |
 | `--check` | off | Verify generated files are up to date; exit 65 on drift |
 | `--format <FMT>` | — | Output format for diagnostics (`plain`, `json`) |
 
-Rendering is idempotent. Specs with hardcoded webhook URLs or an empty `tests:` list are rejected with exit 64 before any file is written.
+Rendering is idempotent, and does not depend on the order repeated `--spec` flags are given in. Specs with hardcoded webhook URLs or an empty `tests:` list are rejected with exit 64 before any file is written — as are two specs sharing one directory, and a spec that does not resolve under `--repo-root` (see [Multi-spec repositories][ref-multi-spec]).
 
 ### `package pipeline plan` {#pipeline-plan}
 
@@ -169,8 +170,8 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 |------|---------|-----------|
 | 0 | Success | — |
 | 1 | Pipeline execution failure (download, push, verify) | `sync`, `prepare`, `push` |
-| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block | `validate`, `pipeline generate ci`, `pipeline announce` |
-| 65 | Data error: spec validation failed, renderer drift (`--check`), JUnit/plan/run-summary malformed | all |
+| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root` | `validate`, `pipeline generate ci`, `pipeline announce` |
+| 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed | all |
 | 69 | Upstream source or target registry unreachable; Discord 5xx / timeout | `sync`, `check`, `plan`, `push`, `notify` |
 | 74 | I/O error: template render or file write failure | `pipeline generate ci`, `push` |
 | 77 | Discord 401/403 — webhook secret likely rotated | `pipeline notify` |
@@ -181,6 +182,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 
 <!-- internal -->
 [ref-mirror-yml]: ./mirror-yml.md
+[ref-multi-spec]: ./mirror-yml.md#multi-spec
 [spec-announce]: ./mirror-yml.md#announce
 [env-discord-hook]: ./environment.md#ocx-mirror-discord-hook
 [env-discord-user-id]: ./environment.md#ocx-mirror-discord-user-id

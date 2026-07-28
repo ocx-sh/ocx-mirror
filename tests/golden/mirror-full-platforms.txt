@@ -100,7 +100,14 @@ jobs:
           # Project to the matrix-relevant fields only. The full plan — including
           # the resolved per-platform asset URLs — travels to the prepare legs
           # via the plan artifact below, keeping the matrix JSON lean.
-          echo "versions=$(jq -c '[.versions[] | {version, platforms, kind}]' plan.json)" >> "${GITHUB_OUTPUT}"
+          #
+          # `metadata-drift` entries are dropped here. They carry no assets by
+          # construction, so a prepare leg for one aborts on "carries no resolved
+          # assets", and the test leg would then look for a bundle nothing wrote.
+          # `has_new` excludes them, so a drift-only run never gets this far —
+          # but a run with one new version AND one drifted version does. Patching
+          # is human-dispatched (`pipeline patch`); `has_drift` only reports.
+          echo "versions=$(jq -c '[.versions[] | select(.kind != "metadata-drift") | {version, platforms, kind}]' plan.json)" >> "${GITHUB_OUTPUT}"
           echo "target=$(jq -r '.target' plan.json)" >> "${GITHUB_OUTPUT}"
       # Ship the resolved plan (asset URLs included) to the prepare legs so
       # they never re-run the source crawl — one crawl per run instead of N+1,
