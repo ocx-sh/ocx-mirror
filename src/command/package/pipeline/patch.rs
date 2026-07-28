@@ -215,14 +215,7 @@ impl Patch {
                     // from one that did just because a different command drove it.
                     Ok(report) => {
                         let target = format!("{}/{}", spec.target.registry, spec.target.repository);
-                        let stranded = announce::is_stranded(false, &report);
-                        for line in announce::report_lines(false, &report, config, &target) {
-                            if stranded {
-                                log::warn!("{line}");
-                            } else {
-                                log::info!("{line}");
-                            }
-                        }
+                        announce::log_report(false, &report, config, &target);
                     }
                     Err(error) => failures.push(format!(
                         "index announce for {} failed: {error} — {republished} republished manifest(s) are live \

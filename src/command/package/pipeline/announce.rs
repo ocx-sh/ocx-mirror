@@ -90,16 +90,26 @@ impl Announce {
         let report = result.map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
 
         let target = format!("{}/{}", spec.target.registry, spec.target.repository);
-        let stranded = is_stranded(self.dry_run, &report);
-        for line in report_lines(self.dry_run, &report, config, &target) {
-            if stranded {
-                log::warn!("{line}");
-            } else {
-                log::info!("{line}");
-            }
-        }
+        log_report(self.dry_run, &report, config, &target);
 
         Ok(())
+    }
+}
+
+/// Log `report` at the level its outcome deserves.
+///
+/// Every caller of `invoke_announce` goes through here. Formatting and level
+/// selection are one call precisely because they drifted apart once: `pipeline
+/// patch` grew its own `({status}, {pr})` line and kept printing it through two
+/// commits that fixed the same defect next door.
+pub(crate) fn log_report(dry_run: bool, report: &AnnounceReport, config: &spec::AnnounceConfig, target: &str) {
+    let stranded = is_stranded(dry_run, report);
+    for line in report_lines(dry_run, report, config, target) {
+        if stranded {
+            log::warn!("{line}");
+        } else {
+            log::info!("{line}");
+        }
     }
 }
 
@@ -111,7 +121,7 @@ impl Announce {
 /// was told where to review it — the one outcome of this command that is worse
 /// than a failure, because it is silent. Warn rather than info; the exit code
 /// stays 0, since the commit did land.
-pub(crate) fn is_stranded(dry_run: bool, report: &AnnounceReport) -> bool {
+fn is_stranded(dry_run: bool, report: &AnnounceReport) -> bool {
     !dry_run && report.status == "updated" && report.pull_request_url.is_none()
 }
 
