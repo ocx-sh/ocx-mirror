@@ -645,6 +645,8 @@ not `tests/smoke.star`. [`metadata.default`](#metadata) and [`catalog.readme` / 
       - .github/workflows/mirror-buildifier.yml
 ```
 
+[`pipeline generate ci`][cli-generate-ci] rejects a `script:` that resolves to nothing (exit 65, like a missing [`metadata.default`](#metadata)) — top-level and per-platform entries alike. When the file exists where a spec-directory-relative reading would put it, the error says so and names the path to write instead.
+
 ### `catalog:` resolves from the spec's own directory {#multi-spec-catalog-path}
 
 [`catalog.readme` and `catalog.logo`](#catalog) resolve against the directory holding the spec file — the opposite of `script:` above. A logo shared at the repository root is invisible to a nested spec's default probe (`logo.svg`, then `logo.png`, looked for only in `buildifier/`), so every nested spec that wants the shared logo has to say so explicitly:

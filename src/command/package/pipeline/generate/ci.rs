@@ -235,6 +235,20 @@ impl GenerateCi {
         reject_colliding_slots(&placed)?;
 
         let named = placed.len() > 1;
+        // `script:` paths are the one thing only the repository root can resolve,
+        // and this is the only command that knows it.
+        let invalid: Vec<String> = placed
+            .iter()
+            .flat_map(|(slot, spec)| {
+                spec::validate_test_scripts(spec, &repo_root, slot.dir())
+                    .into_iter()
+                    .map(|error| format!("{}{error}", label(slot, named)))
+            })
+            .collect();
+        if !invalid.is_empty() {
+            return Err(MirrorError::SpecInvalid(invalid));
+        }
+
         for (slot, spec) in &placed {
             if let Some(warning) = ghcr_owner_warning(spec, std::env::var("GITHUB_REPOSITORY").ok().as_deref()) {
                 eprintln!("warning: {}{warning}", label(slot, named));
@@ -1432,6 +1446,9 @@ mod tests {
     /// Returns `Err(MirrorError)` if the renderer rejects the spec.
     fn render_fixture(fixture_name: &str, work_dir: &Path) -> Result<(), MirrorError> {
         let spec = install_spec(fixture_name, work_dir);
+        // The one `script:` in the fixture corpus. `script:` resolves from the
+        // repository root and must exist, so the repository has to hold it.
+        write_file(work_dir, "tests/smoke.star", "ocx_assert(True)\n");
         generate(work_dir, &[spec], false)
     }
 
@@ -3522,6 +3539,100 @@ tests:
                 "the guard's {event} trigger must cover the shared base exactly once, got:\n{guard}"
             );
         }
+    }
+
+    // ── `script:` paths ───────────────────────────────────────────────────────
+
+    /// A spec whose one test is a Starlark `script:`, declared top-level.
+    fn script_spec(script: &str) -> String {
+        format!(
+            "{SHFMT_SPEC}platforms:\n  linux/amd64:\n    runner: ubuntu-latest\ntests:\n  - name: smoke\n    script: {script}\n"
+        )
+    }
+
+    /// The same, declared as a per-platform override — a second list of tests
+    /// that nothing else validates.
+    fn platform_script_spec(script: &str) -> String {
+        format!(
+            "{SHFMT_SPEC}platforms:\n  linux/amd64:\n    runner: ubuntu-latest\n    tests:\n      - name: smoke\n        script: {script}\n"
+        )
+    }
+
+    /// Render a one-spec repository at `buildifier/mirror.yml`, optionally
+    /// creating a script file at `create` first.
+    fn render_with_script(spec_yaml: &str, create: Option<&str>) -> Result<(), MirrorError> {
+        let dir = tempdir().unwrap();
+        if let Some(at) = create {
+            write_file(dir.path(), at, "ocx_assert(True)\n");
+        }
+        let spec = write_file(dir.path(), "buildifier/mirror.yml", spec_yaml);
+        generate(dir.path(), &[spec], false)
+    }
+
+    /// The one message of a rejected render, or a panic naming what came back.
+    fn only_spec_error(result: Result<(), MirrorError>) -> String {
+        match result {
+            Err(MirrorError::SpecInvalid(errors)) => {
+                assert_eq!(errors.len(), 1, "one missing script, one message: {errors:?}");
+                errors.into_iter().next().expect("just asserted one")
+            }
+            other => panic!("a missing test script must be a spec error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_test_script_that_does_not_exist_is_a_spec_error() {
+        // Rendering a workflow that names a script nobody wrote is a green here
+        // and a red test leg in someone else's CI run, after a publish attempt.
+        render_with_script(
+            &script_spec("buildifier/tests/smoke.star"),
+            Some("buildifier/tests/smoke.star"),
+        )
+        .expect("a spec whose script exists must render");
+
+        let missing = only_spec_error(render_with_script(&script_spec("buildifier/tests/smoke.star"), None));
+        assert!(
+            missing.contains("entry 'smoke' script not found: buildifier/tests/smoke.star")
+                && missing.contains("resolves from the repository root as "),
+            "the message must name the path and what it resolved against, got: {missing}"
+        );
+        assert!(
+            !missing.contains("write "),
+            "nothing exists anywhere, so there is no better path to suggest, got: {missing}"
+        );
+
+        // The near miss: `tests/smoke.star` inside `buildifier/mirror.yml` reads
+        // as spec-relative and means repo-root-relative. Saying only "not found"
+        // would leave the author staring at a file that is right there.
+        let near_miss = only_spec_error(render_with_script(
+            &script_spec("tests/smoke.star"),
+            Some("buildifier/tests/smoke.star"),
+        ));
+        assert!(
+            near_miss.contains("`script:` is repository-root-relative")
+                && near_miss.contains("write buildifier/tests/smoke.star"),
+            "the near miss must name the path that would have worked, got: {near_miss}"
+        );
+    }
+
+    #[test]
+    fn a_per_platform_test_script_is_checked_too() {
+        // `platforms.<key>.tests` overrides the top-level list and is the only
+        // list a container leg ever runs — nothing else validates it at all.
+        render_with_script(
+            &platform_script_spec("buildifier/tests/smoke.star"),
+            Some("buildifier/tests/smoke.star"),
+        )
+        .expect("a per-platform script that exists must render");
+
+        let missing = only_spec_error(render_with_script(
+            &platform_script_spec("buildifier/tests/smoke.star"),
+            None,
+        ));
+        assert!(
+            missing.contains("platforms: 'linux/amd64': tests: entry 'smoke' script not found"),
+            "the message must name the platform whose override it is, got: {missing}"
+        );
     }
 
     #[test]

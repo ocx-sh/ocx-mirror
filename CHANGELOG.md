@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Discord notify now sends one message per published version instead of batching up to 10 embeds; consecutive messages are paced and HTTP 429 rate-limits are retried per the `retry_after` hint (#10) *(mirror)*
+- `pipeline generate ci` now rejects a `tests[].script:` path that does not exist, resolved from the repository root (exit 65, as for a missing `metadata.default`); per-platform test overrides are checked too, and a script sitting where a spec-directory-relative reading would put it is named in the error *(mirror)*
 - `pipeline generate ci` now adds every file in a spec's `extends:` chain to the generated `paths:` triggers and to the drift guard's union, so editing a shared base re-runs the packages that inherit from it; a base outside the repository root is rejected (exit 64) because no `paths:` entry can name it *(mirror)*
 
 ## [0.4.0] - 2026-06-12
