@@ -111,7 +111,7 @@ impl Announce {
 /// was told where to review it — the one outcome of this command that is worse
 /// than a failure, because it is silent. Warn rather than info; the exit code
 /// stays 0, since the commit did land.
-fn is_stranded(dry_run: bool, report: &AnnounceReport) -> bool {
+pub(crate) fn is_stranded(dry_run: bool, report: &AnnounceReport) -> bool {
     !dry_run && report.status == "updated" && report.pull_request_url.is_none()
 }
 
@@ -137,7 +137,12 @@ fn is_stranded(dry_run: bool, report: &AnnounceReport) -> bool {
 /// empty by construction there), so the real run cannot say how much it
 /// curated. That is an upstream gap in `ocx package announce --format json`,
 /// not something to approximate here.
-fn report_lines(dry_run: bool, report: &AnnounceReport, config: &spec::AnnounceConfig, target: &str) -> Vec<String> {
+pub(crate) fn report_lines(
+    dry_run: bool,
+    report: &AnnounceReport,
+    config: &spec::AnnounceConfig,
+    target: &str,
+) -> Vec<String> {
     let package = &config.package;
     let index_repo = &config.index_repo;
     let status = report.status.as_str();
