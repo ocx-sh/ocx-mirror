@@ -270,10 +270,20 @@ impl GenerateCi {
 
     /// The directory the generated workflows are written under.
     ///
-    /// An explicit `--repo-root` wins. Otherwise it is the deepest directory
-    /// every `--spec` shares, which for a single-spec repository is the spec's
-    /// own parent — so `generate ci --spec /elsewhere/repo/mirror.yml` still
-    /// writes into that repository rather than into the current directory.
+    /// An explicit `--repo-root` wins. Otherwise it is the enclosing git
+    /// repository, which is the same answer for one nested spec as for five.
+    /// Inferring it from the spec set is not: the deepest directory a *single*
+    /// nested spec shares is its own parent, so a repo-root-relative
+    /// `tests: script:` had the spec directory prepended twice
+    /// (`repo/tool/tool/tests/smoke.star`) and an `extends:` base above the
+    /// spec read as outside the repository. Every single-spec-in-a-subdirectory
+    /// repo failed its own drift guard; five-spec repos passed only because
+    /// their common ancestor happened to be the real root.
+    ///
+    /// Falls back to the shared ancestor outside a git repository — rendering
+    /// into a bare directory has no better answer, and the process CWD would be
+    /// worse: `generate ci --spec /elsewhere/repo/mirror.yml` must write into
+    /// that repository, not wherever it was invoked from.
     async fn resolve_repo_root(&self) -> Result<PathBuf, MirrorError> {
         if let Some(root) = &self.repo_root {
             return canonical(root).await;
@@ -281,6 +291,12 @@ impl GenerateCi {
         let mut shared: Option<PathBuf> = None;
         for path in &self.spec {
             let parent = canonical(spec_parent(path)).await?;
+            if let Some(root) = git_root(&parent) {
+                // A spec outside this root is caught by `SpecSlot::new`, which
+                // is a better error than silently rooting at an ancestor of two
+                // unrelated repositories.
+                return Ok(root);
+            }
             shared = Some(match shared {
                 None => parent,
                 Some(current) => common_ancestor(&current, &parent),
@@ -288,6 +304,20 @@ impl GenerateCi {
         }
         shared.ok_or_else(|| MirrorError::SpecUsageError("no --spec given".to_string()))
     }
+}
+
+/// The nearest ancestor of `dir` holding a `.git`, or `None` outside a
+/// repository.
+///
+/// `.git` is a directory in a normal clone and a *file* in a worktree or
+/// submodule checkout, so existence is the test, not file type.
+///
+/// ponytail: sync `exists()` in an async fn — one short upward walk, once per
+/// invocation. Reach for `tokio::fs` here only if this ever runs per-spec.
+fn git_root(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// Read, pre-flight and validate one spec file (phases 1–3).
@@ -4059,12 +4089,84 @@ tests:
         }
     }
 
+    /// Run `generate ci` with the repository root left to inference.
+    fn generate_inferring_root(specs: &[PathBuf], check: bool) -> Result<(), MirrorError> {
+        let cmd = GenerateCi {
+            spec: specs.to_vec(),
+            repo_root: None,
+            check,
+            format: None,
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        rt.block_on(async { cmd.execute(&printer).await })
+    }
+
+    /// A repository holding `count` package specs one level down, each with a
+    /// repo-root-relative `tests: script:` and an `extends:` base above it —
+    /// the two things an inferred root gets wrong.
+    fn nested_spec_repo(root: &Path, count: usize) -> Vec<PathBuf> {
+        std::fs::create_dir_all(root.join(".git")).expect("mark the repository root");
+        write_file(root, "mirror-base.yml", EXTENDS_BASE);
+        (0..count)
+            .map(|i| {
+                let name = format!("tool{i}");
+                write_file(root, &format!("{name}/tests/smoke.star"), "ocx_assert(True)\n");
+                let spec = extends_child(&name, Some("../mirror-base.yml")).replace(
+                    "  - name: version\n",
+                    &format!("  - name: smoke\n    script: {name}/tests/smoke.star\n  - name: version\n"),
+                );
+                write_file(root, &format!("{name}/mirror.yml"), &spec)
+            })
+            .collect()
+    }
+
+    /// A single spec one level down must infer the *repository* root, not its
+    /// own directory.
+    ///
+    /// Repro (`mirror-astral-sh`): `tests: script:` is documented and
+    /// implemented as repo-root-relative, so an inferred root of `<repo>/tool0`
+    /// resolved it as `<repo>/tool0/tool0/tests/smoke.star` — doubled segment —
+    /// and the `extends:` base above the spec read as outside the repository.
+    /// Every single-spec-in-a-subdirectory repo failed its own
+    /// `verify-generated` drift guard. Multi-spec repos passed only because
+    /// their common ancestor happened to be the real root, which is why this
+    /// asserts both counts: one spec and three must infer the same root.
+    #[test]
+    fn a_nested_spec_infers_the_repository_root_whatever_the_spec_count() {
+        for count in [1, 3] {
+            let dir = tempdir().unwrap();
+            let specs = nested_spec_repo(dir.path(), count);
+
+            generate_inferring_root(&specs, false)
+                .unwrap_or_else(|e| panic!("{count} nested spec(s) must render: {e}"));
+
+            for i in 0..count {
+                assert!(
+                    dir.path()
+                        .join(format!(".github/workflows/mirror-tool{i}.yml"))
+                        .exists(),
+                    "workflows must land at the repository root, not under the spec directory ({count} spec(s))",
+                );
+            }
+            // The generated guard has to pass against the same inference the
+            // repository will run it with — the symptom was a repo that could
+            // never satisfy its own drift check.
+            generate_inferring_root(&specs, true)
+                .unwrap_or_else(|e| panic!("the drift guard must pass for {count} nested spec(s): {e}"));
+        }
+    }
+
     #[test]
     fn the_repo_root_defaults_to_the_directory_the_specs_share() {
         // `generate ci --spec /elsewhere/repo/mirror.yml` has to write into that
         // repository. Defaulting the root to the process's own directory would
         // scatter generated workflows wherever the command happened to run.
         let dir = tempdir().unwrap();
+        // Marked explicitly: without it the answer depends on whether TMPDIR
+        // happens to sit inside a git repository, which is the difference
+        // between exercising the git lookup and exercising the fallback.
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         let spec = install_spec("mirror-minimal.yml", dir.path());
         let cmd = GenerateCi {
             spec: vec![spec],
