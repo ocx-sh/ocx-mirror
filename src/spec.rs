@@ -256,7 +256,7 @@ impl MirrorSpec {
                     Some(name) => format!("variants.{name}.bin_scan"),
                     None => "bin_scan".to_string(),
                 };
-                config.validate_scannable(spec_dir, &label, &mut errors);
+                config.validate_scannable(spec_dir, &label, variant.bin_scan, &mut errors);
             }
         }
 

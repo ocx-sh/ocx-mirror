@@ -170,6 +170,8 @@ The scan only looks *below* `${installPath}`. A metadata file whose PATH variabl
 
 **The spec is rejected at load rather than allowed to publish that.** Enabling `bin_scan` on metadata with no `${installPath}/<dir>` interface-visible PATH entry fails with exit 65, naming the file — and, on a multi-variant spec, the variant. Every file the `metadata` block can select is checked, so a per-platform override with no scan target is caught even when the default is fine. Such a mirror either points a PATH entry at a subdirectory, or leaves `bin_scan: off` and hand-lists `binaries`; `off` with the same metadata is a perfectly good spec and keeps loading.
 
+A file that already declares `binaries` is exempt **under `auto` only**, because `auto` passes a declared list through without scanning at all. `verify` is not exempt: it does walk the tree, and with no scan target it inspects no file and passes green whatever the archive contains — a verification that cannot fail, on a spec that says the list is checked.
+
 Watch the per-platform files specifically, because upstream archive layouts are rarely symmetric. python-build-standalone is the worked example: Linux and macOS extract to `python/bin/`, but the Windows archive puts `python.exe` at its root with no `bin/` at all — so `metadata-windows.json` is the file that ends up with a bare `${installPath}`, on a spec whose default is fine. That is exactly the case the per-file check exists for.
 
 All interface-visible `Path` vars are scanned, not just `PATH` — a `MANPATH` set to `${installPath}/man` is a second scan target, and the results merge into one claim. On a non-Windows target the exec bit keeps man pages out; a genuinely executable file parked under such a directory *would* be claimed.

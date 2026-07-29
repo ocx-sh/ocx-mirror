@@ -1,0 +1,4 @@
+Filesystem      Size  Used Avail Use% Mounted on
+tmpfs            24G   21G  3.4G  86% /tmp
+/dev/sdd       1007G  787G  170G  83% /
+17G	/tmp/claude-1000

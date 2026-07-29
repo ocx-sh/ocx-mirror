@@ -586,6 +586,11 @@ pub(crate) async fn prepare_task(
             true => adopt_resumed_binaries(authoring, &sidecar_path).await?,
             false => authoring,
         };
+        // The same guard the fresh path runs. A resume that adopts an empty or
+        // absent claim would publish it, and `adopting_binaries_from` then reads
+        // the absent field as "nothing to adopt" — so plan reports no drift and
+        // the mistake is permanent.
+        reject_empty_scan(&authoring, task)?;
         let metadata = finalize_metadata(&authoring, &task.platform, &sidecar_path).await?;
         return Ok((bundle_path, metadata));
     }
@@ -667,24 +672,30 @@ pub(crate) async fn prepare_task(
     Ok((bundle_path, metadata))
 }
 
-/// Fails a scanning task whose scan produced an empty `binaries` claim.
+/// Fails a scanning task that ends up with no usable `binaries` claim.
 ///
 /// `binaries: []` is not "undeclared" — it is a positive published claim that
-/// the package exposes no executables, and it is what a scan yields whenever its
-/// target directories are absent from the extracted tree: a typo in the metadata
-/// or an upstream that renamed `bin/`. The load-time gate proves the metadata
-/// *declares* an `${installPath}/<dir>` PATH entry; only here, with the tree on
-/// disk, can that directory be shown to actually exist. Under `verify` the same
-/// state passes silently — nothing declared and nothing found makes the
-/// one-directional diff trivially empty — so the check has to be on the result,
-/// not the diff.
+/// the package exposes no executables, and it is what a *fill* yields whenever
+/// its target directories are absent from the extracted tree: a typo in the
+/// metadata or an upstream that renamed `bin/`. Under `verify` with nothing
+/// declared the same state passes silently, because nothing found makes the
+/// one-directional diff trivially empty — so the check is on the result, not
+/// the diff. An absent field is rejected too: a scanning task that reaches here
+/// without one came off a sidecar that disagrees with its own bundle.
 ///
-/// ponytail: an empty result stands in for "the target directories are missing",
-/// which avoids re-deriving ocx's `strip_components` wildcard walk here. A
+/// **This observes the tree only when the scan filled the field.** For
+/// `(verify, declared)` `resolve_binaries` returns the metadata unchanged, so
+/// what arrives here is the hand-written list and nothing about the archive has
+/// been established. Catching a vanished directory in that case needs ocx to
+/// stop treating a declared-but-absent name as legal (ADR §2) — recorded as a
+/// follow-up, not fixable here.
+///
+/// ponytail: an empty result stands in for "the target directories are
+/// missing", which avoids re-deriving ocx's `strip_components` wildcard walk. A
 /// package whose interface directory exists but holds no executables lands in
 /// the same error, and that is also a spec worth failing.
 fn reject_empty_scan(scanned: &AuthoringMetadata, task: &MirrorTask) -> Result<()> {
-    if task.bin_scan.scans() && scanned.binaries().is_some_and(|binaries| binaries.is_empty()) {
+    if task.bin_scan.scans() && scanned.binaries().is_none_or(|binaries| binaries.is_empty()) {
         anyhow::bail!(
             "bin_scan for {} {} found no executables — the metadata's ${{installPath}} PATH \
              directories are missing from the extracted archive, or hold nothing executable. \
@@ -1040,6 +1051,13 @@ mod tests {
     /// the same false "exposes no executables" claim the gate exists to stop —
     /// and under `verify`, with nothing declared and nothing found, the
     /// one-directional diff is trivially empty and it went green.
+    ///
+    /// Both legs use a fixture that declares **no** `binaries`, which is the
+    /// only shape reaching this guard: `verify` here is the fill path. For
+    /// `(verify, declared)` `resolve_binaries` returns the hand-written list
+    /// untouched and nothing observes the tree at all — that gap is ocx's ADR §2
+    /// rule that a declared-but-absent name is legal, recorded as a follow-up
+    /// and deliberately not asserted here.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_scan_target_missing_from_the_archive_fails_instead_of_claiming_nothing() {
@@ -1059,6 +1077,41 @@ mod tests {
                 "{label}: the failure must say the scan came up empty: {rendered}",
             );
         }
+    }
+
+    /// The resume path runs the same guard as the fresh path.
+    ///
+    /// A resumed scanning task takes an early return that skipped
+    /// `reject_empty_scan` entirely, so it could republish `binaries: []` — or,
+    /// off a sidecar that never carried the field, no claim at all. Either then
+    /// reads as "nothing to adopt" on the download-free paths, so `plan` reports
+    /// no drift and the mistake is permanent.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resumed_scanning_task_rejects_an_unusable_claim() {
+        let spec = spec_dir_declaring("");
+        let work = tempfile::tempdir().expect("tempdir");
+        let task_dir = work.path().join("resume");
+
+        prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect("first run succeeds");
+
+        // What a sidecar from a run whose scan found nothing looks like. The
+        // bundle stays, so the next call takes the resume path.
+        let sidecar = task_dir.join("metadata.json");
+        let text = std::fs::read_to_string(&sidecar).expect("sidecar exists");
+        let emptied = text.replace(r#""tool""#, "");
+        assert_ne!(
+            emptied, text,
+            "fixture must actually drop the claim, or this proves nothing"
+        );
+        std::fs::write(&sidecar, emptied).expect("rewrite sidecar");
+
+        let error = prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect_err("a resumed run must not republish an unusable claim");
+        assert!(format!("{error:#}").contains("found no executables"), "got: {error:#}",);
     }
 
     /// A *named* default variant publishes bare tags beside its prefixed ones,
