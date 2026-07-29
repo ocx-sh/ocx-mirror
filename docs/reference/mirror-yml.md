@@ -170,6 +170,10 @@ The scan only looks *below* `${installPath}`. A metadata file whose PATH variabl
 
 **The spec is rejected at load rather than allowed to publish that.** Enabling `bin_scan` on metadata with no `${installPath}/<dir>` interface-visible PATH entry fails with exit 65, naming the file — and, on a multi-variant spec, the variant. Every file the `metadata` block can select is checked, so a per-platform override with no scan target is caught even when the default is fine. Such a mirror either points a PATH entry at a subdirectory, or leaves `bin_scan: off` and hand-lists `binaries`; `off` with the same metadata is a perfectly good spec and keeps loading.
 
+Watch the per-platform files specifically, because upstream archive layouts are rarely symmetric. python-build-standalone is the worked example: Linux and macOS extract to `python/bin/`, but the Windows archive puts `python.exe` at its root with no `bin/` at all — so `metadata-windows.json` is the file that ends up with a bare `${installPath}`, on a spec whose default is fine. That is exactly the case the per-file check exists for.
+
+All interface-visible `Path` vars are scanned, not just `PATH` — a `MANPATH` set to `${installPath}/man` is a second scan target, and the results merge into one claim. On a non-Windows target the exec bit keeps man pages out; a genuinely executable file parked under such a directory *would* be claimed.
+
 `verify` is the mode a mirror wants once it does hand-list `binaries`: the list stops being documentation and becomes a regression test against upstream rearranging its archive. Platforms that genuinely differ get a per-platform metadata file — CMake's Windows zip has no `ccmake.exe` while its Linux and macOS archives both ship `ccmake`, so the Windows entry under [`metadata.platforms`](#metadata) declares its own shorter list.
 
 ### Interaction with `pipeline patch` {#bin-scan-patch}
