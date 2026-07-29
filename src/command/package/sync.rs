@@ -197,6 +197,7 @@ impl Sync {
                     target: spec.target.clone(),
                     metadata_config: eff_variant.metadata.clone(),
                     bin_scan: eff_variant.bin_scan,
+                    libc_lint: eff_variant.libc_lint,
                     verify_config: spec.verify.clone(),
                     cascade: spec.cascade,
                     spec_dir: spec_dir.to_path_buf(),

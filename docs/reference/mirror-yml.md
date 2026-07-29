@@ -13,6 +13,7 @@
 | `variants` | array | No* | Alternate asset sets for the same tool, each producing its own version-tag prefix. *Mutually exclusive with `assets` — exactly one of the two is required. See [`variants`](#variants). |
 | `metadata` | object | No | Path(s) to the package metadata JSON, with optional per-platform overrides. See [`metadata`](#metadata). |
 | `bin_scan` | string | No | `off` (default), `auto`, or `verify` — derive the published `binaries` claim from the extracted bundle. See [`bin_scan`](#bin-scan). |
+| `libc_lint` | boolean | No | Check a Linux build's declared `os.features` against the libc its binaries link against (`true` by default). See [`libc_lint`](#libc-lint). |
 | `asset_type` | string | No | `Archive` (default) or `Binary` |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
@@ -115,6 +116,7 @@ variants:
 | `assets` | object | Yes | This variant's platform → regex mapping, same shape as top-level [`assets`](#assets). |
 | `metadata` | object | No | Overrides the top-level [`metadata`](#metadata) for this variant only. |
 | `bin_scan` | string | No | Overrides the top-level [`bin_scan`](#bin-scan) for this variant only. |
+| `libc_lint` | boolean | No | Overrides the top-level [`libc_lint`](#libc-lint) for this variant only. |
 | `asset_type` | string | No | Overrides the top-level `asset_type` for this variant only. |
 
 **Rules:**
@@ -123,7 +125,7 @@ variants:
 - At least one variant is required; exactly one must set `default: true`.
 - Only the default variant may omit `name`. A non-default variant without one is rejected.
 - Two variants with the same name (or two unnamed variants) are rejected as duplicates.
-- A variant that omits `metadata`, `bin_scan` or `asset_type` inherits the spec's top-level value. A slim variant ships a different binary set than the full one, so `bin_scan: off` on a variant is an override back to unscanned, not "unset".
+- A variant that omits `metadata`, `bin_scan`, `libc_lint` or `asset_type` inherits the spec's top-level value. A slim variant ships a different binary set than the full one, so `bin_scan: off` on a variant is an override back to unscanned, not "unset" — and `libc_lint: true` on a variant of a spec that set `libc_lint: false` turns the check back on for that variant alone.
 
 ## `metadata` {#metadata}
 
@@ -188,6 +190,27 @@ All interface-visible `Path` vars are scanned, not just `PATH` — a `MANPATH` s
 Adoption is deliberately limited to the second case. Applying it to a declared list would rewrite the expectation to whatever is already published, so a corrected hand-written list could never register as drift and the fix would never reach the published versions.
 
 The consequence worth knowing: turning `bin_scan` on does **not** retroactively populate `binaries` on already-published versions, and `patch` will not do it either. A version picks up its scanned claim when it is next actually built — either by a new push, or by deleting the tag and re-mirroring it.
+
+## `libc_lint` {#libc-lint}
+
+A Linux binary that links against glibc cannot run on a musl-only host, and vice versa. Which one a package needs is stated in its platform key's `os.features` — `linux/amd64+libc.glibc`. `libc_lint` checks that statement against the binaries the bundle actually ships, at mirror time, and refuses to build a version whose declaration is false.
+
+```yaml
+libc_lint: false
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `true` (default) | Every file on the package's interface `PATH` is read. One that needs a libc family the platform key does not declare fails that version's build, naming the target, the version, the platform, the file, its dynamic loader and the platform key that would be correct. |
+| `false` | The check does not run. Nothing else changes — the same bundle and the same metadata are written either way. A line naming the target and platform is logged wherever the check would have run, so the suppression is visible in the CI log. |
+
+**Why an omitted libc is a claim, not a gap.** `os.features` matching is subset matching: an artifact whose feature list is empty demands nothing of the host, so it resolves onto *every* host. Publishing a glibc-linked tile under a bare `linux/amd64` is therefore a positive claim of libc universality, and a consumer on Alpine installs it happily and then gets `No such file or directory` naming a file that is plainly there — the kernel reporting the absent ELF interpreter. That has already happened to a published mirror.
+
+The check reads only the ELF `PT_INTERP` header, so it costs nothing and understands nothing else: a binary needing `libstdc++` or `libicu` passes, a glibc 2.38 build declared for a glibc 2.28 host passes, and a file not on an interface `PATH` directory is never read. Statically linked binaries have no `PT_INTERP` and satisfy any declaration — which is why the four `bazelbuild` specs publishing static Go binaries under bare `linux/amd64` and `linux/arm64` keys are correct as written and pass unchanged.
+
+**The opt-out is total.** `libc_lint: false` skips the whole check, refusals and scan-scope failures alike. That is deliberate, and the same escape hatch `ocx package create --no-libc-lint` provides: a bug in one half of the check would otherwise block every publish of a spec with no way through, and a partial bypass would leave that half still able to stop the mirror. Reach for it when the check is wrong, not when the declaration is — the fix for a real refusal is the platform key the error message hands you.
+
+The check runs during [`pipeline prepare`](./cli.md#pipeline-prepare), between extracting the archive and compressing it — the only window in which the binaries exist on disk. [`pipeline patch`][cli-patch] never downloads anything, so it cannot run the check and never reports a libc finding; a version already published under a false declaration is corrected by fixing the platform key and re-mirroring it, not by patching metadata.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 

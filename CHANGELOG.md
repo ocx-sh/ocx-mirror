@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `pipeline prepare` now checks a Linux build's declared `os.features` against the libc its packaged binaries actually link against, between extracting the archive and compressing it. A binary on the interface `PATH` needing a libc family the platform key does not declare fails that version's build, naming the target, version, platform, file, dynamic loader and the platform key that would be correct — subset matching reads an omitted `libc.glibc` as a claim of libc universality, so publishing one shipped a tile that resolved onto hosts unable to execute it. The new `libc_lint` spec key (boolean, `true` by default, per-variant overridable) turns the check off; the bypass is total, matching `ocx package create --no-libc-lint` *(mirror)*
 - `pipeline generate ci` now emits a `patch.yml` workflow per spec, `workflow_dispatch` only, with `version` / `min_version` / `max_version` inputs that become `pipeline patch --metadata-only`'s selection flags; dispatching with every field empty patches every published version. Correcting published metadata no longer needs registry push credentials and an index token on a maintainer's machine *(mirror)*
 
 ### Changed

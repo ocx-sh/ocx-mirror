@@ -28,6 +28,8 @@ pub struct VariantSpec {
     pub asset_type: Option<AssetTypeConfig>,
     #[serde(default)]
     pub bin_scan: Option<BinScanMode>,
+    #[serde(default)]
+    pub libc_lint: Option<bool>,
 }
 
 /// A resolved variant with all inherited fields materialized.
@@ -51,4 +53,9 @@ pub struct EffectiveVariant {
     /// top-level). A slim variant ships a different binary set than the full
     /// one, so it may want a different mode than the spec's.
     pub bin_scan: BinScanMode,
+    /// Whether the libc check runs for this variant (variant override or
+    /// inherited from top-level). One variant's upstream build can be the only
+    /// one the check misreads, and bypassing the whole spec to get it through
+    /// would silently stop checking the others.
+    pub libc_lint: bool,
 }
