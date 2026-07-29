@@ -1,0 +1,40 @@
+# Mirror spec: two variants (bare default + `slim-` prefixed) with a bin_scan.
+# The renderer is variant-agnostic on purpose — the variant lives in the version
+# string discover emits (`slim-3.13.9`), and prepare/test/push key off that
+# string — so this golden is what proves a variants spec renders the same single
+# workflow a single-variant one does, rather than needing a variant matrix axis.
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+
+source:
+  type: github_release
+  owner: astral-sh
+  repo: python-build-standalone
+  tag_pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+bin_scan: verify
+
+variants:
+  - default: true
+    assets:
+      linux/amd64:
+        - "cpython-.*-x86_64-unknown-linux-gnu-install_only\\.tar\\.gz$"
+  - name: slim
+    bin_scan: auto
+    assets:
+      linux/amd64:
+        - "cpython-.*-x86_64-unknown-linux-gnu-install_only_stripped\\.tar\\.gz$"
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: python3 --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest

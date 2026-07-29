@@ -3375,6 +3375,7 @@ announce:
         "mirror-two-platform-announce.yml",
         "mirror-windows-arm64.yml",
         "mirror-all-test-kinds.yml",
+        "mirror-variants.yml",
     ];
 
     /// Render every generated file for `fixture` into one comparable blob,
