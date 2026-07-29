@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** an unknown key under `variants:` is now a spec-load failure (exit 65) naming the offending key, matching the top-level spec. A misspelling there used to be dropped silently — so `libc-lint: false` (the hyphenated spelling of `ocx package create --no-libc-lint`) left the check on, the build still refusing, and no way to tell the bypass had not applied. A spec that previously parsed with a stray variant key now errors *(mirror)*
 - `pipeline patch` no longer fails when `OCX_ANNOUNCE_TOKEN` is absent: the closing announce is recorded as skipped, the same degradation `pipeline push` has. An announce that is attempted and fails still fails the command *(mirror)*
 
 - Discord notify now sends one message per published version instead of batching up to 10 embeds; consecutive messages are paced and HTTP 429 rate-limits are retried per the `retry_after` hint (#10) *(mirror)*

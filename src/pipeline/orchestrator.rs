@@ -554,10 +554,20 @@ pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::
 /// `resolve → download → verify → extract → scan → libc check → sidecar →
 /// compress → drop tree`.
 ///
-/// A resume skips both tree readers, because the tree is gone. That is sound
-/// for the libc check specifically: the bundle is written only after the check
-/// passed, so a bundle on disk is itself the record of a passing check for the
-/// tree that produced it.
+/// A resume skips both tree readers, because the tree is gone. The two are not
+/// equally covered afterwards. `bin_scan` re-runs its own guard on the resumed
+/// path ([`reject_empty_scan`] below), so an unusable claim still reds. The libc
+/// check has no such equivalent: it is reachable only from the bundle block, and
+/// the early return above happens first. So:
+///
+/// - a bundle on disk is **not** evidence the check passed — it may have been
+///   written under `libc_lint: false`, or by a binary predating the check;
+/// - flipping `libc_lint` back to `true` does not reach a work dir that already
+///   holds a bundle. The operator must discard the bundle to re-check it.
+///
+/// No warning is emitted for this. A resume with `libc_lint` on — the default,
+/// and the overwhelmingly common case — would fire it every time, which is
+/// noise, not signal.
 pub(crate) async fn prepare_task(
     task: &MirrorTask,
     task_dir: &Path,
