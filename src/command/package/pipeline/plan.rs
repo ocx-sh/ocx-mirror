@@ -23,10 +23,10 @@ use crate::command::package::target_registry::{self, PublishedImage};
 use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
-use crate::pipeline::orchestrator::{self, ExpectedMetadata};
+use crate::pipeline::orchestrator::{self, ExpectedMetadata, MetadataPlan};
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
-use crate::spec::{self, MetadataConfig, MirrorSpec};
+use crate::spec::{self, BinScanMode, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// Maximum number of published tags read concurrently by the drift scan.
@@ -355,12 +355,12 @@ async fn detect_metadata_drift(
     // variant the spec still declares metadata for. A spec that declares none
     // cannot publish at all, so there is nothing to compare against.
     let leaves = leaf_versions(all_tags);
-    let candidates: Vec<(Version, String, MetadataConfig)> = leaves
+    let candidates: Vec<(Version, String, MetadataPlan)> = leaves
         .iter()
         .filter(|(_, tag)| !scheduled.contains(tag.as_str()))
         .filter_map(|(version, tag)| {
-            let config = orchestrator::metadata_config_for(spec, version)?;
-            Some((version.clone(), tag.clone(), config))
+            let plan = orchestrator::metadata_plan_for(spec, version)?;
+            Some((version.clone(), tag.clone(), plan))
         })
         .collect();
 
@@ -381,36 +381,34 @@ async fn detect_metadata_drift(
     // version — one spec file serves every version of a variant. Memoized so a
     // thousand-version mirror reads those files once per `(variant, platform)`
     // instead of once per published tile.
-    let configs: HashMap<&Version, &MetadataConfig> = candidates
-        .iter()
-        .map(|(version, _, config)| (version, config))
-        .collect();
+    let plans: HashMap<&Version, &MetadataPlan> = candidates.iter().map(|(version, _, plan)| (version, plan)).collect();
     let mut expected_metadata: HashMap<(Option<String>, Platform), ExpectedMetadata> = HashMap::new();
-    let mut suspects: Vec<(PublishedImage, Metadata)> = Vec::new();
+    let mut suspects: Vec<(PublishedImage, ExpectedMetadata, BinScanMode)> = Vec::new();
 
     for image in images {
-        let Some(config) = configs.get(&image.version) else {
+        let Some(plan) = plans.get(&image.version) else {
             continue;
         };
         let key = (image.version.variant().map(str::to_string), image.platform.clone());
         let expected = match expected_metadata.entry(key) {
             Entry::Occupied(cached) => cached.into_mut(),
             Entry::Vacant(slot) => {
-                let resolved = orchestrator::expected_metadata(config, &image.platform, spec_dir).map_err(|error| {
-                    MirrorError::SpecInvalid(vec![format!(
-                        "failed to resolve the metadata {} would publish for {}: {error:#}",
-                        image.version, image.platform
-                    )])
-                })?;
+                let resolved =
+                    orchestrator::expected_metadata(&plan.config, &image.platform, spec_dir).map_err(|error| {
+                        MirrorError::SpecInvalid(vec![format!(
+                            "failed to resolve the metadata {} would publish for {}: {error:#}",
+                            image.version, image.platform
+                        )])
+                    })?;
                 slot.insert(resolved)
             }
         };
         // Local and free, and the answer for every tile of a healthy mirror —
         // used here only to avoid spawning a network task per clean tile.
         // `image_drifted` below re-runs it as part of the actual decision.
-        if !config_bytes_match(&image, &expected.published)? {
-            let expected = expected.published.clone();
-            suspects.push((image, expected));
+        if !settled_by_digest(&image, &expected.published, plan.bin_scan)? {
+            let expected = expected.clone();
+            suspects.push((image, expected, plan.bin_scan));
         }
     }
 
@@ -421,8 +419,10 @@ async fn detect_metadata_drift(
     // concurrent scan above removes.
     log::info!("{} tiles need a config-blob read to settle", suspects.len());
     let drifted: Vec<Option<(Version, String)>> = stream::iter(suspects)
-        .map(|(image, expected)| async move {
-            let drifted = image_drifted(publisher, identifier, &image, &expected).await?;
+        .map(|(image, expected, bin_scan)| async move {
+            let drifted = image_drift(publisher, identifier, &image, &expected, bin_scan)
+                .await?
+                .is_some();
             Ok::<_, MirrorError>(drifted.then(|| (image.version, image.platform.to_string())))
         })
         .buffer_unordered(DRIFT_SCAN_CONCURRENCY)
@@ -446,8 +446,8 @@ async fn detect_metadata_drift(
         .collect())
 }
 
-/// Whether the metadata the registry records for `image` differs from what a
-/// fresh publish would write.
+/// The metadata a fresh publish would write for `image`, or `None` when the
+/// registry already records exactly that.
 ///
 /// The config digest settles the common case without fetching the blob: equal
 /// bytes are necessarily equal values. The converse does **not** hold — the
@@ -456,18 +456,47 @@ async fn detect_metadata_drift(
 /// mismatch only promotes the pair to a value comparison. Reporting drift off
 /// the digest would republish the entire fleet the first time serialization
 /// moved.
-pub(crate) async fn image_drifted(
+///
+/// Returns the expectation rather than a bare `bool` because under `bin_scan`
+/// the expectation the caller passed in is not the one the comparison ran
+/// against: it is missing `binaries`, and the answer is only meaningful after
+/// the published claim has been carried into it. Handing that adopted
+/// expectation back is what stops `pipeline patch` republishing against the
+/// unadopted one and deleting the claim.
+pub(crate) async fn image_drift(
     publisher: &Publisher,
     identifier: &Identifier,
     image: &PublishedImage,
-    expected: &Metadata,
-) -> Result<bool, MirrorError> {
-    if config_bytes_match(image, expected)? {
-        return Ok(false);
+    expected: &ExpectedMetadata,
+    bin_scan: BinScanMode,
+) -> Result<Option<ExpectedMetadata>, MirrorError> {
+    if settled_by_digest(image, &expected.published, bin_scan)? {
+        return Ok(None);
     }
 
     let published = target_registry::fetch_published_metadata(publisher, identifier, image).await?;
-    metadata_drifted(&published, expected)
+    let expected = match bin_scan.scans() {
+        true => expected
+            .adopting_binaries_from(&published, &image.platform)
+            .map_err(|error| {
+                MirrorError::SpecInvalid(vec![format!(
+                    "failed to carry the published binaries of {} ({}) into the expected metadata: {error:#}",
+                    image.version, image.platform
+                )])
+            })?,
+        false => expected.clone(),
+    };
+    Ok(metadata_drifted(&published, &expected.published)?.then_some(expected))
+}
+
+/// Whether the config digest alone proves `image` is current.
+///
+/// Never under a `bin_scan`: the expectation is missing the `binaries` claim
+/// the registry records, so its digest cannot match a correctly published tile
+/// and a digest comparison would report drift on every one of them. Those tiles
+/// go straight to the blob read that adopts the published claim.
+fn settled_by_digest(image: &PublishedImage, expected: &Metadata, bin_scan: BinScanMode) -> Result<bool, MirrorError> {
+    Ok(!bin_scan.scans() && config_bytes_match(image, expected)?)
 }
 
 /// Whether the config blob the registry recorded is byte-identical to the one a
@@ -636,9 +665,159 @@ fn print_plan_plain(report: &PlanReport) {
 
 #[cfg(test)]
 mod tests {
-    use ocx_lib::oci::Platform;
+    use ocx_lib::oci::{Algorithm, Descriptor, Digest, Platform};
 
     use super::*;
+
+    // ── bin_scan: the drift comparison against a claim it cannot recompute ──
+    //
+    // `plan` and `patch` are download-free by design, so neither can run the
+    // scan that produces `binaries`. Every assertion below defends the same
+    // property from a different side: the expectation must adopt the published
+    // claim, or a scanned mirror drifts on every run and each patch republishes
+    // the claim away.
+
+    /// The metadata a mirror's spec file declares — no `binaries`, because a
+    /// scanned one is never written into the spec.
+    fn spec_expectation() -> ExpectedMetadata {
+        let authoring = serde_json::from_slice(br#"{"type":"bundle","version":1,"strip_components":1,"env":[]}"#)
+            .expect("metadata fixture parses");
+        ExpectedMetadata::render(authoring, &scan_platform()).expect("the fixture renders both projections")
+    }
+
+    fn scan_platform() -> Platform {
+        "linux/amd64".parse().expect("valid platform")
+    }
+
+    /// What the registry records for a tile a `bin_scan` mirror published: the
+    /// spec's metadata plus the scanned claim.
+    fn published_with_binaries() -> Metadata {
+        serde_json::from_slice(
+            br#"{"type":"bundle","version":1,"strip_components":1,"env":[],"binaries":["cmake","ctest"]}"#,
+        )
+        .expect("published fixture parses")
+    }
+
+    fn image_recording(config_digest: &str) -> PublishedImage {
+        PublishedImage {
+            version: Version::parse("3.29.0").expect("valid version"),
+            platform: scan_platform(),
+            manifest_digest: Digest::Sha256("b".repeat(64)),
+            config: Descriptor {
+                media_type: "application/vnd.ocx.package.metadata.v1+json".to_string(),
+                digest: config_digest.to_string(),
+                size: 42,
+                urls: None,
+                annotations: None,
+                artifact_type: None,
+            },
+            layers: vec![],
+        }
+    }
+
+    /// A correctly published `bin_scan` tile must never be settled from its
+    /// config digest.
+    ///
+    /// The expectation resolved from the spec structurally cannot carry
+    /// `binaries`, so its digest can only match a tile that has none. Trusting
+    /// the digest therefore reports drift on every correctly published tile,
+    /// forever — and `patch` acting on that republishes the claim away.
+    #[test]
+    fn a_bin_scan_tile_is_never_settled_by_its_config_digest() {
+        let expected = spec_expectation();
+        let bytes = serde_json::to_vec(&expected.published).expect("serializes");
+        // The strongest possible case for a skip: the digests are identical.
+        let image = image_recording(&Algorithm::Sha256.hash(&bytes).to_string());
+
+        assert!(
+            settled_by_digest(&image, &expected.published, BinScanMode::Off).expect("digest compares"),
+            "control: without a bin_scan an identical config digest must settle the tile",
+        );
+        for mode in [BinScanMode::Auto, BinScanMode::Verify] {
+            assert!(
+                !settled_by_digest(&image, &expected.published, mode).expect("digest compares"),
+                "{mode:?} must fall through to the blob read that adopts the published binaries, \
+                 even on an identical config digest",
+            );
+        }
+    }
+
+    /// The published claim must reach both projections of the expectation.
+    ///
+    /// `published` decides drift; `sidecar_json` is what `patch` pushes. A fix
+    /// that adopted only the first would still delete the claim the moment any
+    /// unrelated field drifted.
+    #[test]
+    fn adopting_carries_the_published_binaries_into_both_projections() {
+        let expected = spec_expectation();
+        assert!(
+            expected.published.binaries().is_none(),
+            "the spec-resolved expectation must start without binaries, or this test proves nothing",
+        );
+
+        let adopted = expected
+            .adopting_binaries_from(&published_with_binaries(), &scan_platform())
+            .expect("adoption renders");
+
+        assert_eq!(
+            adopted.published.binaries().map(|binaries| binaries.len()),
+            Some(2),
+            "the drift comparison must see the published claim",
+        );
+        assert!(
+            adopted.sidecar_json.contains("cmake") && adopted.sidecar_json.contains("ctest"),
+            "the sidecar patch republishes with must carry the claim too, or the push deletes it: {}",
+            adopted.sidecar_json,
+        );
+    }
+
+    /// The whole point, stated as the comparison itself: a tile differing from
+    /// the spec *only* by its scanned `binaries` is current, not drifted.
+    #[test]
+    fn a_tile_differing_only_by_its_scanned_binaries_is_current() {
+        let published = published_with_binaries();
+        let expected = spec_expectation();
+
+        assert!(
+            metadata_drifted(&published, &expected.published).expect("compares"),
+            "control: unadopted, the published claim reads as drift — this is the bug being prevented",
+        );
+        assert!(
+            !metadata_drifted(
+                &published,
+                &expected
+                    .adopting_binaries_from(&published, &scan_platform())
+                    .expect("adoption renders")
+                    .published,
+            )
+            .expect("compares"),
+            "with the claim adopted, the tile must read as current",
+        );
+    }
+
+    /// Adoption must not invent a claim. A mirror that turns `bin_scan` on
+    /// publishes `binaries` from the next push onward; until then the published
+    /// tiles have none, and reporting them as current would hide real drift on
+    /// every other field.
+    #[test]
+    fn adopting_from_a_tile_without_binaries_changes_nothing() {
+        let expected = spec_expectation();
+        let published: Metadata =
+            serde_json::from_slice(br#"{"type":"bundle","version":1,"env":[]}"#).expect("published fixture parses");
+
+        let adopted = expected
+            .adopting_binaries_from(&published, &scan_platform())
+            .expect("adoption renders");
+
+        assert!(
+            adopted.published.binaries().is_none(),
+            "nothing to adopt must leave the expectation untouched",
+        );
+        assert!(
+            metadata_drifted(&published, &adopted.published).expect("compares"),
+            "a tile that really has drifted (strip_components) must still report drift",
+        );
+    }
 
     // ── §3.5 S5: ocx-mirror package pipeline plan — unit tests ────────────────────
     //

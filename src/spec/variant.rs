@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use super::asset_type::AssetTypeConfig;
 use super::assets::AssetPatterns;
+use super::bin_scan::BinScanMode;
 use super::metadata_config::MetadataConfig;
 
 /// A variant declaration in a mirror spec.
@@ -25,6 +26,8 @@ pub struct VariantSpec {
     pub metadata: Option<MetadataConfig>,
     #[serde(default)]
     pub asset_type: Option<AssetTypeConfig>,
+    #[serde(default)]
+    pub bin_scan: Option<BinScanMode>,
 }
 
 /// A resolved variant with all inherited fields materialized.
@@ -44,4 +47,8 @@ pub struct EffectiveVariant {
     pub metadata: Option<MetadataConfig>,
     /// Asset type config (variant override or inherited from top-level).
     pub asset_type: Option<AssetTypeConfig>,
+    /// Binary auto-detection mode (variant override or inherited from
+    /// top-level). A slim variant ships a different binary set than the full
+    /// one, so it may want a different mode than the spec's.
+    pub bin_scan: BinScanMode,
 }

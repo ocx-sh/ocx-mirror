@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use ocx_lib::oci::Platform;
 use url::Url;
 
-use crate::spec::{AssetType, MetadataConfig, Target, VerifyConfig};
+use crate::spec::{AssetType, BinScanMode, MetadataConfig, Target, VerifyConfig};
 
 /// Variant context carried by a mirror task.
 #[derive(Debug, Clone)]
@@ -29,6 +29,11 @@ pub struct MirrorTask {
     pub asset_name: String,
     pub target: Target,
     pub metadata_config: Option<MetadataConfig>,
+    /// Whether this task derives its `binaries` claim from the extracted
+    /// content tree. Unlike every other metadata input it cannot be resolved
+    /// before the download, so it is what forces the scan to sit between
+    /// extraction and bundling.
+    pub bin_scan: BinScanMode,
     pub verify_config: Option<VerifyConfig>,
     pub cascade: bool,
     pub spec_dir: PathBuf,

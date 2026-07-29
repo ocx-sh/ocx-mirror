@@ -6,11 +6,13 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ocx_lib::cli::progress::{ProgressManager, Spinner};
 use ocx_lib::log;
 use ocx_lib::oci::Platform;
+use ocx_lib::package::bin_scan;
 use ocx_lib::package::metadata::Metadata;
+use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 use serde::Serialize;
@@ -24,7 +26,7 @@ use super::progress;
 use super::push;
 use super::verify;
 use crate::error::MirrorError;
-use crate::spec::{MetadataConfig, MirrorSpec};
+use crate::spec::{BinScanMode, MetadataConfig, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// A task that completed the prepare phase (download + verify + bundle).
@@ -77,11 +79,56 @@ pub struct VersionManifest {
 /// projection that becomes the OCI config blob, while
 /// [`sidecar_json`](Self::sidecar_json) is the platform-stamped file that
 /// `ocx package push --metadata` reads.
+#[derive(Clone)]
 pub(crate) struct ExpectedMetadata {
+    /// The authoring form both projections below are rendered from.
+    ///
+    /// Retained rather than discarded after rendering because one field —
+    /// `binaries` under a `bin_scan` — can only be supplied from outside the
+    /// spec, and re-rendering both projections around it is the only way to
+    /// keep them agreeing with each other. See
+    /// [`adopting_binaries_from`](Self::adopting_binaries_from).
+    authoring: AuthoringMetadata,
     /// Published projection — byte-for-byte the config blob a push writes.
     pub published: Metadata,
     /// `-metadata.json` sidecar, with the platform recorded.
     pub sidecar_json: String,
+}
+
+impl ExpectedMetadata {
+    /// Renders both projections from one authoring document.
+    ///
+    /// The sidecar goes through [`package::sidecar_json`] rather than a plain
+    /// serialization: it is what stamps the `platform` field, and `ocx package
+    /// push --metadata` exits 65 on a sidecar that lacks one.
+    pub(crate) fn render(authoring: AuthoringMetadata, platform: &Platform) -> Result<Self> {
+        let sidecar_json = package::sidecar_json(&authoring, platform)?;
+        // The published projection is also where a dependency declared only as
+        // a `platforms` pin map collapses to this platform's pin.
+        let published = authoring.to_published(platform)?;
+        Ok(Self {
+            authoring,
+            published,
+            sidecar_json,
+        })
+    }
+
+    /// The same expectation, carrying `published`'s `binaries` claim.
+    ///
+    /// Under `bin_scan` the claim is derived from the extracted content tree,
+    /// which no download-free path has — so the expectation this module can
+    /// compute always says "no binaries declared". Left alone that reads as
+    /// drift on every scanned mirror forever, and `pipeline patch` acting on it
+    /// would republish the claim *away*, silently deleting a correct published
+    /// `binaries` list. Adopting what the registry already records makes the
+    /// comparison see the one field it cannot recompute as unchanged, while
+    /// every other field still drifts normally.
+    pub(crate) fn adopting_binaries_from(&self, published: &Metadata, platform: &Platform) -> Result<Self> {
+        match published.binaries() {
+            Some(binaries) => Self::render(self.authoring.clone().with_binaries(binaries.clone()), platform),
+            None => Ok(self.clone()),
+        }
+    }
 }
 
 /// Computes the metadata a fresh publish of `platform` would produce today.
@@ -91,37 +138,45 @@ pub(crate) struct ExpectedMetadata {
 /// drift, and `pipeline patch` re-publishes against it — so a spec fix reaches
 /// already-published versions without anyone deleting a tag.
 ///
-/// The sidecar goes through [`package::sidecar_json`] rather than a plain
-/// serialization: it is what stamps the `platform` field, and `ocx package
-/// push --metadata` exits 65 on a sidecar that lacks one.
+/// Under a `bin_scan` the result is therefore incomplete by construction, and
+/// callers must run it through
+/// [`ExpectedMetadata::adopting_binaries_from`] before comparing.
 pub(crate) fn expected_metadata(
     config: &MetadataConfig,
     platform: &Platform,
     spec_dir: &Path,
 ) -> Result<ExpectedMetadata> {
-    let authoring = package::resolve_metadata(config, &platform.to_string(), spec_dir)?;
-    let sidecar_json = package::sidecar_json(&authoring, platform)?;
-    // The published projection is also where a dependency declared only as a
-    // `platforms` pin map collapses to this platform's pin.
-    let published = authoring.to_published(platform)?;
-    Ok(ExpectedMetadata {
-        published,
-        sidecar_json,
-    })
+    ExpectedMetadata::render(
+        package::resolve_metadata(config, &platform.to_string(), spec_dir)?,
+        platform,
+    )
 }
 
-/// The metadata configuration that governs `version`'s variant.
+/// How a variant produces its published metadata: the spec files it reads, and
+/// whether a `bin_scan` derives the `binaries` claim from the content tree.
+#[derive(Debug, Clone)]
+pub(crate) struct MetadataPlan {
+    pub config: MetadataConfig,
+    pub bin_scan: BinScanMode,
+}
+
+/// How `version`'s variant produces its published metadata.
 ///
 /// A variant-prefixed tag (`slim-3.13.9`) is published from its own variant's
-/// `metadata:` block where it has one, falling back to the spec-level block —
-/// the same resolution [`MirrorSpec::effective_variants`] performs for a sync
-/// run. Returns `None` when the tag names a variant the spec no longer
-/// declares, or when neither the variant nor the spec declares metadata.
-pub(crate) fn metadata_config_for(spec: &MirrorSpec, version: &Version) -> Option<MetadataConfig> {
-    spec.effective_variants()
+/// `metadata:` and `bin_scan:` where it has them, falling back to the
+/// spec-level values — the same resolution [`MirrorSpec::effective_variants`]
+/// performs for a sync run. Returns `None` when the tag names a variant the
+/// spec no longer declares, or when neither the variant nor the spec declares
+/// metadata.
+pub(crate) fn metadata_plan_for(spec: &MirrorSpec, version: &Version) -> Option<MetadataPlan> {
+    let variant = spec
+        .effective_variants()
         .into_iter()
-        .find(|variant| variant.name.as_deref() == version.variant())
-        .and_then(|variant| variant.metadata)
+        .find(|variant| variant.name.as_deref() == version.variant())?;
+    Some(MetadataPlan {
+        config: variant.metadata?,
+        bin_scan: variant.bin_scan,
+    })
 }
 
 /// Prepare all platforms for a single version: download, verify, and bundle.
@@ -475,6 +530,10 @@ pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::
 /// Acquires `download_sem` for the download+verify phase, then releases it and
 /// acquires `bundle_sem` for the CPU-bound bundling phase. This lets downloads
 /// and compression run independently.
+///
+/// The published metadata is finalised **between** extraction and compression,
+/// not before the download: a `bin_scan` reads the extracted tree, so no
+/// earlier point in this function can know what `binaries` will say.
 pub(crate) async fn prepare_task(
     task: &MirrorTask,
     task_dir: &Path,
@@ -489,25 +548,29 @@ pub(crate) async fn prepare_task(
     let archive_path = task_dir.join(&task.asset_name);
     let content_dir = task_dir.join("content");
     let bundle_path = task_dir.join("bundle.tar.xz");
+    // The per-platform metadata the generated CI workflow's `cp` step copies
+    // beside the bundle (not the spec-level default metadata.json from the
+    // working directory), and that `ocx package push --metadata` then reads.
+    let sidecar_path = task_dir.join("metadata.json");
 
-    // Resolve metadata once (needed for both bundle and push)
-    let expected = match &task.metadata_config {
-        Some(config) => expected_metadata(config, &task.platform, &task.spec_dir)?,
-        None => anyhow::bail!("no metadata configuration provided in spec"),
+    let Some(config) = &task.metadata_config else {
+        anyhow::bail!("no metadata configuration provided in spec");
     };
-
-    // Write the resolved per-platform metadata alongside the bundle so the
-    // generated CI workflow's `cp` step copies the correct per-platform file
-    // (not the spec-level default metadata.json from the working directory).
-    // Written before the early-exit check so resume runs also refresh the file.
-    tokio::fs::write(task_dir.join("metadata.json"), &expected.sidecar_json).await?;
-
-    // The in-process push carries the platform beside the metadata in `Info`,
-    // so it needs the published projection.
-    let metadata = expected.published;
+    let authoring = package::resolve_metadata(config, &task.platform.to_string(), &task.spec_dir)?;
 
     if bundle_path.exists() {
-        // Resume: bundle already exists, metadata.json already written above.
+        // Resume. An earlier run already extracted this bundle's content tree
+        // and discarded it, so a `bin_scan` has nothing left to read — the
+        // sidecar that run wrote is the record of what it found, and it is
+        // written before the bundle exists precisely so this readback cannot
+        // miss. Without a scan nothing downstream of the download reaches the
+        // metadata, so it is re-resolved from the spec instead and a spec-side
+        // fix reaches the resumed run.
+        let metadata = if task.bin_scan.scans() {
+            resume_scanned_metadata(&sidecar_path, &task.platform).await?
+        } else {
+            finalize_metadata(&authoring, &task.platform, &sidecar_path).await?
+        };
         return Ok((bundle_path, metadata));
     }
 
@@ -537,15 +600,19 @@ pub(crate) async fn prepare_task(
     } // download permit released
 
     // --- Bundle phase (CPU-bound) ---
-    {
+    //
+    // Extraction, the bin-scan and compression share one permit: the scan reads
+    // the tree extraction just wrote and compression consumes the same tree, so
+    // releasing in between would only widen the window in which an extracted
+    // tree occupies disk without letting any other task make progress.
+    let metadata = {
         let _permit = bundle_sem.acquire().await.expect("semaphore closed");
 
         progress::set_stage(spinner, "Bundling", &task.normalized_version, &task.platform);
-        let asset_type = task.asset_type.clone();
 
         let ap = archive_path.clone();
         let cd = content_dir.clone();
-        let bp = bundle_path.clone();
+        let asset_type = task.asset_type.clone();
         let an = task.asset_name.clone();
         tokio::task::spawn_blocking(move || {
             tokio::runtime::Handle::current().block_on(async {
@@ -553,15 +620,62 @@ pub(crate) async fn prepare_task(
                     let _ = tokio::fs::remove_dir_all(&cd).await;
                 }
                 tokio::fs::create_dir_all(&cd).await?;
-                package::extract_and_bundle(&ap, &cd, &bp, &asset_type, &an, compression_threads).await?;
+                package::extract(&ap, &cd, &asset_type, &an).await
+            })
+        })
+        .await??;
+
+        // The one metadata input that does not exist before the download. Every
+        // other one is resolvable from the spec alone, which is what lets
+        // `expected_metadata` stay download-free for `plan` and `patch`.
+        let scanned = bin_scan::resolve_binaries(&content_dir, authoring, &task.platform, task.bin_scan.into())
+            .await
+            .with_context(|| format!("bin_scan failed for {} {}", task.normalized_version, task.platform))?;
+        let metadata = finalize_metadata(&scanned, &task.platform, &sidecar_path).await?;
+
+        let cd = content_dir.clone();
+        let bp = bundle_path.clone();
+        tokio::task::spawn_blocking(move || {
+            tokio::runtime::Handle::current().block_on(async {
+                package::bundle(&cd, &bp, compression_threads).await?;
                 let _ = tokio::fs::remove_dir_all(&cd).await;
                 Ok::<_, anyhow::Error>(())
             })
         })
         .await??;
-    } // bundle permit released
+
+        metadata
+    }; // bundle permit released
 
     Ok((bundle_path, metadata))
+}
+
+/// Writes the `-metadata.json` sidecar beside the bundle and returns the
+/// published projection the in-process push carries in `Info`.
+async fn finalize_metadata(authoring: &AuthoringMetadata, platform: &Platform, sidecar: &Path) -> Result<Metadata> {
+    let expected = ExpectedMetadata::render(authoring.clone(), platform)?;
+    tokio::fs::write(sidecar, &expected.sidecar_json)
+        .await
+        .with_context(|| format!("failed to write {}", sidecar.display()))?;
+    Ok(expected.published)
+}
+
+/// The metadata an earlier run recorded for this task, read back off the
+/// sidecar it left behind.
+///
+/// Only reached on a resume under `bin_scan`, where re-resolving from the spec
+/// would silently drop the scanned `binaries` claim and publish a bundle whose
+/// metadata contradicts the one already prepared beside it.
+async fn resume_scanned_metadata(sidecar: &Path, platform: &Platform) -> Result<Metadata> {
+    let json = tokio::fs::read_to_string(sidecar).await.with_context(|| {
+        format!(
+            "cannot resume a bin_scan bundle without its sidecar {} — remove the bundle to re-scan",
+            sidecar.display()
+        )
+    })?;
+    let authoring: AuthoringMetadata =
+        serde_json::from_str(&json).with_context(|| format!("failed to parse {}", sidecar.display()))?;
+    Ok(authoring.to_published(platform)?)
 }
 
 /// Phase 2: Push a prepared bundle to the registry with optional cascade.
@@ -607,6 +721,195 @@ mod tests {
 
     fn platform(spec: &str) -> ocx_lib::oci::Platform {
         spec.parse().expect("valid platform")
+    }
+
+    // ── bin_scan: the claim that only exists after extraction ─────────────
+
+    /// A spec directory holding one metadata file that declares an
+    /// interface-visible `${installPath}/bin` PATH var — the shape a scan
+    /// looks at — plus whatever `binaries` clause the caller wants in it.
+    #[cfg(unix)]
+    fn spec_dir_declaring(binaries: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            format!(
+                r#"{{"type":"bundle","version":1{binaries},
+                "env":[{{"key":"PATH","type":"path","value":"${{installPath}}/bin","required":false,"visibility":"interface"}}]}}"#
+            ),
+        )
+        .expect("write metadata fixture");
+        dir
+    }
+
+    /// A `.tar.xz` holding `bin/tool` with the exec bit set — the upstream
+    /// asset a mirror downloads, built here so the test needs no network.
+    #[cfg(unix)]
+    async fn staged_asset(at: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let content = at.parent().expect("asset has a parent").join("upstream-content");
+        std::fs::create_dir_all(content.join("bin")).expect("create fixture tree");
+        let tool = content.join("bin").join("tool");
+        std::fs::write(&tool, b"#!/bin/sh\n").expect("write fixture tool");
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod fixture tool");
+        package::bundle(&content, at, 1).await.expect("build fixture asset");
+        std::fs::remove_dir_all(&content).expect("drop fixture tree");
+    }
+
+    /// Runs the real prepare phase offline: the asset is staged where the
+    /// download would have written it, so `prepare_task` skips the fetch and
+    /// exercises extract → scan → sidecar → bundle exactly as in production.
+    #[cfg(unix)]
+    async fn prepare_scanned(spec_dir: &Path, task_dir: &Path, bin_scan: BinScanMode) -> Result<Metadata> {
+        let task = MirrorTask {
+            version: "1.0.0".into(),
+            normalized_version: "1.0.0".into(),
+            platform: platform("linux/amd64"),
+            download_url: "https://example.invalid/asset.tar.xz".parse().expect("valid url"),
+            asset_name: "asset.tar.xz".into(),
+            target: crate::spec::Target {
+                registry: "registry.test".into(),
+                repository: "mirror/tool".into(),
+            },
+            metadata_config: Some(MetadataConfig {
+                default: "metadata.json".into(),
+                platforms: HashMap::new(),
+            }),
+            bin_scan,
+            verify_config: None,
+            cascade: false,
+            spec_dir: spec_dir.to_path_buf(),
+            asset_type: crate::spec::AssetType::Archive { strip_components: None },
+            variant: None,
+        };
+
+        tokio::fs::create_dir_all(task_dir).await.expect("create task dir");
+        let asset = task_dir.join(&task.asset_name);
+        if !asset.exists() {
+            staged_asset(&asset).await;
+        }
+
+        let progress = ProgressManager::hidden();
+        let spinner = progress.spinner("test".to_string());
+        let (_bundle, metadata) = prepare_task(
+            &task,
+            task_dir,
+            &reqwest::Client::new(),
+            &spinner,
+            &Semaphore::new(1),
+            &Semaphore::new(1),
+            1,
+        )
+        .await?;
+        Ok(metadata)
+    }
+
+    /// The names on disk, as the sidecar `ocx package push --metadata` reads
+    /// records them — the file, not the in-memory value, because that file is
+    /// what the CI push job actually publishes from.
+    #[cfg(unix)]
+    fn sidecar_binaries(task_dir: &Path) -> Vec<String> {
+        let json = std::fs::read_to_string(task_dir.join("metadata.json")).expect("sidecar written");
+        let sidecar: AuthoringMetadata = serde_json::from_str(&json).expect("sidecar parses");
+        sidecar
+            .binaries()
+            .map(|binaries| binaries.iter().map(|name| name.as_str().to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The ordering constraint this feature exists to satisfy: `binaries` is
+    /// derived from the extracted content tree, so the metadata cannot be
+    /// finalised before the download the way every other field is.
+    ///
+    /// Asserted against the sidecar as well as the published projection: the CI
+    /// push job publishes from the file, so a claim that reached only the
+    /// in-memory value would never leave the runner.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bin_scan_auto_fills_binaries_from_the_extracted_tree() {
+        let spec = spec_dir_declaring("");
+        let work = tempfile::tempdir().expect("tempdir");
+
+        let off = work.path().join("off");
+        let metadata = prepare_scanned(spec.path(), &off, BinScanMode::Off)
+            .await
+            .expect("prepare succeeds");
+        assert!(
+            metadata.binaries().is_none(),
+            "control: without bin_scan nothing may invent a binaries claim",
+        );
+        assert!(sidecar_binaries(&off).is_empty(), "control: sidecar too");
+
+        let auto = work.path().join("auto");
+        let metadata = prepare_scanned(spec.path(), &auto, BinScanMode::Auto)
+            .await
+            .expect("prepare succeeds");
+        assert_eq!(
+            metadata.binaries().map(|binaries| binaries.len()),
+            Some(1),
+            "the executable under the interface PATH dir must reach the published metadata",
+        );
+        assert_eq!(sidecar_binaries(&auto), vec!["tool"], "and the sidecar the push reads");
+    }
+
+    /// `verify` is the mode a mirror wants once it hand-lists `binaries`: the
+    /// list becomes a regression test against upstream rearranging its archive,
+    /// and a disagreement fails the run instead of publishing quietly.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bin_scan_verify_fails_on_an_undeclared_binary() {
+        let spec = spec_dir_declaring(r#","binaries":["other"]"#);
+        let work = tempfile::tempdir().expect("tempdir");
+
+        let error = prepare_scanned(spec.path(), &work.path().join("verify"), BinScanMode::Verify)
+            .await
+            .expect_err("an executable the spec does not declare must fail the run");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("tool") && rendered.contains("not declared"),
+            "the failure must name the undeclared binary: {rendered}",
+        );
+
+        // The same tree under `auto` passes a declared list through untouched —
+        // otherwise the test above would prove nothing about `verify`.
+        let metadata = prepare_scanned(spec.path(), &work.path().join("auto"), BinScanMode::Auto)
+            .await
+            .expect("auto passes a declared claim through unverified");
+        assert_eq!(metadata.binaries().map(|binaries| binaries.len()), Some(1));
+    }
+
+    /// A resume arrives after the content tree is gone, so re-resolving the
+    /// metadata from the spec would silently drop the scanned claim and publish
+    /// a bundle whose metadata contradicts what was prepared beside it.
+    ///
+    /// The sidecar the first run wrote is the record, and it is written before
+    /// the bundle exists precisely so this readback cannot miss.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resumed_bin_scan_task_keeps_the_scanned_binaries() {
+        let spec = spec_dir_declaring("");
+        let work = tempfile::tempdir().expect("tempdir");
+        let task_dir = work.path().join("resume");
+
+        prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect("first run succeeds");
+        assert!(task_dir.join("bundle.tar.xz").exists(), "first run must leave a bundle");
+        assert!(
+            !task_dir.join("content").exists(),
+            "and must have discarded the tree a re-scan would need",
+        );
+
+        let resumed = prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect("resume succeeds");
+        assert_eq!(
+            resumed.binaries().map(|binaries| binaries.len()),
+            Some(1),
+            "a resumed run must republish the scanned claim, not drop it",
+        );
+        assert_eq!(sidecar_binaries(&task_dir), vec!["tool"]);
     }
 
     #[test]

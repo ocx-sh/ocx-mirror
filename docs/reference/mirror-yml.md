@@ -12,6 +12,7 @@
 | `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. *Mutually exclusive with `variants` — exactly one of the two is required. |
 | `variants` | array | No* | Alternate asset sets for the same tool, each producing its own version-tag prefix. *Mutually exclusive with `assets` — exactly one of the two is required. See [`variants`](#variants). |
 | `metadata` | object | No | Path(s) to the package metadata JSON, with optional per-platform overrides. See [`metadata`](#metadata). |
+| `bin_scan` | string | No | `off` (default), `auto`, or `verify` — derive the published `binaries` claim from the extracted bundle. See [`bin_scan`](#bin-scan). |
 | `asset_type` | string | No | `Archive` (default) or `Binary` |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
@@ -113,6 +114,7 @@ variants:
 | `default` | boolean | No | Marks the variant whose tags publish unprefixed (`3.13.9`, not `<name>-3.13.9`). Exactly one variant must set this. |
 | `assets` | object | Yes | This variant's platform → regex mapping, same shape as top-level [`assets`](#assets). |
 | `metadata` | object | No | Overrides the top-level [`metadata`](#metadata) for this variant only. |
+| `bin_scan` | string | No | Overrides the top-level [`bin_scan`](#bin-scan) for this variant only. |
 | `asset_type` | string | No | Overrides the top-level `asset_type` for this variant only. |
 
 **Rules:**
@@ -121,7 +123,7 @@ variants:
 - At least one variant is required; exactly one must set `default: true`.
 - Only the default variant may omit `name`. A non-default variant without one is rejected.
 - Two variants with the same name (or two unnamed variants) are rejected as duplicates.
-- A variant that omits `metadata` or `asset_type` inherits the spec's top-level value.
+- A variant that omits `metadata`, `bin_scan` or `asset_type` inherits the spec's top-level value. A slim variant ships a different binary set than the full one, so `bin_scan: off` on a variant is an override back to unscanned, not "unset".
 
 ## `metadata` {#metadata}
 
@@ -145,6 +147,34 @@ metadata:
 Both paths resolve against the directory holding the spec file, never the repository root — the same rule [`catalog`](#catalog) follows, and the opposite of [`tests.script`](#multi-spec-script-path). Every path is checked for existence when the spec loads; a missing file is a spec-load failure (exit 65), not a runtime surprise.
 
 Editing this file only changes what *future* pushes publish. `pipeline plan` compares it against what already-published versions record and reports any mismatch as a `metadata-drift` entry; [`pipeline patch`][cli-patch] then republishes the corrected metadata against those versions' existing layers, with no re-download and no re-upload. There is no key here for *which* versions to patch — that range is a flag on the `patch` command line, not spec state, since a stored range would need a ledger to track what it had already covered.
+
+## `bin_scan` {#bin-scan}
+
+The `binaries` field of a package's metadata names the executables the package puts on the interface surface. Hand-listing it means keeping a list in step with whatever upstream ships in the archive; `bin_scan` derives it from the bundle instead, at mirror time.
+
+```yaml
+bin_scan: verify
+metadata:
+  default: metadata.json
+```
+
+| Value | Behaviour |
+|-------|-----------|
+| `off` (default) | Never scan. `binaries` is exactly what the metadata file declares, or absent when it declares none. |
+| `auto` | Fill an absent `binaries` claim from the scan. A claim the metadata file already declares passes through unverified. |
+| `verify` | Fill an absent claim exactly as `auto`, and additionally check a declared one against the extracted tree. An executable on the interface surface that the file does not list, or a listed name present but not executable, fails the run. |
+
+The scan is not a directory walk. It reads the immediate entries of the directories reachable through the metadata's `${installPath}`-rooted `Path` environment variables whose visibility reaches the interface — so a `libexec` directory behind a `private` variable never contributes, and neither does a subdirectory of a `PATH` entry. On a non-Windows target platform a candidate counts when it carries the Unix exec bit; on a Windows target the `.exe`, `.com`, `.bat` and `.cmd` extensions are stripped and the exec bit is ignored. Symlinks are followed and claim the name of the link.
+
+`verify` is the mode a mirror wants once it does hand-list `binaries`: the list stops being documentation and becomes a regression test against upstream rearranging its archive. Platforms that genuinely differ get a per-platform metadata file — CMake's Windows zip has no `ccmake.exe` while its Linux and macOS archives both ship `ccmake`, so the Windows entry under [`metadata.platforms`](#metadata) declares its own shorter list.
+
+### Interaction with `pipeline patch` {#bin-scan-patch}
+
+[`pipeline patch`][cli-patch] never downloads anything — re-referencing published layers by digest is its entire reason to exist — so it cannot re-run a scan. The metadata it computes from the spec therefore always says "no binaries declared", which is not what a correctly published scanned tile records.
+
+So on a spec with `bin_scan` enabled, the drift comparison reads the published `binaries` claim and carries it into the expectation before comparing. Without that, `plan` would report `metadata-drift` on every scanned version on every run, and each `patch` would republish the metadata with `binaries` *absent* — silently deleting a correct claim. Every other field still drifts and still gets corrected as normal; `binaries` is the one field `patch` preserves rather than recomputes.
+
+The consequence worth knowing: turning `bin_scan` on does **not** retroactively populate `binaries` on already-published versions, and `patch` will not do it either. A version picks up its scanned claim when it is next actually built — either by a new push, or by deleting the tag and re-mirroring it.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 

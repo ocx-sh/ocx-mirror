@@ -4,6 +4,7 @@
 mod announce_config;
 mod asset_type;
 mod assets;
+mod bin_scan;
 mod catalog_config;
 mod concurrency_config;
 mod metadata_config;
@@ -22,6 +23,7 @@ mod versions_config;
 pub use announce_config::{AnnounceConfig, DEFAULT_INDEX_REPO};
 pub use asset_type::{AssetType, AssetTypeConfig};
 pub use assets::AssetPatterns;
+pub use bin_scan::BinScanMode;
 pub use catalog_config::CatalogConfig;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
@@ -67,6 +69,16 @@ pub struct MirrorSpec {
 
     #[serde(default)]
     pub metadata: Option<MetadataConfig>,
+
+    /// Whether the published `binaries` metadata claim is derived from the
+    /// extracted content tree rather than hand-listed in the metadata file.
+    ///
+    /// `off` (the default) publishes exactly what the metadata file declares.
+    /// `auto` fills an absent claim from the scan; `verify` also checks a
+    /// declared one against the tree, so a hand-written list becomes a
+    /// regression test against upstream rearranging its archive.
+    #[serde(default)]
+    pub bin_scan: BinScanMode,
 
     /// How to process downloaded assets before bundling.
     ///
@@ -382,6 +394,7 @@ impl MirrorSpec {
                     assets: v.assets.clone(),
                     metadata: v.metadata.clone().or_else(|| self.metadata.clone()),
                     asset_type: v.asset_type.clone().or_else(|| self.asset_type.clone()),
+                    bin_scan: v.bin_scan.unwrap_or(self.bin_scan),
                 })
                 .collect(),
             None => vec![EffectiveVariant {
@@ -393,6 +406,7 @@ impl MirrorSpec {
                     .expect("validated: assets or variants must be present"),
                 metadata: self.metadata.clone(),
                 asset_type: self.asset_type.clone(),
+                bin_scan: self.bin_scan,
             }],
         }
     }
@@ -2371,6 +2385,82 @@ metadata:
         // debug inherits top-level metadata
         let debug = &variants[1];
         assert!(debug.metadata.is_some());
+    }
+
+    /// `bin_scan` follows the same override-with-fallback rule as `metadata`
+    /// and `asset_type`: a slim variant ships a different binary set than the
+    /// full one, so it may need a different mode than the spec's — and a
+    /// variant that says nothing must inherit rather than silently reset to
+    /// `off`.
+    #[test]
+    fn effective_variants_bin_scan_overrides_per_variant_and_falls_back() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+bin_scan: verify
+variants:
+  - default: true
+    assets:
+      linux/amd64:
+        - "full-.*\\.tar\\.gz"
+  - name: slim
+    bin_scan: auto
+    assets:
+      linux/amd64:
+        - "slim-.*\\.tar\\.gz"
+  - name: legacy
+    bin_scan: off
+    assets:
+      linux/amd64:
+        - "legacy-.*\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        let variants = spec.effective_variants();
+
+        assert_eq!(
+            variants[0].bin_scan,
+            BinScanMode::Verify,
+            "a variant that states no mode inherits the spec's",
+        );
+        assert_eq!(variants[1].bin_scan, BinScanMode::Auto, "a variant may override it");
+        assert_eq!(
+            variants[2].bin_scan,
+            BinScanMode::Off,
+            "including overriding it back off — `off` must not read as 'unset'",
+        );
+    }
+
+    /// Omitting the key everywhere must leave every variant unscanned: turning
+    /// a scan on by default would start publishing a `binaries` claim no
+    /// publisher made, across the whole fleet, on the next cron run.
+    #[test]
+    fn bin_scan_defaults_to_off_for_a_spec_that_never_mentions_it() {
+        let yaml = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_.*_linux_amd64$"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        assert_eq!(spec.bin_scan, BinScanMode::Off);
+        assert_eq!(spec.effective_variants()[0].bin_scan, BinScanMode::Off);
     }
 
     // ── §3.1 S1: Pipeline schema round-trip and validation tests ────────────
