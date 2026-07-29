@@ -795,6 +795,44 @@ mod tests {
         );
     }
 
+    /// A `binaries` list the *spec* declares must never be adopted away.
+    ///
+    /// Adoption exists for the claim only the artifact knows — a scanned one.
+    /// Applying it to a hand-written list rewrites the expectation to whatever
+    /// the registry already holds, so that field can never drift: a maintainer
+    /// correcting a wrong declared list gets silence, `plan` reports nothing,
+    /// and the fix never reaches the published versions. Includes `verify`,
+    /// which checks the declaration against the tree rather than replacing it.
+    #[test]
+    fn a_spec_declared_binaries_claim_is_never_adopted_away() {
+        let declared: ocx_lib::package::metadata::authoring::AuthoringMetadata = serde_json::from_slice(
+            br#"{"type":"bundle","version":1,"strip_components":1,"env":[],"binaries":["cmake","ctest"]}"#,
+        )
+        .expect("declared fixture parses");
+        let expected = ExpectedMetadata::render(declared, &scan_platform()).expect("renders");
+
+        // What the registry still records: the shorter, wrong list the spec was
+        // just corrected away from.
+        let published: Metadata = serde_json::from_slice(
+            br#"{"type":"bundle","version":1,"strip_components":1,"env":[],"binaries":["cmake"]}"#,
+        )
+        .expect("published fixture parses");
+
+        let adopted = expected
+            .adopting_binaries_from(&published, &scan_platform())
+            .expect("adoption renders");
+
+        assert_eq!(
+            adopted.published.binaries().map(|binaries| binaries.len()),
+            Some(2),
+            "the spec's declared list must survive adoption untouched",
+        );
+        assert!(
+            metadata_drifted(&published, &adopted.published).expect("compares"),
+            "a corrected hand-written list must report drift so the fix can land",
+        );
+    }
+
     /// Adoption must not invent a claim. A mirror that turns `bin_scan` on
     /// publishes `binaries` from the next push onward; until then the published
     /// tiles have none, and reporting them as current would hide real drift on
