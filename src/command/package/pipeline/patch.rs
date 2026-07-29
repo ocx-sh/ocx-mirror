@@ -162,6 +162,11 @@ impl Patch {
                     continue;
                 };
 
+                if let Err(refusal) = layout_unchanged(&publisher, &identifier, image, &expected.published).await? {
+                    failures.push(format!("{tag} ({}): {refusal}", image.platform));
+                    continue;
+                }
+
                 let sidecar = work_dir.join(format!("{tag}-{}-metadata.json", spec::platform_slug(&image.platform)));
                 let outcome = republish(
                     &spec,
@@ -238,6 +243,44 @@ impl Patch {
         }
         Ok(())
     }
+}
+
+/// Whether `expected` still describes the layers `image` already published.
+///
+/// `strip_components` is the whole mapping from a layer's archive paths onto
+/// `${installPath}`, and it is fixed when the layer is *built*. Patch never
+/// downloads: it re-references those exact layers by digest, so republishing
+/// metadata that strips differently describes a tree the layer does not contain
+/// — every `${installPath}`-rooted PATH entry would name a directory absent
+/// from the bundle, and the package would install broken while its digest still
+/// verifies.
+///
+/// This is reachable in production, not theoretical: `mirror-astral-sh`
+/// published windows/amd64 as `strip_components: 1` with `PATH=${installPath}`,
+/// then had to move to `strip_components: 0` with `PATH=${installPath}/python`
+/// because the `bin_scan` load gate rejects the bare form. Every leaf tag reads
+/// as drifted, and patching them would have shipped exactly that broken state.
+///
+/// ponytail: compares the one field that is decidable without the layer bytes.
+/// A PATH change under an unchanged `strip_components` is still unverified —
+/// deciding that needs the layer listing, which is the download patch exists to
+/// avoid. Upgrade to a blob listing if a mirror ever hits that shape.
+async fn layout_unchanged(
+    publisher: &Publisher,
+    identifier: &Identifier,
+    image: &PublishedImage,
+    expected: &ocx_lib::package::metadata::Metadata,
+) -> Result<Result<(), String>, MirrorError> {
+    let published = target_registry::fetch_published_metadata(publisher, identifier, image).await?;
+    let (was, now) = (published.strip_components(), expected.strip_components());
+    if was == now {
+        return Ok(Ok(()));
+    }
+    Ok(Err(format!(
+        "refusing to patch: the published layers were built with strip_components {was:?} and the spec \
+         now says {now:?}. Patch re-references those layers by digest, so the new metadata would describe \
+         a tree they do not contain. Re-mirror this version instead of patching it.",
+    )))
 }
 
 /// Re-emits one `(version, platform)` manifest against `sidecar_json`.
@@ -765,6 +808,49 @@ mod tests {
 
     fn offline_publisher() -> Publisher {
         Publisher::new(ClientBuilder::from_env().expect("client builds"))
+    }
+
+    /// Patch must refuse when the layer layout changed under it.
+    ///
+    /// `strip_components` is the whole mapping from a layer's archive paths onto
+    /// `${installPath}`, fixed when the layer is built. Patch re-references the
+    /// published layers by digest, so republishing metadata that strips
+    /// differently describes a tree they do not contain — every
+    /// `${installPath}`-rooted PATH entry names a directory absent from the
+    /// bundle, and the package installs broken while its digest still verifies.
+    ///
+    /// Live on `mirror-astral-sh`: windows/amd64 published as
+    /// `strip_components: 1` with `PATH=${installPath}`, then had to move to
+    /// `strip_components: 0` with `PATH=${installPath}/python` because the
+    /// `bin_scan` load gate rejects the bare form. All six leaf tags read as
+    /// drifted, and patching them would have shipped exactly that.
+    #[test]
+    fn a_strip_components_change_is_a_layout_change_not_a_metadata_fix() {
+        let strip = |n: Option<u8>| -> ocx_lib::package::metadata::Metadata {
+            let field = n.map(|n| format!(r#","strip_components":{n}"#)).unwrap_or_default();
+            serde_json::from_str(&format!(r#"{{"type":"bundle","version":1{field},"env":[]}}"#))
+                .expect("metadata fixture parses")
+        };
+
+        // Every published-vs-expected pair a patch run can see. Only an equal
+        // pair may be republished; the rest describe a different tree.
+        for (was, now, patchable) in [
+            (Some(1), Some(1), true),
+            (None, None, true),
+            (Some(1), Some(0), false),
+            (Some(0), Some(1), false),
+            // `None` and `Some(0)` mean the same layout but are different
+            // published bytes. Refusing costs one message a human resolves;
+            // the opposite ships a broken package. Pinned so a future
+            // "normalize None to 0" is a decision, not a silent drift.
+            (None, Some(0), false),
+        ] {
+            assert_eq!(
+                strip(was).strip_components() == strip(now).strip_components(),
+                patchable,
+                "published strip {was:?} -> spec strip {now:?}",
+            );
+        }
     }
 
     /// The idempotency mechanism, and the whole reason there is no patch

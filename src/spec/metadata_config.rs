@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use super::bin_scan::BinScanMode;
 use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::package::metadata::env::modifier::Modifier;
 use ocx_lib::package::metadata::template::classify_install_path_rooted_dir;
@@ -49,7 +50,7 @@ impl MetadataConfig {
     /// exactly that platform.
     ///
     /// `label` names the variant so a multi-variant spec says which one.
-    pub fn validate_scannable(&self, spec_dir: &Path, label: &str, errors: &mut Vec<String>) {
+    pub fn validate_scannable(&self, spec_dir: &Path, label: &str, mode: BinScanMode, errors: &mut Vec<String>) {
         for path in std::iter::once(&self.default).chain(self.platforms.values()) {
             // A missing or unparseable file is already reported by `validate`.
             let Ok(text) = std::fs::read_to_string(spec_dir.join(path)) else {
@@ -58,19 +59,27 @@ impl MetadataConfig {
             let Ok(metadata) = serde_json::from_str::<AuthoringMetadata>(&text) else {
                 continue;
             };
-            // A file that declares `binaries` owns the claim: `auto` passes a
-            // declared list through without scanning at all, so the scan target
-            // is irrelevant and rejecting would block a legitimate spec. Same
-            // spec-owns-the-field rule the download-free adoption and the resume
-            // path follow.
-            if metadata.binaries().is_some() {
+            // `auto` passes a declared list through *without scanning*, so the
+            // scan target is irrelevant there and rejecting would block a
+            // legitimate spec. `verify` is not the same: it walks the tree, and
+            // with no scan target `verify_declared_binaries` iterates an empty
+            // candidate map — both its loops no-op and it returns `Ok`, so the
+            // verification can never fail. A `verify` that cannot go red is
+            // worse than no verification, because the spec says it is checked.
+            if metadata.binaries().is_some() && mode == BinScanMode::Auto {
                 continue;
             }
             if !has_scan_target(&metadata) {
+                let consequence = match metadata.binaries().is_some() {
+                    true => "the verification would inspect no file and pass green whatever the archive contains",
+                    false => {
+                        "the scan would find nothing and publish `binaries: []`, a claim that the package \
+                              exposes no executables"
+                    }
+                };
                 errors.push(format!(
                     "{label}: bin_scan is enabled but {} declares no interface-visible \
-                     ${{installPath}}/<dir> PATH entry — the scan would find nothing and publish \
-                     `binaries: []`, a claim that the package exposes no executables. \
+                     ${{installPath}}/<dir> PATH entry — {consequence}. \
                      Point a PATH entry at a subdirectory, or set bin_scan: off and list binaries by hand.",
                     path.display()
                 ));
@@ -166,9 +175,25 @@ platforms:
     }
 
     fn scan_errors(dir: &Path, config: &MetadataConfig) -> Vec<String> {
+        scan_errors_for(dir, config, BinScanMode::Auto)
+    }
+
+    fn scan_errors_for(dir: &Path, config: &MetadataConfig, mode: BinScanMode) -> Vec<String> {
         let mut errors = Vec::new();
-        config.validate_scannable(dir, "bin_scan", &mut errors);
+        config.validate_scannable(dir, "bin_scan", mode, &mut errors);
         errors
+    }
+
+    /// Writes `name` declaring `binaries` alongside one PATH entry.
+    fn write_declared_metadata(dir: &Path, name: &str, value: &str) {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                r#"{{"type":"bundle","version":1,"binaries":["shfmt"],"env":[
+                   {{"key":"PATH","type":"path","required":true,"value":"{value}","visibility":"public"}}]}}"#
+            ),
+        )
+        .expect("write metadata fixture");
     }
 
     fn config(default: &str, platforms: &[(&str, &str)]) -> MetadataConfig {
@@ -228,25 +253,55 @@ platforms:
         assert!(errors[0].contains("metadata-windows.json"), "got: {}", errors[0]);
     }
 
-    /// A file that hand-declares `binaries` must load even with no scan target.
+    /// The declared-list carve-out is `auto`-only, and the two halves must be
+    /// asserted together or the gate silently loses one mode.
     ///
-    /// `auto` passes a declared list through without scanning, so the target
-    /// directory never matters — rejecting it blocked a legitimate spec, the
-    /// mirror-order equivalent of adopting a declared claim away.
+    /// `auto` passes a declared list through *without scanning*, so the target
+    /// never matters and rejecting blocks a legitimate spec. `verify` does walk
+    /// the tree — with no scan target `verify_declared_binaries` iterates an
+    /// empty candidate map, both loops no-op, and it returns `Ok`. So a
+    /// carve-out that covered `verify` too produced a spec whose declared
+    /// verification could never go red, which is worse than not verifying:
+    /// the spec claims the list is checked.
     #[test]
-    fn a_declared_binaries_list_needs_no_scan_target() {
+    fn the_declared_list_carve_out_is_auto_only() {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("metadata.json"),
-            r#"{"type":"bundle","version":1,"binaries":["shfmt"],"env":[
-               {"key":"PATH","type":"path","required":true,"value":"${installPath}","visibility":"public"}]}"#,
-        )
-        .unwrap();
+        write_declared_metadata(dir.path(), "metadata.json", "${installPath}");
+        let config = config("metadata.json", &[]);
 
         assert!(
-            scan_errors(dir.path(), &config("metadata.json", &[])).is_empty(),
-            "a declared claim is never scanned, so it needs no scan target",
+            scan_errors_for(dir.path(), &config, BinScanMode::Auto).is_empty(),
+            "auto never scans a declared claim, so it needs no scan target",
         );
+
+        let errors = scan_errors_for(dir.path(), &config, BinScanMode::Verify);
+        assert_eq!(
+            errors.len(),
+            1,
+            "verify with nothing to inspect must be rejected: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("inspect no file"),
+            "the error must say the verification is vacuous, not that a scan would publish []: {}",
+            errors[0],
+        );
+    }
+
+    /// And a declared list *with* a scan target loads under both modes — the
+    /// control that keeps the test above from passing on a gate that simply
+    /// rejects every `verify`.
+    #[test]
+    fn a_declared_list_with_a_scan_target_loads_under_both_modes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_declared_metadata(dir.path(), "metadata.json", "${installPath}/bin");
+        let config = config("metadata.json", &[]);
+
+        for mode in [BinScanMode::Auto, BinScanMode::Verify] {
+            assert!(
+                scan_errors_for(dir.path(), &config, mode).is_empty(),
+                "{mode:?} with a real scan target must load",
+            );
+        }
     }
 
     /// A private-visibility PATH var is never a scan target (ADR §1), so it
