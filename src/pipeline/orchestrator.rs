@@ -123,10 +123,20 @@ impl ExpectedMetadata {
     /// `binaries` list. Adopting what the registry already records makes the
     /// comparison see the one field it cannot recompute as unchanged, while
     /// every other field still drifts normally.
+    ///
+    /// Only a claim the spec does **not** declare is adopted. A hand-written
+    /// `binaries` list is spec-owned and stays authoritative — including under
+    /// `verify`, which checks the declaration against the tree rather than
+    /// replacing it, so the published claim is the declared one either way.
+    /// Adopting a declared claim would rewrite the expectation to whatever is
+    /// already published, and a maintainer correcting a wrong hand-written list
+    /// would get silence: the field could never drift and the fix never lands.
     pub(crate) fn adopting_binaries_from(&self, published: &Metadata, platform: &Platform) -> Result<Self> {
         match published.binaries() {
-            Some(binaries) => Self::render(self.authoring.clone().with_binaries(binaries.clone()), platform),
-            None => Ok(self.clone()),
+            Some(binaries) if self.authoring.binaries().is_none() => {
+                Self::render(self.authoring.clone().with_binaries(binaries.clone()), platform)
+            }
+            _ => Ok(self.clone()),
         }
     }
 }
@@ -168,13 +178,21 @@ pub(crate) struct MetadataPlan {
 /// performs for a sync run. Returns `None` when the tag names a variant the
 /// spec no longer declares, or when neither the variant nor the spec declares
 /// metadata.
+///
+/// A bare tag that matches no variant by name belongs to the default variant.
+/// A *named* default (`name: pgo.lto, default: true`) publishes `3.13.9` beside
+/// `pgo.lto-3.13.9`, and the bare alias carries no variant name — so matching on
+/// name alone found nothing and drift detection and `patch` skipped every one of
+/// those tags silently.
 pub(crate) fn metadata_plan_for(spec: &MirrorSpec, version: &Version) -> Option<MetadataPlan> {
-    let variant = spec
-        .effective_variants()
-        .into_iter()
-        .find(|variant| variant.name.as_deref() == version.variant())?;
+    let variants = spec.effective_variants();
+    let variant = match variants.iter().find(|v| v.name.as_deref() == version.variant()) {
+        Some(variant) => variant,
+        None if version.variant().is_none() => variants.iter().find(|v| v.is_default)?,
+        None => return None,
+    };
     Some(MetadataPlan {
-        config: variant.metadata?,
+        config: variant.metadata.clone()?,
         bin_scan: variant.bin_scan,
     })
 }
@@ -560,17 +578,17 @@ pub(crate) async fn prepare_task(
 
     if bundle_path.exists() {
         // Resume. An earlier run already extracted this bundle's content tree
-        // and discarded it, so a `bin_scan` has nothing left to read — the
-        // sidecar that run wrote is the record of what it found, and it is
-        // written before the bundle exists precisely so this readback cannot
-        // miss. Without a scan nothing downstream of the download reaches the
-        // metadata, so it is re-resolved from the spec instead and a spec-side
-        // fix reaches the resumed run.
-        let metadata = if task.bin_scan.scans() {
-            resume_scanned_metadata(&sidecar_path, &task.platform).await?
-        } else {
-            finalize_metadata(&authoring, &task.platform, &sidecar_path).await?
+        // and discarded it, so a `bin_scan` has nothing left to read. Everything
+        // the *spec* owns is re-resolved from the spec, so a spec-side fix — an
+        // env var, an entrypoint — still reaches a resumed run; only `binaries`,
+        // the one field no download-free path can recompute, is adopted from the
+        // sidecar that run wrote. Carrying the whole sidecar instead discarded
+        // every unrelated metadata fix on any resumed run.
+        let authoring = match task.bin_scan.scans() {
+            true => adopt_resumed_binaries(authoring, &sidecar_path).await?,
+            false => authoring,
         };
+        let metadata = finalize_metadata(&authoring, &task.platform, &sidecar_path).await?;
         return Ok((bundle_path, metadata));
     }
 
@@ -631,6 +649,7 @@ pub(crate) async fn prepare_task(
         let scanned = bin_scan::resolve_binaries(&content_dir, authoring, &task.platform, task.bin_scan.into())
             .await
             .with_context(|| format!("bin_scan failed for {} {}", task.normalized_version, task.platform))?;
+        reject_empty_scan(&scanned, task)?;
         let metadata = finalize_metadata(&scanned, &task.platform, &sidecar_path).await?;
 
         let cd = content_dir.clone();
@@ -650,6 +669,36 @@ pub(crate) async fn prepare_task(
     Ok((bundle_path, metadata))
 }
 
+/// Fails a scanning task whose scan produced an empty `binaries` claim.
+///
+/// `binaries: []` is not "undeclared" — it is a positive published claim that
+/// the package exposes no executables, and it is what a scan yields whenever its
+/// target directories are absent from the extracted tree: a typo in the metadata
+/// or an upstream that renamed `bin/`. The load-time gate proves the metadata
+/// *declares* an `${installPath}/<dir>` PATH entry; only here, with the tree on
+/// disk, can that directory be shown to actually exist. Under `verify` the same
+/// state passes silently — nothing declared and nothing found makes the
+/// one-directional diff trivially empty — so the check has to be on the result,
+/// not the diff.
+///
+/// ponytail: an empty result stands in for "the target directories are missing",
+/// which avoids re-deriving ocx's `strip_components` wildcard walk here. A
+/// package whose interface directory exists but holds no executables lands in
+/// the same error, and that is also a spec worth failing.
+fn reject_empty_scan(scanned: &AuthoringMetadata, task: &MirrorTask) -> Result<()> {
+    if task.bin_scan.scans() && scanned.binaries().is_some_and(|binaries| binaries.is_empty()) {
+        anyhow::bail!(
+            "bin_scan for {} {} found no executables — the metadata's ${{installPath}} PATH \
+             directories are missing from the extracted archive, or hold nothing executable. \
+             Publishing would claim this package exposes no commands. Check the PATH entries \
+             against the archive layout, or set bin_scan: off and list binaries by hand.",
+            task.normalized_version,
+            task.platform,
+        );
+    }
+    Ok(())
+}
+
 /// Writes the `-metadata.json` sidecar beside the bundle and returns the
 /// published projection the in-process push carries in `Info`.
 async fn finalize_metadata(authoring: &AuthoringMetadata, platform: &Platform, sidecar: &Path) -> Result<Metadata> {
@@ -660,22 +709,32 @@ async fn finalize_metadata(authoring: &AuthoringMetadata, platform: &Platform, s
     Ok(expected.published)
 }
 
-/// The metadata an earlier run recorded for this task, read back off the
-/// sidecar it left behind.
+/// `authoring` carrying the `binaries` claim an earlier run scanned, read back
+/// off the sidecar it left behind.
 ///
-/// Only reached on a resume under `bin_scan`, where re-resolving from the spec
-/// would silently drop the scanned `binaries` claim and publish a bundle whose
-/// metadata contradicts the one already prepared beside it.
-async fn resume_scanned_metadata(sidecar: &Path, platform: &Platform) -> Result<Metadata> {
+/// Only reached on a resume under `bin_scan`, where the content tree is gone and
+/// a re-scan is impossible. Everything else in `authoring` is the freshly
+/// re-resolved spec, so a spec-side fix still lands; only this one field comes
+/// from the sidecar. A spec that declares `binaries` itself owns the field and
+/// is left alone — the same rule
+/// [`ExpectedMetadata::adopting_binaries_from`] applies on the download-free
+/// paths.
+async fn adopt_resumed_binaries(authoring: AuthoringMetadata, sidecar: &Path) -> Result<AuthoringMetadata> {
+    if authoring.binaries().is_some() {
+        return Ok(authoring);
+    }
     let json = tokio::fs::read_to_string(sidecar).await.with_context(|| {
         format!(
             "cannot resume a bin_scan bundle without its sidecar {} — remove the bundle to re-scan",
             sidecar.display()
         )
     })?;
-    let authoring: AuthoringMetadata =
+    let recorded: AuthoringMetadata =
         serde_json::from_str(&json).with_context(|| format!("failed to parse {}", sidecar.display()))?;
-    Ok(authoring.to_published(platform)?)
+    Ok(match recorded.binaries() {
+        Some(binaries) => authoring.with_binaries(binaries.clone()),
+        None => authoring,
+    })
 }
 
 /// Phase 2: Push a prepared bundle to the registry with optional cascade.
@@ -731,15 +790,23 @@ mod tests {
     #[cfg(unix)]
     fn spec_dir_declaring(binaries: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
+        write_metadata(dir.path(), "bin", binaries, "");
+        dir
+    }
+
+    /// Rewrites the spec's metadata file: PATH pointed at `rel`, plus whatever
+    /// `binaries` clause and `extra` keys the caller wants. Separate from
+    /// [`spec_dir_declaring`] so a test can change the spec *between* runs.
+    #[cfg(unix)]
+    fn write_metadata(spec_dir: &Path, rel: &str, binaries: &str, extra: &str) {
         std::fs::write(
-            dir.path().join("metadata.json"),
+            spec_dir.join("metadata.json"),
             format!(
                 r#"{{"type":"bundle","version":1{binaries},
-                "env":[{{"key":"PATH","type":"path","value":"${{installPath}}/bin","required":false,"visibility":"interface"}}]}}"#
+                "env":[{{"key":"PATH","type":"path","value":"${{installPath}}/{rel}","required":false,"visibility":"interface"}}{extra}]}}"#
             ),
         )
         .expect("write metadata fixture");
-        dir
     }
 
     /// A `.tar.xz` holding `bin/tool` with the exec bit set — the upstream
@@ -920,6 +987,136 @@ mod tests {
             "a resumed run must republish the scanned claim, not drop it",
         );
         assert_eq!(sidecar_binaries(&task_dir), vec!["tool"]);
+    }
+
+    /// A resume adopts `binaries` from the old sidecar and *nothing else*.
+    ///
+    /// Carrying the whole sidecar kept the scanned claim but froze every other
+    /// field with it, so a spec-side fix landing between the two runs — here a
+    /// second env var — was silently discarded on any resumed run and the
+    /// corrected metadata never published.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resumed_bin_scan_task_still_picks_up_a_spec_metadata_fix() {
+        let spec = spec_dir_declaring("");
+        let work = tempfile::tempdir().expect("tempdir");
+        let task_dir = work.path().join("resume");
+
+        prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect("first run succeeds");
+
+        // The spec-side fix, applied after the bundle exists.
+        write_metadata(
+            spec.path(),
+            "bin",
+            "",
+            r#",{"key":"TOOL_HOME","type":"constant","value":"${installPath}","required":false,"visibility":"interface"}"#,
+        );
+
+        let resumed = prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect("resume succeeds");
+
+        assert!(
+            resumed
+                .env()
+                .is_some_and(|vars| vars.into_iter().any(|var| var.key == "TOOL_HOME")),
+            "a resumed run must re-resolve everything the spec owns: {:?}",
+            resumed
+                .env()
+                .map(|vars| vars.into_iter().map(|v| v.key.clone()).collect::<Vec<_>>()),
+        );
+        assert_eq!(
+            resumed.binaries().map(|binaries| binaries.len()),
+            Some(1),
+            "and must still carry the scanned claim it cannot recompute",
+        );
+    }
+
+    /// A scan that finds nothing must fail the run, not publish `binaries: []`.
+    ///
+    /// The load-time gate proves the metadata *declares* an
+    /// `${installPath}/<dir>` PATH entry; it cannot prove that directory exists
+    /// in the archive. A typo or an upstream rename yields zero candidates and
+    /// the same false "exposes no executables" claim the gate exists to stop —
+    /// and under `verify`, with nothing declared and nothing found, the
+    /// one-directional diff is trivially empty and it went green.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_scan_target_missing_from_the_archive_fails_instead_of_claiming_nothing() {
+        let work = tempfile::tempdir().expect("tempdir");
+
+        for (mode, label) in [(BinScanMode::Auto, "auto"), (BinScanMode::Verify, "verify")] {
+            let spec = spec_dir_declaring("");
+            // The archive ships `bin/`; the metadata points somewhere else.
+            write_metadata(spec.path(), "not-in-the-archive", "", "");
+
+            let error = prepare_scanned(spec.path(), &work.path().join(label), mode)
+                .await
+                .expect_err("a scan target absent from the archive must fail the run");
+            let rendered = format!("{error:#}");
+            assert!(
+                rendered.contains("found no executables"),
+                "{label}: the failure must say the scan came up empty: {rendered}",
+            );
+        }
+    }
+
+    /// A *named* default variant publishes bare tags beside its prefixed ones,
+    /// and those bare tags must still resolve to a metadata plan.
+    ///
+    /// `pgo.lto-3.13.9` and `3.13.9` are the same variant's output, but the bare
+    /// alias carries no variant name — so matching variants by name alone
+    /// returned `None`, and drift detection and `pipeline patch` skipped every
+    /// bare tag of such a mirror in silence.
+    #[test]
+    fn a_named_default_variants_bare_tags_resolve_to_its_metadata_plan() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: astral-sh
+  repo: python-build-standalone
+  tag_pattern: "^(?P<version>\\d+)$"
+metadata:
+  default: metadata.json
+variants:
+  - name: pgo.lto
+    default: true
+    bin_scan: verify
+    assets:
+      linux/amd64: ["pgo-.*\\.tar\\.gz"]
+  - name: slim
+    assets:
+      linux/amd64: ["slim-.*\\.tar\\.gz"]
+"#;
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        let plan_for = |tag: &str| metadata_plan_for(&spec, &Version::parse(tag).expect("valid version"));
+
+        let bare = plan_for("3.13.9").expect("a named default's bare tag must resolve to the default variant");
+        assert_eq!(
+            bare.bin_scan,
+            BinScanMode::Verify,
+            "and to *that* variant's settings, not the spec-level defaults",
+        );
+        assert_eq!(
+            plan_for("pgo.lto-3.13.9").expect("the prefixed tag resolves").bin_scan,
+            BinScanMode::Verify
+        );
+        assert_eq!(
+            plan_for("slim-3.13.9")
+                .expect("a non-default variant resolves")
+                .bin_scan,
+            BinScanMode::Off
+        );
+        assert!(
+            plan_for("gone-3.13.9").is_none(),
+            "a tag naming a variant the spec no longer declares must still resolve to nothing",
+        );
     }
 
     #[test]

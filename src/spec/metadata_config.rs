@@ -58,6 +58,14 @@ impl MetadataConfig {
             let Ok(metadata) = serde_json::from_str::<AuthoringMetadata>(&text) else {
                 continue;
             };
+            // A file that declares `binaries` owns the claim: `auto` passes a
+            // declared list through without scanning at all, so the scan target
+            // is irrelevant and rejecting would block a legitimate spec. Same
+            // spec-owns-the-field rule the download-free adoption and the resume
+            // path follow.
+            if metadata.binaries().is_some() {
+                continue;
+            }
             if !has_scan_target(&metadata) {
                 errors.push(format!(
                     "{label}: bin_scan is enabled but {} declares no interface-visible \
@@ -218,6 +226,27 @@ platforms:
         );
         assert_eq!(errors.len(), 1, "got: {errors:?}");
         assert!(errors[0].contains("metadata-windows.json"), "got: {}", errors[0]);
+    }
+
+    /// A file that hand-declares `binaries` must load even with no scan target.
+    ///
+    /// `auto` passes a declared list through without scanning, so the target
+    /// directory never matters — rejecting it blocked a legitimate spec, the
+    /// mirror-order equivalent of adopting a declared claim away.
+    #[test]
+    fn a_declared_binaries_list_needs_no_scan_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"type":"bundle","version":1,"binaries":["shfmt"],"env":[
+               {"key":"PATH","type":"path","required":true,"value":"${installPath}","visibility":"public"}]}"#,
+        )
+        .unwrap();
+
+        assert!(
+            scan_errors(dir.path(), &config("metadata.json", &[])).is_empty(),
+            "a declared claim is never scanned, so it needs no scan target",
+        );
     }
 
     /// A private-visibility PATH var is never a scan target (ADR §1), so it
