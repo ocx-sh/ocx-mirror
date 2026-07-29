@@ -491,12 +491,17 @@ pub(crate) async fn image_drift(
 
 /// Whether the config digest alone proves `image` is current.
 ///
-/// Never under a `bin_scan`: the expectation is missing the `binaries` claim
-/// the registry records, so its digest cannot match a correctly published tile
-/// and a digest comparison would report drift on every one of them. Those tiles
-/// go straight to the blob read that adopts the published claim.
+/// Only an *incomplete* expectation has to skip it. A `bin_scan` whose spec
+/// declares no `binaries` cannot compute the claim the registry records, so its
+/// digest can never match a correctly published tile and trusting it would
+/// report drift on every one of them; those go straight to the blob read that
+/// adopts the published claim. A spec that declares `binaries` computes the
+/// whole document download-free, scanning or not, and skipping the digest there
+/// buys nothing: it costs a config-blob GET per tile per run, and turns one
+/// unparseable published blob into a `TargetError` that aborts the discover job.
 fn settled_by_digest(image: &PublishedImage, expected: &Metadata, bin_scan: BinScanMode) -> Result<bool, MirrorError> {
-    Ok(!bin_scan.scans() && config_bytes_match(image, expected)?)
+    let complete = !bin_scan.scans() || expected.binaries().is_some();
+    Ok(complete && config_bytes_match(image, expected)?)
 }
 
 /// Whether the config blob the registry recorded is byte-identical to the one a
@@ -723,7 +728,7 @@ mod tests {
     /// the digest therefore reports drift on every correctly published tile,
     /// forever — and `patch` acting on that republishes the claim away.
     #[test]
-    fn a_bin_scan_tile_is_never_settled_by_its_config_digest() {
+    fn only_an_incomplete_bin_scan_tile_skips_its_config_digest() {
         let expected = spec_expectation();
         let bytes = serde_json::to_vec(&expected.published).expect("serializes");
         // The strongest possible case for a skip: the digests are identical.
@@ -736,8 +741,27 @@ mod tests {
         for mode in [BinScanMode::Auto, BinScanMode::Verify] {
             assert!(
                 !settled_by_digest(&image, &expected.published, mode).expect("digest compares"),
-                "{mode:?} must fall through to the blob read that adopts the published binaries, \
-                 even on an identical config digest",
+                "{mode:?} on a spec declaring no binaries must fall through to the blob read that \
+                 adopts the published claim, even on an identical config digest",
+            );
+        }
+
+        // A spec that hand-declares `binaries` computes the whole document
+        // download-free, scanning or not — mirror-kitware is exactly this. Making
+        // it skip the digest anyway costs a config-blob GET per tile per cron run
+        // and turns one unparseable blob into an aborted discover job.
+        let declared: ocx_lib::package::metadata::authoring::AuthoringMetadata = serde_json::from_slice(
+            br#"{"type":"bundle","version":1,"strip_components":1,"env":[],"binaries":["cmake","ctest"]}"#,
+        )
+        .expect("declared fixture parses");
+        let complete = ExpectedMetadata::render(declared, &scan_platform()).expect("renders");
+        let bytes = serde_json::to_vec(&complete.published).expect("serializes");
+        let image = image_recording(&Algorithm::Sha256.hash(&bytes).to_string());
+
+        for mode in [BinScanMode::Off, BinScanMode::Auto, BinScanMode::Verify] {
+            assert!(
+                settled_by_digest(&image, &complete.published, mode).expect("digest compares"),
+                "{mode:?} with a declared claim is fully computable and must settle on the digest",
             );
         }
     }

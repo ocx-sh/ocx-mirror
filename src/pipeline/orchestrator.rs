@@ -113,24 +113,22 @@ impl ExpectedMetadata {
         })
     }
 
-    /// The same expectation, carrying `published`'s `binaries` claim.
+    /// The same expectation, carrying `published`'s `binaries` claim — but only
+    /// when this expectation could not compute one itself.
     ///
-    /// Under `bin_scan` the claim is derived from the extracted content tree,
-    /// which no download-free path has — so the expectation this module can
-    /// compute always says "no binaries declared". Left alone that reads as
-    /// drift on every scanned mirror forever, and `pipeline patch` acting on it
-    /// would republish the claim *away*, silently deleting a correct published
-    /// `binaries` list. Adopting what the registry already records makes the
-    /// comparison see the one field it cannot recompute as unchanged, while
-    /// every other field still drifts normally.
+    /// The mode is not the question; whether the *spec declares the field* is.
+    /// A metadata file that declares `binaries` computes the whole document
+    /// download-free, scanning or not — `verify` checks the declaration against
+    /// the tree rather than replacing it, so the published claim is the declared
+    /// one either way. Adopting there would rewrite the expectation to whatever
+    /// is already published, and a maintainer correcting a wrong hand-written
+    /// list would get silence: the field could never drift and the fix never
+    /// lands.
     ///
-    /// Only a claim the spec does **not** declare is adopted. A hand-written
-    /// `binaries` list is spec-owned and stays authoritative — including under
-    /// `verify`, which checks the declaration against the tree rather than
-    /// replacing it, so the published claim is the declared one either way.
-    /// Adopting a declared claim would rewrite the expectation to whatever is
-    /// already published, and a maintainer correcting a wrong hand-written list
-    /// would get silence: the field could never drift and the fix never lands.
+    /// Only when the file declares nothing and a scan filled it is the claim
+    /// genuinely uncomputable here. Left unadopted it reads as drift on every
+    /// such tile forever, and `pipeline patch` acting on that would republish
+    /// the claim *away*, silently deleting a correct published list.
     pub(crate) fn adopting_binaries_from(&self, published: &Metadata, platform: &Platform) -> Result<Self> {
         match published.binaries() {
             Some(binaries) if self.authoring.binaries().is_none() => {
