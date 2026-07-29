@@ -80,6 +80,26 @@ pub struct MirrorSpec {
     #[serde(default)]
     pub bin_scan: BinScanMode,
 
+    /// Whether a Linux build's declared `os.features` are checked against the
+    /// libc its packaged binaries actually link against.
+    ///
+    /// `true` (the default): a binary on the interface `PATH` needing a libc
+    /// family the platform key does not declare fails that version's build.
+    /// Under `os.features` subset matching an undeclared family is a positive
+    /// claim of libc universality, so publishing one ships a tile that resolves
+    /// onto hosts which cannot execute it.
+    ///
+    /// `false` bypasses the whole check, refusals and scan-scope failures
+    /// alike — the same total bypass as `ocx package create --no-libc-lint`,
+    /// and for the same reason: a false refusal would otherwise block every
+    /// publish with no way through. A partial bypass would leave a bug in the
+    /// un-bypassed half still able to stop a mirror.
+    ///
+    /// A boolean, not a [`BinScanMode`]-shaped enum: the check has two states
+    /// and `ocx` spells it as one flag.
+    #[serde(default = "default_true")]
+    pub libc_lint: bool,
+
     /// How to process downloaded assets before bundling.
     ///
     /// - `archive`: Extract the asset as a tar/zip archive, optionally stripping
@@ -416,6 +436,7 @@ impl MirrorSpec {
                     metadata: v.metadata.clone().or_else(|| self.metadata.clone()),
                     asset_type: v.asset_type.clone().or_else(|| self.asset_type.clone()),
                     bin_scan: v.bin_scan.unwrap_or(self.bin_scan),
+                    libc_lint: v.libc_lint.unwrap_or(self.libc_lint),
                 })
                 .collect(),
             None => vec![EffectiveVariant {
@@ -428,6 +449,7 @@ impl MirrorSpec {
                 metadata: self.metadata.clone(),
                 asset_type: self.asset_type.clone(),
                 bin_scan: self.bin_scan,
+                libc_lint: self.libc_lint,
             }],
         }
     }
@@ -2578,6 +2600,90 @@ assets:
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
         assert_eq!(spec.bin_scan, BinScanMode::Off);
         assert_eq!(spec.effective_variants()[0].bin_scan, BinScanMode::Off);
+    }
+
+    /// The opposite default to `bin_scan`'s, and the assertion that has to
+    /// break if anyone flips it: a spec that never mentions `libc_lint` is
+    /// checked. Every ported spec's declared `os.features` already match their
+    /// binaries, so on-by-default reds nothing that ships — and a check the
+    /// whole fleet leaves off is not a check.
+    #[test]
+    fn libc_lint_defaults_to_on_for_a_spec_that_never_mentions_it() {
+        let yaml = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_.*_linux_amd64$"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        assert!(spec.libc_lint, "an unmentioned libc_lint must be on");
+        assert!(spec.effective_variants()[0].libc_lint, "and must reach the variant");
+    }
+
+    /// `libc_lint` follows the same override-with-fallback rule as `bin_scan`:
+    /// one variant's upstream build can be the only one the check misreads, and
+    /// bypassing the whole spec to get that variant through would silently stop
+    /// checking the others. A variant that says nothing inherits rather than
+    /// resetting to the type default.
+    #[test]
+    fn effective_variants_libc_lint_overrides_per_variant_and_falls_back() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+libc_lint: false
+variants:
+  - default: true
+    assets:
+      linux/amd64:
+        - "full-.*\\.tar\\.gz"
+  - name: slim
+    libc_lint: true
+    assets:
+      linux/amd64:
+        - "slim-.*\\.tar\\.gz"
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        let variants = spec.effective_variants();
+
+        assert!(
+            !variants[0].libc_lint,
+            "a variant saying nothing inherits the spec-level value"
+        );
+        assert!(variants[1].libc_lint, "a variant may override it");
+        assert!(
+            !spec.libc_lint,
+            "the spec level must stay off while one variant turns it on"
+        );
+
+        // Both fallback directions, because `true` is also `bool`'s type
+        // default: the spec above kills a hardcoded `unwrap_or(true)`, and only
+        // a spec that omits the key kills `unwrap_or_default()`. Either
+        // mutation survives the other case.
+        let inheriting_on = yaml
+            .replace("libc_lint: false\n", "")
+            .replace("    libc_lint: true\n", "");
+        let spec: MirrorSpec = serde_yaml_ng::from_str(&inheriting_on).expect("spec parses");
+        assert!(
+            spec.effective_variants().iter().all(|v| v.libc_lint),
+            "with the key omitted every variant inherits the on default"
+        );
     }
 
     // ── §3.1 S1: Pipeline schema round-trip and validation tests ────────────

@@ -10,10 +10,10 @@ use anyhow::{Context, Result};
 use ocx_lib::cli::progress::{ProgressManager, Spinner};
 use ocx_lib::log;
 use ocx_lib::oci::Platform;
-use ocx_lib::package::bin_scan;
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 use ocx_lib::package::version::Version;
+use ocx_lib::package::{bin_scan, libc_lint};
 use ocx_lib::publisher::Publisher;
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -549,7 +549,15 @@ pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::
 ///
 /// The published metadata is finalised **between** extraction and compression,
 /// not before the download: a `bin_scan` reads the extracted tree, so no
-/// earlier point in this function can know what `binaries` will say.
+/// earlier point in this function can know what `binaries` will say. The libc
+/// check reads the same tree in the same window, giving the sequence
+/// `resolve → download → verify → extract → scan → libc check → sidecar →
+/// compress → drop tree`.
+///
+/// A resume skips both tree readers, because the tree is gone. That is sound
+/// for the libc check specifically: the bundle is written only after the check
+/// passed, so a bundle on disk is itself the record of a passing check for the
+/// tree that produced it.
 pub(crate) async fn prepare_task(
     task: &MirrorTask,
     task_dir: &Path,
@@ -653,6 +661,13 @@ pub(crate) async fn prepare_task(
             .await
             .with_context(|| format!("bin_scan failed for {} {}", task.normalized_version, task.platform))?;
         reject_empty_scan(&scanned, task)?;
+        // The second reader of the same tree, in the same window and for the
+        // same reason: what a binary demands of a host's C library is only
+        // knowable from the binary. After the scan because it inspects the
+        // `PATH` directories the scanned metadata names, and before the sidecar
+        // is written so a refused version leaves nothing on disk claiming to be
+        // publishable.
+        check_declared_libc(&content_dir, &scanned, task).await?;
         let metadata = finalize_metadata(&scanned, &task.platform, &sidecar_path).await?;
 
         let cd = content_dir.clone();
@@ -706,6 +721,54 @@ fn reject_empty_scan(scanned: &AuthoringMetadata, task: &MirrorTask) -> Result<(
         );
     }
     Ok(())
+}
+
+/// Checks what the packaged binaries demand of a host's C library against what
+/// the platform key claims they demand, and fails this task if the claim is
+/// false.
+///
+/// `os.features` subset matching reads an omitted `libc.glibc` as "needs no
+/// particular libc", which resolves onto every host — so a glibc-linked mirror
+/// tile published under a bare `linux/amd64` lands on Alpine and dies with a
+/// bare `No such file or directory` naming a file that is plainly there. That
+/// has already happened to a bazel mirror. Nothing else in this pipeline reads
+/// the artifact, so nothing else can catch it.
+///
+/// `libc_lint: false` skips the whole call — refusals and unresolvable-scope
+/// failures alike, exactly as `ocx package create --no-libc-lint` does. A
+/// partial bypass would leave a bug in the un-bypassed half still able to stop
+/// a mirror, which is the availability failure the key exists to prevent.
+///
+/// The context names the repository the run publishes to (one spec per target,
+/// so it names which of a repo's specs to fix), the version and the platform;
+/// the offending file, its dynamic loader, the libc it needs and the corrected
+/// platform key all come from [`LibcLintError`](ocx_lib::package::libc_lint::LibcLintError).
+async fn check_declared_libc(content_dir: &Path, metadata: &AuthoringMetadata, task: &MirrorTask) -> Result<()> {
+    if !task.libc_lint {
+        // Gated on the lint's own scope predicate, not the key alone: the check
+        // inspects nothing on darwin/* or windows/*, so on those legs of a
+        // matrix the two runs are identical and a warning would name a
+        // verification that was never going to happen.
+        if libc_lint::checks_declared_libc(&task.platform) {
+            log::warn!(
+                "[{}] libc_lint: false — {} {} publishes without checking its declared os.features \
+                 against the packaged binaries",
+                task.target.repository,
+                task.normalized_version,
+                task.platform,
+            );
+        }
+        return Ok(());
+    }
+    libc_lint::check_declared_libc(content_dir, metadata, &task.platform)
+        .await
+        .with_context(|| {
+            format!(
+                "libc check refused {} {} {} — declare the libc its binaries need, or set \
+                 `libc_lint: false` in the spec to publish without the check",
+                task.target.repository, task.normalized_version, task.platform,
+            )
+        })
 }
 
 /// Writes the `-metadata.json` sidecar beside the bundle and returns the
@@ -838,6 +901,19 @@ mod tests {
     /// exercises extract → scan → sidecar → bundle exactly as in production.
     #[cfg(unix)]
     async fn prepare_scanned(spec_dir: &Path, task_dir: &Path, bin_scan: BinScanMode) -> Result<Metadata> {
+        prepare_offline(spec_dir, task_dir, bin_scan, true).await
+    }
+
+    /// As [`prepare_scanned`], with the libc check switchable. Separate only so
+    /// the eleven `bin_scan` tests do not carry a fourth argument none of them
+    /// vary.
+    #[cfg(unix)]
+    async fn prepare_offline(
+        spec_dir: &Path,
+        task_dir: &Path,
+        bin_scan: BinScanMode,
+        libc_lint: bool,
+    ) -> Result<Metadata> {
         let task = MirrorTask {
             version: "1.0.0".into(),
             normalized_version: "1.0.0".into(),
@@ -853,6 +929,7 @@ mod tests {
                 platforms: HashMap::new(),
             }),
             bin_scan,
+            libc_lint,
             verify_config: None,
             cascade: false,
             spec_dir: spec_dir.to_path_buf(),
@@ -1201,5 +1278,127 @@ variants:
             task_dir(work, "3.12.5", &platform("linux/amd64")),
             Path::new("/work/3.12.5/linux_amd64")
         );
+    }
+
+    // ── libc_lint: the claim the pipeline never read ──────────────────────
+    //
+    // Linux-only, because `PT_INTERP` is what the check reads and the fixture
+    // is a real compiled binary. Never a hand-written byte array: the subject
+    // is a binary format, and a fixture the parser never had to face for real
+    // proves nothing. Same rule ocx's own libc_lint fixtures follow.
+    #[cfg(target_os = "linux")]
+    mod libc {
+        use super::*;
+
+        /// Stages `bin/tool` as a **dynamically linked** ELF built by the host
+        /// C toolchain, bundled where the download would have landed — so
+        /// `prepare_offline` skips the fetch and the check meets a real
+        /// loader reference.
+        ///
+        /// A missing `cc` is a hard failure, never a skip: linking this very
+        /// test binary already went through a C linker driver, so "cc absent"
+        /// is unreachable wherever this runs and a skip would be a green that
+        /// never ran.
+        async fn stage_dynamic_elf_asset(task_dir: &Path) {
+            tokio::fs::create_dir_all(task_dir).await.expect("create task dir");
+            let content = task_dir.join("upstream-content");
+            std::fs::create_dir_all(content.join("bin")).expect("create fixture tree");
+
+            let source = task_dir.join("tool.c");
+            std::fs::write(&source, "int main(void) { return 0; }\n").expect("write fixture source");
+            let compiled = std::process::Command::new("cc")
+                .arg("-o")
+                .arg(content.join("bin").join("tool"))
+                .arg(&source)
+                .output()
+                .expect("cc must be present: linking this test binary already required a C linker driver");
+            assert!(
+                compiled.status.success(),
+                "cc failed to build the fixture binary: {}",
+                String::from_utf8_lossy(&compiled.stderr)
+            );
+
+            package::bundle(&content, &task_dir.join("asset.tar.xz"), 1)
+                .await
+                .expect("build fixture asset");
+            std::fs::remove_dir_all(&content).expect("drop fixture tree");
+        }
+
+        /// The finding this key exists for, and its escape hatch, asserted
+        /// against one another on the same fixture.
+        ///
+        /// The declared platform is a bare `linux/amd64`. Under `os.features`
+        /// subset matching that is a positive claim of libc universality, so
+        /// publishing a glibc-linked binary under it produces a tile that
+        /// resolves onto musl hosts and dies with a bare `No such file or
+        /// directory`. Before this the pipeline never read the artifact at all.
+        #[tokio::test]
+        async fn a_libc_claim_the_binaries_contradict_fails_the_prepare_unless_opted_out() {
+            let spec = spec_dir_declaring("");
+            let work = tempfile::tempdir().expect("tempdir");
+
+            let refused = work.path().join("checked");
+            stage_dynamic_elf_asset(&refused).await;
+            let error = prepare_offline(spec.path(), &refused, BinScanMode::Off, true)
+                .await
+                .expect_err("a glibc binary under a platform declaring no libc must not publish");
+            let rendered = format!("{error:#}");
+
+            // Everything an operator staring at a CI log needs to act: which
+            // spec (by the target it publishes to), which version, which
+            // platform, which file, which libc, and the way through.
+            for needle in [
+                "mirror/tool",
+                "1.0.0",
+                "linux/amd64",
+                "bin/tool",
+                "libc.glibc",
+                "libc_lint: false",
+            ] {
+                assert!(rendered.contains(needle), "message must name {needle}: {rendered}");
+            }
+
+            // The other outcome, same fixture, same platform: the opt-out is
+            // the only difference, so a green here is the bypass working and
+            // not the check having quietly stopped applying.
+            let bypassed = work.path().join("bypassed");
+            stage_dynamic_elf_asset(&bypassed).await;
+            prepare_offline(spec.path(), &bypassed, BinScanMode::Off, false)
+                .await
+                .expect("libc_lint: false must publish the same tree");
+            assert!(
+                bypassed.join("bundle.tar.xz").exists(),
+                "the bypassed run must leave a publishable bundle"
+            );
+            assert!(
+                !refused.join("bundle.tar.xz").exists(),
+                "the refused run must leave nothing publishable behind"
+            );
+        }
+
+        /// The opt-out silences one check, not the prepare. A `bin_scan:
+        /// verify` mismatch on the very same tree still fails — otherwise the
+        /// escape hatch for a false libc refusal would quietly become an
+        /// escape hatch for everything the tree is checked for.
+        #[tokio::test]
+        async fn the_opt_out_does_not_suppress_an_unrelated_prepare_failure() {
+            let spec = spec_dir_declaring(r#","binaries":["somethingelse"]"#);
+            let work = tempfile::tempdir().expect("tempdir");
+            let task_dir = work.path().join("task");
+            stage_dynamic_elf_asset(&task_dir).await;
+
+            let error = prepare_offline(spec.path(), &task_dir, BinScanMode::Verify, false)
+                .await
+                .expect_err("an undeclared binary must still fail with the libc check off");
+            let rendered = format!("{error:#}");
+            assert!(
+                rendered.contains("bin_scan"),
+                "the surviving failure must be the bin_scan one: {rendered}"
+            );
+            assert!(
+                !rendered.contains("libc"),
+                "and must not be the libc one, which is bypassed: {rendered}"
+            );
+        }
     }
 }

@@ -74,7 +74,9 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 1. Fetch upstream versions (GitHub API or URL index)
 2. Resolve assets per platform (regex match)
 3. Filter versions (min/max, prerelease, backfill cap)
-4. Parallel: download → verify → bundle (two independent semaphores: I/O vs CPU)
+4. Parallel: download → verify → **extract → `bin_scan` → libc check → write sidecar** → compress → drop tree (two independent semaphores: I/O vs CPU)
+
+The bolded window is load-bearing. Both tree readers must sit between extraction and compression, because the tree is gone afterwards: `bin_scan` derives the `binaries` claim from it and `libc_lint` reads each interface binary's `PT_INTERP` to check the declared `os.features`. Neither is recomputable on a resume — the bundle on disk is the record that both already ran. The sidecar is written last so a refused version leaves nothing publishable behind.
 
 ### Phase 2: Push (sequential by version, oldest first)
 
@@ -84,7 +86,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 
 ## Spec Format (YAML)
 
-Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`.
+Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`, `bin_scan` (off/auto/verify), `libc_lint` (bool, default **on** — total opt-out for the create-time libc check, mirroring `ocx package create --no-libc-lint`).
 
 Source types:
 - `github_release`: `{owner, repo, tag_pattern}` — regex with `(?P<version>...)` capture

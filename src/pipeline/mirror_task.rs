@@ -34,6 +34,10 @@ pub struct MirrorTask {
     /// before the download, so it is what forces the scan to sit between
     /// extraction and bundling.
     pub bin_scan: BinScanMode,
+    /// Whether this task checks its declared `os.features` against the libc its
+    /// packaged binaries link against. Like the scan it reads the extracted
+    /// tree, so it lives in the same window between extraction and compression.
+    pub libc_lint: bool,
     pub verify_config: Option<VerifyConfig>,
     pub cascade: bool,
     pub spec_dir: PathBuf,
