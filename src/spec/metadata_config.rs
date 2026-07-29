@@ -4,6 +4,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use ocx_lib::package::metadata::authoring::AuthoringMetadata;
+use ocx_lib::package::metadata::env::modifier::Modifier;
+use ocx_lib::package::metadata::template::classify_install_path_rooted_dir;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -30,6 +33,57 @@ impl MetadataConfig {
             }
         }
     }
+
+    /// Rejects a `bin_scan` whose metadata gives the scan nowhere to look.
+    ///
+    /// The scan reads directories *below* `${installPath}`, so a metadata file
+    /// whose interface-visible `Path` vars are all bare `${installPath}` — the
+    /// usual `asset_type: binary` shape, one executable at the content root —
+    /// yields zero scan targets, and `auto` then bakes `binaries: []`: a
+    /// positive published claim that the package exposes no executables. That
+    /// is wrong metadata reaching a real registry silently, so it fails the
+    /// spec load instead.
+    ///
+    /// Every file the config can select is checked, not just `default`: a
+    /// per-platform override with no scan target publishes the empty claim on
+    /// exactly that platform.
+    ///
+    /// `label` names the variant so a multi-variant spec says which one.
+    pub fn validate_scannable(&self, spec_dir: &Path, label: &str, errors: &mut Vec<String>) {
+        for path in std::iter::once(&self.default).chain(self.platforms.values()) {
+            // A missing or unparseable file is already reported by `validate`.
+            let Ok(text) = std::fs::read_to_string(spec_dir.join(path)) else {
+                continue;
+            };
+            let Ok(metadata) = serde_json::from_str::<AuthoringMetadata>(&text) else {
+                continue;
+            };
+            if !has_scan_target(&metadata) {
+                errors.push(format!(
+                    "{label}: bin_scan is enabled but {} declares no interface-visible \
+                     ${{installPath}}/<dir> PATH entry — the scan would find nothing and publish \
+                     `binaries: []`, a claim that the package exposes no executables. \
+                     Point a PATH entry at a subdirectory, or set bin_scan: off and list binaries by hand.",
+                    path.display()
+                ));
+            }
+        }
+    }
+}
+
+/// Whether a bin-scan of this metadata would have any directory to read.
+///
+/// ponytail: mirrors the scan-scope rule in ocx's `bin_scan::collect_candidates`
+/// (interface visibility + an `${installPath}/<dir>`-shaped `Path` var) rather
+/// than calling it, because that function needs an extracted tree and this runs
+/// at spec load. Six lines against a stable ADR-pinned rule; if the rule grows a
+/// third condition, ocx should export the predicate and this should call it.
+fn has_scan_target(metadata: &AuthoringMetadata) -> bool {
+    let AuthoringMetadata::Bundle(bundle) = metadata;
+    (&bundle.env).into_iter().any(|var| {
+        var.visibility.has_interface()
+            && matches!(&var.modifier, Modifier::Path(path) if classify_install_path_rooted_dir(&path.value).is_some())
+    })
 }
 
 #[cfg(test)]
@@ -87,6 +141,99 @@ platforms:
             "must have exactly 4 platform overrides; got: {:?}",
             config.platforms.keys().collect::<Vec<_>>()
         );
+    }
+
+    // ── bin_scan scannability gate ────────────────────────────────────────
+
+    /// Writes `name` with one interface-visible PATH entry set to `value`.
+    fn write_metadata(dir: &Path, name: &str, value: &str) {
+        std::fs::write(
+            dir.join(name),
+            format!(
+                r#"{{"type":"bundle","version":1,"env":[
+                   {{"key":"PATH","type":"path","required":true,"value":"{value}","visibility":"public"}}]}}"#
+            ),
+        )
+        .expect("write metadata fixture");
+    }
+
+    fn scan_errors(dir: &Path, config: &MetadataConfig) -> Vec<String> {
+        let mut errors = Vec::new();
+        config.validate_scannable(dir, "bin_scan", &mut errors);
+        errors
+    }
+
+    fn config(default: &str, platforms: &[(&str, &str)]) -> MetadataConfig {
+        MetadataConfig {
+            default: default.into(),
+            platforms: platforms
+                .iter()
+                .map(|(key, file)| ((*key).to_string(), PathBuf::from(*file)))
+                .collect(),
+        }
+    }
+
+    /// The footgun this gate exists for: the scan reads directories *below*
+    /// `${installPath}`, so a bare `${installPath}` PATH entry — an
+    /// `asset_type: binary` mirror's usual shape — gives it nothing to read and
+    /// `auto` bakes `binaries: []`, a positive claim that the package exposes
+    /// no executables. Measured against ocx before this gate existed; it must
+    /// fail the load, not reach a registry.
+    #[test]
+    fn a_bare_install_path_var_is_rejected_when_the_scan_is_on() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_metadata(dir.path(), "metadata.json", "${installPath}");
+
+        let errors = scan_errors(dir.path(), &config("metadata.json", &[]));
+        assert_eq!(errors.len(), 1, "got: {errors:?}");
+        assert!(
+            errors[0].contains("binaries: []") && errors[0].contains("metadata.json"),
+            "the error must name the file and the claim it would publish: {}",
+            errors[0],
+        );
+    }
+
+    /// The sibling that must keep loading — `${installPath}/bin` is the shape
+    /// every archive mirror uses, and `mirror-cmake` ships exactly this.
+    #[test]
+    fn an_install_path_rooted_dir_var_passes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_metadata(dir.path(), "metadata.json", "${installPath}/bin");
+
+        assert!(scan_errors(dir.path(), &config("metadata.json", &[])).is_empty());
+    }
+
+    /// Every file the config can select is checked, not just `default`: a
+    /// per-platform override with no scan target publishes the empty claim on
+    /// exactly that platform and nowhere else — the hardest version to notice.
+    #[test]
+    fn a_per_platform_override_without_a_scan_target_is_rejected() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_metadata(dir.path(), "metadata.json", "${installPath}/bin");
+        write_metadata(dir.path(), "metadata-windows.json", "${installPath}");
+
+        let errors = scan_errors(
+            dir.path(),
+            &config("metadata.json", &[("windows/amd64", "metadata-windows.json")]),
+        );
+        assert_eq!(errors.len(), 1, "got: {errors:?}");
+        assert!(errors[0].contains("metadata-windows.json"), "got: {}", errors[0]);
+    }
+
+    /// A private-visibility PATH var is never a scan target (ADR §1), so it
+    /// must not satisfy the gate either — otherwise a `libexec`-only spec
+    /// passes validation and still publishes `binaries: []`.
+    #[test]
+    fn a_private_visibility_var_does_not_count_as_a_scan_target() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"type":"bundle","version":1,"env":[
+               {"key":"PATH","type":"path","required":true,"value":"${installPath}/libexec","visibility":"private"}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(scan_errors(dir.path(), &config("metadata.json", &[])).len(), 1);
     }
 
     /// `resolve_metadata` selects `metadata-darwin.json` for `darwin/arm64`

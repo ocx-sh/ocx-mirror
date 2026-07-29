@@ -239,6 +239,27 @@ impl MirrorSpec {
             metadata.validate(spec_dir, &mut errors);
         }
 
+        // A `bin_scan` is the one metadata setting whose misconfiguration
+        // publishes a wrong claim instead of failing, so it is checked here,
+        // before anything can push. Per effective variant, because a
+        // variant-level `bin_scan` overrides the spec-level one — checking only
+        // `self.bin_scan` would let a scanning variant through a spec whose top
+        // level is `off`. Guarded because `effective_variants` assumes the
+        // assets-xor-variants rule this same run may still be reporting.
+        if self.assets.is_some() || self.variants.is_some() {
+            for variant in self.effective_variants() {
+                let Some(config) = &variant.metadata else { continue };
+                if !variant.bin_scan.scans() {
+                    continue;
+                }
+                let label = match &variant.name {
+                    Some(name) => format!("variants.{name}.bin_scan"),
+                    None => "bin_scan".to_string(),
+                };
+                config.validate_scannable(spec_dir, &label, &mut errors);
+            }
+        }
+
         if let Some(versions) = &self.versions {
             versions.validate(&mut errors);
         }
@@ -2436,6 +2457,98 @@ variants:
             BinScanMode::Off,
             "including overriding it back off — `off` must not read as 'unset'",
         );
+    }
+
+    /// A `bin_scan` on a *variant* must be gated even when the spec-level mode
+    /// is `off` — checking only `self.bin_scan` lets exactly the interesting
+    /// case through, and the slim variant then publishes `binaries: []`.
+    ///
+    /// The default variant in the same spec keeps a bare `${installPath}` and
+    /// must stay silent, or the gate is just rejecting the file globally.
+    #[test]
+    fn a_scanning_variant_is_gated_even_when_the_spec_level_mode_is_off() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for (file, value) in [("metadata.json", "${installPath}"), ("slim.json", "${installPath}")] {
+            std::fs::write(
+                dir.path().join(file),
+                format!(
+                    r#"{{"type":"bundle","version":1,"env":[
+                       {{"key":"PATH","type":"path","required":true,"value":"{value}","visibility":"public"}}]}}"#
+                ),
+            )
+            .unwrap();
+        }
+
+        let yaml = r#"
+name: tool
+target:
+  registry: ocx.sh
+  repository: tool
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+metadata:
+  default: metadata.json
+variants:
+  - default: true
+    assets:
+      linux/amd64: ["full-.*\\.tar\\.gz"]
+  - name: slim
+    bin_scan: auto
+    metadata:
+      default: slim.json
+    assets:
+      linux/amd64: ["slim-.*\\.tar\\.gz"]
+"#;
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        assert_eq!(spec.bin_scan, BinScanMode::Off, "the spec level must stay off");
+
+        let errors = spec.validate(&dir.path().join("mirror.yml"));
+        assert_eq!(errors.len(), 1, "exactly the scanning variant must be reported: {errors:?}");
+        assert!(
+            errors[0].starts_with("variants.slim.bin_scan:") && errors[0].contains("slim.json"),
+            "the error must name the variant and its file: {}",
+            errors[0],
+        );
+    }
+
+    /// The control: the same unscannable metadata with the scan off is a
+    /// perfectly good spec and must keep loading. Without this the gate could
+    /// be rejecting on the metadata shape alone and nobody would notice.
+    #[test]
+    fn a_bare_install_path_var_loads_fine_when_the_scan_is_off() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"type":"bundle","version":1,"env":[
+               {"key":"PATH","type":"path","required":true,"value":"${installPath}","visibility":"public"}]}"#,
+        )
+        .unwrap();
+
+        let yaml = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+)$"
+metadata:
+  default: metadata.json
+asset_type:
+  type: binary
+  name: shfmt
+assets:
+  linux/amd64:
+    - "shfmt_.*_linux_amd64$"
+"#;
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("spec parses");
+        let errors = spec.validate(&dir.path().join("mirror.yml"));
+        assert!(errors.is_empty(), "bin_scan: off must not gate anything: {errors:?}");
     }
 
     /// Omitting the key everywhere must leave every variant unscanned: turning
