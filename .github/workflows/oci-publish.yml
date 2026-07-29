@@ -32,6 +32,10 @@ on:
         required: true
       REGISTRY_TOKEN:
         required: true
+      OCX_ANNOUNCE_TOKEN:
+        description: GitHub credential the index announce pull request is opened
+          with. Absent (fork build, dev publish) means publish without announcing.
+        required: false
 
 permissions:
   contents: read
@@ -64,6 +68,7 @@ jobs:
           VERSION_TAG: ${{ inputs.version_tag }}
           OCX_AUTH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           OCX_AUTH_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -95,6 +100,22 @@ jobs:
 
           METADATA="packaging/metadata.json"
 
+          # Every target leg appends the tags it published (plus the cascade
+          # tags it moved) here; the announce at the end curates them in one call.
+          announce_tags="$(mktemp)"
+          # `package announce` and `push --announce-file` shipped together, so one
+          # probe answers for both. It has to gate the PUSH flag too: an older ocx
+          # rejects an unknown flag with exit 64, which would fail the publish
+          # itself rather than just skipping the announce. The setup-ocx pin is
+          # deliberately conservative and currently predates both.
+          announce_flag=()
+          if ocx package announce --help >/dev/null 2>&1; then
+            announce_supported=1
+            announce_flag=(--announce-file "$announce_tags")
+          else
+            announce_supported=0
+          fi
+
           for target in "${!PLATFORM_MAP[@]}"; do
             platform="${PLATFORM_MAP[$target]}"
             ext=""
@@ -117,12 +138,17 @@ jobs:
 
             identifier="${REGISTRY}/ocx/mirror:${VERSION_TAG}"
             echo "==> Publishing ${identifier} (${platform})"
+            # No --metadata: `push` derives the sidecar path from its layer via
+            # the same conventions::infer_metadata_file that `create` used to
+            # write it. Handing it the SOURCE "${METADATA}" instead fails with
+            # "metadata sidecar has no recorded platform" (exit 65) — only the
+            # generated sidecar carries the recorded platform.
             ocx package push \
               --identifier "${identifier}" \
               --platform "${platform}" \
               --cascade \
               --new \
-              --metadata "${METADATA}" \
+              "${announce_flag[@]}" \
               "$ARCHIVE"
 
             rm -rf "$WORK"
@@ -136,3 +162,37 @@ jobs:
             --readme CATALOG.md \
             --logo assets/logo.svg \
             "${REGISTRY}/ocx/mirror"
+
+          # Publish the just-pushed tags into the ocx-sh/index entry for
+          # ocx/mirror. Runs AFTER `describe` so the announce observes the fresh
+          # `__ocx.desc` tag and carries the catalog readme/logo into the index.
+          #
+          # No `--fork`: this repository lives in the organization that owns the
+          # index, and GitHub refuses to fork a repository into its own owning
+          # organization, so the announce branch is pushed to the index directly.
+          # It still lands as a pull request, which is what the index's
+          # governance gate and its refresh/new-package labelling run on.
+          announce_skip=""
+          # The announce re-observes each curated tag on the physical repository
+          # the index root points at, which is the PROD registry — a dev tag
+          # simply does not exist there.
+          if (( ! announce_supported )); then
+            announce_skip="the installed ocx has no 'package announce'"
+          elif [[ "$REGISTRY" != "ocx.sh" ]]; then
+            announce_skip="${REGISTRY} is not the registry ocx-sh/index points at"
+          elif [[ -z "${OCX_ANNOUNCE_TOKEN:-}" ]]; then
+            announce_skip="OCX_ANNOUNCE_TOKEN is unavailable"
+          fi
+          if [[ -n "$announce_skip" ]]; then
+            echo "::notice::skipping index announce for ocx/mirror: ${announce_skip}"
+          elif [[ ! -s "$announce_tags" ]]; then
+            echo "::error::no published tags recorded for ocx/mirror; refusing to announce nothing"
+            exit 1
+          else
+            echo "==> Announcing ocx/mirror into ocx-sh/index"
+            ocx package announce \
+              --package ocx/mirror \
+              --tags-from-file "$announce_tags" \
+              --index-repo ocx-sh/index
+          fi
+          rm -f "$announce_tags"
