@@ -11,22 +11,19 @@ use ocx_lib::package::metadata::authoring::AuthoringMetadata;
 
 use crate::spec::{AssetType, MetadataConfig};
 
-/// Process a downloaded asset and create an OCX bundle.
+/// Lay a downloaded asset out into `content_dir` — the tree a bundle is made
+/// of, and the tree a `bin_scan` reads.
 ///
 /// The [`AssetType`] determines how the asset is handled:
 /// - `Archive`: extracted as a tar/zip, with optional `strip_components`.
 /// - `Binary`: placed directly into the content directory under the configured name.
 ///
-/// `compression_threads` is passed directly to `CompressionOptions::with_threads()`.
-/// `0` = auto-detect, `1` = single-threaded, `n` = use n threads.
-pub async fn extract_and_bundle(
-    asset_path: &Path,
-    content_dir: &Path,
-    bundle_path: &Path,
-    asset_type: &AssetType,
-    asset_name: &str,
-    compression_threads: u32,
-) -> Result<()> {
+/// Separate from [`bundle`] because the published metadata is finalised
+/// between the two: `bin_scan` derives the `binaries` claim from this tree, and
+/// the sidecar carrying it must be written before the bundle exists, or a run
+/// interrupted in between would resume off a bundle with no record of what was
+/// scanned.
+pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetType, asset_name: &str) -> Result<()> {
     match asset_type {
         AssetType::Archive { strip_components } => {
             let options = strip_components.map(|sc| ExtractOptions {
@@ -39,12 +36,18 @@ pub async fn extract_and_bundle(
             place_binary(asset_path, content_dir, name, asset_name).await?;
         }
     }
+    Ok(())
+}
 
+/// Compress an extracted `content_dir` into the OCX bundle at `bundle_path`.
+///
+/// `compression_threads` is passed directly to `CompressionOptions::with_threads()`.
+/// `0` = auto-detect, `1` = single-threaded, `n` = use n threads.
+pub async fn bundle(content_dir: &Path, bundle_path: &Path, compression_threads: u32) -> Result<()> {
     BundleBuilder::from_path(content_dir)
         .with_compression(ocx_lib::compression::CompressionOptions::default().with_threads(compression_threads))
         .create(bundle_path)
         .await?;
-
     Ok(())
 }
 
@@ -169,16 +172,10 @@ mod tests {
         let bundle_path = dir.path().join("bundle.tar.xz");
         let asset_type = AssetType::Binary { name: "shfmt".into() };
 
-        extract_and_bundle(
-            &asset,
-            &content_dir,
-            &bundle_path,
-            &asset_type,
-            "shfmt_v3.13.0_linux_amd64",
-            1,
-        )
-        .await
-        .unwrap();
+        extract(&asset, &content_dir, &asset_type, "shfmt_v3.13.0_linux_amd64")
+            .await
+            .unwrap();
+        bundle(&content_dir, &bundle_path, 1).await.unwrap();
 
         // Extract the published bundle and inspect its contents. The bundle is a
         // tar of `content_dir`'s entries at the archive root (the `content/`

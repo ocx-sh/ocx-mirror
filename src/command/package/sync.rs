@@ -196,6 +196,7 @@ impl Sync {
                     asset_name: platform_asset.asset_name.clone(),
                     target: spec.target.clone(),
                     metadata_config: eff_variant.metadata.clone(),
+                    bin_scan: eff_variant.bin_scan,
                     verify_config: spec.verify.clone(),
                     cascade: spec.cascade,
                     spec_dir: spec_dir.to_path_buf(),

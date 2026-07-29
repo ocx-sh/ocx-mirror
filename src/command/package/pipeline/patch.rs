@@ -46,7 +46,7 @@ use ocx_lib::package::version::Version;
 use ocx_lib::publisher::{ArchiveMediaType, Publisher};
 
 use crate::command::package::pipeline::announce;
-use crate::command::package::pipeline::plan::{image_drifted, leaf_versions};
+use crate::command::package::pipeline::plan::{image_drift, leaf_versions};
 use crate::command::package::pipeline::push::{
     ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, build_push_args, forward_ocx_env, invoke_announce,
     resolve_ocx_binary,
@@ -134,7 +134,7 @@ impl Patch {
             // A tag whose variant the spec no longer declares has nothing to be
             // compared against, and a spec that declares no metadata at all
             // cannot publish in the first place.
-            let Some(config) = orchestrator::metadata_config_for(&spec, version) else {
+            let Some(plan) = orchestrator::metadata_plan_for(&spec, version) else {
                 log::debug!("[patch] {tag} — the spec declares no metadata for this variant");
                 continue;
             };
@@ -142,18 +142,25 @@ impl Patch {
             let images = target_registry::fetch_published_images(&publisher, &identifier, &[tag.as_str()]).await?;
             for image in &images {
                 let expected =
-                    orchestrator::expected_metadata(&config, &image.platform, spec_dir).map_err(|error| {
+                    orchestrator::expected_metadata(&plan.config, &image.platform, spec_dir).map_err(|error| {
                         MirrorError::SpecInvalid(vec![format!(
                             "failed to resolve the metadata {tag} would publish for {}: {error:#}",
                             image.platform
                         )])
                     })?;
 
-                if !image_drifted(&publisher, &identifier, image, &expected.published).await? {
+                // The expectation this republishes against is the one the drift
+                // comparison settled on, never the one resolved above: under a
+                // `bin_scan` they differ by the `binaries` claim, which patch
+                // cannot recompute because it never downloads. Pushing the
+                // unadopted sidecar would delete a correct published claim on
+                // the first unrelated metadata fix.
+                let Some(expected) = image_drift(&publisher, &identifier, image, &expected, plan.bin_scan).await?
+                else {
                     current += 1;
                     log::debug!("[patch] {tag} ({}) — already current", image.platform);
                     continue;
-                }
+                };
 
                 let sidecar = work_dir.join(format!("{tag}-{}-metadata.json", spec::platform_slug(&image.platform)));
                 let outcome = republish(
@@ -420,9 +427,10 @@ fn strip_build(version: &Version) -> Version {
 #[cfg(test)]
 mod tests {
     use ocx_lib::oci::{Algorithm, Descriptor, Platform};
-    use ocx_lib::package::metadata::Metadata;
 
     use super::*;
+    use crate::pipeline::orchestrator::ExpectedMetadata;
+    use crate::spec::BinScanMode;
 
     /// The wire media types, read off the same enum the production code maps
     /// from — a literal here would let the two drift and still pass.
@@ -741,10 +749,12 @@ mod tests {
 
     // ── skip gate ─────────────────────────────────────────────────────────
 
-    /// The published projection a fresh push of the fixture would record.
-    fn published_metadata() -> Metadata {
-        serde_json::from_slice(br#"{"type":"bundle","version":1,"strip_components":1,"env":[]}"#)
-            .expect("metadata fixture parses")
+    /// The expectation a fresh push of the fixture would record.
+    fn expected_metadata() -> ExpectedMetadata {
+        let authoring = serde_json::from_slice(br#"{"type":"bundle","version":1,"strip_components":1,"env":[]}"#)
+            .expect("metadata fixture parses");
+        ExpectedMetadata::render(authoring, &"linux/amd64".parse().expect("valid platform"))
+            .expect("the fixture renders both projections")
     }
 
     fn image_recording(config_digest: &str) -> PublishedImage {
@@ -763,40 +773,43 @@ mod tests {
     /// no blob fetch, no push.
     #[tokio::test]
     async fn matching_metadata_skips_without_a_registry_call() {
-        let expected = published_metadata();
-        let bytes = serde_json::to_vec(&expected).expect("serializes");
+        let expected = expected_metadata();
+        let bytes = serde_json::to_vec(&expected.published).expect("serializes");
         let image = image_recording(&Algorithm::Sha256.hash(&bytes).to_string());
 
-        let drifted = image_drifted(
+        let drift = image_drift(
             &offline_publisher(),
             &Identifier::new_registry("mirror/cmake", "registry.test"),
             &image,
             &expected,
+            BinScanMode::Off,
         )
         .await
         .expect("the config digest settles it without a fetch");
 
-        assert!(!drifted, "a matching config digest must not schedule a patch");
+        assert!(drift.is_none(), "a matching config digest must not schedule a patch");
     }
 
     /// The red half of the test above: with a config digest that does NOT
-    /// match, `Ok(false)` — the value that produces a skip — must be
+    /// match, `Ok(None)` — the value that produces a skip — must be
     /// unreachable, whatever the registry then answers.
     #[tokio::test]
     async fn a_differing_config_digest_never_settles_as_a_skip() {
         let image = image_recording(&format!("sha256:{}", "f".repeat(64)));
 
-        let result = image_drifted(
+        let result = image_drift(
             &offline_publisher(),
             &Identifier::new_registry("mirror/cmake", "registry.invalid"),
             &image,
-            &published_metadata(),
+            &expected_metadata(),
+            BinScanMode::Off,
         )
         .await;
 
         assert!(
-            !matches!(result, Ok(false)),
-            "a config digest that differs must never settle as 'already current': {result:?}",
+            !matches!(result, Ok(None)),
+            "a config digest that differs must never settle as 'already current': {}",
+            result.is_ok(),
         );
     }
 }
