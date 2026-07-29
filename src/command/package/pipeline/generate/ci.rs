@@ -4103,16 +4103,24 @@ tests:
     }
 
     /// A repository holding `count` package specs one level down, each with a
-    /// repo-root-relative `tests: script:` and an `extends:` base above it —
-    /// the two things an inferred root gets wrong.
-    fn nested_spec_repo(root: &Path, count: usize) -> Vec<PathBuf> {
+    /// repo-root-relative `tests: script:` — and, with `with_base`, an
+    /// `extends:` base *above* the spec directory.
+    ///
+    /// The two are separate fixtures because they fail separately and the
+    /// `extends:` check runs first: with a base present its error masks the
+    /// doubled `script:` path entirely, so a fix that only repaired `extends:`
+    /// would look green.
+    fn nested_spec_repo(root: &Path, count: usize, with_base: bool) -> Vec<PathBuf> {
         std::fs::create_dir_all(root.join(".git")).expect("mark the repository root");
-        write_file(root, "mirror-base.yml", EXTENDS_BASE);
+        if with_base {
+            write_file(root, "mirror-base.yml", EXTENDS_BASE);
+        }
         (0..count)
             .map(|i| {
                 let name = format!("tool{i}");
                 write_file(root, &format!("{name}/tests/smoke.star"), "ocx_assert(True)\n");
-                let spec = extends_child(&name, Some("../mirror-base.yml")).replace(
+                let base = with_base.then_some("../mirror-base.yml");
+                let spec = extends_child(&name, base).replace(
                     "  - name: version\n",
                     &format!("  - name: smoke\n    script: {name}/tests/smoke.star\n  - name: version\n"),
                 );
@@ -4134,26 +4142,29 @@ tests:
     /// asserts both counts: one spec and three must infer the same root.
     #[test]
     fn a_nested_spec_infers_the_repository_root_whatever_the_spec_count() {
-        for count in [1, 3] {
+        // `(1, false)` is the `tests: script:` doubling on its own; `(1, true)`
+        // adds the `extends:` base; `(3, true)` is the multi-spec repo that
+        // used to pass by luck and must keep passing.
+        for (count, with_base) in [(1, false), (1, true), (3, true)] {
+            let case = format!("{count} spec(s), base above: {with_base}");
             let dir = tempdir().unwrap();
-            let specs = nested_spec_repo(dir.path(), count);
+            let specs = nested_spec_repo(dir.path(), count, with_base);
 
-            generate_inferring_root(&specs, false)
-                .unwrap_or_else(|e| panic!("{count} nested spec(s) must render: {e}"));
+            generate_inferring_root(&specs, false).unwrap_or_else(|e| panic!("{case} must render: {e}"));
 
             for i in 0..count {
                 assert!(
                     dir.path()
                         .join(format!(".github/workflows/mirror-tool{i}.yml"))
                         .exists(),
-                    "workflows must land at the repository root, not under the spec directory ({count} spec(s))",
+                    "workflows must land at the repository root, not under the spec directory ({case})",
                 );
             }
             // The generated guard has to pass against the same inference the
             // repository will run it with — the symptom was a repo that could
             // never satisfy its own drift check.
             generate_inferring_root(&specs, true)
-                .unwrap_or_else(|e| panic!("the drift guard must pass for {count} nested spec(s): {e}"));
+                .unwrap_or_else(|e| panic!("the drift guard must pass for {case}: {e}"));
         }
     }
 
