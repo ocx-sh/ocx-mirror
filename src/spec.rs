@@ -2506,7 +2506,11 @@ variants:
         assert_eq!(spec.bin_scan, BinScanMode::Off, "the spec level must stay off");
 
         let errors = spec.validate(&dir.path().join("mirror.yml"));
-        assert_eq!(errors.len(), 1, "exactly the scanning variant must be reported: {errors:?}");
+        assert_eq!(
+            errors.len(),
+            1,
+            "exactly the scanning variant must be reported: {errors:?}"
+        );
         assert!(
             errors[0].starts_with("variants.slim.bin_scan:") && errors[0].contains("slim.json"),
             "the error must name the variant and its file: {}",
