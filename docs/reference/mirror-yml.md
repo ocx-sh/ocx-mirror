@@ -212,6 +212,8 @@ The check reads only the ELF `PT_INTERP` header, so it costs nothing and underst
 
 The check runs during [`pipeline prepare`](./cli.md#pipeline-prepare), between extracting the archive and compressing it — the only window in which the binaries exist on disk. [`pipeline patch`][cli-patch] never downloads anything, so it cannot run the check and never reports a libc finding; a version already published under a false declaration is corrected by fixing the platform key and re-mirroring it, not by patching metadata.
 
+**A bundle already in the work directory is never re-checked.** `prepare` resumes from an existing `bundle.tar.xz` without extracting anything, so the check cannot run — and a bundle on disk is not evidence it ever passed: it may have been built under `libc_lint: false`, or by an ocx-mirror predating the check. Turning `libc_lint` back on therefore has no effect on any `(version, platform)` leg whose bundle the work directory already holds — a version whose `linux/amd64` leg bundled but whose `linux/arm64` leg did not is checked on arm64 and not on amd64. Delete the bundles of the legs you want re-checked (or the work directory).
+
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
 `build_timestamp` controls the tag a mirrored version is published under. Each `(version, platform)` push writes a **primary tag** for that version; with `cascade: true` (the default) it also re-points the **rolling tags** `X.Y`, `X`, and `latest` to the newest build.

@@ -2686,6 +2686,46 @@ variants:
         );
     }
 
+    /// A misspelled variant key must be rejected, naming the key. The escape
+    /// hatch is the reason this matters: `libc-lint: false` is the spelling the
+    /// docs put in front of operators (`ocx package create --no-libc-lint`), and
+    /// silently dropping it leaves the check on, the build still refusing, and
+    /// no way to tell that the bypass never applied. The same misspelling at the
+    /// top level has always been a hard error.
+    #[test]
+    fn unknown_variant_key_is_rejected_and_named() {
+        let yaml = r#"
+name: python
+target:
+  registry: ocx.sh
+  repository: python
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - default: true
+    libc-lint: false
+    assets:
+      linux/amd64:
+        - "full-.*\\.tar\\.gz"
+"#;
+
+        let err = serde_yaml_ng::from_str::<MirrorSpec>(yaml).expect_err("a misspelled variant key must red");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("libc-lint"),
+            "the error must name the offending key: {msg}"
+        );
+
+        // The correct spelling still parses — otherwise this test would pass
+        // just as well against a parser that rejects every variant.
+        let spec: MirrorSpec =
+            serde_yaml_ng::from_str(&yaml.replace("libc-lint:", "libc_lint:")).expect("the declared key parses");
+        assert!(!spec.effective_variants()[0].libc_lint);
+    }
+
     // ── §3.1 S1: Pipeline schema round-trip and validation tests ────────────
 
     /// Helper: base YAML suitable for all §3.1 round-trip tests. Adds the

@@ -15,7 +15,15 @@ use super::metadata_config::MetadataConfig;
 ///
 /// The `name` field is optional: the default variant may omit it to produce
 /// bare (unprefixed) version tags. Non-default variants must have a name.
+///
+/// `deny_unknown_fields` matches [`MirrorSpec`](super::MirrorSpec). Without it
+/// a misspelled key here is silently dropped while the same misspelling one
+/// level up is a hard error — and `libc-lint: false` (the hyphenated spelling
+/// `ocx`'s `--no-libc-lint` flag puts in front of operators) would then leave
+/// the check on, the build still refusing, and the escape hatch looking broken
+/// with no diagnostic.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VariantSpec {
     #[serde(default)]
     pub name: Option<String>,
