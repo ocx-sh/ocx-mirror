@@ -178,9 +178,12 @@ All interface-visible `Path` vars are scanned, not just `PATH` — a `MANPATH` s
 
 ### Interaction with `pipeline patch` {#bin-scan-patch}
 
-[`pipeline patch`][cli-patch] never downloads anything — re-referencing published layers by digest is its entire reason to exist — so it cannot re-run a scan. The metadata it computes from the spec therefore always says "no binaries declared", which is not what a correctly published scanned tile records.
+[`pipeline patch`][cli-patch] never downloads anything — re-referencing published layers by digest is its entire reason to exist — so it cannot re-run a scan. Whether that matters depends on where the claim comes from:
 
-So on a spec with `bin_scan` enabled, the drift comparison reads the published `binaries` claim and carries it into the expectation before comparing. Without that, `plan` would report `metadata-drift` on every scanned version on every run, and each `patch` would republish the metadata with `binaries` *absent* — silently deleting a correct claim. Every other field still drifts and still gets corrected as normal; `binaries` is the one field `patch` preserves rather than recomputes.
+- **The metadata file declares `binaries`** (including under `verify`, which checks the declaration rather than replacing it). Then the spec computes the whole document download-free, and `plan` and `patch` treat `binaries` like every other field: edit the list, and the next run reports drift and republishes the correction.
+- **The metadata file declares none and the scan fills it.** Then the expectation cannot carry the claim at all, so the drift comparison reads the published one and adopts it before comparing. Without that, `plan` would report `metadata-drift` on every such version on every run, and each `patch` would republish the metadata with `binaries` *absent* — silently deleting a correct claim.
+
+Adoption is deliberately limited to the second case. Applying it to a declared list would rewrite the expectation to whatever is already published, so a corrected hand-written list could never register as drift and the fix would never reach the published versions.
 
 The consequence worth knowing: turning `bin_scan` on does **not** retroactively populate `binaries` on already-published versions, and `patch` will not do it either. A version picks up its scanned claim when it is next actually built — either by a new push, or by deleting the tag and re-mirroring it.
 
