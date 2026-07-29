@@ -272,15 +272,27 @@ async fn layout_unchanged(
     expected: &ocx_lib::package::metadata::Metadata,
 ) -> Result<Result<(), String>, MirrorError> {
     let published = target_registry::fetch_published_metadata(publisher, identifier, image).await?;
+    Ok(match layout_refusal(&published, expected) {
+        Some(refusal) => Err(refusal),
+        None => Ok(()),
+    })
+}
+
+/// The decidable half of [`layout_unchanged`], split out so it is testable
+/// without a registry.
+fn layout_refusal(
+    published: &ocx_lib::package::metadata::Metadata,
+    expected: &ocx_lib::package::metadata::Metadata,
+) -> Option<String> {
     let (was, now) = (published.strip_components(), expected.strip_components());
     if was == now {
-        return Ok(Ok(()));
+        return None;
     }
-    Ok(Err(format!(
+    Some(format!(
         "refusing to patch: the published layers were built with strip_components {was:?} and the spec \
          now says {now:?}. Patch re-references those layers by digest, so the new metadata would describe \
          a tree they do not contain. Re-mirror this version instead of patching it.",
-    )))
+    ))
 }
 
 /// Re-emits one `(version, platform)` manifest against `sidecar_json`.
@@ -845,11 +857,18 @@ mod tests {
             // "normalize None to 0" is a decision, not a silent drift.
             (None, Some(0), false),
         ] {
+            let refusal = layout_refusal(&strip(was), &strip(now));
             assert_eq!(
-                strip(was).strip_components() == strip(now).strip_components(),
+                refusal.is_none(),
                 patchable,
-                "published strip {was:?} -> spec strip {now:?}",
+                "published strip {was:?} -> spec strip {now:?}, got: {refusal:?}",
             );
+            if let Some(message) = refusal {
+                assert!(
+                    message.contains("Re-mirror"),
+                    "a refusal must name the remedy, since the patch workflow is the signposted one: {message}",
+                );
+            }
         }
     }
 

@@ -1097,21 +1097,36 @@ mod tests {
             .await
             .expect("first run succeeds");
 
-        // What a sidecar from a run whose scan found nothing looks like. The
-        // bundle stays, so the next call takes the resume path.
+        // Two shapes a sidecar can carry that must not be republished: an empty
+        // claim, and no claim at all — an absent field then reads as "nothing to
+        // adopt" on the download-free paths, so it is just as permanent. The
+        // bundle stays, so each call takes the resume path.
         let sidecar = task_dir.join("metadata.json");
-        let text = std::fs::read_to_string(&sidecar).expect("sidecar exists");
-        let emptied = text.replace(r#""tool""#, "");
-        assert_ne!(
-            emptied, text,
-            "fixture must actually drop the claim, or this proves nothing"
-        );
-        std::fs::write(&sidecar, emptied).expect("rewrite sidecar");
+        let original = std::fs::read_to_string(&sidecar).expect("sidecar exists");
+        let without_binaries = {
+            let mut doc: serde_json::Value = serde_json::from_str(&original).expect("sidecar parses");
+            doc.as_object_mut().expect("sidecar is an object").remove("binaries");
+            serde_json::to_string(&doc).expect("re-serializes")
+        };
 
-        let error = prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
-            .await
-            .expect_err("a resumed run must not republish an unusable claim");
-        assert!(format!("{error:#}").contains("found no executables"), "got: {error:#}",);
+        for (label, rewritten) in [
+            ("empty claim", original.replace(r#""tool""#, "")),
+            ("absent claim", without_binaries),
+        ] {
+            assert_ne!(
+                rewritten, original,
+                "{label}: the fixture must actually change the sidecar, or this proves nothing",
+            );
+            std::fs::write(&sidecar, &rewritten).expect("rewrite sidecar");
+
+            let error = prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+                .await
+                .expect_err("a resumed run must not republish an unusable claim");
+            assert!(
+                format!("{error:#}").contains("found no executables"),
+                "{label}: got {error:#}",
+            );
+        }
     }
 
     /// A *named* default variant publishes bare tags beside its prefixed ones,
