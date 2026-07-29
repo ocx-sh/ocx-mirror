@@ -790,6 +790,16 @@ mod tests {
             staged_asset(&asset).await;
         }
 
+        // Reqwest builds its TLS stack lazily on first `Client::new` and panics
+        // with "No provider set" if none is registered — even though the staged
+        // asset means no request is ever made. Without this the test is green
+        // only when some other test in the process happened to register one
+        // first, which is a green indistinguishable from never having run.
+        static CRYPTO: std::sync::Once = std::sync::Once::new();
+        CRYPTO.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+
         let progress = ProgressManager::hidden();
         let spinner = progress.spinner("test".to_string());
         let (_bundle, metadata) = prepare_task(
