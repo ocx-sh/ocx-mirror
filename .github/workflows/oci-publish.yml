@@ -13,9 +13,24 @@ on:
   workflow_call:
     inputs:
       registry:
-        description: Registry hostname (e.g. `dev.ocx.sh`, `ocx.sh`).
+        description: Registry hostname (e.g. `dev.ocx.sh`, `ghcr.io`).
         required: true
         type: string
+      physical_namespace:
+        description: Path segment prepended to `ocx/mirror` for the push target only,
+          for a registry that namespaces by owner (`ghcr.io` → `ocx-sh`, giving
+          `ghcr.io/ocx-sh/ocx/mirror`). The logical name the index is keyed by, and
+          that `package announce` names, stays `ocx/mirror`.
+        required: false
+        type: string
+        default: ""
+      announce:
+        description: Publish the pushed tags into the index. Only the release publish
+          sets this — a dev tag does not exist on the repository the index root points
+          at, so announcing one would observe nothing.
+        required: false
+        type: boolean
+        default: false
       version_tag:
         description: Fully formed publish tag, including any pre-release and UTC
           build-metadata segments (e.g. `0.4.0-dev_20260612120000`). Callers
@@ -37,8 +52,11 @@ on:
           with. Absent (fork build, dev publish) means publish without announcing.
         required: false
 
-permissions:
-  contents: read
+# No `permissions:` block on purpose. This workflow has two callers wanting
+# different scopes — the release path needs `packages: write` for the GHCR push,
+# the dev path pushes to dev.ocx.sh with its own registry credential and needs
+# nothing. A declaration here caps BOTH (a called workflow can only narrow its
+# caller's grant, never widen it), so each caller declares what it needs.
 
 jobs:
   publish:
@@ -60,11 +78,16 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.3.7"
+          # 0.3.7 predates `package announce`, `push --announce-file` and
+          # `push --annotation`, so the old pin could not announce at all and
+          # would reject the annotation flag with exit 64.
+          version: "0.5.0"
 
       - name: Publish to registry
         env:
           REGISTRY: ${{ inputs.registry }}
+          PHYSICAL_NAMESPACE: ${{ inputs.physical_namespace }}
+          ANNOUNCE: ${{ inputs.announce }}
           VERSION_TAG: ${{ inputs.version_tag }}
           OCX_AUTH_REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           OCX_AUTH_REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
@@ -79,9 +102,17 @@ jobs:
             exit 1
           fi
           case "$REGISTRY" in
-            dev.ocx.sh|ocx.sh) ;;
+            dev.ocx.sh|ghcr.io) ;;
             *) echo "::error::registry '$REGISTRY' not in allowlist"; exit 1 ;;
           esac
+
+          # Same validation for the physical namespace: it lands in the push
+          # identifier, so it must not carry shell metacharacters either.
+          if [[ -n "${PHYSICAL_NAMESPACE}" ]] && ! [[ "${PHYSICAL_NAMESPACE}" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+            echo "::error::physical_namespace '${PHYSICAL_NAMESPACE}' contains invalid characters"
+            exit 1
+          fi
+          physical_prefix="${PHYSICAL_NAMESPACE:+${PHYSICAL_NAMESPACE}/}"
 
           # Map secrets to the registry-specific env names ocx reads.
           # Hostname dots become underscores in OCX_AUTH_<host>_USER/TOKEN.
@@ -136,18 +167,22 @@ jobs:
               -o "$ARCHIVE" \
               -p "$platform"
 
-            identifier="${REGISTRY}/ocx/mirror:${VERSION_TAG}"
+            identifier="${REGISTRY}/${physical_prefix}ocx/mirror:${VERSION_TAG}"
             echo "==> Publishing ${identifier} (${platform})"
             # No --metadata: `push` derives the sidecar path from its layer via
             # the same conventions::infer_metadata_file that `create` used to
             # write it. Handing it the SOURCE "${METADATA}" instead fails with
             # "metadata sidecar has no recorded platform" (exit 65) — only the
             # generated sidecar carries the recorded platform.
+            # `image.source` is what links the GHCR package to this repository
+            # and lets it inherit the repository's permissions; a registry derives
+            # nothing from the path.
             ocx package push \
               --identifier "${identifier}" \
               --platform "${platform}" \
               --cascade \
               --new \
+              --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
               "${announce_flag[@]}" \
               "$ARCHIVE"
 
@@ -157,11 +192,11 @@ jobs:
           # Repository-level catalog description (__ocx.desc tag) — README from
           # CATALOG.md (frontmatter supplies title/description/keywords) plus
           # the project logo. Version-independent; refreshed on every publish.
-          echo "==> Pushing catalog description for ${REGISTRY}/ocx/mirror"
+          echo "==> Pushing catalog description for ${REGISTRY}/${physical_prefix}ocx/mirror"
           ocx package describe \
             --readme CATALOG.md \
             --logo assets/logo.svg \
-            "${REGISTRY}/ocx/mirror"
+            "${REGISTRY}/${physical_prefix}ocx/mirror"
 
           # Publish the just-pushed tags into the ocx-sh/index entry for
           # ocx/mirror. Runs AFTER `describe` so the announce observes the fresh
@@ -175,11 +210,13 @@ jobs:
           announce_skip=""
           # The announce re-observes each curated tag on the physical repository
           # the index root points at, which is the PROD registry — a dev tag
-          # simply does not exist there.
+          # simply does not exist there. The caller declares which publish that
+          # is; deriving it from the registry hostname went stale the moment the
+          # prod registry moved to GHCR.
           if (( ! announce_supported )); then
             announce_skip="the installed ocx has no 'package announce'"
-          elif [[ "$REGISTRY" != "ocx.sh" ]]; then
-            announce_skip="${REGISTRY} is not the registry ocx-sh/index points at"
+          elif [[ "$ANNOUNCE" != "true" ]]; then
+            announce_skip="this publish does not announce"
           elif [[ -z "${OCX_ANNOUNCE_TOKEN:-}" ]]; then
             announce_skip="OCX_ANNOUNCE_TOKEN is unavailable"
           fi
