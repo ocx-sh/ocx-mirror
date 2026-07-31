@@ -72,18 +72,28 @@ jobs:
       channel: release
 
   publish-registry:
-    name: Publish to ocx.sh
+    name: Publish to GHCR
     # Pre-release tags (e.g. v0.5.0-rc.1) skip the production registry.
     if: ${{ !contains(github.ref_name, '-') }}
     needs: [compute-version, build]
     uses: ./.github/workflows/oci-publish.yml
+    permissions:
+      contents: read
+      # The GHCR push authenticates as GITHUB_TOKEN. A called workflow can only
+      # narrow its caller's grant, so the scope has to be granted here.
+      packages: write
     with:
-      registry: ocx.sh
+      # Logical name stays `ocx.sh/ocx/mirror` — that is what the index entry is
+      # keyed by and what users install. Only the physical home moved to GHCR.
+      registry: ghcr.io
+      physical_namespace: ocx-sh
+      announce: true
       version_tag: ${{ needs.compute-version.outputs.version_tag }}
       environment: ocx.sh
     secrets:
-      REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
-      REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+      # GHCR takes the workflow's own token; no registry credential to provision.
+      REGISTRY_USER: ${{ github.actor }}
+      REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
 
   github-release:
