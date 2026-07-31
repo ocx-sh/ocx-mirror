@@ -5,21 +5,69 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] - 2026-07-31
 
 ### Added
 
-- `pipeline prepare` now checks a Linux build's declared `os.features` against the libc its packaged binaries actually link against, between extracting the archive and compressing it. A binary on the interface `PATH` needing a libc family the platform key does not declare fails that version's build, naming the target, version, platform, file, dynamic loader and the platform key that would be correct — subset matching reads an omitted `libc.glibc` as a claim of libc universality, so publishing one shipped a tile that resolved onto hosts unable to execute it. The new `libc_lint` spec key (boolean, `true` by default, per-variant overridable) turns the check off; the bypass is total, matching `ocx package create --no-libc-lint` *(mirror)*
-- `pipeline generate ci` now emits a `patch.yml` workflow per spec, `workflow_dispatch` only, with `version` / `min_version` / `max_version` inputs that become `pipeline patch --metadata-only`'s selection flags; dispatching with every field empty patches every published version. Correcting published metadata no longer needs registry push credentials and an index token on a maintainer's machine *(mirror)*
+- Push registry catalog description and logo *(publish)*
+- One Discord message per published version (#10) *(notify)*
+- Warn on build_timestamp none with cascade *(spec)*
+- Unique work dirs per libc os_features variant *(pipeline)*
+- Record OCI annotations on every published index *(push)*
+- Publish mirrors to GHCR and announce them into the OCX index (#20) *(announce)*
+- Run the container test matrix under each image's own libc (#25) *(ci)*
+- Announce every registry tag into the index *(pipeline)*
+- Render one workflow set per mirror spec *(generate)*
+- Detect published metadata drift *(plan)*
+- Patch published metadata without re-mirroring *(pipeline)*
+- Emit a dispatch-only patch workflow per spec *(generate)*
+- Bin_scan derives the published binaries claim from the bundle *(mirror)*
+- Reject a bin_scan whose metadata gives the scan nowhere to look *(mirror)*
+- Declare ocx-mirror's interface binary explicitly *(packaging)*
+- Check the declared libc against the packaged binaries *(mirror)*
 
 ### Changed
 
-- **Breaking:** an unknown key under `variants:` is now a spec-load failure (exit 65) naming the offending key, matching the top-level spec. A misspelling there used to be dropped silently — so `libc-lint: false` (the hyphenated spelling of `ocx package create --no-libc-lint`) left the check on, the build still refusing, and no way to tell the bypass had not applied. A spec that previously parsed with a stray variant key now errors *(mirror)*
-- `pipeline patch` no longer fails when `OCX_ANNOUNCE_TOKEN` is absent: the closing announce is recorded as skipped, the same degradation `pipeline push` has. An announce that is attempted and fails still fails the command *(mirror)*
+- Nest package-mirroring commands under `package` *(cli)*
+- One call formats and levels every announce report *(announce)*
+- Keep the digest short-circuit when the spec declares binaries *(plan)*
 
-- Discord notify now sends one message per published version instead of batching up to 10 embeds; consecutive messages are paced and HTTP 429 rate-limits are retried per the `retry_after` hint (#10) *(mirror)*
-- `pipeline generate ci` now rejects a `tests[].script:` path that does not exist, resolved from the repository root (exit 65, as for a missing `metadata.default`); per-platform test overrides are checked too, and a script sitting where a spec-directory-relative reading would put it is named in the error *(mirror)*
-- `pipeline generate ci` now adds every file in a spec's `extends:` chain to the generated `paths:` triggers and to the drift guard's union, so editing a shared base re-runs the packages that inherit from it; a base outside the repository root is rejected (exit 64) because no `paths:` entry can name it *(mirror)*
+### Documentation
+
+- Record CLI namespace restructure; reserve `registry` *(adr)*
+- Document build_timestamp and GC-safe publishing *(publishing)*
+- Document libc os_features asset keys *(spec)*
+- Fleet-rollout handover for the GHCR + index migration (#26) *(artifacts)*
+- A customManager that matches nothing reports nothing (#28) *(artifacts)*
+- Promote the unchecked-green rule out of R8 (#33) *(artifacts)*
+- Document multi-spec mirror repositories *(reference)*
+- Document the variants and metadata spec keys *(reference)*
+- Document pipeline patch and metadata drift *(reference)*
+- Warn that a bare ${installPath} PATH var scans to binaries: [] *(mirror)*
+- The bare-${installPath} hazard is now rejected, not warned about *(mirror)*
+- Name the asymmetric-archive case the per-file bin_scan check exists for *(mirror)*
+
+### Fixed
+
+- Bump setup-ocx pin to v1.3.0 for ocx 0.4.3 tar.gz assets *(ci)*
+- Drive the argv env-leak test through the injected lookup *(test)*
+- Credential the ghcr.io jobs that read and write the target (#22) *(ci)*
+- Record the platform in the sidecar it writes (#23) *(prepare)*
+- Spell the registry out in the identifier it hands ocx (#24) *(push)*
+- Drop release_tag, a required field with no consumer (#27) *(spec)*
+- The pipeline fixture has never parsed (#30) *(test)*
+- Read what the announce did, not whether it exited *(push)*
+- Announce-from-registry needs read, not write, on packages *(pipeline)*
+- Keep the announce dry run out of the shared temp dir *(pipeline)*
+- Trigger a spec's workflows on its extends chain *(generate)*
+- Reject a tests script path that resolves to nothing *(generate)*
+- Make a dry run unmistakable in the announce log *(announce)*
+- Report what a run did, and make a dry run say it did nothing *(announce)*
+- Report the patch-driven announce like every other announce *(patch)*
+- Infer the repo root from the git repository, not the spec set *(generate)*
+- The spec owns a declared binaries claim, everywhere *(mirror)*
+- Round-2 findings — verify can fail again, patch refuses layout changes *(mirror)*
+- Round-2 review findings — strict variant keys, honest resume docs *(mirror)*
 
 ## [0.4.0] - 2026-06-12
 
@@ -70,5 +118,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stop baking metadata.json into bundle content *(mirror)*
 - Fail-safe target-registry reads in discover and sync *(mirror)*
 - Stop prepare legs re-crawling the source (N+1 crawls) *(mirror)*
+
+### Release
+
+- V0.4.0
+[0.5.0]: https://github.com/ocx-sh/ocx-mirror/compare/v0.4.0..v0.5.0
 [0.4.0]: https://github.com/ocx-sh/ocx-mirror/tree/v0.4.0
 
