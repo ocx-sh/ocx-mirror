@@ -76,6 +76,9 @@ ocx-mirror package pipeline generate ci [OPTIONS]
 
 Rendering is idempotent, and does not depend on the order repeated `--spec` flags are given in. Specs with hardcoded webhook URLs or an empty `tests:` list are rejected with exit 64 before any file is written — as are two specs sharing one directory, and a spec that does not resolve under `--repo-root` (see [Multi-spec repositories][ref-multi-spec]).
 
+!!! warning "Do not let a bot bump versions inside generated workflows"
+    The mirror repository owns its *action* pins — the drift guard normalises `uses: owner/action@<ref>` away before comparing, so a Renovate or Dependabot digest bump on a generated workflow stays green. Nothing else in those files is bot-editable. In particular the `ocx` version each workflow pins (the `version:` input to `setup-ocx`, and the release the container test legs download) comes from the renderer, so an in-place bump makes the committed file differ from what the spec renders and the drift guard fails with exit 65. Exclude generated workflows from any such rule and update the version by bumping `ocx-mirror` and re-running `generate ci`.
+
 ### `package pipeline plan` {#pipeline-plan}
 
 Compute which versions need work. Side-effect-free: queries the upstream source and the target registry, then emits a plan document listing versions to mirror, including the resolved per-platform asset URLs.

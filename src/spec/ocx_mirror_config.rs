@@ -5,9 +5,11 @@
 //!
 //! [`OcxMirrorConfig`] pins nothing. The `ocx-mirror` a generated workflow runs
 //! comes from the repository's own `ocx.toml` / `ocx.lock`, which `setup-ocx`
-//! activates, and the `ocx` release the container test legs download is a
-//! renderer constant (`OCX_CONTAINER_CLI_TAG`) so the whole fleet tests against
-//! one binary. Neither is a per-spec choice, so neither is a field here.
+//! activates, and the `ocx` version is a renderer constant
+//! (`OCX_CONTAINER_CLI_TAG`) that both legs read: native legs take it as
+//! `setup-ocx`'s `version:` input, container legs download the static release of
+//! the same tag. So the whole fleet tests against one binary. Neither is a
+//! per-spec choice, so neither is a field here.
 
 use serde::Deserialize;
 

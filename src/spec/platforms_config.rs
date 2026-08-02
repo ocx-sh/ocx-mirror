@@ -14,8 +14,10 @@ use super::tests_config::TestEntry;
 
 /// Configuration for a single container image to test against.
 ///
-/// In container mode the OCX binary is injected via a per-leg ephemeral
-/// Dockerfile `ADD` before each test leg runs.
+/// In container mode the generated workflow fetches a libc-matched static
+/// `ocx` once per leg on the runner and bind-mounts it read-only into each
+/// `docker run` at `/usr/local/bin/ocx`. Every test is a fresh `--rm`
+/// container — no image is ever built, and nothing persists between tests.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContainerConfig {
     /// OCI image reference (e.g. `ubuntu:24.04`, `alpine:3.20`).

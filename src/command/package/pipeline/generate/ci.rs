@@ -725,6 +725,7 @@ fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         // Substituted after `{TEST_RUN_STEPS}` — the placeholder lives inside the
         // container prelude that step just injected.
         .replace("{OCX_CLI_TAG}", OCX_CONTAINER_CLI_TAG)
+        .replace("{OCX_CLI_VERSION}", ocx_cli_version())
         .replace("{TARGET_IDENTIFIER}", &target_identifier)
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
         .replace("{DISCOVER_PERMISSIONS}", render_discover_permissions(spec))
@@ -1004,8 +1005,14 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
     out
 }
 
-/// The `ocx` CLI release whose statically-linked binary is mounted into a
-/// container test leg.
+/// The one `ocx` CLI release a generated workflow runs, on every leg.
+///
+/// Both legs read it: native legs pass it to `setup-ocx` as its `version:`
+/// input, container legs download the statically-linked release of the same tag
+/// and mount it into the image. Left unpinned, the native legs would float to
+/// whatever `ocx` is newest on the day a mirror happens to run while the
+/// container legs stayed on this constant — the two halves of one test matrix
+/// exercising different binaries.
 ///
 /// Deliberately a renderer constant and not a spec field. Which `ocx` executes
 /// the tests is a property of *this renderer* — it has to be able to read the
@@ -1017,6 +1024,14 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
 /// The trailing marker is the Renovate anchor; see `customManagers` in
 /// `renovate.json`. Keep the literal on one line or the regex stops matching.
 const OCX_CONTAINER_CLI_TAG: &str = "v0.5.2"; // renovate: datasource=github-releases depName=ocx-sh/ocx
+
+/// [`OCX_CONTAINER_CLI_TAG`] as `setup-ocx` spells it: a bare semver, no `v`.
+///
+/// Derived rather than a second constant so the two spellings cannot drift —
+/// Renovate only ever moves the tag.
+fn ocx_cli_version() -> &'static str {
+    OCX_CONTAINER_CLI_TAG.trim_start_matches('v')
+}
 
 /// Render per-test shell commands for the `test` job's run step.
 ///
@@ -1186,6 +1201,7 @@ fn render_describe(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{DESCRIBE_PERMISSIONS}", render_registry_write_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{TARGET_REGISTRY}", &spec.target.registry)
+        .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 
 /// Render the `announce-from-registry.yml` catch-up workflow.
@@ -1209,6 +1225,7 @@ fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
         .replace("{ANNOUNCE_PERMISSIONS}", render_discover_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+        .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 
 /// Render the `patch.yml` metadata-correction workflow.
@@ -1236,6 +1253,7 @@ fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
         .replace("{PATCH_PERMISSIONS}", render_registry_write_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+        .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 
 /// The `--spec` arguments the drift guard re-renders the repository with.
@@ -1288,6 +1306,7 @@ fn render_verify_generated(slots: &[&SpecSlot]) -> String {
         .replace("{SPEC_SOURCE}", &sources)
         .replace("{SPEC_ARGS}", &verify_spec_args(slots))
         .replace("{TRIGGER_PATHS}", &indent_entries(&entries))
+        .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 
 /// Build the map of repo-root-relative path → file content for one spec.
@@ -1926,6 +1945,42 @@ mod tests {
             )),
             "must download the pinned ocx release as .tar.gz, got:\n{workflow}"
         );
+    }
+
+    #[test]
+    fn every_setup_ocx_step_pins_the_renderer_ocx_version() {
+        // The other half of the pin the container legs get from their download
+        // URL. A `setup-ocx` step without the `version:` input floats that job
+        // to whatever ocx is newest the day the mirror happens to run, so one
+        // missed step is enough to have the two halves of a test matrix
+        // exercising different binaries. Assert per step, on every generated
+        // file — the announce fixture is one of the two rendering all four.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-ghcr-announce.yml", dir.path()).expect("announce fixture must render");
+
+        let expected = format!("        with:\n          version: \"{}\"", ocx_cli_version());
+        let mut steps = 0;
+        for entry in std::fs::read_dir(dir.path().join(".github/workflows")).unwrap() {
+            let path = entry.unwrap().path();
+            let content = std::fs::read_to_string(&path).unwrap();
+            let lines: Vec<&str> = content.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains("uses: ocx-sh/setup-ocx@") {
+                    continue;
+                }
+                steps += 1;
+                assert!(
+                    lines[index + 1..].join("\n").starts_with(&expected),
+                    "{} line {}: setup-ocx must pin the renderer's ocx version, got:\n{}",
+                    path.display(),
+                    index + 1,
+                    lines[index..].join("\n"),
+                );
+            }
+        }
+        // 5 in mirror.yml, 1 each in describe / patch / announce-from-registry /
+        // verify-generated.
+        assert_eq!(steps, 9, "every generated workflow's setup-ocx steps must be covered");
     }
 
     #[test]

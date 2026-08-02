@@ -417,7 +417,7 @@ ocx_mirror:
 | `rev` | string | No | Full 40-character git SHA, echoed back as `ocx_mirror_rev` in `pipeline plan` output for traceability. Must match `^[0-9a-f]{40}$`. |
 
 !!! info "Where the binaries come from"
-    Generated jobs install the toolchain via the [`ocx-sh/setup-ocx`][setup-ocx] action, which activates the mirror repository's project toolchain (`ocx.toml` / `ocx.lock`) onto `PATH` — `ocx-mirror` and `ocx` both come from there. Container test legs additionally download a statically-linked `ocx` release; that tag is a constant in the renderer, not a spec field, so the whole fleet tests against one binary and it advances when the repository's pinned `ocx-mirror` does.
+    Generated jobs install the toolchain via the [`ocx-sh/setup-ocx`][setup-ocx] action, which activates the mirror repository's project toolchain (`ocx.toml` / `ocx.lock`) onto `PATH` — `ocx-mirror` and `ocx` both come from there. Every generated job pins one `ocx` version end to end: `setup-ocx` is called with an explicit `version:` input, and container test legs download the statically-linked release of that same version. The version is a constant in the renderer, not a spec field, so the whole fleet tests against one binary and it advances when the repository's pinned `ocx-mirror` does.
 
 ## `notify` {#notify}
 
