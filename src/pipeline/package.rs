@@ -8,6 +8,7 @@ use ocx_lib::archive::{Archive, ExtractOptions};
 use ocx_lib::oci::Platform;
 use ocx_lib::package::bundle::BundleBuilder;
 use ocx_lib::package::metadata::authoring::AuthoringMetadata;
+use ocx_lib::package::metadata::binary::Binaries;
 
 use crate::spec::{AssetType, MetadataConfig};
 
@@ -72,6 +73,68 @@ async fn place_binary(asset_path: &Path, content_dir: &Path, name: &str, asset_n
         tokio::fs::set_permissions(&dest, perms).await?;
     }
 
+    Ok(())
+}
+
+/// Make every file in `content_dir` whose name is a declared binary executable.
+///
+/// A tar or zip member carries the mode upstream gave it, so an archive mirror
+/// publishes whatever the release tarball happened to hold — and some upstreams
+/// ship their interface binary at 0644. The `binaries` list is the one statement
+/// of which files are commands, so it is what this is keyed on.
+///
+/// The whole tree is walked rather than the metadata's interface `PATH`
+/// directories, because the layout this exists for has none: the bug's own spec
+/// puts the binary at the archive root under a bare `${installPath}` PATH entry.
+///
+/// A declared name absent from the tree is not an error here. `bin_scan: verify`
+/// is the presence guard where one is usable at all; failing on absence would
+/// red every mirror whose list covers several platforms' file sets.
+///
+/// The `& 0o111` skip makes this strictly "make executable if it is not" — a
+/// file that already carries any exec bit keeps its exact mode, so this never
+/// downgrades a 0775 or a setuid bit to 0755.
+///
+/// ponytail: two `read_dir`s per directory (the walk's own, then the scan's),
+/// negligible beside the xz compression that follows. Fold the file listing into
+/// the walk only if a huge extracted tree measurably shows up.
+pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &Binaries) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::collections::BTreeSet;
+        use std::os::unix::fs::PermissionsExt;
+
+        use anyhow::Context;
+        use ocx_lib::package::bin_scan;
+        use ocx_lib::utility::fs::{DirWalker, WalkDecision};
+
+        let declared: BTreeSet<&str> = binaries.iter().map(|name| name.as_str()).collect();
+        let directories = DirWalker::new(content_dir, |directory: &Path, _depth| {
+            WalkDecision::collect_and_descend(vec![directory.to_path_buf()])
+        })
+        .walk()
+        .await?;
+
+        for directory in directories {
+            for (path, file_metadata) in bin_scan::scan_directory_files(&directory).await? {
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                if !declared.contains(file_name) || file_metadata.permissions().mode() & 0o111 != 0 {
+                    continue;
+                }
+                tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .await
+                    .with_context(|| format!("failed to make declared binary {} executable", path.display()))?;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The exec bit is a POSIX concept with no host API here; the walk would
+        // be pure cost.
+        let _ = (content_dir, binaries);
+    }
     Ok(())
 }
 
@@ -155,6 +218,46 @@ mod tests {
             .unwrap();
 
         assert!(content_dir.join("shfmt.exe").exists());
+    }
+
+    /// The four properties the chmod is keyed on: it reaches a nested directory
+    /// (full-tree walk, not the interface `PATH` dirs), it touches only the
+    /// names the metadata declares, it leaves an already-executable file's exact
+    /// mode alone rather than flattening it to 0755, and a declared name the
+    /// archive does not ship is silently skipped rather than failing the run.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declared_binaries_are_made_executable_anywhere_in_the_tree() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir_all(content_dir.join("nested")).unwrap();
+        for (relative, mode) in [("nested/tool", 0o644), ("data", 0o644), ("already", 0o775)] {
+            let file = content_dir.join(relative);
+            std::fs::write(&file, b"payload").unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        let binaries: Binaries = serde_json::from_str(r#"["tool","already","absent"]"#).unwrap();
+        ensure_declared_binaries_executable(&content_dir, &binaries)
+            .await
+            .expect("a declared name absent from the tree must not fail the run");
+
+        let mode = |relative: &str| {
+            std::fs::metadata(content_dir.join(relative))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("nested/tool"), 0o755, "the walk must reach nested directories");
+        assert_eq!(mode("data"), 0o644, "an undeclared file must keep its mode");
+        assert_eq!(
+            mode("already"),
+            0o775,
+            "a file that is already executable must keep its exact mode, not be flattened to 0755",
+        );
     }
 
     #[tokio::test]

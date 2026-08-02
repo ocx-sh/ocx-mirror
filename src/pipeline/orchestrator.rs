@@ -551,19 +551,23 @@ pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::
 /// not before the download: a `bin_scan` reads the extracted tree, so no
 /// earlier point in this function can know what `binaries` will say. The libc
 /// check reads the same tree in the same window, giving the sequence
-/// `resolve → download → verify → extract → scan → libc check → sidecar →
-/// compress → drop tree`.
+/// `resolve → download → verify → extract → scan → chmod declared binaries →
+/// libc check → sidecar → compress → drop tree`.
 ///
-/// A resume skips both tree readers, because the tree is gone. The two are not
-/// equally covered afterwards. `bin_scan` re-runs its own guard on the resumed
-/// path ([`reject_empty_scan`] below), so an unusable claim still reds. The libc
-/// check has no such equivalent: it is reachable only from the bundle block, and
-/// the early return above happens first. So:
+/// A resume skips every step of that window, because the tree is gone. They are
+/// not equally covered afterwards. `bin_scan` re-runs its own guard on the
+/// resumed path ([`reject_empty_scan`] below), so an unusable claim still reds.
+/// The libc check has no such equivalent: it is reachable only from the bundle
+/// block, and the early return above happens first. So:
 ///
 /// - a bundle on disk is **not** evidence the check passed — it may have been
 ///   written under `libc_lint: false`, or by a binary predating the check;
 /// - flipping `libc_lint` back to `true` does not reach a work dir that already
 ///   holds a bundle. The operator must discard the bundle to re-check it.
+///
+/// The declared-binaries chmod sits in the same block and is uncovered the same
+/// way: a bundle written by a binary predating it keeps its 0644 members, and no
+/// resume will fix them — discard the bundle to re-prepare it.
 ///
 /// No warning is emitted for this. A resume with `libc_lint` on — the default,
 /// and the overwhelmingly common case — would fire it every time, which is
@@ -671,6 +675,15 @@ pub(crate) async fn prepare_task(
             .await
             .with_context(|| format!("bin_scan failed for {} {}", task.normalized_version, task.platform))?;
         reject_empty_scan(&scanned, task)?;
+        // Issue #51: a tar or zip member keeps whatever mode upstream shipped, and
+        // some upstreams ship their interface binary at 0644 (PowerShell's `pwsh`).
+        // `asset_type: binary` never had the problem — `place_binary` chmods 0755 —
+        // so this closes the asymmetry on the archive path, triggered by the one
+        // list that says which files are commands. Both asset types route through
+        // here; on the binary path it is a no-op.
+        if let Some(binaries) = scanned.binaries() {
+            package::ensure_declared_binaries_executable(&content_dir, binaries).await?;
+        }
         // The second reader of the same tree, in the same window and for the
         // same reason: what a binary demands of a host's C library is only
         // knowable from the binary. After the scan because it inspects the
@@ -902,6 +915,25 @@ mod tests {
         let tool = content.join("bin").join("tool");
         std::fs::write(&tool, b"#!/bin/sh\n").expect("write fixture tool");
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).expect("chmod fixture tool");
+        package::bundle(&content, at, 1).await.expect("build fixture asset");
+        std::fs::remove_dir_all(&content).expect("drop fixture tree");
+    }
+
+    /// A `.tar.xz` whose declared interface binary sits at the archive **root**
+    /// at 0644, beside an undeclared file at the same mode — the shape issue #51
+    /// reproduces: upstream ships `pwsh` non-executable and the metadata's PATH
+    /// is the bare `${installPath}`, so no scan can be pointed at it.
+    #[cfg(unix)]
+    async fn staged_non_executable_asset(at: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let content = at.parent().expect("asset has a parent").join("upstream-content");
+        std::fs::create_dir_all(&content).expect("create fixture tree");
+        for name in ["pwsh", "LICENSE.txt"] {
+            let file = content.join(name);
+            std::fs::write(&file, b"#!/bin/sh\n").expect("write fixture file");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod fixture file");
+        }
         package::bundle(&content, at, 1).await.expect("build fixture asset");
         std::fs::remove_dir_all(&content).expect("drop fixture tree");
     }
@@ -1214,6 +1246,63 @@ mod tests {
                 "{label}: got {error:#}",
             );
         }
+    }
+
+    /// Issue #51: a tar member keeps the mode upstream shipped it with, and
+    /// PowerShell ships `pwsh` at 0644. The published bundle then installs a
+    /// command that cannot be run, while the `asset_type: binary` path has
+    /// always chmodded 0755 — the same package, mirrored two ways, differing in
+    /// whether its commands work.
+    ///
+    /// The spec here is the bug's own shape: PATH is the bare `${installPath}`,
+    /// so there is no `bin/` a scan could be pointed at, and the declared
+    /// `binaries` list is the only statement of which files are commands.
+    /// Asserted against the extracted bundle, not `content/` — prepare drops the
+    /// tree, and the bundle is what gets pushed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_declared_binary_shipped_without_an_exec_bit_is_published_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let spec = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            spec.path().join("metadata.json"),
+            r#"{"type":"bundle","version":1,"binaries":["pwsh"],
+            "env":[{"key":"PATH","type":"path","value":"${installPath}","required":false,"visibility":"interface"}]}"#,
+        )
+        .expect("write metadata fixture");
+
+        let work = tempfile::tempdir().expect("tempdir");
+        let task_dir = work.path().join("task");
+        tokio::fs::create_dir_all(&task_dir).await.expect("create task dir");
+        staged_non_executable_asset(&task_dir.join("asset.tar.xz")).await;
+
+        prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
+            .await
+            .expect("prepare succeeds");
+
+        let published = work.path().join("published");
+        ocx_lib::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
+            .await
+            .expect("the produced bundle extracts");
+
+        let mode = |name: &str| {
+            std::fs::metadata(published.join(name))
+                .unwrap_or_else(|e| panic!("{name} missing from the bundle: {e}"))
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(
+            mode("pwsh"),
+            0o755,
+            "a declared binary must be executable in the published bundle",
+        );
+        assert_eq!(
+            mode("LICENSE.txt"),
+            0o644,
+            "and nothing else may be touched — this is not a blanket chmod -R",
+        );
     }
 
     /// A *named* default variant publishes bare tags beside its prefixed ones,
