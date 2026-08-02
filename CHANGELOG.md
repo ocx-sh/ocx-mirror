@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-02
+
+### Added
+
+- Pin setup-ocx to the renderer ocx version *(generate)*
+- Accept containers[].setup *(spec)*
+- Build a leg's container image from setup *(ci)*
+
+### Documentation
+
+- Document containers[].setup and containers[].id *(mirror-yml)*
+
+### Fixed
+
+- Bump container-leg ocx to v0.5.2 *(generate)*
+- Reject unknown platform and container fields *(spec)*
+- Reject a trailing-backslash setup command *(spec)*
+
 ## [0.5.0] - 2026-07-31
 
 ### Added
@@ -68,6 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The spec owns a declared binaries claim, everywhere *(mirror)*
 - Round-2 findings — verify can fail again, patch refuses layout changes *(mirror)*
 - Round-2 review findings — strict variant keys, honest resume docs *(mirror)*
+- Relock the toolchain for ocx 0.5.0 *(ci)*
+
+### Release
+
+- V0.5.0
 
 ## [0.4.0] - 2026-06-12
 
@@ -122,6 +145,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.5.1]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.0..v0.5.1
 [0.5.0]: https://github.com/ocx-sh/ocx-mirror/compare/v0.4.0..v0.5.0
 [0.4.0]: https://github.com/ocx-sh/ocx-mirror/tree/v0.4.0
 
