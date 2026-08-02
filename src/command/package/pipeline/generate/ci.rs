@@ -500,8 +500,37 @@ struct MatrixLeg {
     /// `platform` with any `os.features` suffix stripped — what
     /// `docker run --platform` accepts. Empty for a native leg.
     docker_platform: String,
+    /// Dockerfile provisioning this leg's image from the container's `setup:`
+    /// commands. Empty when the container declares none — which is also what
+    /// gates every piece of setup machinery out of the rendered workflow.
+    container_dockerfile: String,
     shell: String,
     tests: Vec<RenderedTest>,
+}
+
+/// Render the Dockerfile that provisions one container leg.
+///
+/// `RUN` in shell form hands the line to the image's `SHELL` unparsed, so the
+/// YAML → Rust → Dockerfile → shell trip is a pure copy: quotes and expansions
+/// arrive as written and nothing here needs escaping. The one shape that would
+/// not survive — an embedded newline, which splits a single `RUN` in two — is
+/// rejected by `validate_container_setup` before the renderer ever sees it.
+fn render_setup_dockerfile(image: &str, shell: &str, setup: &[String]) -> String {
+    // `{shell:?}` is the JSON-quoted exec form `SHELL` requires.
+    let mut dockerfile = format!("FROM {image}\nSHELL [{shell:?}, \"-c\"]\n");
+    for command in setup {
+        dockerfile.push_str(&format!("RUN {command}\n"));
+    }
+    dockerfile
+}
+
+/// Does any leg provision its image?
+///
+/// One gate for the whole feature: the matrix key, the `env:` passthrough and
+/// the build block are meaningless apart, so they appear together or not at
+/// all — and a spec declaring no `setup:` renders exactly what it did before.
+fn any_container_setup(legs: &[MatrixLeg]) -> bool {
+    legs.iter().any(|leg| !leg.container_dockerfile.is_empty())
 }
 
 /// Convert a slice of [`TestEntry`] into [`RenderedTest`] list.
@@ -574,6 +603,15 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                             .unwrap_or("sh")
                             .to_string()
                     });
+                    // Validation rejects an empty `setup:`, so the filter only
+                    // guards against a spec that skipped it — an empty list
+                    // must render as "no setup", never as a bare `FROM`.
+                    let container_dockerfile = container
+                        .setup
+                        .as_deref()
+                        .filter(|setup| !setup.is_empty())
+                        .map(|setup| render_setup_dockerfile(&container.image, &shell, setup))
+                        .unwrap_or_default();
                     legs.push(MatrixLeg {
                         platform: platform_key.clone(),
                         platform_slug: platform_slug.clone(),
@@ -582,6 +620,7 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                         container_image: container.image.clone(),
                         container_libc: spec::infer_libc_from_image(&container.image).to_string(),
                         docker_platform: spec::platform_without_features(platform_key),
+                        container_dockerfile,
                         shell,
                         tests: effective_tests.clone(),
                     });
@@ -597,6 +636,7 @@ fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                     container_image: String::new(),
                     container_libc: String::new(),
                     docker_platform: String::new(),
+                    container_dockerfile: String::new(),
                     shell: shell.to_string(),
                     tests: effective_tests,
                 });
@@ -701,6 +741,16 @@ fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     let test_run_steps = render_test_run_steps(&matrix);
     let target_identifier = spec.target.reference();
 
+    // The Dockerfile reaches the shell through `env:`, not an inline `${{ }}`:
+    // it is multi-line and carries the setup commands' own quoting, neither of
+    // which survives interpolation into a shell script. Absent → the
+    // placeholder collapses and the env block is the one line it always was.
+    let container_setup_env = if any_container_setup(&matrix) {
+        "\n          OCX_CONTAINER_DOCKERFILE: ${{ matrix.container_dockerfile }}".to_string()
+    } else {
+        String::new()
+    };
+
     let triggers = trigger_paths(
         slot,
         &[
@@ -734,6 +784,7 @@ fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{WEBHOOK_SECRET_NAME}", webhook_secret_name)
         .replace("{DISCORD_USER_ID_ENV}", &discord_user_id_env)
+        .replace("{CONTAINER_SETUP_ENV}", &container_setup_env)
 }
 
 /// GitHub's own container registry — authenticated with the workflow's
@@ -968,6 +1019,21 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
                 leg.container_image, leg.container_libc, leg.docker_platform,
             ));
         }
+        // Second guarded block, for the same reason: a container leg that
+        // declares no `setup:` keeps the exact key set it had before the field
+        // existed, so provisioning is opt-in per container, not per leg set.
+        if !leg.container_dockerfile.is_empty() {
+            // Block scalar `|` — the Dockerfile is multi-line and carries
+            // whatever quoting the setup commands do. Body at 14 spaces
+            // (matrix entry indent 12 + 2), same shape as `script_inline`.
+            let indented = leg
+                .container_dockerfile
+                .lines()
+                .map(|line| format!("              {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            out.push_str(&format!("            container_dockerfile: |\n{indented}\n"));
+        }
         out.push_str(&format!("            shell: {}\n", leg.shell));
         // Inline the test entries so they are visible in the generated YAML.
         out.push_str("            tests:\n");
@@ -1094,7 +1160,7 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
                   | tar -xz -C "${OCX_CONTAINER_DIR}" --strip-components=1
                 chmod +x "${OCX_CONTAINER_BIN}"
               fi
-            fi
+{CONTAINER_SETUP_BUILD}            fi
             ocx_test() {
               if [ -n "${CONTAINER_IMAGE}" ]; then
                 # The workspace is mounted at its own path so the bundle and its
@@ -1119,6 +1185,30 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
         )
     } else {
         ("", "ocx")
+    };
+
+    // Provisioning sits inside the container branch, after the arch guard, so
+    // an arm64-on-amd64 leg still gets its own diagnosis rather than a docker
+    // exec-format error. The `inspect` guard makes the build once-per-leg: the
+    // second and every later version of the run finds the tag already there.
+    //
+    // ponytail: the tag is runner-local and `(container_id, platform_slug)` is
+    // unique per leg, which is enough even on a shared self-hosted runner. A
+    // pathological `id:` can push it past docker's 128-char tag cap — that
+    // fails the build loudly, upgrade to a hash if a real spec ever hits it.
+    let container_setup_build = if any_container_setup(legs) {
+        r#"              if [ -n "${OCX_CONTAINER_DOCKERFILE:-}" ]; then
+                OCX_SETUP_TAG="ocx-mirror-setup:${{ matrix.container_id }}-${{ matrix.platform_slug }}"
+                if ! docker image inspect "${OCX_SETUP_TAG}" >/dev/null 2>&1; then
+                  printf '%s' "${OCX_CONTAINER_DOCKERFILE}" \
+                    | docker build --platform "${{ matrix.docker_platform }}" -t "${OCX_SETUP_TAG}" - \
+                    || { echo "::error::container setup failed for ${{ matrix.container_id }} on ${{ matrix.platform }}: a setup: command exited non-zero (the failing RUN is above)"; exit 1; }
+                fi
+                CONTAINER_IMAGE="${OCX_SETUP_TAG}"
+              fi
+"#
+    } else {
+        ""
     };
 
     let body = r#"{CONTAINER_PRELUDE}            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
@@ -1174,6 +1264,8 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
             fi
 "#;
     body.replace("{CONTAINER_PRELUDE}", container_prelude)
+        // After `{CONTAINER_PRELUDE}` — the placeholder lives inside it.
+        .replace("{CONTAINER_SETUP_BUILD}", container_setup_build)
         .replace("{OCX_TEST}", ocx_test)
 }
 
@@ -1626,6 +1718,7 @@ mod tests {
             "mirror-multi-container.yml",
             "mirror-container-mixed.yml",
             "mirror-container-libc.yml",
+            "mirror-container-setup.yml",
         ] {
             let workflow = workflow_for(fixture);
             let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&workflow)
@@ -1647,6 +1740,89 @@ mod tests {
                 })
                 .count();
             assert!(with_image > 0, "{fixture} must render container legs");
+        }
+    }
+
+    #[test]
+    fn container_setup_builds_the_image_once_per_leg() {
+        let workflow = workflow_for("mirror-container-setup.yml");
+
+        for needle in [
+            // The Dockerfile crosses into the shell through `env:`, never as an
+            // inline expression — that is what makes quotes and newlines safe.
+            "OCX_CONTAINER_DOCKERFILE: ${{ matrix.container_dockerfile }}",
+            // Once per leg, not once per version: every version after the first
+            // finds the tag already built.
+            r#"if ! docker image inspect "${OCX_SETUP_TAG}" >/dev/null 2>&1; then"#,
+            r#"| docker build --platform "${{ matrix.docker_platform }}" -t "${OCX_SETUP_TAG}" - \"#,
+            // Without this the provisioned image is built and then ignored.
+            r#"CONTAINER_IMAGE="${OCX_SETUP_TAG}""#,
+            // A failing setup command must name itself in the run summary; a
+            // bare non-zero `docker build` reads as a renderer bug.
+            "::error::container setup failed for",
+        ] {
+            assert!(
+                workflow.contains(needle),
+                "a setup-declaring spec must render `{needle}`, got:\n{workflow}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_setup_matrix_entries_stay_valid_yaml() {
+        // Asserting the parsed value, not the rendered text: it is the only way
+        // to prove the block scalar's indentation, the honoured shell, the
+        // one-RUN-per-command shape and the survival of both quote flavours in
+        // a single check — and each of those is a way to emit a broken image.
+        let workflow = workflow_for("mirror-container-setup.yml");
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&workflow)
+            .unwrap_or_else(|e| panic!("setup fixture must render parseable YAML: {e}\n{workflow}"));
+        let legs = parsed["jobs"]["test"]["strategy"]["matrix"]["include"]
+            .as_sequence()
+            .expect("test matrix must be a sequence");
+        let leg = |id: &str| {
+            legs.iter()
+                .find(|leg| leg["container_id"].as_str() == Some(id))
+                .unwrap_or_else(|| panic!("no leg with container_id {id}"))
+        };
+
+        assert_eq!(
+            leg("alpine_3_20")["container_dockerfile"].as_str(),
+            Some("FROM alpine:3.20\nSHELL [\"sh\", \"-c\"]\nRUN apk add --no-cache libstdc++\n"),
+        );
+        assert_eq!(
+            leg("ubuntu_24_04")["container_dockerfile"].as_str(),
+            Some(concat!(
+                "FROM ubuntu:24.04\n",
+                "SHELL [\"bash\", \"-c\"]\n",
+                "RUN apt-get update && apt-get install -y --no-install-recommends libatomic1\n",
+                "RUN sh -c 'echo \"provisioned\" > /etc/ocx-setup-marker'\n",
+            )),
+        );
+        // Same platform, no `setup:` — the key set stays what it was.
+        assert!(
+            leg("fedora_40").get("container_dockerfile").is_none(),
+            "a container without setup must not gain a container_dockerfile key",
+        );
+    }
+
+    #[test]
+    fn a_container_spec_without_setup_emits_no_setup_machinery() {
+        // The container half of the byte-identical proof (the golden corpus is
+        // the native half): container mode predates `setup:`, so a spec that
+        // declares none must render exactly what it rendered before.
+        let workflow = workflow_for("mirror-multi-container.yml");
+
+        for needle in [
+            "container_dockerfile",
+            "OCX_CONTAINER_DOCKERFILE",
+            "docker build",
+            "ocx-mirror-setup",
+        ] {
+            assert!(
+                !workflow.contains(needle),
+                "a spec without setup must not render `{needle}`, got:\n{workflow}"
+            );
         }
     }
 

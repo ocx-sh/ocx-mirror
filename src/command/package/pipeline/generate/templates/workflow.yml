@@ -136,7 +136,7 @@ jobs:
       - name: Run tests for all versions
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}{CONTAINER_SETUP_ENV}
         run: |
           set -euo pipefail
           # `tr -d '\r'` strips CR injected by native jq.exe on Windows runners.

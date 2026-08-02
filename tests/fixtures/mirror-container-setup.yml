@@ -1,0 +1,55 @@
+# Mirror spec whose containers provision their own images via `setup:`.
+#
+# The per-container gate is what this fixture exists to pin: the glibc platform
+# carries one container that provisions and one that does not, so a renderer
+# emitting the setup machinery per leg *set* instead of per container reds here
+# rather than in a downstream mirror repo.
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  "linux/amd64+libc.musl":
+    - "shfmt_v.*_linux_amd64$"
+  "linux/amd64+libc.glibc":
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  # One command, on the image the musl claim is verified against.
+  "linux/amd64+libc.musl":
+    runner: ubuntu-latest
+    containers:
+      - image: alpine:3.20
+        setup:
+          - apk add --no-cache libstdc++
+  "linux/amd64+libc.glibc":
+    runner: ubuntu-latest
+    containers:
+      # Two commands, the second carrying both quote flavours: `RUN` shell form
+      # hands the line to `SHELL -c` unparsed, so the rendered Dockerfile is the
+      # proof that quoting survived YAML → Rust → block scalar untouched.
+      - image: ubuntu:24.04
+        setup:
+          - apt-get update && apt-get install -y --no-install-recommends libatomic1
+          - sh -c 'echo "provisioned" > /etc/ocx-setup-marker'
+      # Same platform, no setup — this leg must keep the pre-setup key set.
+      - image: fedora:40
