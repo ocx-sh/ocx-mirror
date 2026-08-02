@@ -1016,7 +1016,7 @@ fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
 ///
 /// The trailing marker is the Renovate anchor; see `customManagers` in
 /// `renovate.json`. Keep the literal on one line or the regex stops matching.
-const OCX_CONTAINER_CLI_TAG: &str = "v0.4.3"; // renovate: datasource=github-releases depName=ocx-sh/ocx
+const OCX_CONTAINER_CLI_TAG: &str = "v0.5.2"; // renovate: datasource=github-releases depName=ocx-sh/ocx
 
 /// Render per-test shell commands for the `test` job's run step.
 ///
