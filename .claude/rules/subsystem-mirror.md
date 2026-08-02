@@ -41,7 +41,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/metadata_config.rs` | Metadata.json path config |
 | `spec/concurrency_config.rs` | Parallel download/push limits |
 | `spec/tests_config.rs` | `TestEntry` (name + command); top-level `tests:` schema |
-| `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig`; `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
+| `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig` (`image`/`shell`/`id`/`setup` — `setup` provisions the leg's image once per leg via `docker build`); `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
 | `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`); logical index name, spelled out — never derived from `target` |
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); URL-reject validator via `policy_check_notify` |

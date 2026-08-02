@@ -279,7 +279,7 @@ Each entry sets exactly one of three mutually exclusive fields:
 
 Declares the GHA runner and container matrix for the generated workflow. Each key is a platform key, in the same form [`assets`](#assets) uses — including the `+libc.<flavor>` suffix.
 
-A platform without `containers:` runs its tests natively on the runner. A platform with `containers:` runs them once per image: the generated workflow fetches a libc-matched, statically-linked `ocx` release and executes every `ocx package test` inside `docker run <image>`, so the mirrored artifact is loaded and run by that image's own libc. That is the only way an `os.features` musl or glibc claim is actually verified — an artifact that links glibc reds its Alpine leg instead of shipping a false claim.
+A platform without `containers:` runs its tests natively on the runner. A platform with `containers:` runs them once per image: the generated workflow fetches a libc-matched, statically-linked `ocx` release and executes every `ocx package test` inside `docker run <image>`, so the mirrored artifact is loaded and run by that image's own libc. That is the only way an `os.features` musl or glibc claim is actually verified — an artifact that links glibc reds its Alpine leg instead of shipping a false claim. Declaring [`setup`](#container-setup) on a container narrows that claim, honestly: not "runs on stock image X", but "runs on stock image X plus these named packages" — and the packages are named right next to the image they provision.
 
 !!! note "Container legs are linux-only, and run natively"
     Tests run via `docker run`, so `containers:` is rejected on a `darwin/*` or `windows/*` platform. A spec may mix freely: container legs on Linux, native legs everywhere else. No qemu is installed, so a `linux/arm64` platform with `containers:` needs an arm64 `runner:` — the leg fails with that message rather than emulating.
@@ -300,6 +300,42 @@ platforms:
 ```
 
 `docker run --platform` is handed the key with the `+libc.*` suffix stripped (`linux/amd64`); `ocx package test --platform` keeps the full key, which is what selects that entry out of the image index.
+
+### Provisioning the image (`setup`) {#container-setup}
+
+A stock base image sometimes lacks a shared library the mirrored artifact links against — `pnpm`'s glibc build needs `libatomic.so.1`, its musl build needs `libgcc_s`. `containers[].setup` provisions the image before any test runs, per container:
+
+```yaml
+platforms:
+  "linux/amd64+libc.musl":
+    runner: ubuntu-latest
+    containers:
+      - image: "alpine:3.20"
+        shell: sh
+        setup:
+          - apk add --no-cache libstdc++
+
+  "linux/amd64+libc.glibc":
+    runner: ubuntu-latest
+    containers:
+      - image: "ubuntu:24.04"
+        shell: bash
+        setup:
+          - apt-get update
+          - apt-get install -y libatomic1
+      - image: "fedora:40"
+        shell: bash
+        setup:
+          - dnf install -y libatomic
+```
+
+Each entry becomes one Dockerfile `RUN`, handed verbatim to the container's own `shell`. The image is built once per leg with `docker build` — not once per test — and every `ocx package test` invocation on that leg, across every mirrored version, reuses the resulting tag. A setup command that exits non-zero reds the leg naming the setup step, rather than surfacing as a downstream test failure that reads as an artifact defect.
+
+**One command per entry.** `RUN` shell-form passes each entry to the container's shell unparsed, so an embedded newline would split one `RUN` into a broken Dockerfile — write the extra step as its own list entry instead.
+
+**Deliberate scope limit.** `setup` provisions the image so the artifact can load — it is not a general pre-test hook. A leg's value is the narrow, honest claim it makes: this artifact runs on stock image X plus these named packages. Growth past a handful of lines is a visible signal the leg is doing too much (fetching fixtures, starting daemons, seeding services), and it stays visible precisely because the commands sit next to the image they provision.
+
+Reuse across legs — the same setup needed on more than one platform — comes from YAML anchors, the same mechanism the fleet already uses for shared `assets:` and `source:` blocks; `setup:` is a plain list with nothing anchor-specific about it.
 
 ```yaml
 platforms:
@@ -341,6 +377,8 @@ platforms:
 | `containers` | array | No | Container matrix entries. Absent = native mode. Must have ≥1 entry when present. |
 | `containers[].image` | string | Yes | Valid OCI image reference (e.g. `ubuntu:24.04`) |
 | `containers[].shell` | string | No* | Shell to invoke inside the container. *Required when image name does not match a known default (see below). |
+| `containers[].id` | string | No | Stable ID used to construct JUnit filenames and GHA matrix check names. Defaults to the slugified `image` (`:` and `/` → `_`). |
+| `containers[].setup` | array of strings | No | Shell commands baked into the container's image before any test runs, one per entry. See [Provisioning the image (`setup`)](#container-setup). At least one entry when the key is present — an empty list is rejected. |
 | `shell` | string | No | Default shell for native legs. Defaults: `pwsh` on Windows, `bash` elsewhere. |
 | `prefix` | array of strings | No | Command prefix applied before every test invocation. Defaults: `["arch", "-x86_64"]` on `darwin/amd64` with a `macos-*` runner; empty otherwise. |
 | `tests` | array | No | Per-platform test override. When present, replaces the top-level `tests:` array entirely (no partial merge). |
@@ -352,6 +390,9 @@ platforms:
 
 - Must parse as a platform key: `<os>/<arch>[/<variant>][+libc.<flavor>,...]` — the same grammar [`assets`](#assets-libc) uses. Quote any key containing `+`.
 - A key declaring a libc must be tested under that libc: every image on `linux/amd64+libc.musl` has to be a musl base (Alpine), and every image on a `+libc.glibc` key a glibc base. The mismatch is rejected at generate time with exit 65 — a musl-static binary runs fine under glibc, so an Alpine claim tested in Ubuntu goes green having verified nothing.
+- `containers[].setup`, when present, must declare at least one command — an empty list is rejected (exit 65: drop the key instead).
+- Every `setup` entry must be non-blank and a single line. Each entry becomes one Dockerfile `RUN`; a blank entry or one containing a newline is rejected (exit 65) rather than emitted as a broken Dockerfile.
+- A key other than `runner`, `containers`, `prefix`, `shell`, `tests`, `min_version`, `max_version`, or `exclude` under `platforms.<p>` — and a key other than `image`, `shell`, `id`, or `setup` under `containers[]` — is rejected at parse time (`deny_unknown_fields`, exit 65), not silently dropped. This is what makes a `setup:` written one level too high, on the platform instead of the container, a loud error.
 
 ### Version applicability {#platform-version-applicability}
 
