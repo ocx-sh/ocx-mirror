@@ -17,7 +17,9 @@ use super::tests_config::TestEntry;
 /// In container mode the generated workflow fetches a libc-matched static
 /// `ocx` once per leg on the runner and bind-mounts it read-only into each
 /// `docker run` at `/usr/local/bin/ocx`. Every test is a fresh `--rm`
-/// container — no image is ever built, and nothing persists between tests.
+/// container, so nothing persists between tests. Declaring `setup` provisions
+/// the image once per leg with `docker build`, and every `docker run` on that
+/// leg uses the locally built tag instead of `image`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContainerConfig {
     /// OCI image reference (e.g. `ubuntu:24.04`, `alpine:3.20`).
@@ -28,6 +30,15 @@ pub struct ContainerConfig {
     /// Optional stable ID used to construct JUNIT filenames and GHA matrix
     /// check names. Defaults to slugified `image` (`:` and `/` → `_`).
     pub id: Option<String>,
+    /// Shell commands baked into the leg's image, one `RUN` per entry, before
+    /// any test runs. For provisioning what the stock image lacks (the shared
+    /// library the mirrored artifact links against) — not a per-test hook:
+    /// the build happens once per leg and nothing re-runs between versions.
+    ///
+    /// `Option` rather than a plain `Vec` so an explicit empty list stays
+    /// distinguishable from an absent key, and rejectable.
+    #[serde(default)]
+    pub setup: Option<Vec<String>>,
 }
 
 /// Configuration for one platform target in the test pipeline.

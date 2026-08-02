@@ -775,10 +775,42 @@ fn validate_exclude_entry(key: &str, index: usize, entry: &ExcludeEntry, errors:
     }
 }
 
+/// Validate one container's `setup:` list.
+///
+/// Each entry becomes a single Dockerfile `RUN`, passed verbatim to the
+/// container's shell — so the only shapes that cannot survive the trip are the
+/// ones rejected here: a list that declares nothing to run, an entry that runs
+/// nothing, and an entry carrying a newline (the natural `script_inline`-style
+/// mistake, which would split one `RUN` into a broken Dockerfile).
+fn validate_container_setup(key: &str, container: &ContainerConfig, errors: &mut Vec<String>) {
+    let Some(setup) = &container.setup else {
+        return;
+    };
+    let image = &container.image;
+    if setup.is_empty() {
+        errors.push(format!(
+            "platforms: '{key}': container image '{image}' declares an empty setup list; \
+             drop the key or give it at least one command"
+        ));
+    }
+    for (index, command) in setup.iter().enumerate() {
+        if command.trim().is_empty() {
+            errors.push(format!(
+                "platforms: '{key}': container image '{image}': setup[{index}] must not be blank"
+            ));
+        } else if command.contains('\n') {
+            errors.push(format!(
+                "platforms: '{key}': container image '{image}': setup[{index}] must be a single \
+                 command (each entry becomes one Dockerfile RUN); split it across entries"
+            ));
+        }
+    }
+}
+
 /// Validate `platforms:` map: valid platform keys, runner present, container
 /// image format, shell defaults for known distros, explicit shell required for
-/// unknown, plus per-platform version applicability (`min_version`,
-/// `max_version`, `exclude`).
+/// unknown, per-container `setup:` commands, plus per-platform version
+/// applicability (`min_version`, `max_version`, `exclude`).
 fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut Vec<String>) {
     for (key, config) in platforms {
         // The canonical `os/arch[/variant][+feature,…]` grammar, parsed by the
@@ -882,6 +914,8 @@ fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &mut 
                             declared_libc.join(",")
                         ));
                     }
+
+                    validate_container_setup(key, container, errors);
                 }
             }
         }
@@ -3106,6 +3140,81 @@ platforms:
         assert!(
             errors.iter().any(|e| e.contains("containers are linux-only")),
             "containers on a windows platform must be rejected, got: {errors:?}"
+        );
+    }
+
+    /// A minimal spec whose single container carries the given extra lines,
+    /// indented to sit under `- image: alpine:3.20`.
+    fn spec_with_container_lines(lines: &str) -> MirrorSpec {
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: alpine:3.20
+{lines}"#,
+            base = MINIMAL_BASE_YAML
+        );
+        serde_yaml_ng::from_str(&yaml).unwrap()
+    }
+
+    #[test]
+    fn validate_accepts_setup_commands_on_a_container() {
+        let spec = spec_with_container_lines(
+            r#"        setup:
+          - apk add --no-cache libstdc++
+          - apk add --no-cache libgcc
+"#,
+        );
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(errors.is_empty(), "setup commands must validate, got: {errors:?}");
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_setup_list() {
+        // `setup: []` reads as "provision nothing" but declares intent to
+        // provision — the maintainer meant to fill it in.
+        let spec = spec_with_container_lines("        setup: []\n");
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("empty setup list")),
+            "an empty setup list must be rejected, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_blank_setup_command() {
+        let spec = spec_with_container_lines(
+            r#"        setup:
+          - "  "
+"#,
+        );
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("setup[0] must not be blank")),
+            "a blank setup command must be rejected, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_a_multi_line_setup_command() {
+        // One entry is one `RUN`. A block scalar here — the shape `script_inline`
+        // trains maintainers to reach for — would emit a broken Dockerfile.
+        let spec = spec_with_container_lines(
+            r#"        setup:
+          - |
+            apk add --no-cache libstdc++
+            apk add --no-cache libgcc
+"#,
+        );
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains("setup[0] must be a single command")),
+            "a multi-line setup command must be rejected, got: {errors:?}"
         );
     }
 
