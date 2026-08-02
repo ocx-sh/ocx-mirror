@@ -46,4 +46,5 @@ venv/
 *.sock
 
 # Agent worktrees (see workflow-swarm.md) — never committed.
-.agents/
+# Only the transient checkouts; .agents/memory/ is team-shared and tracked.
+.agents/worktrees/

@@ -11,6 +11,13 @@ same authors, same conventions. Architecture rule:
 [.claude/rules/subsystem-mirror.md](./.claude/rules/subsystem-mirror.md)
 (module map, pipeline phases, spec format, error model).
 
+## Product
+
+Overview: [docs/index.md](./docs/index.md) — what it does, how it works.
+Users: repo operators publishing tool mirrors; runs locally and in GitHub Actions.
+Comparable tools: aqua registry, mise/asdf backends, ubi, `crane`/`oras` (raw OCI copy).
+Research keywords: OCI artifacts, ORAS, GitHub Releases API, cascade tags, registry mirroring.
+
 ## Layout
 
 | Path | Purpose |
