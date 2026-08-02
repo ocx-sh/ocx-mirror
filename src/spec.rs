@@ -3219,6 +3219,34 @@ platforms:
     }
 
     #[test]
+    fn validate_rejects_setup_on_a_platform_without_containers() {
+        // `setup:` belongs to a container, not a platform. One level of
+        // under-indentation is the whole mistake, and `deny_unknown_fields` is
+        // what turns it into a parse error instead of a dropped line — so this
+        // never reaches `validate()`.
+        let yaml = format!(
+            r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    setup:
+      - apk add --no-cache libstdc++
+"#,
+            base = MINIMAL_BASE_YAML
+        );
+        let error = serde_yaml_ng::from_str::<MirrorSpec>(&yaml)
+            .expect_err("a platform-level setup must fail to parse")
+            .to_string();
+        assert!(
+            error.contains("unknown field") && error.contains("setup"),
+            "the error must name the rejected key, got: {error}"
+        );
+    }
+
+    #[test]
     fn validate_accepts_a_libc_bearing_platform_key() {
         // Declaring a libc is the only way to make the claim testable, so the
         // key grammar has to admit it — a `^[a-z0-9_-]+/[a-z0-9_-]+$` regex does

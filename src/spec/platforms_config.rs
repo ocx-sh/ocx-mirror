@@ -20,7 +20,13 @@ use super::tests_config::TestEntry;
 /// container, so nothing persists between tests. Declaring `setup` provisions
 /// the image once per leg with `docker build`, and every `docker run` on that
 /// leg uses the locally built tag instead of `image`.
+///
+/// `deny_unknown_fields` matches [`MirrorSpec`](super::MirrorSpec) and every
+/// sibling spec struct: a misspelled key here would otherwise be dropped in
+/// silence, and a dropped `setup` leaves the leg testing an unprovisioned image
+/// — green, having verified nothing.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContainerConfig {
     /// OCI image reference (e.g. `ubuntu:24.04`, `alpine:3.20`).
     pub image: String,
@@ -46,7 +52,13 @@ pub struct ContainerConfig {
 /// A platform without `containers` runs tests natively on the declared GHA
 /// runner. A platform with `containers` runs each test in each listed
 /// container image (container mode, linux only).
+///
+/// `deny_unknown_fields` matches [`MirrorSpec`](super::MirrorSpec) and every
+/// sibling spec struct. It is also what makes a `setup:` written one level too
+/// high — a platform key rather than a container one — a loud parse error
+/// instead of a silently ignored line.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlatformConfig {
     /// GitHub Actions runner label (e.g. `ubuntu-latest`, `macos-latest`).
     pub runner: String,
