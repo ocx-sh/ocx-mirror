@@ -392,6 +392,7 @@ platforms:
 - A key declaring a libc must be tested under that libc: every image on `linux/amd64+libc.musl` has to be a musl base (Alpine), and every image on a `+libc.glibc` key a glibc base. The mismatch is rejected at generate time with exit 65 — a musl-static binary runs fine under glibc, so an Alpine claim tested in Ubuntu goes green having verified nothing.
 - `containers[].setup`, when present, must declare at least one command — an empty list is rejected (exit 65: drop the key instead).
 - Every `setup` entry must be non-blank and a single line. Each entry becomes one Dockerfile `RUN`; a blank entry or one containing a newline is rejected (exit 65) rather than emitted as a broken Dockerfile.
+- No `setup` entry may end in a backslash. A trailing `\` is a line continuation that would absorb the following `RUN` as its own arguments — the build exits 0 with that layer never applied — so it is rejected (exit 65).
 - A key other than `runner`, `containers`, `prefix`, `shell`, `tests`, `min_version`, `max_version`, or `exclude` under `platforms.<p>` — and a key other than `image`, `shell`, `id`, or `setup` under `containers[]` — is rejected at parse time (`deny_unknown_fields`, exit 65), not silently dropped. This is what makes a `setup:` written one level too high, on the platform instead of the container, a loud error.
 
 ### Version applicability {#platform-version-applicability}

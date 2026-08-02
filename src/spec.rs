@@ -777,11 +777,13 @@ fn validate_exclude_entry(key: &str, index: usize, entry: &ExcludeEntry, errors:
 
 /// Validate one container's `setup:` list.
 ///
-/// Each entry becomes a single Dockerfile `RUN`, passed verbatim to the
-/// container's shell — so the only shapes that cannot survive the trip are the
-/// ones rejected here: a list that declares nothing to run, an entry that runs
-/// nothing, and an entry carrying a newline (the natural `script_inline`-style
-/// mistake, which would split one `RUN` into a broken Dockerfile).
+/// Each entry becomes a single Dockerfile `RUN`, passed to the container's
+/// shell as written. Rejected here are the shapes that would not arrive as one
+/// command: a list that declares nothing to run, an entry that runs nothing, an
+/// entry carrying a newline (the natural `script_inline`-style mistake, which
+/// splits one `RUN` into a broken Dockerfile), and an entry ending in a
+/// backslash — a line continuation, which quietly absorbs the *next* `RUN` and
+/// leaves that layer unbuilt while the build still exits 0.
 fn validate_container_setup(key: &str, container: &ContainerConfig, errors: &mut Vec<String>) {
     let Some(setup) = &container.setup else {
         return;
@@ -802,6 +804,16 @@ fn validate_container_setup(key: &str, container: &ContainerConfig, errors: &mut
             errors.push(format!(
                 "platforms: '{key}': container image '{image}': setup[{index}] must be a single \
                  command (each entry becomes one Dockerfile RUN); split it across entries"
+            ));
+        } else if command.trim_end().ends_with('\\') {
+            // Trimmed first: docker continues the line on a backslash that is
+            // the last *non-whitespace* character, so trailing spaces do not
+            // save it. Either way `RUN foo \` swallows the next `RUN` as its
+            // own arguments — the build exits 0 having skipped that layer,
+            // leaving the leg green on an unprovisioned image.
+            errors.push(format!(
+                "platforms: '{key}': container image '{image}': setup[{index}] must not end with \
+                 a backslash; it would continue into the next RUN instead of ending the command"
             ));
         }
     }
@@ -3216,6 +3228,30 @@ platforms:
             errors.iter().any(|e| e.contains("setup[0] must be a single command")),
             "a multi-line setup command must be rejected, got: {errors:?}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_a_trailing_backslash_setup_command() {
+        // A line continuation absorbs the next `RUN` as its own arguments: the
+        // build exits 0 with that layer never applied, and the leg goes green
+        // on an image the setup did not provision.
+        // Both spellings: whitespace after the backslash does not stop docker
+        // continuing the line, so it must not stop the check either.
+        for trailer in ["", " "] {
+            let spec = spec_with_container_lines(&format!(
+                r#"        setup:
+          - "apk add --no-cache libstdc++ \\{trailer}"
+          - apk add --no-cache libgcc
+"#
+            ));
+            let errors = spec.validate(Path::new("test.yml"));
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains("setup[0] must not end with a backslash")),
+                "a trailing-backslash setup command must be rejected (trailer {trailer:?}), got: {errors:?}"
+            );
+        }
     }
 
     #[test]

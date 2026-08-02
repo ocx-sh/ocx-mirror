@@ -511,10 +511,11 @@ struct MatrixLeg {
 /// Render the Dockerfile that provisions one container leg.
 ///
 /// `RUN` in shell form hands the line to the image's `SHELL` unparsed, so the
-/// YAML → Rust → Dockerfile → shell trip is a pure copy: quotes and expansions
-/// arrive as written and nothing here needs escaping. The one shape that would
-/// not survive — an embedded newline, which splits a single `RUN` in two — is
-/// rejected by `validate_container_setup` before the renderer ever sees it.
+/// YAML → Rust → Dockerfile → shell trip copies the command through. The shapes
+/// that would not arrive as one `RUN` — an embedded newline, a trailing
+/// backslash — are rejected by `validate_container_setup` before the renderer
+/// sees them. A `${{ … }}` in a command is emitted raw and interpolated by
+/// Actions, the same surface `tests[].command` already has.
 fn render_setup_dockerfile(image: &str, shell: &str, setup: &[String]) -> String {
     // `{shell:?}` is the JSON-quoted exec form `SHELL` requires.
     let mut dockerfile = format!("FROM {image}\nSHELL [{shell:?}, \"-c\"]\n");
