@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ocx_lib::cli::DataInterface;
+use ocx_lib::cli::{DataInterface, ExitCode};
 use ocx_lib::log;
 use ocx_lib::package::version::Version;
 
@@ -856,8 +856,115 @@ pub(crate) fn build_push_args(
     Ok(args)
 }
 
+/// How long one push attempt may run before it is killed.
+///
+/// A tile is a 180–350 MB bundle, so a healthy upload takes minutes and the
+/// bound has to sit well above that. It bounds one attempt for one
+/// `(version, platform)`, so a full ladder — `max_retries: 3`, four attempts
+/// plus backoff — is the worst case for a single tile at just over an hour. A
+/// run pushing many tiles is bounded by the job, not by this: GitHub's default
+/// 360-minute limit is the outer one, and staying well inside it is what keeps
+/// the run-summary write reachable.
+const PUSH_TIMEOUT: Duration = Duration::from_secs(900);
+
+/// First retry delay; each further attempt doubles it.
+const PUSH_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(1);
+
+/// Ceiling on the doubling, so a large `max_retries` cannot park the job on
+/// backoff alone. The shape of the ladder barely matters either way — a push
+/// attempt costs minutes and the delay between them seconds. No jitter: pushes
+/// are strictly sequential, so there is no herd to spread out.
+const PUSH_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// One failed push attempt: what to report, and whether trying again could
+/// plausibly change the outcome.
+#[derive(Debug)]
+struct PushAttemptError {
+    message: String,
+    transient: bool,
+}
+
+/// Whether an `ocx package push` exit code is one this pipeline will try again.
+///
+/// 69 is not a narrow "the registry blipped" signal today: `ocx` maps *every*
+/// registry-client failure to it (`ClientError::Registry => Unavailable`, with
+/// an explicit v1 TODO in its `oci/client/error.rs`), so a permanent 403 on a
+/// manifest arrives here indistinguishable from a 503 and costs four uploads
+/// before it is reported. Retrying it anyway is the deliberate interim trade:
+/// the failure this exists to survive is far more common than the permanent
+/// denial, and the denial still fails the run — later, not differently. Narrow
+/// this to 75 once ocx-sh/ocx#266 separates the two upstream.
+///
+/// Bad credentials are already separated (80) and are not retried. `None`
+/// (signal-killed) is not retried either: the signal came from outside, and the
+/// runner that sent it is usually about to send another.
+fn push_exit_is_transient(code: Option<i32>) -> bool {
+    matches!(code, Some(code) if code == ExitCode::Unavailable as i32 || code == ExitCode::TempFail as i32)
+}
+
+/// Delay before attempt `attempt + 1`, doubling from
+/// [`PUSH_RETRY_BACKOFF_BASE`] and capped at [`PUSH_RETRY_BACKOFF_MAX`].
+fn push_retry_backoff(attempt: u32) -> Duration {
+    PUSH_RETRY_BACKOFF_BASE
+        .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
+        .min(PUSH_RETRY_BACKOFF_MAX)
+}
+
+/// One `ocx package push [--cascade] -p {platform} -i {target_ref} {bundle}
+/// --format json` subprocess, bounded by `timeout`.
+///
+/// `timeout` is a parameter rather than the constant read directly so the bound
+/// itself can be tested without a fifteen-minute test.
+async fn push_once(ocx_binary: &Path, args: &[String], timeout: Duration) -> Result<PushReport, PushAttemptError> {
+    let mut cmd = tokio::process::Command::new(ocx_binary);
+    cmd.args(args);
+
+    // Forward OCX_* environment variables into the subprocess.
+    // This preserves offline mode, remote mode, registry config, etc.
+    forward_ocx_env(&mut cmd);
+
+    // Tokio leaves a child running when its future is dropped; on timeout that
+    // would orphan a push still streaming a bundle at the registry — and the
+    // retry would then race it.
+    cmd.kill_on_drop(true);
+
+    let output = match tokio::time::timeout(timeout, cmd.output()).await {
+        Err(_) => {
+            return Err(PushAttemptError {
+                message: format!("ocx package push timed out after {}s", timeout.as_secs()),
+                transient: true,
+            });
+        }
+        Ok(Err(e)) => {
+            return Err(PushAttemptError {
+                message: format!("failed to spawn ocx: {e}"),
+                transient: false,
+            });
+        }
+        Ok(Ok(output)) => output,
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(PushAttemptError {
+            message: format!("ocx package push exited {}: {}", output.status, stderr.trim()),
+            transient: push_exit_is_transient(output.status.code()),
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(stdout.trim()).map_err(|e| PushAttemptError {
+        // A push that exited 0 did its work; an unreadable report is this
+        // pipeline disagreeing with that `ocx` about a format, which a second
+        // run reproduces exactly.
+        message: format!("failed to parse push JSON output: {e}\nstdout: {}", stdout.trim()),
+        transient: false,
+    })
+}
+
 /// Invoke `ocx package push [--cascade] -p {platform} -i {target_ref} {bundle} --format json`
-/// as a subprocess and parse the JSON output.
+/// as a subprocess and parse the JSON output, retrying transient failures up to
+/// `concurrency.max_retries` times.
 ///
 /// Returns the parsed `PushReport` on success, or a descriptive error string
 /// on subprocess failure (caller records as `push_error` without aborting).
@@ -876,25 +983,26 @@ async fn invoke_push(
     let annotations = crate::annotations::build_annotations(&spec.annotations);
     let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade)?;
 
-    let mut cmd = tokio::process::Command::new(&ocx_binary);
-    cmd.args(&args);
-
-    // Forward OCX_* environment variables into the subprocess.
-    // This preserves offline mode, remote mode, registry config, etc.
-    forward_ocx_env(&mut cmd);
-
-    let output = cmd.output().await.map_err(|e| format!("failed to spawn ocx: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ocx package push exited {}: {}", output.status, stderr.trim()));
+    let mut attempt = 1u32;
+    loop {
+        match push_once(&ocx_binary, &args, PUSH_TIMEOUT).await {
+            Ok(report) => return Ok(report),
+            Err(failure) => {
+                if !failure.transient || attempt > spec.concurrency.max_retries {
+                    return Err(failure.message);
+                }
+                let backoff = push_retry_backoff(attempt);
+                log::warn!(
+                    "[{}] push attempt {attempt} for {target_ref} ({platform}) failed, retrying in {}s: {}",
+                    spec.name,
+                    backoff.as_secs(),
+                    failure.message,
+                );
+                tokio::time::sleep(backoff).await;
+                attempt += 1;
+            }
+        }
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let report: PushReport = serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("failed to parse push JSON output: {e}\nstdout: {}", stdout.trim()))?;
-
-    Ok(report)
 }
 
 /// GitHub Actions secret carrying the token `ocx package announce` uses to
@@ -3478,6 +3586,293 @@ esac
             std::env::remove_var(ENV_ANNOUNCE_TOKEN);
         }
         result
+    }
+
+    // ── Push retry (issue #50) ────────────────────────────────────────────
+
+    /// The single version `mirror-push-retry.yml` publishes in these tests.
+    const PUSH_RETRY_VERSION: &str = "3.7.0";
+
+    /// A stand-in `ocx` whose push fails its first `failures` invocations with
+    /// `exit_code` and succeeds afterwards. The attempt count lands in
+    /// `{dir}/push-attempts` — same stateful-counter shape as
+    /// [`fake_ocx_pipeline`]'s `tagstate/`, and the only way to tell one
+    /// attempt from four.
+    #[cfg(unix)]
+    fn fake_ocx_flaky_push(dir: &Path, failures: u32, exit_code: u8) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-ocx");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+attempts=$(cat '{counter}' 2>/dev/null || echo 0)
+attempts=$((attempts + 1))
+echo "$attempts" > '{counter}'
+if [ "$attempts" -le {failures} ]; then
+  echo 'operation timed out' >&2
+  exit {exit_code}
+fi
+echo '{{"cascade_tags_written":["{PUSH_RETRY_VERSION}"],"status":"pushed"}}'
+"#,
+                counter = dir.join("push-attempts").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    /// How many times [`fake_ocx_flaky_push`] was invoked.
+    #[cfg(unix)]
+    fn push_attempts(dir: &Path) -> u32 {
+        std::fs::read_to_string(dir.join("push-attempts"))
+            .map(|body| body.trim().parse().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// Stage one green single-platform version for the retry fixture.
+    #[cfg(unix)]
+    fn stage_push_retry_version(junit_dir: &Path, bundles_dir: &Path) {
+        write_junit(
+            junit_dir,
+            PUSH_RETRY_VERSION,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(PUSH_RETRY_VERSION, "linux/amd64", "_native_"),
+        );
+        // Contents are irrelevant — the push subprocess is a stand-in.
+        std::fs::write(
+            bundles_dir.join(format!("bundle-{PUSH_RETRY_VERSION}-linux_amd64.tar.xz")),
+            b"x",
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_transient_push_failure_is_retried_and_the_tile_still_lands() {
+        // A registry 503 on the first attempt. The bundle is built, the tests
+        // are green, and the only thing between the run and a published image
+        // is one more request — reporting `push_error` here throws the whole
+        // leg away over a blip that costs a second to ride out.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let script = fake_ocx_flaky_push(dir.path(), 1, ExitCode::Unavailable as u8);
+
+        stage_push_retry_version(junit_dir.path(), bundles_dir.path());
+
+        run_pipeline_with_fake_ocx(
+            "mirror-push-retry.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            None,
+        )
+        .expect("a transient push failure must not fail the run");
+
+        assert_eq!(push_attempts(dir.path()), 2, "the failed attempt must be retried once");
+
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let version = &val["versions"][0];
+        assert_eq!(version["version"], PUSH_RETRY_VERSION, "got: {version}");
+        assert_eq!(version["status"], "published", "got: {version}");
+        assert_eq!(
+            version["platforms_pushed"],
+            serde_json::json!(["linux/amd64"]),
+            "got: {version}",
+        );
+        assert_eq!(version["platforms_failed"], serde_json::json!([]), "got: {version}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_retries_stop_at_the_spec_max_retries() {
+        // Two assertions in one number: the ladder is bounded (a registry that
+        // is down stays down — the run must not sit there forever), and its
+        // length comes from the spec. The fixture sets `max_retries: 2`, a
+        // value no plausible hardcoding produces: the default 3 would spend
+        // four attempts, an off-by-one two.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::Unavailable as u8);
+
+        stage_push_retry_version(junit_dir.path(), bundles_dir.path());
+
+        let result = run_pipeline_with_fake_ocx(
+            "mirror-push-retry.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            None,
+        );
+        assert!(result.is_err(), "an exhausted retry ladder must still fail the run");
+        assert_eq!(
+            push_attempts(dir.path()),
+            3,
+            "one attempt plus the two retries the spec grants",
+        );
+
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let version = &val["versions"][0];
+        assert_eq!(version["platforms_failed"][0]["reason"], "push_error", "got: {version}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_transient_push_failure_is_not_retried() {
+        // Guards the other side of the retry predicate rather than the bug:
+        // a rejected manifest (65) is deterministic, and re-sending it three
+        // more times only makes the run slower. Passes before the fix by
+        // construction — it exists to fail a retry-everything implementation.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::DataError as u8);
+
+        stage_push_retry_version(junit_dir.path(), bundles_dir.path());
+
+        let result = run_pipeline_with_fake_ocx(
+            "mirror-push-retry.yml",
+            &script,
+            junit_dir.path(),
+            bundles_dir.path(),
+            &summary_path,
+            None,
+        );
+        assert!(result.is_err(), "a rejected push must fail the run");
+        assert_eq!(push_attempts(dir.path()), 1, "a deterministic rejection is not retried");
+
+        let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let version = &val["versions"][0];
+        assert_eq!(version["platforms_failed"][0]["reason"], "push_error", "got: {version}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_push_is_killed_by_the_push_timeout() {
+        // Two claims, and the second is the one with teeth: the wait is
+        // bounded, and the child is dead when it returns. Tokio leaves a
+        // timed-out child running, so without `kill_on_drop` an orphaned push
+        // keeps streaming its bundle at the registry while the retry sends the
+        // same one — two writers, one tag. Observed as a marker file only a
+        // survivor lives long enough to write.
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("survived-the-timeout");
+        let script = dir.path().join("hanging-ocx");
+        std::fs::write(&script, format!("#!/bin/sh\nsleep 1\ntouch '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let started = std::time::Instant::now();
+        let failure = rt
+            .block_on(push_once(&script, &[], Duration::from_millis(200)))
+            .expect_err("a hung push must not hang the run");
+
+        assert!(failure.message.contains("timed out"), "got: {}", failure.message);
+        assert!(failure.transient, "a stall is the retryable case, not a verdict");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the timeout must bound the wait, took {:?}",
+            started.elapsed(),
+        );
+
+        // Past the point a surviving child would have written the marker.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(
+            !marker.exists(),
+            "a timed-out push must be killed, not orphaned to race its own retry",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn max_retries_zero_is_a_single_attempt() {
+        // The documented floor: `0` opts out of retrying entirely. Nothing else
+        // pins it — an off-by-one in the loop guard would quietly make it two,
+        // and the spec that asked for none would get one anyway.
+        let _env_lock = job_url_env_lock();
+        let dir = tempdir().unwrap();
+        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::Unavailable as u8);
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(
+            r#"
+name: minimal
+target:
+  registry: ocx.sh
+  repository: minimal
+source:
+  type: github_release
+  owner: test
+  repo: test
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+concurrency:
+  max_retries: 0
+"#,
+        )
+        .unwrap();
+
+        // SAFETY: test-only process env, serialised by the lock above.
+        unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(invoke_push(
+            &spec,
+            "linux/amd64",
+            "ocx.sh/minimal:1.0.0",
+            &dir.path().join("bundle-1.0.0-linux_amd64.tar.xz"),
+            false,
+        ));
+        // SAFETY: cleanup so neighbouring tests don't inherit the pin.
+        unsafe { std::env::remove_var("OCX_BINARY_PIN") };
+
+        assert!(result.is_err(), "the attempt failed and no retry was granted");
+        assert_eq!(push_attempts(dir.path()), 1, "`max_retries: 0` is one attempt, total");
+    }
+
+    #[test]
+    fn only_a_registry_fault_is_worth_retrying() {
+        // The retry predicate decides whether a failed push costs one second or
+        // is thrown away. Anything deterministic — bad data, bad credentials,
+        // bad invocation — answers identically on the second ask, and a
+        // signal-killed child (`None`) means something outside the run wants it
+        // to stop.
+        for code in [ExitCode::Unavailable, ExitCode::TempFail] {
+            assert!(
+                push_exit_is_transient(Some(code as i32)),
+                "{code:?} is a registry fault that may clear",
+            );
+        }
+
+        for code in [
+            ExitCode::Failure,
+            ExitCode::UsageError,
+            ExitCode::DataError,
+            ExitCode::IoError,
+            ExitCode::PermissionDenied,
+            ExitCode::ConfigError,
+        ] {
+            assert!(
+                !push_exit_is_transient(Some(code as i32)),
+                "{code:?} reproduces exactly on a retry",
+            );
+        }
+        assert!(!push_exit_is_transient(Some(70)), "an ocx crash is not a blip");
+        assert!(!push_exit_is_transient(None), "a signal-killed push is not retried");
     }
 
     #[cfg(unix)]

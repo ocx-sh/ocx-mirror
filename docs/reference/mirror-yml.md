@@ -19,7 +19,7 @@
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
 | `verify` | object | No | Checksum verification options |
-| `concurrency` | object | No | Parallel download and push limits |
+| `concurrency` | object | No | Parallel download limits, source rate limiting, push retry policy |
 | `tests` | array | No* | Commands to run against each installed bundle. Required when `pipeline generate ci` is used. |
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
 | `ocx_mirror` | object | No | Provenance of the ocx-mirror behind a plan. Pins nothing. |

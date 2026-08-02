@@ -1552,10 +1552,36 @@ assets:
         assert!(!spec.skip_prereleases);
         assert!(spec.asset_type.is_none(), "asset_type should default to None");
         assert_eq!(spec.concurrency.max_downloads, 8);
-        assert_eq!(spec.concurrency.max_pushes, 2);
         assert_eq!(spec.concurrency.rate_limit_ms, 0);
         assert_eq!(spec.concurrency.max_retries, 3);
         assert!(!spec.allow_manual_edits, "allow_manual_edits should default to false");
+    }
+
+    #[test]
+    fn a_spec_that_still_sets_max_pushes_keeps_parsing() {
+        // `max_pushes` was removed as a knob nothing read. Every mirror repo in
+        // the fleet carries its own `mirror.yml`, so the field outliving the
+        // code that named it must stay harmless — which it is only as long as
+        // `ConcurrencyConfig` does not deny unknown fields. This pins that.
+        let yaml = r#"
+name: minimal
+target:
+  registry: ocx.sh
+  repository: minimal
+source:
+  type: github_release
+  owner: test
+  repo: test
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+concurrency:
+  max_pushes: 4
+  max_retries: 5
+"#;
+
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).expect("a stale `max_pushes` must not break a mirror");
+        assert_eq!(spec.concurrency.max_retries, 5);
     }
 
     #[test]

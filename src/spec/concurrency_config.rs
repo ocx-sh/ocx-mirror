@@ -4,16 +4,17 @@
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Fields read from YAML spec; used when concurrency control is implemented
 pub struct ConcurrencyConfig {
     #[serde(default = "default_max_downloads")]
     pub max_downloads: usize,
     #[serde(default = "default_max_bundles")]
     pub max_bundles: usize,
-    #[serde(default = "default_max_pushes")]
-    pub max_pushes: usize,
+    /// Delay in milliseconds between paged source-listing requests
+    /// (GitHub Releases). `0` (default) = no delay.
     #[serde(default)]
     pub rate_limit_ms: u64,
+    /// Extra attempts a transient push failure gets on top of the first.
+    /// `0` = a single attempt.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     /// Number of compression threads per bundle task.
@@ -28,7 +29,6 @@ impl Default for ConcurrencyConfig {
         Self {
             max_downloads: default_max_downloads(),
             max_bundles: default_max_bundles(),
-            max_pushes: default_max_pushes(),
             rate_limit_ms: 0,
             max_retries: default_max_retries(),
             compression_threads: 0,
@@ -44,10 +44,6 @@ fn default_max_bundles() -> usize {
     std::thread::available_parallelism()
         .map(|p| (p.get() / 2).max(1))
         .unwrap_or(2)
-}
-
-fn default_max_pushes() -> usize {
-    2
 }
 
 fn default_max_retries() -> u32 {

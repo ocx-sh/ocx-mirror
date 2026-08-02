@@ -1,0 +1,37 @@
+# Mirror spec: single-platform fixture for the push-retry tests.
+# Copy of mirror-minimal.yml plus a `concurrency.max_retries` of 2: not the
+# default 3, and not the 1 an off-by-one would produce, so the three attempts it
+# grants can only have come from this file.
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+concurrency:
+  max_retries: 2
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
