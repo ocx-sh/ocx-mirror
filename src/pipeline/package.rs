@@ -102,7 +102,7 @@ pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &
     #[cfg(unix)]
     {
         use std::collections::BTreeSet;
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         use anyhow::Context;
         use ocx_lib::package::bin_scan;
@@ -121,6 +121,50 @@ pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &
                     continue;
                 };
                 if !declared.contains(file_name) || file_metadata.permissions().mode() & 0o111 != 0 {
+                    continue;
+                }
+                // Two shapes of declared name reach a file outside the content
+                // root, and both are reachable from an upstream archive: the
+                // scan stats through symlinks and `chmod(2)` follows them, while
+                // the extractor's symlink validation is purely lexical, so a
+                // chain of parent links passes it; and a tar member of type
+                // `Link` is unpacked with the raw linkname, so an absolute one
+                // lands as an ordinary regular file sharing the victim's inode
+                // (ocx-sh/ocx#275). The hardlink is the worse of the two — a
+                // symlinked escape is caught by `validate_symlinks_in_dir`
+                // before bundling, but that sweep sees a hardlink as the plain
+                // regular file it is, so the escaped content gets published.
+                //
+                // Skipping does cost a real case: a declared name that is a
+                // symlink is skipped outright, so an alias layout whose target
+                // has a different basename (`bin/pwsh` → `libexec/pwsh.bin`)
+                // leaves that target at whatever mode upstream shipped — the
+                // walk reaches the target but does not recognise its name. The
+                // conservative skip is still the right default; a containment
+                // check is the fix if such a layout ever needs mirroring.
+                //
+                // `nlink > 1` cannot false-positive today because the extractor
+                // cannot produce a legitimate in-tree hardlink pair at all: a
+                // relative linkname resolves against the process CWD rather
+                // than the destination, so an ordinary GNU-tar-dedup archive
+                // fails extraction outright ("No such file or directory ... when
+                // hard linking"). Every multiply-linked file under `content/`
+                // therefore arrived by escaping. If ocx#275 is fixed by
+                // resolving linknames under the destination, legitimate pairs
+                // become extractable and this clause turns from a security
+                // guard into a functional limitation — revisit it then.
+                let entry = match tokio::fs::symlink_metadata(&path).await {
+                    Ok(entry) => entry,
+                    // Same race `scan_directory_files` already tolerates: a file
+                    // may vanish between the directory read and the stat.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => {
+                        return Err(
+                            anyhow::Error::new(e).context(format!("failed to stat declared binary {}", path.display()))
+                        );
+                    }
+                };
+                if entry.file_type().is_symlink() || entry.nlink() > 1 {
                     continue;
                 }
                 tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -257,6 +301,126 @@ mod tests {
             mode("already"),
             0o775,
             "a file that is already executable must keep its exact mode, not be flattened to 0755",
+        );
+    }
+
+    /// A declared name that is a symlink must leave its target's mode alone.
+    ///
+    /// The extractor validates a member's link target *lexically* — no
+    /// filesystem call — so an archive shipping self-referential parent links
+    /// (`a`→`.`, `a/b`→`.`) has every declared path accepted while the file
+    /// physically lands above the content root. Both the scan's stat and
+    /// `chmod(2)` follow links, so the escapee is what got chmodded: an
+    /// upstream archive picking the mode of an arbitrary file on the runner.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_declared_binary_that_is_a_symlink_leaves_its_target_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // Outside the walked tree — where the escape lands.
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"not upstream's to touch").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir(&content_dir).unwrap();
+        std::os::unix::fs::symlink("../victim", content_dir.join("tool")).unwrap();
+
+        let binaries: Binaries = serde_json::from_str(r#"["tool"]"#).unwrap();
+        ensure_declared_binaries_executable(&content_dir, &binaries)
+            .await
+            .expect("a symlinked declared name must be skipped, not fail the run");
+
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the chmod must not follow a declared binary's symlink out of the content root",
+        );
+    }
+
+    /// A declared name that is a hardlink to a file outside the tree must leave
+    /// that file's mode alone — the escape the symlink skip does not catch.
+    ///
+    /// Reproduced end-to-end against the real extractor before this test was
+    /// written: a tar member of type `Link` whose linkname is absolute extracts
+    /// with `Ok(())` and lands as an ordinary regular file at `nlink=2` sharing
+    /// the victim's inode, so `is_symlink()` is false and the chmod took a 0600
+    /// file outside the extraction root to 0755. The archive is built here with
+    /// `hard_link` rather than a crafted tar: it produces the identical inode
+    /// state, and the tar-side defect is upstream's (ocx-sh/ocx#275) — what this
+    /// repository owns is that the chmod refuses a multiply-linked file.
+    ///
+    /// Unlike the symlink case, nothing downstream catches this one:
+    /// `validate_symlinks_in_dir` sees a hardlink as the plain regular file it
+    /// is, so without the skip the escaped content is bundled and published.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_declared_binary_that_is_a_hardlink_out_of_the_tree_leaves_its_target_alone() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // Outside the walked tree — where the escape reaches.
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"not upstream's to touch").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir(&content_dir).unwrap();
+        let escapee = content_dir.join("tool");
+        std::fs::hard_link(&victim, &escapee).unwrap();
+
+        let landed = std::fs::symlink_metadata(&escapee).unwrap();
+        assert!(
+            !landed.file_type().is_symlink() && landed.nlink() > 1,
+            "the fixture must be a plain regular file the symlink skip cannot see, or this test proves nothing",
+        );
+
+        let binaries: Binaries = serde_json::from_str(r#"["tool"]"#).unwrap();
+        ensure_declared_binaries_executable(&content_dir, &binaries)
+            .await
+            .expect("a hardlinked declared name must be skipped, not fail the run");
+
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the chmod must not reach a declared binary's hardlink target outside the content root",
+        );
+    }
+
+    /// An intermediate path component being a symlink is a whole escape class
+    /// this module does not defend against itself: `ocx_lib`'s `DirWalker`
+    /// classifies with `DirEntry::file_type()`, which does not follow links, so
+    /// a symlinked directory is never descended into and its contents are never
+    /// scanned. That property lives in another repository and nothing here pins
+    /// it — this test fails loudly if `DirWalker` ever gains a follow-symlinks
+    /// path, at which point this module needs its own containment check.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_walk_does_not_descend_into_a_symlinked_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // A real directory outside the content root, holding a declared name.
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let victim = outside.join("tool");
+        std::fs::write(&victim, b"not upstream's to touch").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir(&content_dir).unwrap();
+        std::os::unix::fs::symlink("../outside", content_dir.join("vendor")).unwrap();
+
+        let binaries: Binaries = serde_json::from_str(r#"["tool"]"#).unwrap();
+        ensure_declared_binaries_executable(&content_dir, &binaries)
+            .await
+            .expect("a symlinked directory must be skipped, not fail the run");
+
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "the walk must not descend through a symlinked directory into files outside the content root",
         );
     }
 

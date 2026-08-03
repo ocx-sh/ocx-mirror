@@ -938,6 +938,40 @@ mod tests {
         std::fs::remove_dir_all(&content).expect("drop fixture tree");
     }
 
+    /// A `.tar.xz` whose `bin/` holds one executable and one non-executable
+    /// file — the mixed shape a scan pointed at `${installPath}/bin` sees when
+    /// upstream ships part of its interface without the exec bit.
+    #[cfg(unix)]
+    async fn staged_mixed_mode_asset(at: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let content = at.parent().expect("asset has a parent").join("upstream-content");
+        std::fs::create_dir_all(content.join("bin")).expect("create fixture tree");
+        for (name, mode) in [("tool", 0o755), ("pwsh", 0o644)] {
+            let file = content.join("bin").join(name);
+            std::fs::write(&file, b"#!/bin/sh\n").expect("write fixture file");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("chmod fixture file");
+        }
+        package::bundle(&content, at, 1).await.expect("build fixture asset");
+        std::fs::remove_dir_all(&content).expect("drop fixture tree");
+    }
+
+    /// A `.tar.xz` whose `bin/` holds a single non-executable file — nothing a
+    /// scan would claim, so a `verify` run sees only the declared-but-not-
+    /// executable disagreement.
+    #[cfg(unix)]
+    async fn staged_non_executable_bin_dir_asset(at: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let content = at.parent().expect("asset has a parent").join("upstream-content");
+        std::fs::create_dir_all(content.join("bin")).expect("create fixture tree");
+        let file = content.join("bin").join("pwsh");
+        std::fs::write(&file, b"#!/bin/sh\n").expect("write fixture file");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod fixture file");
+        package::bundle(&content, at, 1).await.expect("build fixture asset");
+        std::fs::remove_dir_all(&content).expect("drop fixture tree");
+    }
+
     /// Runs the real prepare phase offline: the asset is staged where the
     /// download would have written it, so `prepare_task` skips the fetch and
     /// exercises extract → scan → sidecar → bundle exactly as in production.
@@ -1302,6 +1336,99 @@ mod tests {
             mode("LICENSE.txt"),
             0o644,
             "and nothing else may be touched — this is not a blanket chmod -R",
+        );
+    }
+
+    /// **Limitation pin, not an aspiration.** Under `bin_scan: auto` with no
+    /// hand-written `binaries`, the #51 chmod cannot reach a non-executable
+    /// file — and the assertions below record that as the behavior.
+    ///
+    /// `resolve_binaries` fills the claim from `scan_interface_binaries`, which
+    /// keeps executable candidates only, so a 0644 file never enters the list
+    /// the chmod is keyed on: `pwsh` is absent from the published claim *and*
+    /// still 0644 in the bundle. A mirror hitting #51 fixes it by declaring
+    /// `binaries` by hand, not by switching scan modes. Rewrite this test only
+    /// alongside a deliberate decision to let an auto fill claim files it found
+    /// non-executable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_auto_scan_with_no_declared_list_leaves_a_non_executable_binary_unfixed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let spec = spec_dir_declaring("");
+        let work = tempfile::tempdir().expect("tempdir");
+        let task_dir = work.path().join("task");
+        tokio::fs::create_dir_all(&task_dir).await.expect("create task dir");
+        staged_mixed_mode_asset(&task_dir.join("asset.tar.xz")).await;
+
+        prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+            .await
+            .expect("prepare succeeds");
+
+        assert_eq!(
+            sidecar_binaries(&task_dir),
+            vec!["tool"],
+            "the mechanism: a fill claims only what it found executable",
+        );
+
+        let published = work.path().join("published");
+        ocx_lib::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
+            .await
+            .expect("the produced bundle extracts");
+        let mode = |relative: &str| {
+            std::fs::metadata(published.join(relative))
+                .unwrap_or_else(|e| panic!("{relative} missing from the bundle: {e}"))
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        assert_eq!(mode("bin/tool"), 0o755, "control: the claimed binary is executable");
+        assert_eq!(
+            mode("bin/pwsh"),
+            0o644,
+            "a name no scan claimed stays as upstream shipped it — declare it to have it chmodded",
+        );
+    }
+
+    /// `bin_scan: verify` refuses a declared-but-non-executable binary, and the
+    /// chmod must not have papered over it first.
+    ///
+    /// The two features disagree by design: #51's chmod makes a declared name
+    /// executable, `verify` fails the run for exactly that state. `verify` wins
+    /// — a mirror that asked to be told when upstream changes its archive must
+    /// be told — and today that holds only because `resolve_binaries` runs ten
+    /// lines above the chmod in `prepare_task`. Swapping the two statements
+    /// passes every other test in this file, so the mode assertion below is the
+    /// one thing pinning the order.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bin_scan_verify_refuses_a_non_executable_binary_before_the_chmod_runs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let spec = spec_dir_declaring(r#","binaries":["pwsh"]"#);
+        let work = tempfile::tempdir().expect("tempdir");
+        let task_dir = work.path().join("task");
+        tokio::fs::create_dir_all(&task_dir).await.expect("create task dir");
+        staged_non_executable_bin_dir_asset(&task_dir.join("asset.tar.xz")).await;
+
+        let error = prepare_scanned(spec.path(), &task_dir, BinScanMode::Verify)
+            .await
+            .expect_err("a declared binary that is not executable must fail a verify run");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("pwsh") && rendered.contains("not executable"),
+            "the failure must name the offending binary: {rendered}",
+        );
+
+        let extracted = task_dir.join("content").join("bin").join("pwsh");
+        assert_eq!(
+            std::fs::metadata(&extracted)
+                .expect("the extracted tree survives a refused run")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644,
+            "the chmod must not run before verify — a fixed-up mode would make the refusal unreachable",
         );
     }
 
