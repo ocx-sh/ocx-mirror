@@ -37,7 +37,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
         return
-    registry = os.environ.get("REGISTRY", "localhost:5000")
+    registry = os.environ.get("REGISTRY", "localhost:5001")
     start_registry(registry)
 
 
@@ -48,7 +48,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 
 @pytest.fixture(scope="session")
 def registry() -> str:
-    addr = os.environ.get("REGISTRY", "localhost:5000")
+    addr = os.environ.get("REGISTRY", "localhost:5001")
     start_registry(addr)
     return addr
 

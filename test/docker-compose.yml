@@ -1,5 +1,11 @@
+# Dedicated project name and host port: sibling repos' compose projects
+# default to `test` with a registry on :5000, and the harness would silently
+# reuse whatever answers there (zot GCs untagged manifests; registry:2 keeps
+# them — the eviction tests depend on the latter).
+name: ocx-mirror-test
+
 services:
   registry:
     image: registry:2
     ports:
-      - "5000:5000"
+      - "5001:5000"

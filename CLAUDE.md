@@ -25,7 +25,7 @@ Research keywords: OCI artifacts, ORAS, GitHub Releases API, cascade tags, regis
 | `src/` | The crate (binary `ocx-mirror`), package manifest at repo root |
 | `external/ocx` | **git submodule** — vendored ocx; `ocx_lib` is a path dep into it |
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
-| `test/` | pytest acceptance harness (Docker registry on :5000) |
+| `test/` | pytest acceptance harness (Docker registry on :5001) |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
 | `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package describe` in `oci-publish.yml` (frontmatter = title/description/keywords) |
