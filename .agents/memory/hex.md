@@ -39,3 +39,12 @@ research-axes:
 ```
 
 ## Memory
+
+- Learned: the acceptance suite talks to `localhost:5000`, and `test/docker-compose.yml`
+  declares no project `name:`, so it defaults to `test` — the same default a sibling
+  ocx repo's compose uses. When one of those is up, `task test:quick` silently reuses
+  *its* container (zot, not `registry:2`) and `test_patch_evicts_nothing_a_consumer_could_have_pinned`
+  fails on a manifest zot drops. Run against an isolated `registry:2`
+  (`REGISTRY=localhost:5001 task test:quick`) or pin a `name:` in the compose file.
+- Learned: `task test:quick` is the acceptance loop that skips the rebuild —
+  there is no `--no-build` pytest flag.
