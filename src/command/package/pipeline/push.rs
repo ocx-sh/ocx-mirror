@@ -886,20 +886,16 @@ struct PushAttemptError {
 
 /// Whether an `ocx package push` exit code is one this pipeline will try again.
 ///
-/// 69 is not a narrow "the registry blipped" signal today: `ocx` maps *every*
-/// registry-client failure to it (`ClientError::Registry => Unavailable`, with
-/// an explicit v1 TODO in its `oci/client/error.rs`), so a permanent 403 on a
-/// manifest arrives here indistinguishable from a 503 and costs four uploads
-/// before it is reported. Retrying it anyway is the deliberate interim trade:
-/// the failure this exists to survive is far more common than the permanent
-/// denial, and the denial still fails the run — later, not differently. Narrow
-/// this to 75 once ocx-sh/ocx#266 separates the two upstream.
+/// `ocx` 0.5.3 draws the line for us: 75 means the same command may succeed if
+/// it is run again (registry connect failure, timeout, rate limit), and 69
+/// means rerunning will not change the outcome. Only 75 is worth an upload.
 ///
-/// Bad credentials are already separated (80) and are not retried. `None`
-/// (signal-killed) is not retried either: the signal came from outside, and the
-/// runner that sent it is usually about to send another.
+/// A registry denial never reaches either code — 403 is 80 (auth), which is
+/// deterministic and not retried. `None` (signal-killed) is not retried either:
+/// the signal came from outside, and the runner that sent it is usually about
+/// to send another.
 fn push_exit_is_transient(code: Option<i32>) -> bool {
-    matches!(code, Some(code) if code == ExitCode::Unavailable as i32 || code == ExitCode::TempFail as i32)
+    matches!(code, Some(code) if code == ExitCode::TempFail as i32)
 }
 
 /// Delay before attempt `attempt + 1`, doubling from
@@ -3661,7 +3657,7 @@ echo '{{"cascade_tags_written":["{PUSH_RETRY_VERSION}"],"status":"pushed"}}'
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
         let summary_path = dir.path().join("run-summary.json");
-        let script = fake_ocx_flaky_push(dir.path(), 1, ExitCode::Unavailable as u8);
+        let script = fake_ocx_flaky_push(dir.path(), 1, ExitCode::TempFail as u8);
 
         stage_push_retry_version(junit_dir.path(), bundles_dir.path());
 
@@ -3702,7 +3698,7 @@ echo '{{"cascade_tags_written":["{PUSH_RETRY_VERSION}"],"status":"pushed"}}'
         let junit_dir = tempdir().unwrap();
         let bundles_dir = tempdir().unwrap();
         let summary_path = dir.path().join("run-summary.json");
-        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::Unavailable as u8);
+        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::TempFail as u8);
 
         stage_push_retry_version(junit_dir.path(), bundles_dir.path());
 
@@ -3806,7 +3802,7 @@ echo '{{"cascade_tags_written":["{PUSH_RETRY_VERSION}"],"status":"pushed"}}'
         // and the spec that asked for none would get one anyway.
         let _env_lock = job_url_env_lock();
         let dir = tempdir().unwrap();
-        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::Unavailable as u8);
+        let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::TempFail as u8);
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(
             r#"
@@ -3845,26 +3841,27 @@ concurrency:
     }
 
     #[test]
-    fn only_a_registry_fault_is_worth_retrying() {
+    fn only_a_temporary_fault_is_worth_retrying() {
         // The retry predicate decides whether a failed push costs one second or
-        // is thrown away. Anything deterministic — bad data, bad credentials,
-        // bad invocation — answers identically on the second ask, and a
-        // signal-killed child (`None`) means something outside the run wants it
-        // to stop.
-        for code in [ExitCode::Unavailable, ExitCode::TempFail] {
-            assert!(
-                push_exit_is_transient(Some(code as i32)),
-                "{code:?} is a registry fault that may clear",
-            );
-        }
+        // is thrown away. 75 is the one code `ocx` promises a rerun may answer
+        // differently; everything else — including 69, which it uses precisely
+        // for "rerunning will not change the outcome" — answers identically on
+        // the second ask, and a signal-killed child (`None`) means something
+        // outside the run wants it to stop.
+        assert!(
+            push_exit_is_transient(Some(ExitCode::TempFail as i32)),
+            "75 is the temporary fault that may clear",
+        );
 
         for code in [
             ExitCode::Failure,
             ExitCode::UsageError,
             ExitCode::DataError,
+            ExitCode::Unavailable,
             ExitCode::IoError,
             ExitCode::PermissionDenied,
             ExitCode::ConfigError,
+            ExitCode::AuthError,
         ] {
             assert!(
                 !push_exit_is_transient(Some(code as i32)),
