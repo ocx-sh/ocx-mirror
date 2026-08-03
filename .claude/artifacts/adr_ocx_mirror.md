@@ -199,6 +199,19 @@ concurrency:
   max_retries: integer       # Default: 3.
 ```
 
+> **Superseded (2026-08-03).** `max_pushes` was never implemented and has
+> since been removed from `ConcurrencyConfig` — push runs strictly
+> sequentially by version, so there was nothing to bound in parallel; a spec
+> that still sets the key keeps parsing, and the value is ignored. `max_retries`
+> ended up push-only, not download-and-push: it grants extra attempts to an
+> `ocx package push` exit code of 75 (`TempFail`) alone, with backoff from 1s
+> doubling to a 30s cap plus jitter — not the 60s cap / `Retry-After`-aware
+> shape sketched above, and it never touches downloads. Exit 69
+> (`Unavailable`) is never retried, since a rerun would not change that
+> outcome. See [ocx-sh/ocx-mirror#50](https://github.com/ocx-sh/ocx-mirror/issues/50)
+> and the [`concurrency`](../../docs/reference/mirror-yml.md#concurrency)
+> reference section for what actually shipped.
+
 ### Example: GitHub Releases (CMake)
 
 CMake is a good example of a real-world naming change: older releases used `cmake-3.x.y-Linux-x86_64.tar.gz` (capital L), newer releases use `cmake-3.x.y-linux-x86_64.tar.gz`. The asset pattern list handles this gracefully. macOS uses a universal binary that covers both amd64 and arm64 — the same URL for both platforms, but different metadata because macOS apps may have different env conventions.

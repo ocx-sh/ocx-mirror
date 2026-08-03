@@ -92,10 +92,17 @@ Always, for any archive whose members lack the exec bit.
 
 New `ensure_declared_binaries_executable(content_dir, binaries)` in
 `src/pipeline/package.rs` (full-tree walk via ocx_lib `DirWalker` +
-`scan_directory_files`; chmod 0755 on file-name match lacking `0o111`;
-`#[cfg(unix)]` like `place_binary`). Called from `prepare_task` between
-`reject_empty_scan` and `check_declared_libc` for all asset types and all
-bin_scan modes. Full design: session plan + issue #51.
+`scan_directory_files`; chmod 0755 on file-name match lacking `0o111`, skipping
+a match that resolves to a symlink so the chmod cannot follow it out of the
+content tree; `#[cfg(unix)]` like `place_binary`). Called from `prepare_task`
+between `reject_empty_scan` and `check_declared_libc` for every asset type and
+every `bin_scan` mode — but the chmod only ever reaches a name already present
+in `binaries` at that point in the pipeline. Under `bin_scan: auto` with no
+hand-written `binaries` list, `resolve_binaries` fills the claim by scanning
+for names *already* executable, so a `0644` binary the archive ships is never
+in the filled list and the chmod never sees it — this fix does not rescue that
+case; a mirror hitting it has to hand-declare the name instead. Full design:
+session plan + issue #51.
 
 | File | Change |
 |------|--------|

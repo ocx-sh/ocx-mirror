@@ -39,7 +39,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/versions_config.rs` | Version filter (min/max bounds, new_per_run, backfill order) |
 | `spec/verify_config.rs` | Checksum verify options |
 | `spec/metadata_config.rs` | Metadata.json path config |
-| `spec/concurrency_config.rs` | Parallel download/push limits |
+| `spec/concurrency_config.rs` | Parallel download/bundle limits, source rate limiting, push retry count (`max_retries`) — no push-parallelism knob (`max_pushes` removed; a spec still setting it keeps parsing, ignored) |
 | `spec/tests_config.rs` | `TestEntry` (name + command); top-level `tests:` schema |
 | `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig` (`image`/`shell`/`id`/`setup` — `setup` provisions the leg's image once per leg via `docker build`); `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
@@ -80,9 +80,24 @@ The bolded window is load-bearing. Every step in it must sit between extraction 
 
 ### Phase 2: Push (sequential by version, oldest first)
 
-1. Push bundle to registry
+1. Push bundle to registry, each attempt bounded by a 3600s timeout; a
+   transient failure (`ocx package push` exit 75 only — exit 69 is never
+   retried, since a rerun would not change that outcome) is retried up to
+   `concurrency.max_retries` extra attempts with 1s-doubling-to-30s-capped
+   backoff plus ±10% jitter
 2. Cascade derived tags if enabled (X.Y.Z → X.Y → X → latest)
 3. Track pushed (version, platform) pairs for cascade correctness
+
+The 75/69 split above only exists from **ocx ≥ 0.5.3** onward — the `ocx`
+binary that actually runs the push subprocess, i.e. whatever `ocx.toml` /
+`ocx.lock` toolchain the running `ocx-mirror` is co-located with, not the
+separately-pinned `ocx` version a *generated* downstream workflow bakes into
+its own `setup-ocx` step. An older `ocx` maps every registry-client failure to
+exit 69, so a stale toolchain pin retries nothing regardless of
+`concurrency.max_retries`, and there is deliberately no runtime warning for
+it — the invariant is enforced by keeping this repository's own `ocx.toml` /
+`ocx.lock` current, the same discipline the prepare-window invariant above
+depends on.
 
 ## Spec Format (YAML)
 

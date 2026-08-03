@@ -5,7 +5,7 @@
 - **Plan:** bugfix_push_retry
 - **Active phase:** 7 — Commit & Document
 - **Step:** awaiting /finalize
-- **Last update:** 2026-08-02 (after 5bd1648: fix(pipeline): retry transient push failures up to max_retries)
+- **Last update:** 2026-08-03 (after 6dd88ec: chore(claude): note ocx#266 landing in the push-retry plan — Regression Test Specification and Fix Approach below now synced to the exit-75-only narrowing; the `PUSH_TIMEOUT=3600s`/jitter follow-up is still uncommitted)
 
 ---
 
@@ -86,17 +86,17 @@ stays and is not wired into push backoff (one number, two owners otherwise).
 ## Regression Test Specification
 
 Fixture `tests/fixtures/mirror-push-retry.yml` (mirror-minimal +
-`concurrency: { max_retries: 1 }` — differs from default 3 to prove the field
+`concurrency: { max_retries: 2 }` — differs from default 3 to prove the field
 is read). Stateful shell fake `fake_ocx_flaky_push(dir, failures, exit_code)`
 with attempt-counter file.
 
 | Test | File | Asserts |
 |------|------|---------|
-| `a_transient_push_failure_is_retried_and_the_tile_still_lands` | `push.rs` | fail-once-69 → run Ok, 2 attempts, tile published. **Red pre-fix** |
-| `push_retries_stop_at_the_spec_max_retries` | `push.rs` | always-69 → exactly 2 attempts (bounded + spec-sourced), run Err. **Red pre-fix** |
+| `a_transient_push_failure_is_retried_and_the_tile_still_lands` | `push.rs` | fail-once-75 → run Ok, 2 attempts, tile published. **Red pre-fix** |
+| `push_retries_stop_at_the_spec_max_retries` | `push.rs` | always-75 → exactly 3 attempts (bounded + spec-sourced), run Err. **Red pre-fix** |
 | `a_non_transient_push_failure_is_not_retried` | `push.rs` | always-65 → exactly 1 attempt. Guard (passes pre-fix by construction) |
 | `a_hung_push_is_killed_by_the_push_timeout` | `push.rs` | `sleep 10` fake, 200 ms timeout → Err, transient, elapsed < 10 s |
-| `only_a_registry_fault_is_worth_retrying` | `push.rs` | transient table: 69/75 true; 1/64/65/70/74/77/78/None false |
+| `only_a_temporary_fault_is_worth_retrying` | `push.rs` | transient table: 75 true; 1/64/65/69/70/74/77/78/None false |
 | `a_spec_that_still_sets_max_pushes_keeps_parsing` | `spec.rs` | fleet-compat pin (no `deny_unknown_fields`) |
 
 No acceptance pytest — forcing a 69 against a real registry needs a proxy;
@@ -105,13 +105,16 @@ cost exceeds coverage over the unit suite.
 ## Fix Approach
 
 `push_once(binary, argv, timeout)` extracted from `invoke_push` body +
-`kill_on_drop` + `tokio::time::timeout` (`PUSH_TIMEOUT = 900s`); retry loop in
+`kill_on_drop` + `tokio::time::timeout` (`PUSH_TIMEOUT = 3600s`); retry loop in
 `invoke_push` (signature unchanged) on transient failures up to
 `spec.concurrency.max_retries` with saturating exponential backoff (base 1 s,
-cap 30 s, no jitter — sequential push, no herd). Transient = exit 69, exit 75
-(`ocx_lib::cli::ExitCode`, no magic numbers), our timeout. Drop `max_pushes`
-+ struct-level `#[allow(dead_code)]` from `ConcurrencyConfig`. Full design:
-session plan + issue #50.
+cap 30 s, ±10% jitter layered on top of the cap to de-correlate retries across
+mirrors hitting the same registry outage — pushes within one run are strictly
+sequential, so the jitter isn't for spreading a herd inside a run). Transient
+= exit 75 only (`ocx_lib::cli::ExitCode::TempFail`; exit 69/`Unavailable`
+means a rerun will not change the outcome, so it is never retried), or our own
+timeout. Drop `max_pushes` + struct-level `#[allow(dead_code)]` from
+`ConcurrencyConfig`. Full design: session plan + issue #50.
 
 | File | Change |
 |------|--------|
@@ -148,6 +151,17 @@ session plan + issue #50.
 
 Follow-ups: `patch.rs::republish` retry adoption; ocx-sh/ocx#266 narrows
 transient set to 75; ocx-sh/ocx#267 blob-chunk retry (complementary).
+
+`patch.rs::republish` has since adopted the per-attempt timeout (it routes
+through `push_once`), but deliberately not the retry ladder: a config-blob-only
+republish is dispatch-triggered and cheap to re-run.
+
+A high-tier review of this work raised two gaps that belong upstream, both now
+filed: [ocx-sh/ocx#276](https://github.com/ocx-sh/ocx/issues/276) — `registry_error`
+classifies a mid-upload connection reset as 69 (permanent) rather than 75, so the
+75-only predicate under-retries the most likely large-tile failure until it lands;
+and [ocx-sh/ocx#275](https://github.com/ocx-sh/ocx/issues/275) — hard-link entries
+bypass extraction containment.
 
 ocx-sh/ocx#266 landed in ocx v0.5.3 (commit fccdd447): 75 is now the only
 retry-safe code (69 means a rerun will not change the outcome), so the transient

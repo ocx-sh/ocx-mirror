@@ -801,6 +801,11 @@ concurrency:
   max_retries: 3
 ```
 
+> **Superseded (2026-08-03).** `max_pushes` was never implemented and has
+> since been removed from `ConcurrencyConfig` — a spec setting it, as this
+> example does, still parses; the value is ignored. See
+> [ocx-sh/ocx-mirror#50](https://github.com/ocx-sh/ocx-mirror/issues/50).
+
 ### 6. Error Handling Contract
 
 | Script Behavior | Mirror Response |
