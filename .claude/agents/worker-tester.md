@@ -61,7 +61,7 @@ Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md)
 - Location: `test/tests/test_*.py` (Docker registry on :5001)
 - Key fixtures (`test/conftest.py`): `ocx` (OcxRunner), `ocx_home`, `ocx_binary`, `registry`
 - Helpers: `test/src/runner.py` (OcxRunner), `test/src/mirror_runner.py`, `test/src/helpers.py`
-- Run single: `cd test && uv run pytest tests/test_mirror.py::<test_name> -v --no-build`
+- Run single: `cd test && uv run pytest tests/test_mirror.py::<test_name> -v`
 
 ## Task Runner
 

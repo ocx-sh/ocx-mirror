@@ -54,7 +54,7 @@ Task runner [`task`](https://taskfile.dev). `task` (fast check),
 Single acceptance test:
 
 ```sh
-cd test && uv run pytest tests/test_mirror.py::<name> -v --no-build
+cd test && uv run pytest tests/test_mirror.py::<name> -v
 ```
 
 ## Registries
