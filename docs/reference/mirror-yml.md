@@ -19,7 +19,7 @@
 | `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
 | `verify` | object | No | Checksum verification options |
-| `concurrency` | object | No | Parallel download limits, source rate limiting, push retry policy |
+| `concurrency` | object | No | Parallel download limits, source rate limiting, push retry policy. See [`concurrency`](#concurrency). |
 | `tests` | array | No* | Commands to run against each installed bundle. Required when `pipeline generate ci` is used. |
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
 | `ocx_mirror` | object | No | Provenance of the ocx-mirror behind a plan. Pins nothing. |
@@ -150,7 +150,11 @@ Both paths resolve against the directory holding the spec file, never the reposi
 
 Editing this file only changes what *future* pushes publish. `pipeline plan` compares it against what already-published versions record and reports any mismatch as a `metadata-drift` entry; [`pipeline patch`][cli-patch] then republishes the corrected metadata against those versions' existing layers, with no re-download and no re-upload. There is no key here for *which* versions to patch — that range is a flag on the `patch` command line, not spec state, since a stored range would need a ledger to track what it had already covered.
 
-The file's `binaries` list also decides what `prepare` makes executable. A tar or zip member keeps whatever mode upstream shipped it with, and some upstreams ship their interface binary non-executable at `0644` — PowerShell's `pwsh` does — so after extraction every file in the tree whose name matches a declared `binaries` entry is chmodded to `0755`. Nothing else is touched: a file that already carries an exec bit keeps its exact mode, and an undeclared file keeps whatever the archive gave it. A declared name the archive does not ship is not an error — [`bin_scan: verify`](#bin-scan) is where a missing binary is caught, on the specs that can use it. `verify` also wins over the chmod where the two overlap: a declared name found non-executable in an interface `PATH` directory fails the run with `DeclaredNotExecutable` *before* the chmod gets a chance to run, so `verify` keeps asserting what upstream actually shipped and the chmod never papers over a mismatch it was set up to catch.
+The file's `binaries` list also decides what `prepare` makes executable. A tar or zip member keeps whatever mode upstream shipped it with, and some upstreams ship their interface binary non-executable at `0644` — PowerShell's `pwsh` does — so after extraction every file in the tree whose name matches a declared `binaries` entry is chmodded to `0755` if it lacks any exec bit; a mode already broader than that (`0775`, a setuid bit) is never narrowed. Nothing else is touched: an undeclared file keeps whatever the archive gave it, and a declared name that resolves to a symlink is skipped rather than chmodded — the chmod must not follow a link out of the content tree onto whatever it points at. A declared name the archive does not ship is not an error — [`bin_scan: verify`](#bin-scan) is where a missing binary is caught, on the specs that can use it. `verify` also wins over the chmod where the two overlap: a declared name found non-executable in an interface `PATH` directory fails the run with `DeclaredNotExecutable` *before* the chmod gets a chance to run, so `verify` keeps asserting what upstream actually shipped and the chmod never papers over a mismatch it was set up to catch.
+
+The fix only reaches a name **declared** in `binaries` — whether hand-written, or filled in by [`bin_scan: auto`/`verify`](#bin-scan) from a scan. That second path has a gap of its own: the scan only reports candidates it found *already* executable, so a `0644` binary the archive ships is never picked up by an auto-fill and is therefore never in scope for the chmod either — it stays non-executable in the published bundle. A mirror hitting that case fixes it by hand-declaring the name in `binaries`, not by turning `bin_scan` on.
+
+As with [`libc_lint`](#libc-lint), a version already published keeps the modes it was pushed with. `prepare` never re-processes a version the registry already holds, and [`pipeline patch`][cli-patch] re-references an already-published version's existing layers by digest instead of re-extracting them, so it cannot repair an exec bit either — the only way to correct a version published with the wrong mode is to delete its tags and re-mirror it.
 
 ## `bin_scan` {#bin-scan}
 
@@ -215,6 +219,45 @@ The check reads only the ELF `PT_INTERP` header, so it costs nothing and underst
 The check runs during [`pipeline prepare`](./cli.md#pipeline-prepare), between extracting the archive and compressing it — the only window in which the binaries exist on disk. [`pipeline patch`][cli-patch] never downloads anything, so it cannot run the check and never reports a libc finding; a version already published under a false declaration is corrected by fixing the platform key and re-mirroring it, not by patching metadata.
 
 **A bundle already in the work directory is never re-checked.** `prepare` resumes from an existing `bundle.tar.xz` without extracting anything, so the check cannot run — and a bundle on disk is not evidence it ever passed: it may have been built under `libc_lint: false`, or by an ocx-mirror predating the check. Turning `libc_lint` back on therefore has no effect on any `(version, platform)` leg whose bundle the work directory already holds — a version whose `linux/amd64` leg bundled but whose `linux/arm64` leg did not is checked on arm64 and not on amd64. Delete the bundles of the legs you want re-checked (or the work directory).
+
+## `concurrency` {#concurrency}
+
+Tunes how much of the pipeline runs in parallel, how gently the upstream source is polled, and how a flaky push is retried. Every field has a default, so a spec that never sets `concurrency:` still gets sensible behaviour.
+
+```yaml
+concurrency:
+  max_downloads: 8
+  max_bundles: 4
+  rate_limit_ms: 0
+  max_retries: 3
+  compression_threads: 0
+```
+
+**Fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|--------------|
+| `max_downloads` | integer | `8` | Maximum number of asset downloads running at once, across every `(version, platform)` task the run has in flight. |
+| `max_bundles` | integer | half the host's available CPU cores, minimum 1 (`2` if the core count cannot be detected) | Maximum number of extract-and-compress tasks running at once. Bundling is CPU-bound, so the default scales with the host rather than naming a fixed number — on a 2-core runner it is 1. |
+| `rate_limit_ms` | integer | `0` | Delay, in milliseconds, between paged upstream-listing requests (GitHub Releases pagination). Unrelated to push behaviour — see `max_retries` below for that. `0` means no delay. |
+| `max_retries` | integer | `3` | Extra attempts a *transient* push failure is granted on top of the first — total attempts are `max_retries + 1`. `0` means a single attempt, no retry. See [Push retry](#concurrency-push-retry) below. |
+| `compression_threads` | integer | `0` (auto) | Compression threads per bundle task. `0` splits the host's available cores across the `max_bundles` tasks running concurrently (at least 1 each); a positive value pins every bundle task to that many threads regardless of `max_bundles`. |
+
+`max_pushes` is accepted and silently ignored. Push is sequential by version — see [`pipeline push`](./cli.md#pipeline-push) — so there has never been a push-parallelism knob to bound; keeping the key parsing, rather than rejecting it, is deliberate fleet compatibility for specs written before that was true.
+
+### Push retry {#concurrency-push-retry}
+
+A push can fail transiently — a registry connect timeout, a blip mid-upload — with no fault in the bundle itself. `pipeline push` retries exactly that class of failure, bounded by `max_retries`.
+
+**What counts as transient.** Only an `ocx package push` exit code of **75** (`TempFail`) is retried. Exit **69** (`Unavailable`) means the failure will not change on a rerun — a registry that is down stays down — so it is never retried; neither is a registry auth rejection (exit 80) nor a child process killed by a signal (no exit code at all). Getting this 75/69 split at all needs **ocx ≥ 0.5.3** — specifically in the `ocx` binary that actually runs the push subprocess, which comes from whatever `ocx.toml`/`ocx.lock` toolchain the running `ocx-mirror` is co-located with. That is a separate pin from the `ocx` version a *generated* downstream workflow bakes into its own `setup-ocx` step (see [`ocx_mirror`](#ocx-mirror)) — the two can drift out of step, and it is the co-located one that governs retry behaviour here. An older `ocx` maps every registry-client failure to exit 69, so a transient fault on a stale pin is never retried no matter what `max_retries` says, and there is deliberately no runtime warning for this.
+
+**Backoff.** The first retry waits 1 second; each further attempt doubles the wait, capped at 30 seconds, with ±10% jitter layered on top of the cap — so a capped delay actually lands in the 27–33 second range, not exactly 30.
+
+**Per-attempt timeout.** Each push attempt is bounded at 3600 seconds. This is a backstop against a wedged child process, not a throughput budget — `ocx` itself already bounds a registry request (30 seconds to connect, 120 seconds without a byte read), so a healthy upload never needs the full hour. The worst case for one tile at the default `max_retries: 3` is four attempts, close to four hours, which fits inside GitHub Actions' default 360-minute job limit — but a run pushing **two** such tiles does not. The job timeout, not this per-attempt bound, is the real outer limit on a run.
+
+**Logging.** A retried attempt logs `push attempt {n}/{total}`; a give-up message distinguishes an exhausted retry budget from an exit code that was never eligible for retry, and both name `concurrency.max_retries` so the fix is obvious from the log line.
+
+`pipeline patch`'s republish is bounded by the same 3600-second timeout but is deliberately never retried — it only re-emits a config blob against layers that are already published, so re-dispatching the workflow by hand is cheaper than a retry ladder.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 

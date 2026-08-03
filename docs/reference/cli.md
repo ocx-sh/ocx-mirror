@@ -139,7 +139,7 @@ ocx-mirror package pipeline push --bundles-dir <DIR> --junit-dir <DIR> --write-s
 | `--junit-dir <DIR>` | required | Directory containing `junit-{V}-{platform_slug}-{container_id}.xml` files |
 | `--write-summary <PATH>` | required | Path to write the `run-summary.json` output file |
 
-Exits 0 even when some versions fail — the summary records per-version outcomes. Exits 69 on registry unreachability mid-push, 74 on I/O failure reading JUnit/bundles or writing the summary.
+Exits 0 even when some versions fail — the summary records per-version outcomes. Exits 69 on registry unreachability mid-push, 74 on I/O failure reading JUnit/bundles or writing the summary. A transient push failure (exit 75) is retried with capped, jittered exponential backoff up to `concurrency.max_retries`, each attempt bounded by a timeout — see [`concurrency`][spec-concurrency] for the full policy.
 
 ### `package pipeline notify` {#pipeline-notify}
 
@@ -238,6 +238,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 [ref-mirror-yml]: ./mirror-yml.md
 [ref-multi-spec]: ./mirror-yml.md#multi-spec
 [spec-announce]: ./mirror-yml.md#announce
+[spec-concurrency]: ./mirror-yml.md#concurrency
 [env-discord-hook]: ./environment.md#ocx-mirror-discord-hook
 [env-discord-user-id]: ./environment.md#ocx-mirror-discord-user-id
 [env-announce-token]: ./environment.md#ocx-announce-token
