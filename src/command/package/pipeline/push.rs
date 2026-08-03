@@ -64,7 +64,7 @@ enum VpDecision {
 ///
 /// Fields align with the `PushReport` shape from subsystem-cli.md §2.4.
 #[derive(Debug, serde::Deserialize)]
-struct PushReport {
+pub(crate) struct PushReport {
     /// SHA-256 manifest digest of the pushed image. Captured for audit trails
     /// but not surfaced in run-summary.json in this version.
     #[serde(default)]
@@ -858,29 +858,36 @@ pub(crate) fn build_push_args(
 
 /// How long one push attempt may run before it is killed.
 ///
-/// A tile is a 180–350 MB bundle, so a healthy upload takes minutes and the
-/// bound has to sit well above that. It bounds one attempt for one
-/// `(version, platform)`, so a full ladder — `max_retries: 3`, four attempts
-/// plus backoff — is the worst case for a single tile at just over an hour. A
-/// run pushing many tiles is bounded by the job, not by this: GitHub's default
-/// 360-minute limit is the outer one, and staying well inside it is what keeps
-/// the run-summary write reachable.
-const PUSH_TIMEOUT: Duration = Duration::from_secs(900);
+/// A backstop against a wedged child, not a throughput expectation. `ocx` bounds
+/// every registry request itself — 30s to connect, 120s without a byte read — so
+/// an upload that is progressing at all satisfies those, and all this has to
+/// catch is a child that hung in some way they did not see.
+///
+/// Sizing it for throughput instead is what made the previous 900s wrong: a
+/// 350 MB tile had to sustain ~390 KiB/s to fit, far above the ~26 KiB/s floor
+/// `ocx` itself tolerates on a 3 MiB chunk, so a link healthy by `ocx`'s
+/// standard was killed on every attempt and the version never published.
+///
+/// The worst case is now large enough to matter: one tile exhausting
+/// `max_retries: 3` is four attempts, four hours. That fits inside GitHub's
+/// default 360-minute job limit, but two tiles doing it do not — the job
+/// timeout, not this constant, is the real outer bound on a run, and it is the
+/// one that fires first.
+pub(crate) const PUSH_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// First retry delay; each further attempt doubles it.
 const PUSH_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(1);
 
 /// Ceiling on the doubling, so a large `max_retries` cannot park the job on
 /// backoff alone. The shape of the ladder barely matters either way — a push
-/// attempt costs minutes and the delay between them seconds. No jitter: pushes
-/// are strictly sequential, so there is no herd to spread out.
+/// attempt costs minutes and the delay between them seconds.
 const PUSH_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// One failed push attempt: what to report, and whether trying again could
 /// plausibly change the outcome.
 #[derive(Debug)]
-struct PushAttemptError {
-    message: String,
+pub(crate) struct PushAttemptError {
+    pub(crate) message: String,
     transient: bool,
 }
 
@@ -900,18 +907,59 @@ fn push_exit_is_transient(code: Option<i32>) -> bool {
 
 /// Delay before attempt `attempt + 1`, doubling from
 /// [`PUSH_RETRY_BACKOFF_BASE`] and capped at [`PUSH_RETRY_BACKOFF_MAX`].
+///
+/// Kept pure and un-jittered so the ladder is pinned by a table test; the
+/// spread is applied by [`push_retry_delay`] at the call site.
 fn push_retry_backoff(attempt: u32) -> Duration {
     PUSH_RETRY_BACKOFF_BASE
         .saturating_mul(2u32.saturating_pow(attempt.saturating_sub(1)))
         .min(PUSH_RETRY_BACKOFF_MAX)
 }
 
+/// `delay` spread by ±10%.
+///
+/// The herd this breaks up is not the one inside a run — pushes there are
+/// strictly sequential — but the one across repositories: dozens of mirrors run
+/// scheduled workflows against the same registry, so a rate limit or an outage
+/// starts all of their ladders at the same instant and an undithered ladder
+/// keeps them in lockstep for every retry after. Same ±10% default
+/// go-containerregistry and oras-go ship, each despite being sequential too.
+///
+/// The clock's nanoseconds are the entropy. The spread only has to be
+/// uncorrelated between processes, which is a far weaker property than
+/// randomness, and it costs no dependency.
+fn jitter(delay: Duration) -> Duration {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.subsec_nanos());
+    delay.saturating_mul(90 + nanos % 21) / 100
+}
+
+/// What [`invoke_push`] actually sleeps before attempt `attempt + 1`.
+///
+/// Scaled down by a thousand under `cfg(test)`: the retry tests drive the ladder
+/// through [`Push::execute`], a clap struct with no seam to hand a shorter base
+/// in, and four real seconds of sleeping on every `task rust:verify` buys
+/// nothing that [`push_retry_backoff`]'s own table test does not already pin.
+/// The scaling preserves the ladder's shape; what no test then covers is the
+/// production base reaching this call, which is one constant.
+fn push_retry_delay(attempt: u32) -> Duration {
+    let delay = jitter(push_retry_backoff(attempt));
+    #[cfg(test)]
+    let delay = delay / 1000;
+    delay
+}
+
 /// One `ocx package push [--cascade] -p {platform} -i {target_ref} {bundle}
 /// --format json` subprocess, bounded by `timeout`.
 ///
 /// `timeout` is a parameter rather than the constant read directly so the bound
-/// itself can be tested without a fifteen-minute test.
-async fn push_once(ocx_binary: &Path, args: &[String], timeout: Duration) -> Result<PushReport, PushAttemptError> {
+/// itself can be tested without an hour-long test.
+pub(crate) async fn push_once(
+    ocx_binary: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> Result<PushReport, PushAttemptError> {
     let mut cmd = tokio::process::Command::new(ocx_binary);
     cmd.args(args);
 
@@ -979,19 +1027,35 @@ async fn invoke_push(
     let annotations = crate::annotations::build_annotations(&spec.annotations);
     let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade)?;
 
+    // The budget, named in every line this loop emits: an operator reading a
+    // give-up message has to be able to tell an exhausted ladder from an exit
+    // code that was never going to be retried, and to find the knob either way.
+    let budget = spec.concurrency.max_retries;
+    let total = budget.saturating_add(1);
     let mut attempt = 1u32;
     loop {
         match push_once(&ocx_binary, &args, PUSH_TIMEOUT).await {
             Ok(report) => return Ok(report),
             Err(failure) => {
-                if !failure.transient || attempt > spec.concurrency.max_retries {
-                    return Err(failure.message);
+                if !failure.transient {
+                    return Err(format!(
+                        "{} — this exit code is not retried, whatever concurrency.max_retries ({budget}) grants",
+                        failure.message,
+                    ));
                 }
-                let backoff = push_retry_backoff(attempt);
+                if attempt >= total {
+                    return Err(format!(
+                        "{} — gave up after {total} attempt(s); raise concurrency.max_retries ({budget}) to grant more",
+                        failure.message,
+                    ));
+                }
+                let backoff = push_retry_delay(attempt);
+                // `{:?}` rather than whole seconds: the delay is jittered, so
+                // the first retry lands just under or over a second and
+                // `as_secs()` reported half of them as "0s".
                 log::warn!(
-                    "[{}] push attempt {attempt} for {target_ref} ({platform}) failed, retrying in {}s: {}",
+                    "[{}] push attempt {attempt}/{total} for {target_ref} ({platform}) failed, retrying in {backoff:?}: {}",
                     spec.name,
-                    backoff.as_secs(),
                     failure.message,
                 );
                 tokio::time::sleep(backoff).await;
@@ -3838,6 +3902,57 @@ concurrency:
 
         assert!(result.is_err(), "the attempt failed and no retry was granted");
         assert_eq!(push_attempts(dir.path()), 1, "`max_retries: 0` is one attempt, total");
+    }
+
+    #[test]
+    fn the_retry_ladder_doubles_until_the_cap_and_then_stops() {
+        // The cap is the only thing standing between a generous
+        // `concurrency.max_retries` and a job parked on backoff alone, and no
+        // pipeline test reaches it: the retry fixture grants two retries, so
+        // nothing above attempt 2 is ever asked for and deleting `.min(...)`
+        // leaves the whole suite green.
+        //
+        // `u32::MAX` is not a plausible spec value — it pins that the doubling
+        // saturates instead of panicking, which is what makes the cap safe to
+        // reach from any input at all.
+        for (attempt, seconds) in [(1, 1), (2, 2), (3, 4), (6, 30), (u32::MAX, 30)] {
+            assert_eq!(
+                push_retry_backoff(attempt),
+                Duration::from_secs(seconds),
+                "attempt {attempt}",
+            );
+        }
+    }
+
+    /// The spread is a tenth and stays one: it rides on top of the cap rather
+    /// than replacing it, so the capped delay lands in 27–33s and a bug that
+    /// made the entropy the delay would put the ladder anywhere.
+    #[test]
+    fn jitter_spreads_the_delay_by_a_tenth_and_no_further() {
+        // Sampled rather than asserted once: the entropy is the wall clock, so
+        // a single call proves nothing about the range it can produce.
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..200 {
+            let spread = jitter(Duration::from_secs(30));
+            assert!(
+                (Duration::from_secs(27)..=Duration::from_secs(33)).contains(&spread),
+                "got: {spread:?}",
+            );
+            seen.insert(spread);
+        }
+        // The range alone passes for a `jitter` that returns its argument, which
+        // is the one mutation this test exists to catch. Distinctness is the
+        // assertion that does not: two samples differ only if the spread is
+        // actually applied.
+        //
+        // Not flaky. `subsec_nanos()` comes from `clock_gettime`, which has
+        // nanosecond resolution, and each iteration allocates into a `BTreeSet`
+        // — the loop period is neither zero nor a stable multiple of the 21-value
+        // modulus, so 200 samples cannot collapse onto one bucket.
+        assert!(
+            seen.len() > 1,
+            "one value across 200 samples — the delay is not being spread: {seen:?}",
+        );
     }
 
     #[test]

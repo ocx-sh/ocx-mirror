@@ -48,8 +48,8 @@ use ocx_lib::publisher::{ArchiveMediaType, Publisher};
 use crate::command::package::pipeline::announce;
 use crate::command::package::pipeline::plan::{image_drift, leaf_versions};
 use crate::command::package::pipeline::push::{
-    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, build_push_args, forward_ocx_env, invoke_announce,
-    resolve_ocx_binary,
+    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, PUSH_TIMEOUT, TagSource, announce_token, build_push_args, invoke_announce,
+    push_once, resolve_ocx_binary,
 };
 use crate::command::package::target_registry::{self, PublishedImage};
 use crate::error::MirrorError;
@@ -300,6 +300,18 @@ fn layout_refusal(
 /// Drives `ocx package push` rather than writing manifests here: the layer
 /// digests are unchanged, so `ocx` HEAD-checks each blob and uploads nothing but
 /// the config.
+///
+/// Through [`push_once`], so a hung registry connection is killed on
+/// [`PUSH_TIMEOUT`] instead of parking the patch job until GitHub's job cap.
+/// The retry ladder is not shared — a config-blob-only republish costs nothing
+/// to run again from a dispatch, so it takes the single attempt and none of what
+/// `pipeline push` needs for a 350 MB upload.
+///
+/// [`push_once`]'s JSON contract *is* shared, and it is stricter than what this
+/// used to accept: the argv carries `--format json`, and an exit 0 whose stdout
+/// does not parse as a `PushReport` fails the patch rather than counting as a
+/// republished manifest. Every `PushReport` field defaults, so `{}` satisfies
+/// it; silence does not.
 async fn republish(
     spec: &MirrorSpec,
     tag: &str,
@@ -321,16 +333,10 @@ async fn republish(
     let target_ref = format!("{}:{}", spec.target.reference(), tag);
     let args = patch_push_args(&target_ref, image, sidecar, annotations, spec.cascade)?;
 
-    let mut cmd = tokio::process::Command::new(ocx_binary);
-    cmd.args(&args);
-    forward_ocx_env(&mut cmd);
-
-    let output = cmd.output().await.map_err(|e| format!("failed to spawn ocx: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("ocx package push exited {}: {}", output.status, stderr.trim()));
-    }
-    Ok(())
+    push_once(ocx_binary, &args, PUSH_TIMEOUT)
+        .await
+        .map(|_report| ())
+        .map_err(|failure| failure.message)
 }
 
 /// The `ocx package push` argv that re-emits `image`'s manifest.
@@ -800,6 +806,89 @@ mod tests {
         .expect_err("must reject");
 
         assert!(error.contains("application/vnd.oci.image.layer.v1.tar"), "got: {error}");
+    }
+
+    /// The spec `republish` reads: the target reference it pushes to, and
+    /// whether that push cascades.
+    fn minimal_spec() -> MirrorSpec {
+        serde_yaml_ng::from_str(
+            r#"
+name: cmake
+target:
+  registry: ghcr.io
+  repository: ocx-sh/cmake
+source:
+  type: github_release
+  owner: kitware
+  repo: cmake
+assets:
+  linux/amd64:
+    - "cmake\\.tar\\.xz"
+"#,
+        )
+        .expect("the fixture parses")
+    }
+
+    /// The message a failed patch reports to its caller, verbatim.
+    ///
+    /// `republish` runs through `pipeline push`'s bounded `push_once` so a hung
+    /// registry cannot park the patch job until GitHub's cap. That refactor must
+    /// not have cost what the registry actually said — a patch run reds on this
+    /// string and nothing else carries the reason.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rejected_republish_reports_the_exit_code_and_the_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-ocx");
+        std::fs::write(&script, "#!/bin/sh\necho 'manifest rejected' >&2\nexit 65\n").expect("script writes");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let error = republish(
+            &minimal_spec(),
+            "3.29.0",
+            &image(vec![descriptor(tar_xz())]),
+            r#"{"type":"bundle","version":1}"#,
+            &dir.path().join("3.29.0-linux_amd64-metadata.json"),
+            &BTreeMap::new(),
+            &script,
+        )
+        .await
+        .expect_err("a rejected push must not read as a republished manifest");
+
+        assert!(error.contains("ocx package push exited"), "got: {error}");
+        assert!(error.contains("65"), "got: {error}");
+        assert!(error.contains("manifest rejected"), "got: {error}");
+    }
+
+    /// The success half of the same contract, which routing through `push_once`
+    /// changed and nothing covered: exit 0 used to be unconditional success,
+    /// and is now success only when stdout parses as a `PushReport`. `{}` is the
+    /// minimum that does — every field defaults — so this pins that a report
+    /// carrying no fields is still a republished manifest, and that the
+    /// stricter contract did not turn an ordinary patch run red.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_republish_that_exits_zero_with_a_parseable_report_succeeds() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script = dir.path().join("fake-ocx");
+        std::fs::write(&script, "#!/bin/sh\necho '{}'\n").expect("script writes");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        republish(
+            &minimal_spec(),
+            "3.29.0",
+            &image(vec![descriptor(tar_xz())]),
+            r#"{"type":"bundle","version":1}"#,
+            &dir.path().join("3.29.0-linux_amd64-metadata.json"),
+            &BTreeMap::new(),
+            &script,
+        )
+        .await
+        .expect("exit 0 with a parseable report is a republished manifest");
     }
 
     // ── skip gate ─────────────────────────────────────────────────────────
