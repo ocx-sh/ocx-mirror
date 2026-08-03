@@ -143,16 +143,21 @@ pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &
                 // conservative skip is still the right default; a containment
                 // check is the fix if such a layout ever needs mirroring.
                 //
-                // `nlink > 1` cannot false-positive today because the extractor
-                // cannot produce a legitimate in-tree hardlink pair at all: a
-                // relative linkname resolves against the process CWD rather
-                // than the destination, so an ordinary GNU-tar-dedup archive
+                // `nlink > 1` cannot false-positive at any current call site,
+                // because a relative linkname resolves against the process CWD
+                // rather than the destination: an ordinary GNU-tar-dedup archive
                 // fails extraction outright ("No such file or directory ... when
-                // hard linking"). Every multiply-linked file under `content/`
-                // therefore arrived by escaping. If ocx#275 is fixed by
-                // resolving linknames under the destination, legitimate pairs
-                // become extractable and this clause turns from a security
-                // guard into a functional limitation — revisit it then.
+                // hard linking"), so every multiply-linked file under `content/`
+                // arrived by escaping. That is a property of where we happen to
+                // run, not an invariant anyone enforces — extracting with the
+                // CWD set to the destination produces a legitimate in-tree pair,
+                // which this clause would then skip. Two futures reopen it: ocx
+                // resolving linknames under the destination (ocx-sh/ocx#275), or
+                // any caller that chdirs. Real archives do ship hardlinked
+                // binary shims (Kibana's `node_modules/.bin`), so the day
+                // extraction stops rejecting them, this stops being a security
+                // guard and starts silently skipping them — see
+                // `an_in_tree_hardlink_pair_is_skipped_too`.
                 let entry = match tokio::fs::symlink_metadata(&path).await {
                     Ok(entry) => entry,
                     // Same race `scan_directory_files` already tolerates: a file
@@ -385,6 +390,54 @@ mod tests {
             std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
             0o600,
             "the chmod must not reach a declared binary's hardlink target outside the content root",
+        );
+    }
+
+    /// The cost of `nlink > 1` being a heuristic rather than a containment
+    /// check: a hardlink pair wholly *inside* the tree is skipped too, even
+    /// though nothing escaped.
+    ///
+    /// Unreachable today — the extractor rejects any archive carrying a
+    /// relative hardlink linkname before this runs — so this pins a limitation,
+    /// not a behaviour anyone can currently observe. It is here as a tripwire:
+    /// real upstreams ship hardlinked binary shims (Kibana's
+    /// `node_modules/.bin`), so whoever makes those archives extractable —
+    /// by fixing ocx-sh/ocx#275, or by extracting with a different CWD — will
+    /// find this test asserting the declared binary is left non-executable,
+    /// which is the bug #51 exists to prevent. Change it deliberately or
+    /// replace the heuristic with containment; do not let it change silently.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_tree_hardlink_pair_is_skipped_too() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir_all(content_dir.join("bin")).unwrap();
+
+        // Both ends inside the tree: the shape GNU tar emits when it dedups two
+        // identical files, and the shape npm falls back to for a `.bin` shim.
+        let original = content_dir.join("bin").join("tool");
+        std::fs::write(&original, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&original, content_dir.join("bin").join("tool-alias")).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&original).unwrap().nlink() > 1,
+            "the fixture must be a genuine in-tree hardlink pair, or this pins nothing",
+        );
+
+        let binaries: Binaries = serde_json::from_str(r#"["tool"]"#).unwrap();
+        ensure_declared_binaries_executable(&content_dir, &binaries)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&original).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "a declared binary that happens to be hardlinked is currently left alone — \
+             if this fails, hardlinked archives became extractable and the skip needs replacing \
+             with a containment check",
         );
     }
 
