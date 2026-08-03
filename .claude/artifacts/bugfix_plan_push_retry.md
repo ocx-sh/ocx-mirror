@@ -148,3 +148,8 @@ session plan + issue #50.
 
 Follow-ups: `patch.rs::republish` retry adoption; ocx-sh/ocx#266 narrows
 transient set to 75; ocx-sh/ocx#267 blob-chunk retry (complementary).
+
+ocx-sh/ocx#266 landed in ocx v0.5.3 (commit fccdd447): 75 is now the only
+retry-safe code (69 means a rerun will not change the outcome), so the transient
+set was narrowed to 75 alone and the table test renamed to
+`only_a_temporary_fault_is_worth_retrying`.
