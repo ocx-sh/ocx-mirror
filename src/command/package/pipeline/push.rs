@@ -1034,14 +1034,44 @@ async fn invoke_push(
     let annotations = crate::annotations::build_annotations(&spec.annotations);
     let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade)?;
 
+    push_with_retry(
+        &ocx_binary,
+        &args,
+        spec.concurrency.max_retries,
+        &spec.name,
+        target_ref,
+        platform,
+    )
+    .await
+}
+
+/// Run one push argv to a verdict: attempt it, and retry a transient failure
+/// (`ocx package push` exit 75 only) up to `budget` further times with
+/// [`push_retry_delay`] between attempts.
+///
+/// Extracted from [`invoke_push`] so a second push shape (a multi-layer argv
+/// rather than the single-bundle one) can share the ladder, the transience
+/// predicate and the operator-facing wording instead of duplicating them.
+/// `label` is the mirror name that prefixes every line; `target_ref` and
+/// `platform` name the leg in them.
+///
+/// Returns the parsed [`PushReport`] on success, or a descriptive error string
+/// (caller records it as `push_error` without aborting the run).
+pub(crate) async fn push_with_retry(
+    ocx_binary: &Path,
+    args: &[String],
+    budget: u32,
+    label: &str,
+    target_ref: &str,
+    platform: &str,
+) -> Result<PushReport, String> {
     // The budget, named in every line this loop emits: an operator reading a
     // give-up message has to be able to tell an exhausted ladder from an exit
     // code that was never going to be retried, and to find the knob either way.
-    let budget = spec.concurrency.max_retries;
     let total = budget.saturating_add(1);
     let mut attempt = 1u32;
     loop {
-        match push_once(&ocx_binary, &args, PUSH_TIMEOUT).await {
+        match push_once(ocx_binary, args, PUSH_TIMEOUT).await {
             Ok(report) => return Ok(report),
             Err(failure) => {
                 if !failure.transient {
@@ -1061,8 +1091,7 @@ async fn invoke_push(
                 // the first retry lands just under or over a second and
                 // `as_secs()` reported half of them as "0s".
                 log::warn!(
-                    "[{}] push attempt {attempt}/{total} for {target_ref} ({platform}) failed, retrying in {backoff:?}: {}",
-                    spec.name,
+                    "[{label}] push attempt {attempt}/{total} for {target_ref} ({platform}) failed, retrying in {backoff:?}: {}",
                     failure.message,
                 );
                 tokio::time::sleep(backoff).await;
