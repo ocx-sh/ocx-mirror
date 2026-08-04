@@ -1274,24 +1274,24 @@ fn render_test_run_steps(legs: &[MatrixLeg], is_env: bool) -> String {
     let body = r#"{CONTAINER_PRELUDE}{METADATA_SIBLING}            mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
-            TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length')
+            TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length' | tr -d '\r')
             FAILURES=0
             CASES=""
             for i in $(seq 0 $((TEST_COUNT - 1))); do
-              TEST_NAME=$(echo "${TESTS_JSON}" | jq -r ".[$i].name")
-              TEST_KIND=$(echo "${TESTS_JSON}" | jq -r ".[$i].kind")
+              TEST_NAME=$(echo "${TESTS_JSON}" | jq -r ".[$i].name" | tr -d '\r')
+              TEST_KIND=$(echo "${TESTS_JSON}" | jq -r ".[$i].kind" | tr -d '\r')
               START=$(date +%s)
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
-                TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
+                TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command" | tr -d '\r')
                 {OCX_TEST} package test --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
-                TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
+                TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script" | tr -d '\r')
                 {OCX_TEST} package test --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
-                TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
+                TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline" | tr -d '\r')
                 printf '%s' "${TEST_INLINE}" | {OCX_TEST} package test --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script - || RC=$?
               fi
@@ -1451,6 +1451,12 @@ fn prepare_flatten_script(is_env: bool) -> &'static str {
 /// `ocx package test … || RC=$?` capture (empty METADATA → ocx fails → one JUnit
 /// `<failure>`), instead of a bare jq exit tripping `set -e` and aborting every
 /// remaining version with no JUnit written at all.
+///
+/// Every jq capture ends in `tr -d '\r'`: on windows-latest the captured value
+/// otherwise keeps a trailing CR (Git Bash word-splits `$()` on LF only), which
+/// reaches `ocx package test` as part of the path and fails it with os error
+/// 123. `| tr -d '\r'` sits inside the pipeline so `|| true` still swallows a
+/// genuine miss — `pipefail` propagates jq's exit through it unchanged.
 fn test_target_resolve_script(is_env: bool) -> &'static str {
     if is_env {
         r#"            VERSION_DIR="bundles/${VERSION}"
@@ -1469,10 +1475,10 @@ fn test_target_resolve_script(is_env: bool) -> &'static str {
                 esac
                 ;;
             esac
-            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" --arg full "${TEST_PLATFORM}" '([.envs[] | select(.platform == $full)] + [.envs[] | select(.platform == $p)]) | first // empty' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
-            METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null || true)"
+            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" --arg full "${TEST_PLATFORM}" '([.envs[] | select(.platform == $full)] + [.envs[] | select(.platform == $p)]) | first // empty' "${VERSION_DIR}/env-manifest.json" 2>/dev/null | tr -d '\r' || true)
+            METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null | tr -d '\r' || true)"
             LAYERS=""
-            for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null || true); do
+            for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null | tr -d '\r' || true); do
               LAYERS="${LAYERS} ${VERSION_DIR}/${rel}"
             done"#
     } else {
@@ -3533,7 +3539,7 @@ platforms:
 
         // Must extract TEST_KIND.
         assert!(
-            shell_block.contains("TEST_KIND=$(echo \"${TESTS_JSON}\" | jq -r \".[$i].kind\")"),
+            shell_block.contains("TEST_KIND=$(echo \"${TESTS_JSON}\" | jq -r \".[$i].kind\" | tr -d '\\r')"),
             "shell loop must extract TEST_KIND; block:\n{shell_block}"
         );
         // Must branch on command.
@@ -3588,6 +3594,93 @@ platforms:
             template.contains("head -n1 | tr -d '\\r' || true"),
             "CI_JOB_URL capture must strip CR before exporting the URL"
         );
+    }
+
+    // Regression (live W4 pypi pilot, mirror-pypi run 30874908824 job
+    // 91884431517): the env leg's `test_target_resolve_script` captured layer
+    // paths straight out of `jq -r`, and on windows-latest each captured value
+    // kept a trailing CR — Git Bash word-splits `$()` on LF only. `ocx package
+    // test` then received `…/<digest>.tar.zst\r` and died with os error 123
+    // ("The filename, directory name, or volume label syntax is incorrect"),
+    // reddening the leg's JUnit and withholding the windows index entry. The
+    // raw job log shows the CR verbatim, and the uploaded env-manifest.json is
+    // CR-free, so the CR is injected on the runner, not carried in the data.
+    //
+    // Asserted structurally rather than as a golden byte-diff: the invariant is
+    // "no jq capture in a Windows-reachable script escapes without `tr -d '\r'`",
+    // which must hold for jq pipelines added later too.
+    #[test]
+    fn every_jq_capture_in_the_test_job_scripts_strips_cr() {
+        let legs = build_matrix_from_yaml(
+            r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+asset_type:
+  type: binary
+  name: shfmt
+tests:
+  - name: version
+    command: shfmt --version
+  - name: smoke
+    script: tests/smoke.star
+  - name: inline
+    script_inline: |
+      ocx_assert(True)
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#,
+        );
+
+        // The version-matrix loop lives in the template itself; slice out its
+        // step so the discover/summarize jobs (ubuntu-only, never Windows) do
+        // not count.
+        let version_matrix_loop = WORKFLOW_TEMPLATE
+            .split_once("- name: Run tests for all versions")
+            .map(|(_, rest)| rest.split("\n      - ").next().unwrap_or(rest))
+            .expect("template carries the test job's version-matrix loop");
+
+        // Every script the test job runs on a windows-latest leg: the
+        // version-matrix loop, the shared per-test loop, and both
+        // target-resolve variants (env and archive).
+        let scripts = [
+            ("version matrix loop", version_matrix_loop.to_string()),
+            ("test run steps", render_test_run_steps(&legs, false)),
+            ("env target resolve", test_target_resolve_script(true).to_string()),
+            ("archive target resolve", test_target_resolve_script(false).to_string()),
+        ];
+
+        let mut scanned = 0;
+        for (label, script) in &scripts {
+            // Fold shell continuations so a pipeline wrapped across lines is
+            // scanned as the single logical line it runs as.
+            let folded = script.replace("\\\n", " ");
+            for line in folded.lines() {
+                if !line.contains("jq ") {
+                    continue;
+                }
+                scanned += 1;
+                assert!(
+                    line.contains("tr -d '\\r'"),
+                    "{label}: jq output is captured by the shell without stripping CR, \
+                     which corrupts paths on windows-latest; line:\n{line}"
+                );
+            }
+        }
+        // Non-vacuity: 3 in the version-matrix loop, 6 in the per-test loop,
+        // 3 in the env resolve block. A restructure that empties a slice must
+        // fail here rather than pass by scanning nothing.
+        assert_eq!(scanned, 12, "expected every known jq capture to be scanned");
     }
 
     // ── Per-version platform-set filter in the test loop ──────────────────────
@@ -4237,7 +4330,7 @@ announce:
         // manifest — must red that one version through the `|| RC=$?` capture,
         // not trip `set -e` and abort every remaining version with no JUnit.
         assert!(
-            content.contains(r#""${VERSION_DIR}/env-manifest.json" 2>/dev/null || true"#),
+            content.contains(r#""${VERSION_DIR}/env-manifest.json" 2>/dev/null | tr -d '\r' || true"#),
             "manifest resolution must tolerate a missing manifest:\n{content}"
         );
         // `set -u` is in force: an env leg sets neither variable, so naming

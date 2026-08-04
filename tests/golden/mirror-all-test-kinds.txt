@@ -327,24 +327,24 @@ jobs:
             mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
-            TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length')
+            TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length' | tr -d '\r')
             FAILURES=0
             CASES=""
             for i in $(seq 0 $((TEST_COUNT - 1))); do
-              TEST_NAME=$(echo "${TESTS_JSON}" | jq -r ".[$i].name")
-              TEST_KIND=$(echo "${TESTS_JSON}" | jq -r ".[$i].kind")
+              TEST_NAME=$(echo "${TESTS_JSON}" | jq -r ".[$i].name" | tr -d '\r')
+              TEST_KIND=$(echo "${TESTS_JSON}" | jq -r ".[$i].kind" | tr -d '\r')
               START=$(date +%s)
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
-                TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
+                TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command" | tr -d '\r')
                 ocx package test --platform "${{ matrix.platform }}" --identifier "ocx.sh/shfmt:${VERSION}" "${BUNDLE}" -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
-                TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
+                TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script" | tr -d '\r')
                 ocx package test --platform "${{ matrix.platform }}" --identifier "ocx.sh/shfmt:${VERSION}" "${BUNDLE}" \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
-                TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
+                TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline" | tr -d '\r')
                 printf '%s' "${TEST_INLINE}" | ocx package test --platform "${{ matrix.platform }}" --identifier "ocx.sh/shfmt:${VERSION}" "${BUNDLE}" \
                   --script - || RC=$?
               fi
