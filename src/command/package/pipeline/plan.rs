@@ -1068,7 +1068,13 @@ fn settled_by_digest(image: &PublishedImage, expected: &Metadata, bin_scan: BinS
 /// the published bytes are whatever the `ocx` that wrote them serialized, so a
 /// key-order change alone flips this while the value is unchanged. The caller
 /// must fall back to [`metadata_drifted`] rather than report drift here.
-fn config_bytes_match(image: &PublishedImage, expected: &Metadata) -> Result<bool, MirrorError> {
+///
+/// The push pipeline's backfill cascade repair asks the same question for the
+/// opposite reason: it re-pushes a published tile only to move the rolling tags,
+/// so it needs the re-push to be manifest-identical, and `false` — "this build
+/// would write different bytes" — is exactly the condition under which it must
+/// not run.
+pub(crate) fn config_bytes_match(image: &PublishedImage, expected: &Metadata) -> Result<bool, MirrorError> {
     let bytes = serde_json::to_vec(expected)
         .map_err(|error| MirrorError::ExecutionFailed(vec![format!("failed to serialize metadata: {error}")]))?;
     Ok(image.config.digest == Algorithm::Sha256.hash(&bytes).to_string())

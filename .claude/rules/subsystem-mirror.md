@@ -98,6 +98,21 @@ The bolded window is load-bearing. Every step in it must sit between extraction 
    backoff plus ±10% jitter
 2. Cascade derived tags if enabled (X.Y.Z → X.Y → X → latest)
 3. Track pushed (version, platform) pairs for cascade correctness
+4. Complete the cascade for the platforms an EARLIER run published
+   (`push.rs::cascade_backfilled_entries`)
+
+Step 4 exists because `--cascade` merges only the pushed leg's own platform
+entry into each rolling tag, so both push loops give it to *every* leg of a
+whole version. That covers a version published in one run and not one completed
+across two: the first run withholds `--cascade` while the version is still
+partial, and `pipeline plan` trims the tiles it published from the backfill
+run, so nothing ever cascades them and `X.Y`/`X`/`latest` end up holding the
+backfilled platform alone. The repair re-emits each such entry from the
+registry's own descriptors (published layers by digest + published config
+metadata verbatim, the `pipeline patch` mechanism), and **skips** any entry
+whose config bytes the running build would not reproduce exactly — a re-push
+there would rewrite the platform manifest digest instead of only moving tags.
+Best-effort: the packages are published either way, so a failure warns.
 
 The 75/69 split above only exists from **ocx ≥ 0.5.3** onward — the `ocx`
 binary that actually runs the push subprocess, i.e. whatever `ocx.toml` /

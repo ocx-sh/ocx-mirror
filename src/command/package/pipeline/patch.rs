@@ -344,7 +344,7 @@ async fn republish(
 /// Every published layer is passed as a digest reference in manifest order —
 /// order is the layer stack, and dropping or reordering one would republish a
 /// different package under the same tag.
-fn patch_push_args(
+pub(crate) fn patch_push_args(
     target_ref: &str,
     image: &PublishedImage,
     sidecar: &Path,

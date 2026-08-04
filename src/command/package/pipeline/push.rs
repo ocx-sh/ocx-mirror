@@ -15,6 +15,8 @@ use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 
+use crate::command::package::pipeline::patch::patch_push_args;
+use crate::command::package::pipeline::plan;
 use crate::command::package::target_registry;
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
@@ -145,6 +147,13 @@ impl Push {
         // "Newest" is the last element of the semver-sorted list.
         let newest_version = versions.last().cloned();
 
+        // Read-only registry access for the backfill cascade repair below, and
+        // the one annotation set that repair republishes under — the same map
+        // `invoke_push` builds per leg.
+        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let publisher = Publisher::new(client);
+        let annotations = crate::annotations::build_annotations(&spec.annotations);
+
         // ── Process each version in semver order ─────────────────────────────
         let mut version_summaries: Vec<VersionSummary> = Vec::new();
 
@@ -251,6 +260,16 @@ impl Push {
                         });
                     }
                 }
+            }
+
+            // The platforms an earlier run published carry no cascade of their
+            // own — see [`entries_awaiting_cascade`] — so the rolling tags are
+            // completed from the version's merged index once its last platform
+            // lands.
+            if platforms_failed.is_empty() && !platforms_pushed.is_empty() {
+                cascade_tags.extend(
+                    cascade_backfilled_entries(&publisher, &spec, version, &platforms_pushed, &annotations).await,
+                );
             }
 
             // The version-specific tag is always written when at least one
@@ -668,6 +687,20 @@ impl Push {
                 }
             }
 
+            // ── Phase 2b: the entries an earlier run published ───────────────
+            //
+            // Phase 2 gave `--cascade` to every leg of this run, which covers a
+            // version published in one run and not one completed across two —
+            // see [`entries_awaiting_cascade`]. Only reachable for a cascadable
+            // version: `plan::build_env_plan_entries` cannot dedup a version
+            // `ocx_lib::Version` refuses to parse, so a non-semver version
+            // re-publishes every platform on every run and never splits.
+            if version_is_cascadable && platforms_failed.is_empty() && !platforms_pushed.is_empty() {
+                cascade_tags.extend(
+                    cascade_backfilled_entries(&publisher, spec, version, &platforms_pushed, &annotations).await,
+                );
+            }
+
             // ── Phase 3: `:latest` for a version ocx cannot cascade ──────────
             //
             // After the whole version, never inside phase 2: the alias is a
@@ -883,6 +916,218 @@ fn registry_tag_newer_than<'a>(tags: &'a [String], version: &str) -> Option<&'a 
 /// rolling tags from this?").
 pub(crate) fn pep440_sort_key(version: &str) -> (Option<ocx_python::uv_pep440::Version>, String) {
     (version.parse().ok(), version.to_string())
+}
+
+// ── Backfill cascade repair ──────────────────────────────────────────────────
+
+/// The entries of a version's published index whose cascade never ran.
+///
+/// `ocx package push --cascade` merges only the pushed leg's OWN platform into
+/// each rolling tag, so both phase-2 loops give it to every leg of a whole
+/// version. That is complete for a version published in one run, and silently
+/// incomplete for one completed across two: the run that first published the
+/// version withheld `--cascade` from its green legs precisely because the
+/// version was still partial, and the run that backfills the missing platform
+/// no longer carries those legs at all — `pipeline plan` trims already-published
+/// `(version, platform)` tiles (`filter::filter_versions`,
+/// `plan::build_env_plan_entries`). Nothing ever cascades them, so `X.Y`, `X`
+/// and `latest` end up holding the backfilled platform alone while the exact
+/// version tag is correct.
+///
+/// A pushed platform string that does not parse excludes nothing: re-pushing an
+/// entry this run already pushed is idempotent, while dropping one that still
+/// needs the cascade is the bug.
+fn entries_awaiting_cascade<'a>(
+    published: &'a [target_registry::PublishedImage],
+    platforms_pushed: &[String],
+) -> Vec<&'a target_registry::PublishedImage> {
+    let pushed: Vec<ocx_lib::oci::Platform> = platforms_pushed
+        .iter()
+        .filter_map(|platform| platform.parse().ok())
+        .collect();
+    published
+        .iter()
+        .filter(|image| !pushed.contains(&image.platform))
+        .collect()
+}
+
+/// Run the cascade for every entry of `version`'s merged index this run did not
+/// push, so the rolling tags reflect the whole version rather than this run's
+/// legs (see [`entries_awaiting_cascade`]).
+///
+/// Each entry is re-emitted from the registry's own descriptors — the published
+/// layers by digest, the published config metadata verbatim — so the manifest
+/// written is byte-identical to the one already there and the push costs a
+/// config blob plus the cascade tag writes. Nothing is downloaded and no layer
+/// is re-uploaded, the same mechanism `pipeline patch` publishes through.
+///
+/// An entry whose config bytes this build would not reproduce exactly is
+/// SKIPPED rather than re-pushed: a differing config blob yields a new platform
+/// manifest digest, which would orphan the digest a consumer's lock pins — a
+/// worse outcome than the rolling tag this repairs.
+///
+/// Best-effort by construction, on the same reasoning as
+/// [`alias_newest_as_latest`]: every package of the version is already
+/// published, so a failed repair warns instead of redding the version. Single
+/// attempt per entry — the upload is a config blob, and the retry ladder
+/// `pipeline push` needs for a 350 MB tile buys nothing here.
+///
+/// Returns the cascade tags written, for the run summary and the announce union.
+async fn cascade_backfilled_entries(
+    publisher: &Publisher,
+    spec: &MirrorSpec,
+    version: &str,
+    platforms_pushed: &[String],
+    annotations: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let published = match published_images_for(publisher, &identifier, version).await {
+        Ok(images) => images,
+        Err(error) => {
+            log::warn!(
+                "[{}] {version}: could not read the published index to complete its cascade, so the rolling tags \
+                 may carry only this run's platforms: {error}",
+                spec.name,
+            );
+            return Vec::new();
+        }
+    };
+
+    let awaiting = entries_awaiting_cascade(&published, platforms_pushed);
+    if awaiting.is_empty() {
+        return Vec::new();
+    }
+
+    let work_dir = match tempfile::TempDir::new() {
+        Ok(dir) => dir,
+        Err(error) => {
+            log::warn!(
+                "[{}] {version}: could not create a sidecar directory: {error}",
+                spec.name
+            );
+            return Vec::new();
+        }
+    };
+    let ocx_binary = match resolve_ocx_binary() {
+        Ok(binary) => binary,
+        Err(error) => {
+            log::warn!("[{}] {version}: {error}", spec.name);
+            return Vec::new();
+        }
+    };
+
+    let mut tags = Vec::new();
+    for image in awaiting {
+        log::info!(
+            "[{}] {version} ({}): re-cascading a platform an earlier run published",
+            spec.name,
+            image.platform,
+        );
+        match re_cascade_entry(
+            publisher,
+            &identifier,
+            spec,
+            image,
+            annotations,
+            &ocx_binary,
+            work_dir.path(),
+        )
+        .await
+        {
+            Ok(written) => tags.extend(written),
+            Err(message) => log::warn!(
+                "[{}] {version} ({}): the rolling tags do not carry this platform — {message}",
+                spec.name,
+                image.platform,
+            ),
+        }
+    }
+    tags
+}
+
+/// The repair's view of what the version tag holds, with a test-only stub.
+///
+/// Same hazard [`fetch_published_tags`] documents, one step worse: the
+/// fake-`ocx` harness fakes the subprocess, not the in-process [`Publisher`],
+/// and every green version of every push test reaches this call — so without a
+/// stub the unit suite would read the LIVE `ocx.sh` state its fixtures name,
+/// and then *re-push* against whatever it found. A test build therefore sees an
+/// empty index and skips the repair; the mechanism itself is exercised by the
+/// acceptance harness against the local registry.
+#[cfg(not(test))]
+async fn published_images_for(
+    publisher: &Publisher,
+    identifier: &ocx_lib::oci::Identifier,
+    version: &str,
+) -> Result<Vec<target_registry::PublishedImage>, MirrorError> {
+    target_registry::fetch_published_images(publisher, identifier, &[version]).await
+}
+
+/// See [`published_images_for`] — the test build's registry-free stand-in.
+#[cfg(test)]
+async fn published_images_for(
+    _publisher: &Publisher,
+    _identifier: &ocx_lib::oci::Identifier,
+    _version: &str,
+) -> Result<Vec<target_registry::PublishedImage>, MirrorError> {
+    Ok(Vec::new())
+}
+
+/// Re-emits one published `(version, platform)` manifest with `--cascade`, so
+/// the rolling tags pick up an entry an earlier run left behind. See
+/// [`cascade_backfilled_entries`] for why this is safe to run against live
+/// published state.
+async fn re_cascade_entry(
+    publisher: &Publisher,
+    identifier: &ocx_lib::oci::Identifier,
+    spec: &MirrorSpec,
+    image: &target_registry::PublishedImage,
+    annotations: &BTreeMap<String, String>,
+    ocx_binary: &Path,
+    work_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let published = target_registry::fetch_published_metadata(publisher, identifier, image)
+        .await
+        .map_err(|error| format!("the published metadata could not be read: {error}"))?;
+
+    // The re-push must be a no-op on the manifest. `config_bytes_match` decides
+    // that from the descriptor alone: it is false exactly when this build would
+    // serialize the same document differently from whatever `ocx` published it,
+    // and re-pushing then rewrites the platform manifest instead of repairing a
+    // tag.
+    if !plan::config_bytes_match(image, &published)
+        .map_err(|error| format!("the published metadata could not be compared: {error}"))?
+    {
+        return Err(format!(
+            "its published config blob is not what this build would write, and re-pushing it would replace the \
+             manifest digest {} rather than only move the rolling tags",
+            image.manifest_digest,
+        ));
+    }
+
+    // The sidecar is the published metadata verbatim: `ocx package push -m`
+    // reads the published form since 0.5.6, and this path must reproduce the
+    // registry's config bytes exactly — no authoring round-trip, no platform
+    // stamp (retired; the platform travels on `-p` alone).
+    let sidecar_json = serde_json::to_string_pretty(&published)
+        .map_err(|error| format!("the push sidecar could not be rendered: {error}"))?;
+
+    let sidecar = work_dir.join(format!(
+        "{}-{}-metadata.json",
+        image.version,
+        spec::platform_slug(&image.platform),
+    ));
+    tokio::fs::write(&sidecar, sidecar_json)
+        .await
+        .map_err(|error| format!("failed to write {}: {error}", sidecar.display()))?;
+
+    let target_ref = format!("{}:{}", spec.target.reference(), image.version);
+    let args = patch_push_args(&target_ref, image, &sidecar, annotations, true)?;
+
+    push_once(ocx_binary, &args, PUSH_TIMEOUT)
+        .await
+        .map(|report| report.cascade_tags_written)
+        .map_err(|failure| failure.message)
 }
 
 /// The base `os/arch` half of an env entry's full wheels-key platform string
@@ -2078,6 +2323,113 @@ mod tests {
                 "--annotation",
                 "org.opencontainers.image.source=https://github.com/ocx-sh/mirror-shfmt",
             ]
+        );
+    }
+
+    // ── Backfill cascade repair (BUG3) ────────────────────────────────────
+
+    /// A published `(version, platform)` tile, as `fetch_published_images`
+    /// returns it. Only `platform` and the layer/config descriptors matter
+    /// here — the re-push re-references both by digest.
+    fn published_tile(platform: &str, layer_media_type: &str) -> target_registry::PublishedImage {
+        target_registry::PublishedImage {
+            version: Version::parse("26.5.1").expect("valid version"),
+            platform: platform.parse().expect("valid platform"),
+            manifest_digest: ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+            config: ocx_lib::oci::Descriptor {
+                media_type: "application/vnd.sh.ocx.package.v1+json".to_string(),
+                digest: format!("sha256:{}", "c".repeat(64)),
+                size: 42,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            },
+            layers: vec![ocx_lib::oci::Descriptor {
+                media_type: layer_media_type.to_string(),
+                digest: format!("sha256:{}", "a".repeat(64)),
+                size: 1024,
+                urls: None,
+                artifact_type: None,
+                annotations: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn a_version_completed_across_two_runs_re_cascades_the_earlier_runs_entries() {
+        // Live-pilot BUG3 (mirror-pypi wave 1+2). `ocx/black:26.5.1` completed
+        // across two runs: run 1 published glibc + musl + darwin with the
+        // windows leg red, so phase 2 withheld `--cascade` from all three; run 2
+        // backfilled windows alone — `pipeline plan` had trimmed the three
+        // already-published tiles — and cascaded only that one. `:26.5.1` merged
+        // to all four entries, but `26.5`, `26` and `latest` carried
+        // windows/amd64 alone, so a bare `ocx/black` reference failed to resolve
+        // on every non-windows host.
+        let published = [
+            published_tile("linux/amd64+libc.glibc", "application/vnd.oci.image.layer.v1.tar+zstd"),
+            published_tile("linux/amd64+libc.musl", "application/vnd.oci.image.layer.v1.tar+zstd"),
+            published_tile("darwin/arm64", "application/vnd.oci.image.layer.v1.tar+zstd"),
+            published_tile("windows/amd64", "application/vnd.oci.image.layer.v1.tar+zstd"),
+        ];
+
+        let awaiting: Vec<String> = entries_awaiting_cascade(&published, &["windows/amd64".to_string()])
+            .iter()
+            .map(|image| image.platform.to_string())
+            .collect();
+
+        assert_eq!(
+            awaiting,
+            vec!["linux/amd64+libc.glibc", "linux/amd64+libc.musl", "darwin/arm64"],
+            "the rolling tags must carry the whole merged version index, not this run's legs",
+        );
+    }
+
+    #[test]
+    fn a_version_pushed_whole_in_one_run_has_nothing_left_to_re_cascade() {
+        // The single-run case (pycowsay, yt-dlp in the pilot) is already correct:
+        // every leg carried `--cascade`. The repair must not re-push tiles this
+        // run just published — that would spend a config-blob upload per tile
+        // per version on every green run.
+        let published = [
+            published_tile("linux/amd64", "application/vnd.oci.image.layer.v1.tar+xz"),
+            published_tile("darwin/arm64", "application/vnd.oci.image.layer.v1.tar+xz"),
+        ];
+        let pushed = vec!["linux/amd64".to_string(), "darwin/arm64".to_string()];
+
+        assert!(
+            entries_awaiting_cascade(&published, &pushed).is_empty(),
+            "a version pushed whole in one run needs no repair",
+        );
+    }
+
+    #[test]
+    fn the_re_cascade_argv_carries_cascade_and_the_published_layer_digests() {
+        // The repair re-emits the tile from the registry's OWN descriptors: the
+        // published layers by digest (never re-uploaded, never re-downloaded) and
+        // `--cascade`, which is the entire point of the re-push.
+        let image = published_tile("linux/amd64+libc.glibc", "application/vnd.oci.image.layer.v1.tar+zstd");
+        let sidecar = PathBuf::from("/work/26.5.1-linux_amd64_libc.glibc-metadata.json");
+
+        let args = patch_push_args("ghcr.io/ocx-sh/black:26.5.1", &image, &sidecar, &BTreeMap::new(), true)
+            .expect("the published layer media type has an archive extension");
+
+        assert_eq!(
+            args,
+            vec![
+                "--format",
+                "json",
+                "package",
+                "push",
+                "--cascade",
+                "--new",
+                "-p",
+                "linux/amd64+libc.glibc",
+                "-i",
+                "ghcr.io/ocx-sh/black:26.5.1",
+                "--metadata",
+                "/work/26.5.1-linux_amd64_libc.glibc-metadata.json",
+                &format!("sha256:{}.tar.zst", "a".repeat(64)),
+            ],
         );
     }
 
