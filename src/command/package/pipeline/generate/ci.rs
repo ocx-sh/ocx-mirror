@@ -1163,6 +1163,29 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
                   | tar -xz -C "${OCX_CONTAINER_DIR}" --strip-components=1
                 chmod +x "${OCX_CONTAINER_BIN}"
               fi
+              # Pull the image here rather than letting `docker run` do it
+              # implicitly: a rate-limited or flaky pull inside the test loop is
+              # recorded as a failed testcase, indistinguishable from a mirrored
+              # artifact that genuinely does not run. Failing this step instead
+              # keeps a red testcase meaning exactly one thing. Guarded by
+              # `inspect` — that is when `docker run` would have pulled anyway,
+              # and a pull per version would spend a manifest request (the thing
+              # being rate-limited) on every one. It also precedes the setup
+              # build below, so a provisioned image's FROM resolves from cache.
+              if ! docker image inspect "${CONTAINER_IMAGE}" >/dev/null 2>&1; then
+                OCX_PULL_ATTEMPT=1
+                OCX_PULL_DELAY=2
+                until docker pull --platform "${{ matrix.docker_platform }}" "${CONTAINER_IMAGE}"; do
+                  if [ "${OCX_PULL_ATTEMPT}" -ge 5 ]; then
+                    echo "::error::could not pull ${CONTAINER_IMAGE} for ${{ matrix.docker_platform }} after ${OCX_PULL_ATTEMPT} attempts (rate limit, network, or a tag with no ${{ matrix.docker_platform }} variant — see the docker output above)"
+                    exit 1
+                  fi
+                  echo "pull of ${CONTAINER_IMAGE} failed (attempt ${OCX_PULL_ATTEMPT}); retrying in ${OCX_PULL_DELAY}s"
+                  sleep "${OCX_PULL_DELAY}"
+                  OCX_PULL_ATTEMPT=$((OCX_PULL_ATTEMPT + 1))
+                  OCX_PULL_DELAY=$((OCX_PULL_DELAY * 2))
+                done
+              fi
 {CONTAINER_SETUP_BUILD}            fi
             ocx_test() {
               if [ -n "${CONTAINER_IMAGE}" ]; then
@@ -1794,6 +1817,51 @@ mod tests {
             assert!(
                 workflow.contains(needle),
                 "a setup-declaring spec must render `{needle}`, got:\n{workflow}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_container_image_is_pulled_with_retries_before_anything_runs_it() {
+        // Left to `docker run`, a rate-limited pull surfaces in the JUnit report
+        // as a failed testcase — the one thing a red testcase must not be able
+        // to mean. Pulling up front makes it a failed step instead. The setup
+        // fixture renders both consumers of the image (`docker build`'s FROM and
+        // `docker run`), so it is the one that can prove the ordering.
+        let workflow = workflow_for("mirror-container-setup.yml");
+
+        let pull = r#"until docker pull --platform "${{ matrix.docker_platform }}" "${CONTAINER_IMAGE}"; do"#;
+        let pull_at = workflow.find(pull).unwrap_or_else(|| {
+            panic!("container legs must pull the image explicitly with the docker platform, got:\n{workflow}")
+        });
+
+        // A bare pull would only move the flake, so assert the whole loop: the
+        // once-per-leg guard (without it every version spends a manifest
+        // request — the resource being rate-limited), five attempts, doubling
+        // delay, and a hard exit once they are spent.
+        for needle in [
+            r#"if ! docker image inspect "${CONTAINER_IMAGE}" >/dev/null 2>&1; then"#,
+            "OCX_PULL_DELAY=2",
+            r#"if [ "${OCX_PULL_ATTEMPT}" -ge 5 ]; then"#,
+            r#"sleep "${OCX_PULL_DELAY}""#,
+            "OCX_PULL_DELAY=$((OCX_PULL_DELAY * 2))",
+            "::error::could not pull ${CONTAINER_IMAGE}",
+        ] {
+            assert!(
+                workflow.contains(needle),
+                "the pull must retry with backoff and fail the job when spent — missing `{needle}`, got:\n{workflow}"
+            );
+        }
+
+        // Both consumers go to the network on a cache miss, so both must come
+        // after the pull — otherwise the retry protects nothing.
+        for consumer in ["docker build --platform", "docker run --rm -i --platform"] {
+            let consumer_at = workflow
+                .find(consumer)
+                .unwrap_or_else(|| panic!("the setup fixture must render `{consumer}`, got:\n{workflow}"));
+            assert!(
+                pull_at < consumer_at,
+                "the retrying pull must precede `{consumer}`, got:\n{workflow}"
             );
         }
     }
