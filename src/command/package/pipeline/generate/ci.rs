@@ -711,12 +711,7 @@ fn indent_entries(entries: &[String]) -> String {
 ///
 /// Substitution uses a simple `str::replace` chain — no templating engine dep.
 fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
-    let schedule_block = spec
-        .versions
-        .as_ref()
-        .and_then(|v| v.poll_interval.as_ref())
-        .map(|cron| format!("  schedule:\n    - cron: '{}'\n", cron))
-        .unwrap_or_default();
+    let schedule_block = schedule_block(spec.versions.as_ref().and_then(|v| v.poll_interval.as_ref()));
 
     // `webhook_secret` names the *GitHub Actions secret* that carries the
     // webhook URL — the rendered workflow maps it onto the conventional local
@@ -1374,12 +1369,42 @@ fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 
+/// The workflow-level `concurrency:` group of *this spec's* push workflow.
+///
+/// `workflow.yml` spells it `mirror-${{ github.workflow }}-publish`, and
+/// `github.workflow` is that workflow's `name:` — which the renderer sets to
+/// `spec.name`. Resolving it here lets another workflow name the same group
+/// without a runtime handle on the push workflow.
+fn publish_concurrency_group(spec: &MirrorSpec) -> String {
+    format!("mirror-{}-publish", spec.name)
+}
+
+/// A workflow's `schedule:` trigger, or nothing.
+///
+/// The templates place the placeholder on the line above `workflow_dispatch:`,
+/// so an absent cron collapses to no lines at all.
+///
+/// The cron lands inside a single-quoted scalar unescaped; what keeps a spec
+/// from closing it and appending triggers of its own is `spec::validate_cron`,
+/// which both callers' specs pass through before any file is written.
+fn schedule_block(cron: Option<&String>) -> String {
+    cron.map(|cron| format!("  schedule:\n    - cron: '{}'\n", cron))
+        .unwrap_or_default()
+}
+
 /// Render the `cascade.yml` rolling-tag repair workflow.
 ///
-/// Dispatch-only, with `dry_run` defaulting to true: a broken cascade is a
-/// state a maintainer decides to act on, and re-pointing published rolling
-/// tags on a timer is the opposite of that. Emitted only for a spec that
-/// cascades — a mirror publishing no rolling alias has no graph to repair.
+/// Dispatch is always available and defaults to `dry_run: true`, so a repair
+/// that nobody asked for in writing only audits. `cascade: { schedule: … }`
+/// adds a `schedule:` trigger whose runs repair for real. Emitted only for a
+/// spec that cascades — a mirror publishing no rolling alias has no graph to
+/// repair.
+///
+/// Shares the push workflow's concurrency group (see
+/// [`publish_concurrency_group`]) so a repair never runs while a publish is
+/// mid-way through writing the same aliases. GitHub holds one pending run per
+/// group, so the trade is that a run *waiting* in that group — a repair or a
+/// publish — is cancelled when a newer run of either workflow queues.
 ///
 /// Takes the same `packages: write` block describe and patch do: a repair
 /// writes tags to the target repository. The announce it chains into writes to
@@ -1391,6 +1416,11 @@ fn render_cascade(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
+        .replace(
+            "{CASCADE_SCHEDULE_BLOCK}",
+            &schedule_block(spec.cascade.schedule.as_ref()),
+        )
+        .replace("{PUSH_CONCURRENCY_GROUP}", &publish_concurrency_group(spec))
         .replace("{CASCADE_PERMISSIONS}", render_registry_write_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{OCX_CLI_VERSION}", ocx_cli_version())
@@ -1461,7 +1491,7 @@ fn render_spec(spec: &MirrorSpec, slot: &SpecSlot) -> BTreeMap<PathBuf, String> 
     files.insert(slot.workflow("patch"), render_patch(spec, slot));
 
     // Rolling-tag repair: only a spec that cascades has aliases to break.
-    if spec.cascade {
+    if spec.cascade.enabled {
         files.insert(slot.workflow("cascade"), render_cascade(spec, slot));
     }
 
@@ -2158,11 +2188,12 @@ mod tests {
     }
 
     #[test]
-    fn cascade_workflow_is_dispatch_only_and_carries_the_token() {
-        // A schedule or push trigger here would re-point published rolling tags
-        // on every commit, which is the one thing a repair must never do on its
-        // own. `dry_run` defaulting to true is the other half: a dispatch that
-        // names nothing audits.
+    fn cascade_workflow_is_dispatch_only_by_default_and_carries_the_token() {
+        // A push trigger here would re-point published rolling tags on every
+        // commit, which is the one thing a repair must never do. A schedule is
+        // opt-in per spec, so a spec that did not ask for one gets neither.
+        // `dry_run` defaulting to true is the other half: a dispatch that names
+        // nothing audits.
         let dir = tempdir().unwrap();
         render_fixture("mirror-ghcr-announce.yml", dir.path()).expect("announce fixture must render");
         let rendered = std::fs::read_to_string(dir.path().join(".github/workflows/cascade.yml")).unwrap();
@@ -2177,7 +2208,7 @@ mod tests {
         assert_eq!(
             mapping.keys().map(|k| k.as_str().unwrap()).collect::<Vec<_>>(),
             vec!["workflow_dispatch"],
-            "cascade must be dispatch-only — no push, no schedule",
+            "a spec that named no schedule must get a dispatch-only cascade — and never a push trigger",
         );
 
         let dry_run = &triggers["workflow_dispatch"]["inputs"]["dry_run"];
@@ -2222,6 +2253,114 @@ mod tests {
         assert!(
             !plain.contains_key(Path::new(".github/workflows/cascade.yml")),
             "a spec that publishes no rolling tag must not get a repair workflow"
+        );
+
+        // The map form is an enabled cascade with a trigger attached, so it
+        // emits the same workflow the bare `true` does.
+        let scheduled = render_spec(
+            &spec_from_yaml(&format!("{SHFMT_SPEC}cascade:\n  schedule: \"17 4 * * 1\"\n")),
+            &root_slot(),
+        );
+        assert!(
+            scheduled.contains_key(Path::new(".github/workflows/cascade.yml")),
+            "a spec naming a cascade schedule is a cascading spec"
+        );
+    }
+
+    /// Parse one spec's rendered `cascade.yml`, from an inline spec at the root.
+    fn cascade_of(yaml: &str) -> serde_yaml_ng::Value {
+        let rendered = render_cascade(&spec_from_yaml(yaml), &root_slot());
+        serde_yaml_ng::from_str(&rendered)
+            .unwrap_or_else(|e| panic!("cascade.yml must be parseable YAML: {e}\n{rendered}"))
+    }
+
+    #[test]
+    fn a_cascade_schedule_adds_a_cron_trigger_beside_the_dispatch() {
+        // The opt-in half: an operator who wants unattended repair gets a
+        // timer, and keeps the manual dispatch they had.
+        let parsed = cascade_of(&format!("{SHFMT_SPEC}cascade:\n  schedule: \"17 4 * * 1\"\n"));
+
+        let triggers = parsed["on"]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("triggers must be a mapping, got: {:?}", parsed["on"]));
+        assert_eq!(
+            triggers.keys().map(|k| k.as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["schedule", "workflow_dispatch"],
+            "a schedule is added to the dispatch, never a push trigger and never instead of it",
+        );
+        assert_eq!(
+            parsed["on"]["schedule"][0]["cron"].as_str(),
+            Some("17 4 * * 1"),
+            "got: {:?}",
+            parsed["on"]["schedule"],
+        );
+    }
+
+    #[test]
+    fn the_repair_step_answers_dry_run_for_a_scheduled_event() {
+        // `inputs.dry_run` is empty outside a dispatch. Left alone it reads as
+        // "not true", which is the right answer by accident — one that a
+        // default flip would silently invert.
+        let step = cascade_of(SHFMT_SPEC)["jobs"]["cascade"]["steps"]
+            .as_sequence()
+            .expect("cascade job must have steps")
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Repair the rolling-tag cascade"))
+            .expect("the repair step must be named")
+            .clone();
+        assert_eq!(
+            step["env"]["DRY_RUN"].as_str(),
+            Some("${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}"),
+            "got: {step:?}",
+        );
+    }
+
+    #[test]
+    fn cascade_queues_behind_its_own_specs_publish_workflow() {
+        // A repair and a live push both re-point the same rolling aliases, so
+        // the two must not interleave. The cascade workflow has no runtime
+        // handle on the push workflow's name, so its group is a baked literal —
+        // derive both ends from one render or it drifts unnoticed.
+        let nested = SHFMT_SPEC.replace("name: shfmt", "name: shfmt-py3.13");
+        let files = render(&[
+            (root_slot(), spec_from_yaml(SHFMT_SPEC)),
+            (slot_at("py3.13/mirror.yml"), spec_from_yaml(&nested)),
+        ]);
+
+        let parse = |relative: String| -> serde_yaml_ng::Value {
+            let rendered = &files[Path::new(&relative)];
+            serde_yaml_ng::from_str(rendered).unwrap_or_else(|e| panic!("{relative} must parse: {e}\n{rendered}"))
+        };
+
+        let mut groups = Vec::new();
+        for suffix in ["", "-py3.13"] {
+            let push = parse(format!(".github/workflows/mirror{suffix}.yml"));
+            let cascade = parse(format!(".github/workflows/cascade{suffix}.yml"));
+
+            assert_eq!(
+                push["concurrency"]["group"].as_str(),
+                Some("mirror-${{ github.workflow }}-publish"),
+                "the literal baked into cascade{suffix}.yml is only correct while the push group reads this way",
+            );
+            let name = push["name"].as_str().expect("the push workflow must be named");
+            let group = cascade["concurrency"]["group"]
+                .as_str()
+                .unwrap_or_else(|| panic!("cascade{suffix}.yml must name a concurrency group"));
+            assert_eq!(
+                group,
+                format!("mirror-{name}-publish"),
+                "cascade{suffix}.yml must queue behind the workflow named {name}",
+            );
+            assert_eq!(
+                cascade["concurrency"]["cancel-in-progress"].as_bool(),
+                Some(false),
+                "a repair cancelled mid-flight leaves the graph it was fixing half-written",
+            );
+            groups.push(group.to_string());
+        }
+        assert_ne!(
+            groups[0], groups[1],
+            "a nested spec must join its own publish group, not the root spec's",
         );
     }
 

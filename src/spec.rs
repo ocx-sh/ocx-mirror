@@ -5,6 +5,7 @@ mod announce_config;
 mod asset_type;
 mod assets;
 mod bin_scan;
+mod cascade_config;
 mod catalog_config;
 mod concurrency_config;
 mod metadata_config;
@@ -24,6 +25,7 @@ pub use announce_config::{AnnounceConfig, DEFAULT_INDEX_REPO};
 pub use asset_type::{AssetType, AssetTypeConfig};
 pub use assets::AssetPatterns;
 pub use bin_scan::BinScanMode;
+pub use cascade_config::CascadeConfig;
 pub use catalog_config::CatalogConfig;
 pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 pub use metadata_config::MetadataConfig;
@@ -114,8 +116,10 @@ pub struct MirrorSpec {
     #[serde(default = "default_build_timestamp")]
     pub build_timestamp: BuildTimestampFormat,
 
-    #[serde(default = "default_true")]
-    pub cascade: bool,
+    /// Rolling-tag cascade: `true`/`false`, or a map opting the generated
+    /// repair workflow into a `schedule:` trigger (see [`CascadeConfig`]).
+    #[serde(default)]
+    pub cascade: CascadeConfig,
 
     #[serde(default)]
     pub versions: Option<VersionsConfig>,
@@ -232,6 +236,26 @@ static GITHUB_REPO_RE: std::sync::LazyLock<regex::Regex> =
 static DISCORD_USER_ID_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[0-9]{17,20}$").unwrap());
 
+/// Regex for the characters a cron expression may contain: digits, the
+/// day/month names GitHub accepts, and the `* / , -` operators.
+static CRON_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(r"^[0-9A-Za-z*/,\- ]+$").unwrap());
+
+/// Reject a cron expression that cannot be interpolated into a generated
+/// workflow's `schedule:` block.
+///
+/// GitHub remains the only validator of cron *semantics* — a nonsense but
+/// well-formed `99 99 * * *` still renders. The charset guard exists because
+/// the value is spliced verbatim into `on:` inside a single-quoted scalar
+/// (`schedule_block` in `generate/ci.rs`): a quote or newline would close that
+/// scalar and let a spec add triggers of its own, and a scheduled cascade run
+/// repairs for real.
+pub(crate) fn validate_cron(label: &str, cron: &str, errors: &mut Vec<String>) {
+    if cron.trim().is_empty() || !CRON_RE.is_match(cron) {
+        errors.push(format!("{label}: invalid cron expression '{cron}'"));
+    }
+}
+
 impl MirrorSpec {
     pub fn validate(&self, spec_path: &Path) -> Vec<String> {
         let mut errors = Vec::new();
@@ -280,6 +304,8 @@ impl MirrorSpec {
             }
         }
 
+        self.cascade.validate(&mut errors);
+
         if let Some(versions) = &self.versions {
             versions.validate(&mut errors);
         }
@@ -317,7 +343,7 @@ impl MirrorSpec {
     /// This is an advisory hazard, not a hard error: registry-side retention or a
     /// referrers policy can make `none` safe, so `load_spec` warns rather than rejects.
     fn cascade_without_build_stamp(&self) -> bool {
-        self.cascade && self.build_timestamp == BuildTimestampFormat::None
+        self.cascade.enabled && self.build_timestamp == BuildTimestampFormat::None
     }
 
     /// Whether `platform` applies to `version` under the per-platform
@@ -1285,7 +1311,7 @@ metadata:
         assert_eq!(spec.target.repository, "cmake");
         assert!(matches!(spec.source, Source::GithubRelease { .. }));
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Datetime);
-        assert!(spec.cascade);
+        assert!(spec.cascade.enabled);
         assert!(!spec.skip_prereleases);
     }
 
@@ -1317,7 +1343,7 @@ skip_prereleases: true
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(spec.name, "test-tool");
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Date);
-        assert!(!spec.cascade);
+        assert!(!spec.cascade.enabled);
         assert!(spec.skip_prereleases);
 
         if let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source {
@@ -1548,7 +1574,7 @@ assets:
 
         let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Datetime);
-        assert!(spec.cascade);
+        assert!(spec.cascade.enabled);
         assert!(!spec.skip_prereleases);
         assert!(spec.asset_type.is_none(), "asset_type should default to None");
         assert_eq!(spec.concurrency.max_downloads, 8);
@@ -1819,7 +1845,7 @@ assets:
 
         let spec = load_spec(&spec_path).await.unwrap();
         assert_eq!(spec.name, "test");
-        assert!(spec.cascade);
+        assert!(spec.cascade.enabled);
     }
 
     #[tokio::test]
@@ -1858,7 +1884,7 @@ source:
         let spec = load_spec(&dir.path().join("child.yml")).await.unwrap();
         assert_eq!(spec.name, "child-test");
         assert_eq!(spec.target.registry, "ocx.sh");
-        assert!(spec.cascade);
+        assert!(spec.cascade.enabled);
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::None);
     }
 
@@ -2047,11 +2073,95 @@ source:
         assert_eq!(spec.name, "chain-test");
         assert_eq!(spec.target.registry, "ocx.sh");
         // cascade: grandparent=false, parent=true → true
-        assert!(spec.cascade);
+        assert!(spec.cascade.enabled);
         // build_timestamp: grandparent=date, not overridden → date
         assert_eq!(spec.build_timestamp, BuildTimestampFormat::Date);
         // skip_prereleases: parent=true → true
         assert!(spec.skip_prereleases);
+    }
+
+    #[tokio::test]
+    async fn load_spec_extends_replaces_cascade_wholesale() {
+        // `cascade` is one key, whichever shape it takes: a child spelling the
+        // bool must not inherit the base's schedule, or opting a mirror out of
+        // repair would leave it on a timer.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("base.yml"),
+            r#"
+target:
+  registry: ocx.sh
+  repository: test
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+cascade:
+  schedule: "17 4 * * 1"
+"#,
+        )
+        .unwrap();
+
+        let child_body = r#"
+extends: base.yml
+name: chain-test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+"#;
+        let child = dir.path().join("child.yml");
+
+        std::fs::write(&child, child_body).unwrap();
+        let inherited = load_spec(&child).await.unwrap();
+        assert_eq!(inherited.cascade.schedule.as_deref(), Some("17 4 * * 1"));
+
+        std::fs::write(&child, format!("{child_body}cascade: false\n")).unwrap();
+        let overridden = load_spec(&child).await.unwrap();
+        assert_eq!(
+            overridden.cascade,
+            CascadeConfig {
+                enabled: false,
+                schedule: None
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn load_spec_rejects_a_cron_that_could_add_its_own_triggers() {
+        // Both cron fields are spliced into a generated workflow's `on:` block
+        // inside a single-quoted scalar. A value that closes that scalar adds a
+        // trigger of the spec's choosing — and any non-schedule trigger makes
+        // the cascade repair run for real, unattended. Reject before render.
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+name: cron-guard
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+"#;
+        let spec_path = dir.path().join("mirror.yml");
+
+        for field in ["cascade:\n  schedule", "versions:\n  poll_interval"] {
+            std::fs::write(
+                &spec_path,
+                format!("{body}{field}: \"0 4 * * 1'\\n  push:\\n    branches: [main]\\n#\"\n"),
+            )
+            .unwrap();
+            let err = load_spec(&spec_path).await.expect_err("injected cron must be rejected");
+            assert!(matches!(err, MirrorError::SpecInvalid(_)), "{field}: {err}");
+        }
+
+        std::fs::write(&spec_path, format!("{body}cascade:\n  schedule: \"17 4 * * 1\"\n")).unwrap();
+        load_spec(&spec_path).await.expect("a plain cron must still load");
     }
 
     // -- variant tests --

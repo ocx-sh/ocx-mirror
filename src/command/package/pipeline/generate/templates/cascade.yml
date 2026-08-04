@@ -4,11 +4,12 @@
 
 name: cascade{WORKFLOW_SUFFIX}
 
-# Dispatch only. A cascade breaks when a push lands out of order or dies
-# half-way — a state a maintainer decides to act on, never something to
-# re-point published rolling tags over on a timer.
+# A cascade breaks when a push lands out of order or dies half-way. Dispatch is
+# always available, and defaults to auditing. An operator who wants the repair
+# unattended opts in with `cascade: { schedule: … }` in the spec — a scheduled
+# run repairs for real, never as a dry run.
 on:
-  workflow_dispatch:
+{CASCADE_SCHEDULE_BLOCK}  workflow_dispatch:
     inputs:
       dry_run:
         description: Report the repair plan without writing a tag or touching the index
@@ -16,7 +17,11 @@ on:
         default: true
 
 concurrency:
-  group: mirror-${{ github.workflow }}-cascade
+  # This spec's publish group, baked in: a repair and a live push both re-point
+  # the same rolling aliases, so neither ever runs while the other is in flight.
+  # GitHub keeps one *pending* run per group, so whichever of the two is waiting
+  # is cancelled when a newer run of either workflow queues behind the live one.
+  group: {PUSH_CONCURRENCY_GROUP}
   cancel-in-progress: false
 
 jobs:
@@ -36,7 +41,9 @@ jobs:
           # landed — the same degradation the push job has.
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
           # Read through the environment, never interpolated into the script.
-          DRY_RUN: ${{ inputs.dry_run }}
+          # `inputs.dry_run` is empty on a schedule event, which would read as
+          # "not true" by accident — spell the scheduled answer out instead.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
         run: |
           set -euo pipefail
           if [ "${DRY_RUN}" = "true" ]; then

@@ -57,11 +57,11 @@ ocx-mirror schema <TARGET>
 
 ## `package pipeline` {#pipeline}
 
-Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce`, `patch` and `cascade` each own a standalone workflow outside that chain; the `patch`, `announce` and `cascade` ones are `workflow_dispatch` only, because all three act on an already-published mirror on a maintainer's decision. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
+Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce`, `patch` and `cascade` each own a standalone workflow outside that chain; the `patch` and `announce` ones are `workflow_dispatch` only, because both act on an already-published mirror on a maintainer's decision; `cascade` is dispatch too, plus an optional [schedule][spec-cascade]. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
-Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` / `patch.yml` set, plus `cascade.yml` when it publishes rolling tags (`cascade: true`, the default) and `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
+Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` / `patch.yml` set, plus `cascade.yml` when it publishes rolling tags ([`cascade`][spec-cascade] left at its default, or set to a map) and `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
 
 ```sh
 ocx-mirror package pipeline generate ci [OPTIONS]
@@ -186,11 +186,13 @@ Needs [`OCX_ANNOUNCE_TOKEN`][env-announce-token] unless `--dry-run` is set. Exit
 
 Repair the target repository's rolling-tag graph by spawning `ocx package cascade repair`. A cascade breaks when a push lands out of order or dies half-way: `3.29.0` is published, but `3.29`, `3` and `latest` still name the version before it, so everyone installing the unpinned name gets the older package while the registry looks complete. The repair re-points those aliases at content the registry already serves — no upstream download, no new layer.
 
-Runs from the generated `cascade.yml` workflow, emitted for every spec that publishes rolling tags. `workflow_dispatch` only: which alias is *supposed* to be current is a maintainer's call, and re-pointing published rolling tags on a timer is the opposite of that. Its single `dry_run` input defaults to **true**, so a dispatch that changes nothing audits.
+Runs from the generated `cascade.yml` workflow, emitted for every spec that publishes rolling tags. Dispatch is always available, and its single `dry_run` input defaults to **true**, so a dispatch that changes nothing audits.
 
 ```sh
 gh workflow run cascade.yml --repo <owner>/<mirror> -f dry_run=false
 ```
+
+**Schedule mode.** A spec that sets [`cascade: { schedule: … }`][spec-cascade] also gets a `schedule:` trigger on that workflow, keeping the dispatch. `dry_run` has no value outside a dispatch, so the workflow resolves `DRY_RUN` itself — `false` on a schedule event, the input's value on a dispatch — and a scheduled run therefore repairs for real. A healthy one is silent green: nothing to fix, exit 0, no announce. It reds on exit 65 — findings that remain — and on exit 1 when the repair could not run at all (see the exit-code note below). Green is *not* proof a repair happened: the repair step is skipped when the registry credentials are absent, and a skipped step leaves the job green, so a scheduled run on a repo whose token was never set or has been rotated looks exactly like a healthy one. The `::notice::` from the credential check is the only signal, and on a timer nobody reads it — check it after enabling the schedule, and again after any token rotation.
 
 ```sh
 ocx-mirror package pipeline cascade [OPTIONS]
@@ -264,6 +266,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 [ref-mirror-yml]: ./mirror-yml.md
 [ref-multi-spec]: ./mirror-yml.md#multi-spec
 [spec-announce]: ./mirror-yml.md#announce
+[spec-cascade]: ./mirror-yml.md#cascade
 [spec-concurrency]: ./mirror-yml.md#concurrency
 [env-discord-hook]: ./environment.md#ocx-mirror-discord-hook
 [env-discord-user-id]: ./environment.md#ocx-mirror-discord-user-id

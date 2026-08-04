@@ -15,7 +15,7 @@
 //! | `describe` | `describe` | Publish catalog metadata (README + logo) to the registry |
 //! | `announce` | `announce` | Announce every tag the registry holds into the index (dispatch-only) |
 //! | `patch` | (none) | Republish published metadata against the existing layers (CLI-only) |
-//! | `cascade` | `cascade` | Repair broken rolling aliases and announce what moved (dispatch-only) |
+//! | `cascade` | `cascade` | Repair broken rolling aliases and announce what moved (dispatch, or on a timer via `cascade.schedule`) |
 
 pub mod announce;
 pub mod cascade;

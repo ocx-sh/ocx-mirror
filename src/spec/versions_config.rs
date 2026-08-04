@@ -55,5 +55,8 @@ impl VersionsConfig {
         {
             errors.push(format!("versions.max: invalid version '{max}'"));
         }
+        if let Some(cron) = &self.poll_interval {
+            super::validate_cron("versions.poll_interval", cron, errors);
+        }
     }
 }

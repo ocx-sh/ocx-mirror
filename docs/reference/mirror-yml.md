@@ -16,7 +16,7 @@
 | `libc_lint` | boolean | No | Check a Linux build's declared `os.features` against the libc its binaries link against (`true` by default). See [`libc_lint`](#libc-lint). |
 | `asset_type` | string | No | `Archive` (default) or `Binary` |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
-| `cascade` | boolean | No | Cascade rolling tags on push (`true` by default). Also gates the generated `cascade.yml` repair workflow — see [build_timestamp & GC-safe publishing](#build-timestamp) and [`pipeline cascade`][cli-pipeline-cascade]. |
+| `cascade` | boolean or object | No | Cascade rolling tags on push (`true` by default), and optionally put the generated repair workflow on a timer. See [`cascade`](#cascade). |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
 | `verify` | object | No | Checksum verification options |
 | `concurrency` | object | No | Parallel download limits, source rate limiting, push retry policy. See [`concurrency`](#concurrency). |
@@ -258,6 +258,29 @@ A push can fail transiently — a registry connect timeout, a blip mid-upload �
 **Logging.** A retried attempt logs `push attempt {n}/{total}`; a give-up message distinguishes an exhausted retry budget from an exit code that was never eligible for retry, and both name `concurrency.max_retries` so the fix is obvious from the log line.
 
 `pipeline patch`'s republish is bounded by the same 3600-second timeout but is deliberately never retried — it only re-emits a config blob against layers that are already published, so re-dispatching the workflow by hand is cheaper than a retry ladder.
+
+## `cascade` {#cascade}
+
+Whether a push re-points the rolling tags `X.Y`, `X` and `latest` at the version it just published. Defaults to `true`; `cascade: false` publishes exact version tags only, and drops the generated `cascade.yml` repair workflow along with them — a mirror with no rolling alias has no graph to repair.
+
+The map form is the same "on", with a schedule attached to that repair workflow:
+
+```yaml
+cascade:
+  schedule: "17 4 * * 1"   # optional; UTC cron, GitHub's syntax
+```
+
+A map always means enabled — `cascade: {}` is `cascade: true`. The cron string is passed through verbatim, exactly as [`versions.poll_interval`](#top-level) is: a spec is rejected (exit 65) when the expression is empty or holds a character outside cron's `0-9 A-Z a-z * / , -` charset, and GitHub validates everything beyond that. Give it a cron of its own — a `cascade.schedule` equal to `versions.poll_interval` collides in the shared concurrency group on every cycle, by construction.
+
+**Without a schedule** (the default) `cascade.yml` is `workflow_dispatch` only, and its `dry_run` input defaults to true — a dispatch that names nothing audits.
+
+**With a schedule** the dispatch stays, and each scheduled run repairs for real: `dry_run` has no value on a timer, so the workflow supplies `false`. A healthy scheduled run is **silent green** — the repair finds nothing, exits 0, announces nothing (the announce is never invoked with an empty tag set). Red means [exit 65][cli-pipeline-cascade] — findings the run could not re-point, the state worth a notification — or exit 1, the repair failing to run.
+
+Green does not prove a repair ran, though: the repair step is skipped when the registry credentials are missing, and a skipped step keeps the job green. A repo whose `OCX_MIRROR_REGISTRY_TOKEN` was never set or has since been rotated therefore produces the same silent green forever. Read the run's `::notice::` once after enabling the schedule, and again after every token rotation.
+
+The repair shares the push workflow's `concurrency` group, so neither one ever runs while the other is mid-way through re-pointing the same aliases. GitHub keeps a single *pending* run per group, so the trade is that whichever of the two is queued gets cancelled when a newer run of either workflow arrives — a scheduled repair can be dropped (grey "cancelled", never red) by a busy publish, and a pending publish can now be dropped by a repair.
+
+Cascading interacts with [`build_timestamp`](#build-timestamp): re-pointing a rolling tag leaves the digest it used to name untagged, which is a GC hazard when `build_timestamp: none`.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
@@ -782,7 +805,7 @@ Every generated pipeline invocation in a nested spec's workflows names its own s
 
 **`--repo-root`.** Generated files are written under `--repo-root`, and every filename above is computed relative to it. Left unset, it defaults to the deepest directory every `--spec` given shares — for a single spec that is simply its parent directory, so `generate ci --spec /elsewhere/repo/mirror.yml` still writes into that repository rather than the current directory. A spec that does not resolve under `--repo-root` (explicit or inferred) is rejected with exit 64, naming `--repo-root` as the fix.
 
-**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` follows the same rule for its own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested); `patch-<dir>.yml`, `cascade-<dir>.yml` and `announce-from-registry-<dir>.yml` have no path triggers at all, being dispatch-only. Each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
+**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` follows the same rule for its own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested); `patch-<dir>.yml`, `cascade-<dir>.yml` and `announce-from-registry-<dir>.yml` have no path triggers at all — they are dispatched, or (for a `cascade-<dir>.yml` with a [`schedule`](#cascade)) run on a timer. Each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
 
 **One drift guard per repository.** `verify-generated.yml` is emitted once no matter how many specs the repository holds. Its committed `paths:` list is the union of every spec's own triggers, and the `generate ci --check` command line it bakes in names every spec explicitly with `--spec` as soon as there is more than one — `--spec` appends rather than replaces, so a guard naming only a subset would silently stop checking the rest while staying green. The guard also reds when a `.github/workflows/*.yml` file carries the `# Generated by ocx-mirror` header but is not in the current spec set's output — the file a dropped spec leaves behind, which would otherwise keep running on schedule against a spec that no longer exists. Hand-written workflows without that header are never inspected.
 

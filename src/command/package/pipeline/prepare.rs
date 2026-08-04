@@ -188,7 +188,7 @@ fn build_tasks_from_plan(
             bin_scan: variant.bin_scan,
             libc_lint: variant.libc_lint,
             verify_config: spec.verify.clone(),
-            cascade: spec.cascade,
+            cascade: spec.cascade.enabled,
             spec_dir: spec_dir.to_path_buf(),
             asset_type,
             variant: variant.name.as_ref().map(|name| VariantContext {
@@ -271,7 +271,7 @@ async fn build_tasks_for_version(
                             bin_scan: variant.bin_scan,
                             libc_lint: variant.libc_lint,
                             verify_config: spec.verify.clone(),
-                            cascade: spec.cascade,
+                            cascade: spec.cascade.enabled,
                             spec_dir: spec_dir.to_path_buf(),
                             asset_type,
                             variant: variant.name.as_ref().map(|name| VariantContext {

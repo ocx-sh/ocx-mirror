@@ -111,7 +111,7 @@ This writes five workflows under `.github/workflows/`:
 | `mirror.yml` | The pipeline: discover → prepare → test → push → notify |
 | `describe.yml` | Publishes catalog metadata (README + logo) to the registry |
 | `patch.yml` | Dispatch-only: re-emits published manifests with current metadata |
-| `cascade.yml` | Dispatch-only: repairs the rolling-tag cascade and announces the fix |
+| `cascade.yml` | Repairs the rolling-tag cascade and announces the fix — dispatch, or on a timer via [`cascade: { schedule: … }`][ref-cascade] |
 | `verify-generated.yml` | Drift guard — fails CI when generated workflows are hand-edited |
 
 The workflows are generated files: edit the spec, re-run `ocx-mirror package pipeline generate ci`, and commit the result. `--check` mode (used by the drift guard) exits 65 when the committed files no longer match the spec.
@@ -132,5 +132,6 @@ Finally, configure two repository secrets so the push job can log in to the targ
 <!-- internal -->
 [ref-mirror-yml]: ./reference/mirror-yml.md
 [ref-build-timestamp]: ./reference/mirror-yml.md#build-timestamp
+[ref-cascade]: ./reference/mirror-yml.md#cascade
 [ref-cli]: ./reference/cli.md
 [ref-environment]: ./reference/environment.md

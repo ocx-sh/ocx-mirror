@@ -331,7 +331,7 @@ async fn republish(
         .map_err(|e| format!("failed to write {}: {e}", sidecar.display()))?;
 
     let target_ref = format!("{}:{}", spec.target.reference(), tag);
-    let args = patch_push_args(&target_ref, image, sidecar, annotations, spec.cascade)?;
+    let args = patch_push_args(&target_ref, image, sidecar, annotations, spec.cascade.enabled)?;
 
     push_once(ocx_binary, &args, PUSH_TIMEOUT)
         .await

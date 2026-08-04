@@ -199,7 +199,7 @@ impl Sync {
                     bin_scan: eff_variant.bin_scan,
                     libc_lint: eff_variant.libc_lint,
                     verify_config: spec.verify.clone(),
-                    cascade: spec.cascade,
+                    cascade: spec.cascade.enabled,
                     spec_dir: spec_dir.to_path_buf(),
                     asset_type,
                     variant: rv.variant.as_ref().map(|name| VariantContext {

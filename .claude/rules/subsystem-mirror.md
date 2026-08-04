@@ -38,6 +38,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping). Keys are `os/arch[/variant][/os_version][+libc.<flavor>]` parsed via `ocx_lib` `Platform::from_str`; a `+libc.glibc`/`+libc.musl` suffix lands in `os_features` and publishes as an OCI `os.features` entry |
 | `spec/asset_type.rs` | `AssetTypeConfig` (Archive vs Binary) |
 | `spec/versions_config.rs` | Version filter (min/max bounds, new_per_run, backfill order) |
+| `spec/cascade_config.rs` | `CascadeConfig` — `cascade:` as bool or `{schedule}` map (hand-rolled `Deserialize` visitor, so the map branch keeps its `unknown field` diagnostic; map implies enabled); `validate` charset-checks the cron |
 | `spec/verify_config.rs` | Checksum verify options |
 | `spec/metadata_config.rs` | Metadata.json path config |
 | `spec/concurrency_config.rs` | Parallel download/bundle limits, source rate limiting, push retry count (`max_retries`) — no push-parallelism knob (`max_pushes` removed; a spec still setting it keeps parsing, ignored) |
@@ -102,7 +103,7 @@ depends on.
 
 ## Spec Format (YAML)
 
-Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade`, `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`, `bin_scan` (off/auto/verify), `libc_lint` (bool, default **on** — total opt-out for the create-time libc check, mirroring `ocx package create --no-libc-lint`).
+Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade` (bool, or a map `{schedule}` that also puts the generated repair workflow on a timer), `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`, `bin_scan` (off/auto/verify), `libc_lint` (bool, default **on** — total opt-out for the create-time libc check, mirroring `ocx package create --no-libc-lint`).
 
 Source types:
 - `github_release`: `{owner, repo, tag_pattern}` — regex with `(?P<version>...)` capture
@@ -159,7 +160,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `pipeline prepare --version V [--plan plan.json]` | Prepare — download + bundle | One version across all platforms; writes `bundle-{V}-{P}.tar.xz` per platform. With `--plan`, tasks come from the plan's resolved assets — the source is never queried (one crawl per run, issue #160); without it, falls back to a standalone crawl |
 | `pipeline push` | Push — publish greens | Serial driver; AND across containers for each `(V, P)`; sole cascade-tag writer in the publish pipeline (`pipeline cascade` below re-points existing aliases on dispatch) |
 | `pipeline notify` | Notify — Discord report | Reads `run-summary.json`; silent when all skipped-existing |
-| `pipeline cascade [--dry-run]` | Repair — re-point broken rolling aliases (dispatch-only) | Drives `ocx package cascade repair`; exit 65 = findings remain, everything else non-zero = exit 1. Announces the tags it moved even after a 65, never on a dry run |
+| `pipeline cascade [--dry-run]` | Repair — re-point broken rolling aliases (dispatch; timer when `cascade.schedule` is set) | Drives `ocx package cascade repair`; exit 65 = findings remain, everything else non-zero = exit 1. Announces the tags it moved even after a 65, never on a dry run |
 
 ### R1: Cross-mirror concurrency invariant
 
@@ -172,6 +173,10 @@ concurrency:
 ```
 
 `cancel-in-progress: false` ensures a push job is never aborted mid-flight, preventing cascade-tag corruption. Different mirror repos use different workflow names so the group key remains repo-scoped.
+
+`cascade.yml` joins the **same** group rather than owning one: a repair and a live push both re-point the same rolling aliases. It cannot read the push workflow's `github.workflow`, so the renderer bakes the resolved literal (`mirror-<spec.name>-publish`, since the push workflow's `name:` *is* `spec.name`) into the generated file — `publish_concurrency_group` in `ci.rs`, pinned by a test that derives both ends from one render.
+
+The guarantee is mutual exclusion, not a queue: GitHub holds one *pending* run per group, so the run waiting behind the live one is cancelled when a newer run of either workflow arrives. A scheduled repair can therefore be dropped by a busy publish (grey "cancelled", never red), and a pending publish can be dropped by a repair — accepted, since Actions offers no mutex primitive and neither outcome corrupts tags. A spec must not give `cascade.schedule` the same cron as `versions.poll_interval`.
 
 ### R3: Webhook URL rejection invariant
 
