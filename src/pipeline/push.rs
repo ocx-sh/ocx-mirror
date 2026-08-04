@@ -36,11 +36,9 @@ pub async fn push_and_cascade(
 ) -> Result<MirrorResult> {
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
-    // Mirror publishes each bundle as a whole archive layer — no per-layer
-    // strip/prefix rewriting, so the layout stays at its default (none). The
-    // bundle was just built from freshly downloaded upstream assets, so no
-    // repository in the target registry already holds the blob: there is no
-    // cross-repository mount source to try.
+    // ponytail: default layout (no strip/prefix) preserves pre-bump behavior
+    // exactly. Archive/binary pushes never cross-repository mount — only the
+    // pylock env-push path's wheel layers carry `mount_from`.
     let layers = [LayerRef::File {
         path: bundle_path.to_path_buf(),
         layout: LayerLayoutSpec::default(),
@@ -51,6 +49,12 @@ pub async fn push_and_cascade(
     // push path (`command::package::pipeline::push`) already gets by shelling
     // out — both mirror publish paths write the digest-named safety-net tag.
     let canonical_tag = true;
+
+    // Every push below discards its `PushOutcome` deliberately: this leg pushes
+    // one self-contained bundle layer that can never be mounted, so
+    // `layer_counts` carries nothing to report, and the sync path it serves
+    // writes no run-summary. Layer reuse is reported only on the env-push leg
+    // (`python_push`), whose layers do carry `:from=` mount tails.
 
     if cascade {
         publisher
