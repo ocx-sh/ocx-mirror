@@ -42,6 +42,10 @@ pub enum MirrorError {
     WebhookUnavailable(String),
     /// Discord webhook returned 401/403 — secret rotated or misconfigured.
     WebhookPermissionDenied(String),
+    /// `ocx package cascade repair` ran and findings remain on the target
+    /// repository. The audit outcome, not a failure of the repair — carries
+    /// the target `<registry>/<repository>`.
+    CascadeUnrepaired(String),
 }
 
 impl MirrorError {
@@ -68,6 +72,7 @@ impl MirrorError {
             Self::TemplateError(_) => ExitCode::IoError,
             Self::WebhookUnavailable(_) => ExitCode::Unavailable,
             Self::WebhookPermissionDenied(_) => ExitCode::PermissionDenied,
+            Self::CascadeUnrepaired(_) => ExitCode::DataError,
         }
     }
 }
@@ -107,6 +112,7 @@ impl std::fmt::Display for MirrorError {
             Self::TemplateError(msg) => write!(f, "template error: {msg}"),
             Self::WebhookUnavailable(msg) => write!(f, "webhook unavailable: {msg}"),
             Self::WebhookPermissionDenied(msg) => write!(f, "webhook permission denied: {msg}"),
+            Self::CascadeUnrepaired(target) => write!(f, "cascade findings remain for {target}"),
         }
     }
 }
@@ -153,6 +159,15 @@ mod tests {
         // Issue #160: PlanError → DataError (65) — plan.json input is malformed
         // or lacks resolved assets; same class as RunSummaryError.
         let err = MirrorError::PlanError("version '1.2.3' not present in plan".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn cascade_unrepaired_maps_to_data_error() {
+        // 65 is `ocx package cascade repair`'s own "findings remain" code, and
+        // this variant exists to carry it through unchanged — a dispatch that
+        // reported a broken cascade must not read as the tool failing (1).
+        let err = MirrorError::CascadeUnrepaired("ghcr.io/ocx-sh/cmake".into());
         assert_eq!(err.kind_exit_code(), ExitCode::DataError);
     }
 

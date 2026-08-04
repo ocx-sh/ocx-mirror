@@ -31,6 +31,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/package/pipeline/prepare.rs` | `pipeline prepare --version V [--plan plan.json]` — download + bundle; `--plan` builds from discover's resolved assets, no source re-crawl (issue #160) |
 | `command/package/pipeline/push.rs` | `pipeline push` — serial push driver, writes run-summary.json |
 | `command/package/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
+| `command/package/pipeline/cascade.rs` | `pipeline cascade` — wraps `ocx package cascade repair` (needs ocx ≥ 0.5.4), then announces the tags it moved |
 | `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
 | `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex) |
 | `spec/target.rs` | `Target` (registry + repository) |
@@ -143,10 +144,11 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `TemplateError` | 74 (IoError) | Workflow template render failure |
 | `WebhookUnavailable` | 69 (Unavailable) | Discord 5xx / timeout in `pipeline notify` |
 | `WebhookPermissionDenied` | 77 (PermissionDenied) | Discord 401/403 — webhook secret likely rotated |
+| `CascadeUnrepaired` | 65 (DataError) | `ocx package cascade repair` ran and findings remain — carries `ocx`'s own exit 65 through unchanged, so an audit result never reads as the tool breaking (which stays `ExecutionFailed`) |
 
 ## Test Pipeline {#test-pipeline}
 
-`ocx-mirror package pipeline` is a family of five subcommands that together implement per-mirror CI pipelines. The pipeline smoke-tests every `(version, platform)` pair before publishing to the registry, preventing broken packages from reaching users.
+`ocx-mirror package pipeline` is a family of six subcommands that together implement per-mirror CI pipelines. The pipeline smoke-tests every `(version, platform)` pair before publishing to the registry, preventing broken packages from reaching users.
 
 ### Subcommand contracts
 
@@ -155,8 +157,9 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `pipeline generate ci` | Renderer — writes `.github/workflows/{mirror,describe,verify-generated}.yml` | Idempotent; `--check` exits 65 on drift. Emits `verify-generated.yml` (drift guard, R4) unless `allow_manual_edits: true`. Rejects hardcoded webhook URLs at parse time (R3) |
 | `pipeline plan` | Discover — find new work | Side-effect-free; calls registry + source; emits `plan.json` (schema v2 carries resolved asset URLs per entry) |
 | `pipeline prepare --version V [--plan plan.json]` | Prepare — download + bundle | One version across all platforms; writes `bundle-{V}-{P}.tar.xz` per platform. With `--plan`, tasks come from the plan's resolved assets — the source is never queried (one crawl per run, issue #160); without it, falls back to a standalone crawl |
-| `pipeline push` | Push — publish greens | Serial driver; AND across containers for each `(V, P)`; sole cascade-tag writer in pipeline |
+| `pipeline push` | Push — publish greens | Serial driver; AND across containers for each `(V, P)`; sole cascade-tag writer in the publish pipeline (`pipeline cascade` below re-points existing aliases on dispatch) |
 | `pipeline notify` | Notify — Discord report | Reads `run-summary.json`; silent when all skipped-existing |
+| `pipeline cascade [--dry-run]` | Repair — re-point broken rolling aliases (dispatch-only) | Drives `ocx package cascade repair`; exit 65 = findings remain, everything else non-zero = exit 1. Announces the tags it moved even after a 65, never on a dry run |
 
 ### R1: Cross-mirror concurrency invariant
 
@@ -176,7 +179,7 @@ concurrency:
 
 ### R4: Generated drift guard (`verify-generated.yml`)
 
-`pipeline generate ci` emits `.github/workflows/verify-generated.yml` alongside each spec's `mirror.yml` + `describe.yml` + `patch.yml` (+ `announce-from-registry.yml` when the spec announces). On `pull_request` + push to `main` it runs `ocx-mirror package pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
+`pipeline generate ci` emits `.github/workflows/verify-generated.yml` alongside each spec's `mirror.yml` + `describe.yml` + `patch.yml` (+ `cascade.yml` when the spec cascades, + `announce-from-registry.yml` when the spec announces). On `pull_request` + push to `main` it runs `ocx-mirror package pipeline generate ci --check` (called directly — setup-ocx activates the project toolchain onto PATH), which re-renders from `mirror.yml` and exits 65 on drift — so a hand-edit to any generated workflow fails CI (forbids manual edits to the generated surface). The guard checks all rendered files, including itself.
 
 **Pins are mirror-repo-owned.** Before diffing, `check_drift` normalizes every `uses: owner/action@<ref>` line (`normalize_for_drift` in `ci.rs`), stripping the `@<ref>` digest/tag and any trailing `# vX` comment. A downstream Renovate/Dependabot bump of an action pin therefore does **not** trip the guard — the mirror repo owns its pins. The `owner/action` identity is preserved, so swapping in a *different* action, or any change to step logic, still reds. Templates ship a known-good seed pin (incl. `ocx-sh/setup-ocx`, SHA-pinned) for the first render.
 

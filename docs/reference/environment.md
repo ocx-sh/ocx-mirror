@@ -65,14 +65,16 @@ These three names are the **complete** environment surface for annotations — t
 
 The GitHub credential `ocx package announce` uses to push the fork branch and open the index pull request. Read from the environment and handed to the `ocx` subprocess; `ocx-mirror` never stores it and never logs it.
 
-Only mirrors with an [`announce:`][spec-announce] block need it. The two commands read it differently:
+Only mirrors with an [`announce:`][spec-announce] block need it. The commands read it differently:
 
 | Command | Without the token |
 |---------|-------------------|
 | [`pipeline push`][cli-push] | Degrades: the run publishes normally, emits a GitHub notice, and records `skipped_no_credential` in `run-summary.json`. A mirror without the secret is a valid configuration. |
 | [`pipeline announce`][cli-announce] | Fails. Opening the index pull request is the only thing this command does — except under `--dry-run`, which writes to a temporary directory and needs no token. |
+| [`pipeline patch`][cli-patch] | Degrades like `pipeline push`: republished manifests land, the index announce is skipped with a GitHub notice. |
+| [`pipeline cascade`][cli-cascade] | Degrades like `pipeline push`: repaired tags land on the registry, the index announce is skipped with a GitHub notice. |
 
-Both generated workflows thread it in from a repository secret of the same name:
+The generated workflows thread it in from a repository secret of the same name:
 
 ```yaml
 # In the generated workflow (do not write by hand):
@@ -82,7 +84,7 @@ env:
 
 It is deliberately **not** the workflow's own `GITHUB_TOKEN`: the pull request targets a different repository ([`ocx-sh/index`][index-repo], from a fork), which the run's automatic token cannot reach.
 
-**Scope:** `pipeline push`, `pipeline announce`.
+**Scope:** `pipeline push`, `pipeline announce`, `pipeline patch`, `pipeline cascade`.
 
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
@@ -126,4 +128,6 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [cli-push]: ./cli.md#pipeline-push
 [cli-notify]: ./cli.md#pipeline-notify
 [cli-announce]: ./cli.md#pipeline-announce
+[cli-patch]: ./cli.md#pipeline-patch
+[cli-cascade]: ./cli.md#pipeline-cascade
 [spec-announce]: ./mirror-yml.md#announce

@@ -104,12 +104,14 @@ Then, from the root of the mirror repository:
 ocx-mirror package pipeline generate ci
 ```
 
-This writes three workflows under `.github/workflows/`:
+This writes five workflows under `.github/workflows/`:
 
 | File | Purpose |
 |------|---------|
 | `mirror.yml` | The pipeline: discover → prepare → test → push → notify |
 | `describe.yml` | Publishes catalog metadata (README + logo) to the registry |
+| `patch.yml` | Dispatch-only: re-emits published manifests with current metadata |
+| `cascade.yml` | Dispatch-only: repairs the rolling-tag cascade and announces the fix |
 | `verify-generated.yml` | Drift guard — fails CI when generated workflows are hand-edited |
 
 The workflows are generated files: edit the spec, re-run `ocx-mirror package pipeline generate ci`, and commit the result. `--check` mode (used by the drift guard) exits 65 when the committed files no longer match the spec.

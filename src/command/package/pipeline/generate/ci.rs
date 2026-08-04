@@ -48,6 +48,7 @@ const DESCRIBE_TEMPLATE: &str = include_str!("templates/describe.yml");
 const VERIFY_GENERATED_TEMPLATE: &str = include_str!("templates/verify-generated.yml");
 const ANNOUNCE_FROM_REGISTRY_TEMPLATE: &str = include_str!("templates/announce-from-registry.yml");
 const PATCH_TEMPLATE: &str = include_str!("templates/patch.yml");
+const CASCADE_TEMPLATE: &str = include_str!("templates/cascade.yml");
 
 // ── Spec placement ───────────────────────────────────────────────────────────
 
@@ -182,8 +183,9 @@ fn slash_path(path: &Path) -> String {
 ///
 /// One repository may hold several specs; `--spec` repeats. Generated
 /// filenames derive from where each spec sits under the repository root:
-/// `<root>/mirror.yml` renders `mirror.yml`, `describe.yml`, `patch.yml` and —
-/// when it announces — `announce-from-registry.yml`, while
+/// `<root>/mirror.yml` renders `mirror.yml`, `describe.yml`, `patch.yml`,
+/// `cascade.yml` when it cascades and `announce-from-registry.yml` when it
+/// announces, while
 /// `<root>/py3.13/mirror.yml` renders the same set suffixed `-py3.13`. The
 /// `verify-generated.yml` drift guard is
 /// emitted once per repository and bakes in the full spec list, so the
@@ -1349,6 +1351,28 @@ fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 
+/// Render the `cascade.yml` rolling-tag repair workflow.
+///
+/// Dispatch-only, with `dry_run` defaulting to true: a broken cascade is a
+/// state a maintainer decides to act on, and re-pointing published rolling
+/// tags on a timer is the opposite of that. Emitted only for a spec that
+/// cascades — a mirror publishing no rolling alias has no graph to repair.
+///
+/// Takes the same `packages: write` block describe and patch do: a repair
+/// writes tags to the target repository. The announce it chains into writes to
+/// the index repository with `OCX_ANNOUNCE_TOKEN`.
+fn render_cascade(spec: &MirrorSpec, slot: &SpecSlot) -> String {
+    CASCADE_TEMPLATE
+        .replace("{OCX_MIRROR_VERSION}", VERSION)
+        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{SPEC_SOURCE}", &slot.source())
+        .replace("{SPEC_ARG}", &slot.spec_arg())
+        .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
+        .replace("{CASCADE_PERMISSIONS}", render_registry_write_permissions(spec))
+        .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+        .replace("{OCX_CLI_VERSION}", ocx_cli_version())
+}
+
 /// The `--spec` arguments the drift guard re-renders the repository with.
 ///
 /// Empty for the lone repo-root `mirror.yml`, whose path is what `--spec`
@@ -1412,6 +1436,11 @@ fn render_spec(spec: &MirrorSpec, slot: &SpecSlot) -> BTreeMap<PathBuf, String> 
     // metadata drift, and a repository only discovers it needs the workflow at
     // the moment it already needs to have dispatched it.
     files.insert(slot.workflow("patch"), render_patch(spec, slot));
+
+    // Rolling-tag repair: only a spec that cascades has aliases to break.
+    if spec.cascade {
+        files.insert(slot.workflow("cascade"), render_cascade(spec, slot));
+    }
 
     // Index catch-up workflow: only a mirror that announces has an index entry
     // to catch up. Emitted for every such mirror — there is no separate opt-in,
@@ -2061,6 +2090,74 @@ mod tests {
     }
 
     #[test]
+    fn cascade_workflow_is_dispatch_only_and_carries_the_token() {
+        // A schedule or push trigger here would re-point published rolling tags
+        // on every commit, which is the one thing a repair must never do on its
+        // own. `dry_run` defaulting to true is the other half: a dispatch that
+        // names nothing audits.
+        let dir = tempdir().unwrap();
+        render_fixture("mirror-ghcr-announce.yml", dir.path()).expect("announce fixture must render");
+        let rendered = std::fs::read_to_string(dir.path().join(".github/workflows/cascade.yml")).unwrap();
+
+        let parsed: serde_yaml_ng::Value = serde_yaml_ng::from_str(&rendered)
+            .unwrap_or_else(|e| panic!("cascade.yml must be parseable YAML: {e}\n{rendered}"));
+
+        let triggers = &parsed["on"];
+        let mapping = triggers
+            .as_mapping()
+            .unwrap_or_else(|| panic!("triggers must be a mapping, got: {triggers:?}"));
+        assert_eq!(
+            mapping.keys().map(|k| k.as_str().unwrap()).collect::<Vec<_>>(),
+            vec!["workflow_dispatch"],
+            "cascade must be dispatch-only — no push, no schedule",
+        );
+
+        let dry_run = &triggers["workflow_dispatch"]["inputs"]["dry_run"];
+        assert_eq!(dry_run["type"].as_str(), Some("boolean"), "got: {dry_run:?}");
+        assert_eq!(dry_run["default"].as_bool(), Some(true), "got: {dry_run:?}");
+
+        // A repaired alias points at a digest the index does not know, so the
+        // run ends by announcing — an env: block that lost the secret would
+        // degrade every repair to a silent notice.
+        let step = parsed["jobs"]["cascade"]["steps"]
+            .as_sequence()
+            .expect("cascade job must have steps")
+            .iter()
+            .find(|step| step.get("env").is_some())
+            .expect("one step must carry the announce environment");
+        assert_eq!(
+            step["env"]["OCX_ANNOUNCE_TOKEN"].as_str(),
+            Some("${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
+            "got: {step:?}",
+        );
+
+        // The repair writes tags to the target repository — the read scope
+        // discover gets would 403 the moment it moved one.
+        assert!(
+            rendered.contains("      packages: write\n"),
+            "a ghcr target's repair needs packages: write, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn cascade_workflow_follows_the_spec_flag() {
+        // No cascade, no rolling alias, nothing to repair — and a workflow that
+        // dispatched anyway would report findings on a graph the spec never
+        // asked for.
+        let cascading = render_spec(&spec_from_yaml(SHFMT_SPEC), &root_slot());
+        assert!(
+            cascading.contains_key(Path::new(".github/workflows/cascade.yml")),
+            "cascade defaults to true, so the workflow is emitted by default"
+        );
+
+        let plain = render_spec(&spec_from_yaml(&format!("{SHFMT_SPEC}cascade: false\n")), &root_slot());
+        assert!(
+            !plain.contains_key(Path::new(".github/workflows/cascade.yml")),
+            "a spec that publishes no rolling tag must not get a repair workflow"
+        );
+    }
+
+    #[test]
     fn container_legs_execute_the_artifact_inside_the_image() {
         // The gate this feature exists for: an `os.features` musl/glibc claim is
         // only verified when the mirrored binary is executed by that image's
@@ -2155,9 +2252,9 @@ mod tests {
                 );
             }
         }
-        // 5 in mirror.yml, 1 each in describe / patch / announce-from-registry /
-        // verify-generated.
-        assert_eq!(steps, 9, "every generated workflow's setup-ocx steps must be covered");
+        // 5 in mirror.yml, 1 each in describe / patch / cascade /
+        // announce-from-registry / verify-generated.
+        assert_eq!(steps, 10, "every generated workflow's setup-ocx steps must be covered");
     }
 
     #[test]
@@ -3732,6 +3829,8 @@ announce:
             workflows_in(dir.path()),
             vec![
                 "announce-from-registry-py3.13.yml",
+                "cascade-py3.13.yml",
+                "cascade.yml",
                 "describe-py3.13.yml",
                 "describe.yml",
                 "mirror-py3.13.yml",
@@ -3797,6 +3896,10 @@ announce:
         assert!(
             read("patch-py3.13.yml").contains("pipeline patch --spec py3.13/mirror.yml --metadata-only"),
             "patch must name its own spec"
+        );
+        assert!(
+            read("cascade-py3.13.yml").contains("pipeline cascade --spec py3.13/mirror.yml --dry-run"),
+            "cascade must name its own spec"
         );
 
         // The root spec is the one path `--spec` already defaults to, so it
@@ -4232,6 +4335,7 @@ tests:
                         // mirrors, so it drifts too.
                         ".github/workflows/verify-generated.yml",
                         ".github/workflows/announce-from-registry-py3.13.yml",
+                        ".github/workflows/cascade-py3.13.yml",
                         ".github/workflows/describe-py3.13.yml",
                         ".github/workflows/mirror-py3.13.yml",
                         ".github/workflows/patch-py3.13.yml",

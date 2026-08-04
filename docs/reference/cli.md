@@ -57,11 +57,11 @@ ocx-mirror schema <TARGET>
 
 ## `package pipeline` {#pipeline}
 
-Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce` and `patch` each own a standalone workflow outside that chain; the `patch` and `announce` ones are `workflow_dispatch` only, because both act on an already-published mirror on a maintainer's decision. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
+Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce`, `patch` and `cascade` each own a standalone workflow outside that chain; the `patch`, `announce` and `cascade` ones are `workflow_dispatch` only, because all three act on an already-published mirror on a maintainer's decision. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
-Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` / `patch.yml` set, plus `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
+Render (or check) the CI workflow files for a mirror repository. A repository may hold several mirror specs — `--spec` repeats, once per spec (see [Multi-spec repositories][ref-multi-spec]). Each spec gets its own `mirror.yml` / `describe.yml` / `patch.yml` set, plus `cascade.yml` when it publishes rolling tags (`cascade: true`, the default) and `announce-from-registry.yml` when it has an [`announce:`][spec-announce] block; the repository gets exactly one `verify-generated.yml` drift guard, unless every spec sets `allow_manual_edits: true`. Generated filenames derive from where each spec sits relative to the repository root: the root spec keeps today's names byte for byte, any other spec gets every name suffixed with its own directory.
 
 ```sh
 ocx-mirror package pipeline generate ci [OPTIONS]
@@ -182,6 +182,32 @@ ocx-mirror package pipeline announce [OPTIONS]
 
 Needs [`OCX_ANNOUNCE_TOKEN`][env-announce-token] unless `--dry-run` is set. Exits 64 when the spec has no `announce:` block — there is no index package to announce into.
 
+### `package pipeline cascade` {#pipeline-cascade}
+
+Repair the target repository's rolling-tag graph by spawning `ocx package cascade repair`. A cascade breaks when a push lands out of order or dies half-way: `3.29.0` is published, but `3.29`, `3` and `latest` still name the version before it, so everyone installing the unpinned name gets the older package while the registry looks complete. The repair re-points those aliases at content the registry already serves — no upstream download, no new layer.
+
+Runs from the generated `cascade.yml` workflow, emitted for every spec that publishes rolling tags. `workflow_dispatch` only: which alias is *supposed* to be current is a maintainer's call, and re-pointing published rolling tags on a timer is the opposite of that. Its single `dry_run` input defaults to **true**, so a dispatch that changes nothing audits.
+
+```sh
+gh workflow run cascade.yml --repo <owner>/<mirror> -f dry_run=false
+```
+
+```sh
+ocx-mirror package pipeline cascade [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
+| `--dry-run` | off | Print the repair plan without writing a tag or touching the index |
+
+!!! warning "Requires ocx 0.5.4 or newer"
+    `ocx package cascade` does not exist before 0.5.4, and an older binary rejects the verb as an unknown argument. Until the mirror repository's pinned `ocx` reaches 0.5.4, a dispatch fails with exit 1 and a message naming the requirement.
+
+**Exit 65 means findings remain, not that the tool broke.** A `--dry-run` whose plan is non-empty exits 65, and so does a real repair that could not re-point everything it found — both are audit results a maintainer acts on. Every other non-zero outcome (`ocx` missing the verb, a registry refusal, a failed announce) is exit 1.
+
+**Announces what moved.** A repaired alias points at a digest the index does not know, so a run that re-pointed anything ends by announcing those tags — including a run that exited 65, because the aliases it *did* move are live either way. The announce only happens for a real repair, never a dry run, and only for a spec with an [`announce:`][spec-announce] block. An absent [`OCX_ANNOUNCE_TOKEN`][env-announce-token] is a valid configuration and degrades to a notice, exactly as in [`pipeline push`](#pipeline-push); an announce that fails after tags moved fails the command, since that is the state where the index still points at what the repair replaced.
+
 ### `package pipeline patch` {#pipeline-patch}
 
 Correct the published metadata of versions the registry already holds, without re-downloading or re-uploading anything. Package metadata lives in the OCI config blob, never in a layer, so a fix is a manifest re-emission that re-references the existing layers by digest — the only bytes uploaded are a config blob the size of `metadata.json`. This is the retroactive counterpart to a `metadata-drift` entry in [`pipeline plan`](#pipeline-plan): fix `metadata.json` (or the spec's `metadata:` block) in the mirror repo, then run `patch` to reach every version already published under the old, wrong metadata — the alternative, deleting tags and re-mirroring, costs hours of upstream download and orphans anyone pinned to a digest.
@@ -223,9 +249,9 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 | Code | Meaning | Raised by |
 |------|---------|-----------|
 | 0 | Success | — |
-| 1 | Pipeline execution failure (download, push, verify, republish, or a failed post-patch announce) | `sync`, `prepare`, `push`, `pipeline patch` |
+| 1 | Pipeline execution failure (download, push, verify, republish, a cascade repair that could not run at all, or a failed post-patch / post-repair announce) | `sync`, `prepare`, `push`, `pipeline patch`, `pipeline cascade` |
 | 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root`, an unparseable `--version`/`--min-version`/`--max-version`, a `--version` the registry does not publish or that names a cascade alias | `validate`, `pipeline generate ci`, `pipeline announce`, `pipeline patch` |
-| 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed | all |
+| 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed, cascade findings remain | all |
 | 69 | Upstream source or target registry unreachable; Discord 5xx / timeout | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch` |
 | 74 | I/O error: template render or file write failure | `pipeline generate ci`, `push` |
 | 77 | Discord 401/403 — webhook secret likely rotated | `pipeline notify` |
