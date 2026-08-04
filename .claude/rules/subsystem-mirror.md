@@ -49,7 +49,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
 | `pipeline/orchestrator.rs` | `execute_mirror()`: prepare (concurrent) + push (sequential) |
-| `pipeline/download.rs` | HTTP download with resumption |
+| `pipeline/download.rs` | Single GET buffered to a file — no retry, no resume; an empty body is an error |
 | `pipeline/verify.rs` | Checksum verify |
 | `pipeline/package.rs` | Extract archive, apply metadata, rebundle |
 | `pipeline/push.rs` | Push to registry + cascade tag compute |

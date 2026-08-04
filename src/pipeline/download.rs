@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use tokio::io::AsyncWriteExt;
 use url::Url;
 
-/// Download a file from a URL, streaming to disk.
+/// Download a file from a URL, buffering the body and writing it out.
 pub async fn download(client: &reqwest::Client, url: &Url, output: &Path) -> Result<()> {
     let response = client.get(url.as_str()).send().await?.error_for_status()?;
 
