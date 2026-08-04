@@ -29,6 +29,11 @@ jsonschema = ["dep:schemars"]
 # the same easy-to-maintain pattern ocx itself uses for its vendored forks.
 # Bumping ocx_lib = bumping the external/ocx submodule pointer.
 ocx_lib = { path = "external/ocx/crates/ocx_lib" }
+# ocx_python is an in-workspace path dep (crates/ocx_python) — the pylock
+# translation library the `source.type: pylock`/`pypi` adapters and the env
+# pipeline call into. A path dep inside the workspace directory is a workspace
+# member automatically; no [workspace] members table is needed.
+ocx_python = { path = "crates/ocx_python" }
 
 # Feature lists below are copied EXACTLY from ocx's [workspace.dependencies]
 # (external/ocx/Cargo.toml). Keep them in sync when bumping the submodule —
@@ -61,10 +66,10 @@ rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs
 sha2 = "0.11.0"
 hex = "0.4.3"
 tracing = "0.1.44"
+tempfile = "3.27.0"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full", "test-util"] }
-tempfile = "3.27.0"
 
 # ocx_lib is developed against the ocx-sh forks of oci-client and
 # docker_credential via [patch.crates-io] in the ocx workspace. Patch tables

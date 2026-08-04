@@ -1,0 +1,38 @@
+[package]
+name = "ocx_python"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ocx-sh/ocx-mirror"
+homepage = "https://ocx.sh"
+description = "Pure translation library: PEP 751 pylock.toml into OCX package compositions"
+publish = false
+
+[dependencies]
+ocx_lib = { path = "../../external/ocx/crates/ocx_lib" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha2 = "0.11.0"
+# Versions/features below are copied from ocx's [workspace.dependencies] so a
+# submodule bump keeps these in sync (CLAUDE.md dependency model).
+toml = "1.1.2"
+thiserror = "2.0.18"
+tar = "0.4.46"
+zstd = { version = "0.13", features = ["zstdmt"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+# The four `uv-*` crates are pinned to ONE upstream rev (git, not a published
+# crate — astral-sh/uv does not publish these to crates.io). They share the rev
+# so filename parsing, tag compatibility, and PEP 508/440 marker/version
+# evaluation stay mutually consistent; bump all four together (README procedure).
+# `version-ranges` (pubgrub) is pulled in transitively by uv-pep508 — do NOT add
+# it here.
+uv-distribution-filename = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-platform-tags = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-pep508 = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+uv-pep440 = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
+
+# Deny warnings for this package only — same rationale as the root manifest:
+# --cap-lints does not apply to path deps, so a blanket RUSTFLAGS=-D warnings
+# would promote the vendored forks' warnings to hard errors.
+[lints.rust]
+warnings = "deny"
