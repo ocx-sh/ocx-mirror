@@ -15,6 +15,7 @@ use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 
+use crate::command::package::target_registry;
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
 use crate::pipeline::python_prepare::EnvManifest;
@@ -591,6 +592,7 @@ impl Push {
 
             // ── Phase 2: push the greens, cascading only on a whole version ──
             let mut platforms_pushed: Vec<String> = Vec::new();
+            let mut pushed_entries: Vec<&crate::pipeline::python_prepare::EnvEntry> = Vec::new();
             let mut cascade_tags: Vec<String> = Vec::new();
             let mut all_skipped_existing = platforms_failed.is_empty();
             let mut layer_reuse = LayerReuse::default();
@@ -643,6 +645,7 @@ impl Push {
                             layer_reuse.uploaded += report.layers.uploaded;
                             layer_reuse.verified += report.layers.verified;
                             platforms_pushed.push(platform_str.clone());
+                            pushed_entries.push(env_entry);
                             cascade_tags.extend(report.cascade_tags_written);
                         }
                     }
@@ -664,6 +667,28 @@ impl Push {
                     }
                 }
             }
+
+            // ── Phase 3: `:latest` for a version ocx cannot cascade ──────────
+            //
+            // After the whole version, never inside phase 2: the alias is a
+            // rolling tag by another name, so it is bound by the same rule —
+            // it may only move onto a version every one of whose entries
+            // landed.
+            if !version_is_cascadable
+                && Some(version.as_str()) == newest_version.as_deref()
+                && platforms_failed.is_empty()
+                && !pushed_entries.is_empty()
+                && run_newest_is_registry_newest(&publisher, spec, version).await
+            {
+                for env_entry in &pushed_entries {
+                    if alias_newest_as_latest(spec, env_entry, &env_entry.platform, version, &annotations).await
+                        && !cascade_tags.iter().any(|t| t == "latest")
+                    {
+                        cascade_tags.push("latest".to_string());
+                    }
+                }
+            }
+
             if !platforms_pushed.is_empty() && !cascade_tags.iter().any(|t| t == version) {
                 cascade_tags.insert(0, version.clone());
             }
@@ -697,6 +722,142 @@ impl Push {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Point `:latest` at one already-published env entry, returning whether the
+/// alias landed.
+///
+/// `ocx package push --cascade` derives the rolling tags by parsing the version
+/// as `X.Y.Z`, so a PEP 440 version it cannot parse (`0.0.0.2`) never gets
+/// `latest` and a bare reference (`repo` → `repo:latest`) stays unresolvable.
+/// This re-pushes the newest version's green entries under the literal tag —
+/// content-addressed, so it costs a verify plus a tag write, and each entry
+/// merges into the one `latest` image index.
+///
+/// Best-effort by construction: the primary publish already succeeded, so a
+/// failed alias warns instead of redding the version. For the same reason it
+/// gets a SINGLE attempt through [`push_once`] rather than the retry ladder —
+/// same precedent as `patch::republish`. A missed alias is corrected by the
+/// next run.
+async fn alias_newest_as_latest(
+    spec: &MirrorSpec,
+    env_entry: &crate::pipeline::python_prepare::EnvEntry,
+    platform: &str,
+    version: &str,
+    annotations: &BTreeMap<String, String>,
+) -> bool {
+    let latest_ref = format!("{}:latest", spec.target.reference());
+    let attempt = async {
+        let args = python_push::build_env_push_args(
+            platform,
+            &latest_ref,
+            &env_entry.metadata_path,
+            &env_entry.layers,
+            annotations,
+            false,
+        )?;
+        let ocx_binary = resolve_ocx_binary()?;
+        push_once(&ocx_binary, &args, PUSH_TIMEOUT)
+            .await
+            .map_err(|failure| failure.message)
+    }
+    .await;
+
+    match attempt {
+        Ok(_) => true,
+        Err(message) => {
+            log::warn!(
+                "[{}] latest alias push failed for {version}/{platform}: {message}",
+                spec.name,
+            );
+            false
+        }
+    }
+}
+
+/// Whether `version` — the newest version of THIS run — is also the newest
+/// version the target repository holds, i.e. whether `:latest` may be moved
+/// onto it.
+///
+/// [`alias_newest_as_latest`] otherwise only knows newest-in-run, so a
+/// backfill run (`versions.backfill: oldest-first`, or an `--exact-version`
+/// republish of an old release) would re-point `:latest` at a version older
+/// than what is already published — silently downgrading every consumer
+/// resolving the bare reference.
+///
+/// Fail-safe in the direction that cannot break the registry: a tag-list read
+/// that fails answers `false`, so the alias is skipped and the next run
+/// corrects it. Nothing here may fail the push job — the packages are already
+/// published either way.
+async fn run_newest_is_registry_newest(publisher: &Publisher, spec: &MirrorSpec, version: &str) -> bool {
+    let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let tags = match fetch_published_tags(publisher, &identifier).await {
+        Ok(tags) => tags,
+        Err(error) => {
+            log::warn!(
+                "[{}] skipping the latest alias for {version}: could not read the published tags of {identifier}: {error}",
+                spec.name,
+            );
+            return false;
+        }
+    };
+
+    match registry_tag_newer_than(&tags, version) {
+        Some(newer) => {
+            log::warn!(
+                "[{}] skipping the latest alias for {version}: {identifier} already holds the newer tag '{newer}'",
+                spec.name,
+            );
+            false
+        }
+        None => true,
+    }
+}
+
+/// The latest-alias gate's tag listing, with a test-only injection seam.
+///
+/// The fake-`ocx` test harness fakes the subprocess, not the in-process
+/// [`Publisher`], so without the seam the alias tests would read LIVE
+/// registry state — passing only while the fixture's repository happens to
+/// hold nothing newer, and breaking the day it does. Tests set
+/// [`LATEST_TAGS_OVERRIDE`] under [`ocx_env_lock`], same discipline as every
+/// other process-global test knob.
+async fn fetch_published_tags(
+    publisher: &Publisher,
+    identifier: &ocx_lib::oci::Identifier,
+) -> Result<Vec<String>, MirrorError> {
+    #[cfg(test)]
+    if let Some(tags) = LATEST_TAGS_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        return Ok(tags);
+    }
+    target_registry::list_target_tags(publisher, identifier).await
+}
+
+/// See [`fetch_published_tags`]. `Some(tags)` is consumed by the next fetch.
+#[cfg(test)]
+pub(crate) static LATEST_TAGS_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// The first published tag that is strictly newer than `version` under
+/// [`pep440_sort_key`], if any.
+///
+/// Rolling and canonical tags are not versions and are skipped: `latest` is
+/// the very tag being decided, and `sha256.<hex>` is `ocx package push`'s
+/// digest-named safety net. An unparseable version on either side leaves the
+/// two unordered, which counts as "newer" — the caller then declines to move
+/// the alias, which is the safe direction.
+fn registry_tag_newer_than<'a>(tags: &'a [String], version: &str) -> Option<&'a str> {
+    let own_key = pep440_sort_key(version);
+    tags.iter()
+        .map(String::as_str)
+        .filter(|tag| *tag != "latest" && !tag.starts_with("sha256."))
+        .find(|tag| {
+            let key = pep440_sort_key(tag);
+            key.0.is_some() && key > own_key
+        })
+}
 
 /// Total-order sort key for a PEP 440 version string:
 /// `(parsed version, original text)`.
@@ -5094,6 +5255,153 @@ platforms:
         script
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_non_semver_env_version_is_aliased_under_latest() {
+        // `ocx package push --cascade` derives rolling tags from an X.Y.Z
+        // parse, so a PEP 440 version like `0.0.0.2` never reaches `latest`
+        // and a bare `repo` reference stays unresolvable. The newest such
+        // version's green entries get an explicit `:latest` push.
+        let _env_lock = job_url_env_lock();
+        // Hermetic registry-newest gate: an empty published-tag set means the
+        // run's newest is trivially the registry's newest.
+        *super::LATEST_TAGS_OVERRIDE.lock().unwrap() = Some(Vec::new());
+        let dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let log = dir.path().join("invocations.log");
+        let script = fake_ocx_logging_push(dir.path(), &log);
+
+        let version = "0.0.0.2";
+        write_env_manifest(
+            bundles_dir.path(),
+            version,
+            &[("linux_amd64", "linux/amd64")],
+            &["pycowsay"],
+        );
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+
+        let spec_path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml")).to_path_buf();
+
+        // SAFETY: test-only process env, serialised by the lock above.
+        unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+        // SAFETY: cleanup so neighbouring tests don't inherit the pin.
+        unsafe { std::env::remove_var("OCX_BINARY_PIN") };
+        result.expect("a green non-semver env push must exit 0");
+
+        let invocations = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            invocations.contains(":latest"),
+            "the newest non-semver version must be aliased under :latest, got: {invocations}",
+        );
+        assert!(
+            !invocations.contains("--cascade"),
+            "a version ocx cannot parse must never ask for cascade, got: {invocations}",
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let tags = summary["versions"][0]["cascade_tags_written"].as_array().unwrap();
+        assert!(
+            tags.iter().any(|t| t == "latest"),
+            "a landed alias must be reported as a written tag, got: {tags:?}",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_latest_alias_does_not_red_the_version() {
+        // The primary publish already succeeded — the images ARE in the
+        // registry. A `latest` alias that could not be written is corrected by
+        // the next run, so it warns instead of turning a published version red.
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = job_url_env_lock();
+        // Hermetic registry-newest gate (see `fetch_published_tags`): an empty
+        // published-tag set lets the alias leg run without live registry state.
+        *super::LATEST_TAGS_OVERRIDE.lock().unwrap() = Some(Vec::new());
+        let dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+
+        // Succeeds for the version tag, fails for `:latest`; logs every argv
+        // so the alias attempt itself is provable below.
+        let log = dir.path().join("invocations.log");
+        let script = dir.path().join("fake-ocx-latest-fails");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\ncase \"$*\" in\n  *:latest*) echo 'registry rejected the tag' >&2; exit 69 ;;\n  \
+                 *) echo '{{\"cascade_tags_written\":[],\"status\":\"pushed\"}}' ;;\nesac\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let version = "0.0.0.2";
+        write_env_manifest(
+            bundles_dir.path(),
+            version,
+            &[("linux_amd64", "linux/amd64")],
+            &["pycowsay"],
+        );
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+
+        let spec_path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml")).to_path_buf();
+
+        // SAFETY: test-only process env, serialised by the lock above.
+        unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+        // SAFETY: cleanup so neighbouring tests don't inherit the pin.
+        unsafe { std::env::remove_var("OCX_BINARY_PIN") };
+        result.expect("a failed alias is best-effort and must not fail the run");
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let version_summary = &summary["versions"][0];
+        assert_eq!(version_summary["status"], "published", "got: {version_summary}");
+        let tags = version_summary["cascade_tags_written"].as_array().unwrap();
+        assert!(
+            !tags.iter().any(|t| t == "latest"),
+            "a failed alias must not be reported as written, got: {tags:?}",
+        );
+        // The failure branch must actually have been exercised: the alias
+        // push reached the fake ocx (otherwise this test is unchecked-green).
+        let invocations = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            invocations.contains(":latest"),
+            "the :latest alias push was never attempted; invocations:\n{invocations}"
+        );
+    }
+
     // ── Version verdict closes before any rolling alias moves ──────────────
 
     /// A dual-libc spec: one glibc container leg, one musl container leg, so
@@ -5224,6 +5532,31 @@ platforms:
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_red_entry_stops_the_latest_alias_for_a_version_ocx_cannot_cascade() {
+        // Same hazard on the explicit-alias half: `--cascade` is unavailable for
+        // a PEP 440 version ocx cannot parse, so `:latest` is written by an
+        // extra push — which must be gated on the same closed verdict.
+        let _env_lock = job_url_env_lock();
+        let (invocations, summary) = push_dual_libc_with_one_red_leg("0.0.0.2");
+
+        assert!(
+            invocations.contains("ocx.sh/pycowsay:0.0.0.2"),
+            "the green glibc entry must still be pushed, got: {invocations}",
+        );
+        assert!(
+            !invocations.contains(":latest"),
+            "a version with a red entry must never be aliased under :latest, got: {invocations}",
+        );
+
+        let tags = summary["versions"][0]["cascade_tags_written"].as_array().unwrap();
+        assert!(
+            !tags.iter().any(|t| t == "latest"),
+            "no alias may be reported for a partial version, got: {tags:?}",
+        );
+    }
+
     // ── Version ordering: total order, newest last ─────────────────────────
 
     #[test]
@@ -5250,5 +5583,24 @@ platforms:
         let mut mixed = vec!["nightly".to_string(), "1.0.0".to_string()];
         mixed.sort_by_key(|v| pep440_sort_key(v));
         assert_eq!(mixed, ["nightly", "1.0.0"]);
+    }
+
+    #[test]
+    fn registry_tag_newer_than_ignores_rolling_and_canonical_tags() {
+        let tags: Vec<String> = ["latest", "sha256.abc123", "0.0.0.1", "0.0.0.2"]
+            .iter()
+            .map(|t| (*t).to_string())
+            .collect();
+
+        // Nothing published is newer than the run's newest → the alias may move.
+        assert_eq!(registry_tag_newer_than(&tags, "0.0.0.2"), None);
+
+        // A backfill run whose newest version is older than a published one
+        // must not re-point `:latest` at it.
+        assert_eq!(registry_tag_newer_than(&tags, "0.0.0.1"), Some("0.0.0.2"));
+
+        // An unorderable pair (the run's version does not parse as PEP 440)
+        // counts as newer, so the caller declines — the safe direction.
+        assert_eq!(registry_tag_newer_than(&tags, "nightly"), Some("0.0.0.1"));
     }
 }
