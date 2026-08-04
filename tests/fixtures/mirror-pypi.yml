@@ -1,0 +1,31 @@
+# Mirror spec: pypi source fixture for spec-parsing/validation unit tests.
+# Modeled on mirror-pylock.yml, but versions are discovered from the PyPI
+# JSON API instead of a committed lock. Discovery + per-version lock
+# derivation land in plan_python_mirror_v2 W1/W2 — this fixture only
+# exercises spec parsing and validation until then.
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+
+source:
+  type: pypi
+  package: pycowsay
+
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+  lock:
+    extras:
+      - cli
+
+wheels:
+  linux/amd64: ~
+  linux/arm64: ~
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+  linux/arm64:
+    runner: ubuntu-24.04-arm

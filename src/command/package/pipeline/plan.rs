@@ -8,26 +8,42 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use chrono::Utc;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
-use ocx_lib::oci::{Algorithm, ClientBuilder, Identifier, Platform};
+use ocx_lib::oci::{Algorithm, Architecture, ClientBuilder, Identifier, OperatingSystem, Platform};
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
+use ocx_python::{
+    Implementation, InterpreterPin, LibcFamily, Pylock, PythonTarget, TargetArchitecture, TargetOperatingSystem,
+    TargetPlatform, VariantConstraints,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::command::package::options::OutputFormat;
+use crate::command::package::pipeline::push::pep440_sort_key;
 use crate::command::package::sync::list_upstream_versions;
 use crate::command::package::target_registry::{self, PublishedImage};
 use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
+use crate::pipeline::lock_derive;
 use crate::pipeline::orchestrator::{self, ExpectedMetadata, MetadataPlan};
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
-use crate::spec::{self, BinScanMode, MirrorSpec};
+use crate::source;
+use crate::spec::{self, BackfillOrder, BinScanMode, LockOptions, MirrorSpec, PythonConfig, Source, WheelPatterns};
 use crate::version_platform_map::VersionPlatformMap;
+
+/// Default `--locks-dir` for `pipeline plan` — where derived PEP 751 locks
+/// for `source.type: pypi` mirrors are written, relative to the command's
+/// working directory (the same directory `plan.json` is written to via
+/// stdout redirect in the generated workflow). Shared with `describe.rs`'s
+/// catalog autogen, which looks for an already-derived lock in the same
+/// place.
+pub(crate) const DEFAULT_LOCKS_DIR: &str = "locks";
 
 /// Maximum number of published tags read concurrently by the drift scan.
 ///
@@ -85,12 +101,16 @@ pub struct PlanAssetEntry {
 /// A single version entry in the plan output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanVersionEntry {
-    /// Variant-prefixed normalized tag the pipeline publishes (e.g. `3.29.0`
-    /// for the default variant, `slim-3.29.0` for the `slim` variant). The
-    /// whole prepare → test → push chain keys off this string, so each variant
-    /// must carry its own tag here.
+    /// Normalized tag the pipeline publishes. Archive sources may carry a
+    /// variant prefix (`slim-3.29.0`); env sources always emit the bare app
+    /// version (libc is a platform `os.features` axis there, never a tag
+    /// prefix). The whole prepare → test → push chain keys off this string,
+    /// so each variant must carry its own tag here.
     pub version: String,
-    /// Platform slugs that require work (e.g. `["linux/amd64", "darwin/arm64"]`).
+    /// Base `os/arch` platform strings that require work (e.g.
+    /// `["linux/amd64", "darwin/arm64"]`) — matches the CI matrix legs. Env
+    /// entries dedupe `+libc.*` wheels keys onto their base here; the full
+    /// keys live in [`assets`](Self::assets).
     pub platforms: Vec<String>,
     /// Kind of work needed.
     pub kind: PlanVersionKind,
@@ -109,6 +129,10 @@ pub struct PlanVersionEntry {
     /// `prepare --plan` never re-runs the source generator (issue #160).
     #[serde(default)]
     pub assets: Vec<PlanAssetEntry>,
+    /// Relative path (from plan.json's directory) of the derived pylock this
+    /// entry was resolved from. Set only for `source.type: pypi`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pylock: Option<String>,
 }
 
 /// Structured output of `ocx-mirror package pipeline plan`.
@@ -161,6 +185,14 @@ pub struct PlanCmd {
     /// Output format.
     #[arg(long)]
     pub format: Option<OutputFormat>,
+
+    /// Directory derived PEP 751 locks are written to (`source.type: pypi`
+    /// only). Each pypi `PlanVersionEntry.pylock` carries a path relative to
+    /// this directory's parent — i.e. relative to this command's working
+    /// directory, same as `plan.json` itself. Unused for any other source
+    /// type. Default: `./locks`.
+    #[arg(long)]
+    pub locks_dir: Option<PathBuf>,
 }
 
 impl PlanCmd {
@@ -170,8 +202,12 @@ impl PlanCmd {
             .await
             .map_err(|e| MirrorError::SourceError(format!("failed to load spec: {e}")))?;
         let spec_dir = spec_path.parent().unwrap_or(std::path::Path::new("."));
+        let locks_dir = self
+            .locks_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_LOCKS_DIR));
 
-        let report = build_plan_report(&spec, spec_dir).await?;
+        let report = build_plan_report(&spec, spec_dir, &locks_dir).await?;
 
         // Determine output format: explicit flag, or JSON when in GitHub Actions.
         let use_json = match self.format {
@@ -196,7 +232,11 @@ impl PlanCmd {
 ///
 /// Extracted so that integration tests can call it without going through the
 /// full CLI surface (file-system spec path, `Printer`, format detection).
-async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Result<PlanReport, MirrorError> {
+async fn build_plan_report(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    locks_dir: &Path,
+) -> Result<PlanReport, MirrorError> {
     // Build target identifier for registry queries.
     let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
     let publisher = Publisher::new(client);
@@ -234,13 +274,48 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
 
     let version_map = VersionPlatformMap::from_tags_and_platforms(&all_tags, platform_info);
 
-    // Fetch upstream versions — propagate failures as Unavailable.
-    let upstream_versions = list_upstream_versions(spec, spec_dir)
-        .await
-        .map_err(|e| MirrorError::SourceError(format!("failed to list upstream versions: {e}")))?;
+    // Fetch upstream versions. `list_upstream_versions` already classifies
+    // the failure per source type (pylock/pypi: PylockError/PypiError for
+    // malformed lock or index content vs SourceError for an unreachable one;
+    // github_release/url_index: always SourceError) — propagate as-is instead
+    // of re-stamping every failure as SourceError, which would collapse a data
+    // error into an availability one.
+    let upstream_versions = list_upstream_versions(spec, spec_dir).await?;
 
     // Build timestamp (reuse existing normalizer).
     let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
+
+    // Env sources (`pylock`, `pypi`) select wheel SETS (N per platform) via
+    // `ocx_python::select_wheels` instead of the regex `resolve_assets`, which
+    // assumes exactly one asset per platform and errors (`AmbiguousAsset`) on
+    // 2+ — structurally incompatible with wheel sets (D1,
+    // plan_pylock_mirror.md). They build their own `PlanVersionEntry` list
+    // directly rather than joining the regex path below.
+    //
+    // Metadata drift is not scanned for them: an env package's metadata is
+    // composed from the lock at prepare time (`compose_env`), not resolved
+    // from a spec-declared `metadata.json`, so `orchestrator::metadata_plan_for`
+    // has nothing to compare a published tile against. `has_drift` is therefore
+    // always false here, and the patch job never fires for an env mirror.
+    match &spec.source {
+        Source::Pylock { path, .. } => {
+            let versions =
+                build_pylock_plan_entries(spec, spec_dir, path, &upstream_versions, &all_tags, &version_map).await?;
+            return Ok(env_plan_report(spec, versions));
+        }
+        // Discovery already ran above via `list_upstream_versions` (dispatches
+        // to `source::pypi::list_versions`); per-version lock derivation
+        // happens inside `build_pypi_plan_entries` (design decision A,
+        // plan_python_mirror_v2 W2.A3) — reuses the same lock-agnostic
+        // `build_env_plan_entries` the `pylock` branch above calls, once a
+        // lock has been derived for a candidate version.
+        Source::Pypi { .. } => {
+            let versions =
+                build_pypi_plan_entries(spec, &upstream_versions, &all_tags, &version_map, locks_dir).await?;
+            return Ok(env_plan_report(spec, versions));
+        }
+        _ => {}
+    }
 
     // Resolve assets per effective variant — same logic as sync.rs.
     let effective_variants = spec.effective_variants();
@@ -324,6 +399,488 @@ async fn build_plan_report(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Res
         versions: version_entries,
         target,
         ocx_mirror_rev,
+    })
+}
+
+/// The `PlanReport` wrapper for an env source's version entries.
+///
+/// `has_drift` is always `false`: env metadata is composed from the lock, so
+/// there is no spec-declared document to diff a published tile against (see
+/// the dispatch in [`build_plan_report`]).
+fn env_plan_report(spec: &MirrorSpec, versions: Vec<PlanVersionEntry>) -> PlanReport {
+    PlanReport {
+        schema_version: 3,
+        has_new: !versions.is_empty(),
+        has_drift: false,
+        versions,
+        target: format!("{}/{}", spec.target.registry, spec.target.repository),
+        ocx_mirror_rev: spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone()),
+    }
+}
+
+/// Builds the `PlanVersionEntry` list for a `pylock`-sourced spec.
+///
+/// Thin wrapper: resolves the app version from the source adapter's
+/// already-listed `VersionInfo`, loads the committed lock, and delegates the
+/// actual per-platform wheel selection to the lock-agnostic
+/// [`build_env_plan_entries`].
+async fn build_pylock_plan_entries(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    path: &str,
+    upstream_versions: &[source::VersionInfo],
+    all_tags: &[String],
+    version_map: &VersionPlatformMap,
+) -> Result<Vec<PlanVersionEntry>, MirrorError> {
+    let app_version = upstream_versions
+        .first()
+        .map(|info| info.version.clone())
+        .ok_or_else(|| MirrorError::PylockError("pylock source produced no version".to_string()))?;
+
+    // The source adapter (list_upstream_versions, above) already parsed the
+    // lock once to extract the app version; parsing it again here is the
+    // price of keeping `source::VersionInfo` source-agnostic (no `Pylock`
+    // leaking into it) — a committed local pylock.toml is small, so the extra
+    // parse is cheaper than threading the parsed value across the source
+    // boundary.
+    let lock = source::pylock::load(spec_dir, path)
+        .await
+        .map_err(|e| source::pylock::classify_error("failed to load pylock source", e))?;
+
+    build_env_plan_entries(spec, &lock, &app_version, all_tags, version_map)
+}
+
+/// Lock-agnostic core of [`build_pylock_plan_entries`].
+///
+/// Bypasses `resolve_assets`/`filter::filter_versions` entirely (D1): for
+/// each declared `wheels:` platform key whose BASE os/arch
+/// `spec.platform_applies` accepts and whose FULL key (os_features included)
+/// is not already published (per `version_map`), resolves a `PythonTarget`
+/// from the key + its effective filter and calls `ocx_python::select_wheels`
+/// directly, emitting one `PlanAssetEntry` per selected wheel carrying the
+/// full key. `platforms` dedupes onto base strings so the CI matrix gate
+/// keeps matching `matrix.platform`. Takes an already-parsed
+/// `lock`/`app_version` so it never touches the filesystem — network-free and
+/// directly unit-testable.
+fn build_env_plan_entries(
+    spec: &MirrorSpec,
+    lock: &Pylock,
+    app_version: &str,
+    all_tags: &[String],
+    version_map: &VersionPlatformMap,
+) -> Result<Vec<PlanVersionEntry>, MirrorError> {
+    let python = spec
+        .python
+        .as_ref()
+        .ok_or_else(|| MirrorError::SpecInvalid(vec!["python config is required for env sources".to_string()]))?;
+    let interpreter = pylock_interpreter_pin(python)?;
+    let wheels_map = spec
+        .wheels
+        .as_ref()
+        .ok_or_else(|| MirrorError::SpecInvalid(vec!["wheels config is required for env sources".to_string()]))?;
+
+    let declared_platform_count = spec.platforms.as_ref().map_or(0, |platforms| platforms.len());
+
+    // The pylock app version is a PEP 440 string, which may carry more
+    // numeric components than `ocx_lib::Version` (a ≤3-component
+    // tool-release-tag semver parser) accepts — pycowsay's `0.0.0.2`, or a
+    // calendar version like `2024.1.1.1`. A tag that does not parse simply
+    // cannot be present in the `Version`-keyed `version_map`, so it is
+    // treated as outstanding work rather than panicking.
+    //
+    // ponytail: per-platform dedup of such non-semver versions is therefore
+    // a no-op — a re-run re-publishes the (identical, content-addressed)
+    // env, which the registry dedups. Precise PEP 440 dedup would need a
+    // PEP 440-aware `version_map`; deferred (not blocking — publishes are
+    // idempotent).
+    let check_version = Version::parse(app_version);
+
+    let mut missing_platforms: Vec<String> = Vec::new();
+    let mut assets = Vec::new();
+
+    for platform in wheels_map.sorted_platforms() {
+        let key = platform.to_string();
+        let base = spec::base_platform_key(platform);
+        if !spec.platform_applies(app_version, &base) {
+            continue;
+        }
+        if check_version
+            .as_ref()
+            .is_some_and(|version| version_map.has(version, platform))
+        {
+            continue; // already published for this full key (os_features included)
+        }
+
+        let target = PythonTarget {
+            platform: pylock_target_platform(platform, &key)?,
+            variant: wheel_target_constraints(wheels_map, platform),
+            interpreter: interpreter.clone(),
+        };
+
+        let wheels = ocx_python::select_wheels(lock, &target)
+            .map_err(|e| MirrorError::PylockError(format!("wheel selection failed for platform '{key}': {e}")))?;
+
+        if !missing_platforms.contains(&base) {
+            missing_platforms.push(base.clone());
+        }
+        for wheel in wheels {
+            let url_str = wheel.url.ok_or_else(|| {
+                MirrorError::PylockError(format!(
+                    "wheel '{}' for package '{}' selected with no download URL",
+                    wheel.filename, wheel.name
+                ))
+            })?;
+            let url = url::Url::parse(&url_str)
+                .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
+            assets.push(PlanAssetEntry {
+                platform: key.clone(),
+                asset_name: wheel.filename,
+                url,
+            });
+        }
+    }
+
+    if missing_platforms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Same New/BackfillPartial convention as build_version_entries: the bare
+    // (un-timestamped) tag already on the registry means some platform was
+    // published before, so a shorter missing-set than the declared count is a
+    // backfill, not a first publish.
+    let version_on_registry = Version::parse(app_version)
+        .is_some_and(|v| all_tags.iter().any(|t| Version::parse(t).is_some_and(|tv| tv == v)));
+    let kind = if version_on_registry && declared_platform_count > missing_platforms.len() {
+        PlanVersionKind::BackfillPartial
+    } else {
+        PlanVersionKind::New
+    };
+
+    Ok(vec![PlanVersionEntry {
+        version: app_version.to_string(),
+        platforms: missing_platforms,
+        kind,
+        source_version: app_version.to_string(),
+        variant: None,
+        assets,
+        pylock: None,
+    }])
+}
+
+/// Cheap pre-filter for `source.type: pypi` lock-derivation candidates:
+/// `versions:` bounds, `skip_prereleases`, an already-published dedup check
+/// (at least one declared `wheels:` key still outstanding), and
+/// `new_per_run`/`backfill` — all applied BEFORE any `uv`/`ocx` subprocess
+/// spawns, so [`build_pypi_plan_entries`] only pays the derivation cost
+/// (interpreter materialization + `uv pip compile`) for versions that
+/// actually have outstanding work.
+///
+/// Deliberately does not reuse `filter::filter_versions`: its already-
+/// published dedup step `.expect()`s every tag to parse as `ocx_lib::Version`,
+/// which panics on a real PyPI version string that has more components than
+/// that ≤3-component parser accepts (e.g. `0.0.0.2`) or a PEP 440 `uv`-only
+/// suffix (`2.0.0.dev0`) — the same reason `build_env_plan_entries` bypasses
+/// it for `pylock` (D1, `plan_python_mirror_v2`). This mirrors that
+/// function's fail-open convention instead: an unparseable tag is always
+/// kept as outstanding work.
+fn select_pypi_candidates<'a>(
+    spec: &MirrorSpec,
+    upstream_versions: &'a [source::VersionInfo],
+    version_map: &VersionPlatformMap,
+) -> Vec<&'a source::VersionInfo> {
+    let wheels_keys: Vec<&Platform> = spec
+        .wheels
+        .as_ref()
+        .map_or_else(Vec::new, WheelPatterns::sorted_platforms);
+
+    let versions_config = spec.versions.as_ref();
+    let min = versions_config
+        .and_then(|c| c.min.as_ref())
+        .and_then(|s| Version::parse(s));
+    let max = versions_config
+        .and_then(|c| c.max.as_ref())
+        .and_then(|s| Version::parse(s));
+
+    let mut candidates: Vec<&source::VersionInfo> = upstream_versions
+        .iter()
+        .filter(|info| !(spec.skip_prereleases && info.is_prerelease))
+        .filter(|info| {
+            let Some(parsed) = Version::parse(&info.version) else {
+                return true; // keep unparseable versions (filter.rs convention)
+            };
+            !(min.as_ref().is_some_and(|m| parsed < *m) || max.as_ref().is_some_and(|m| parsed >= *m))
+        })
+        .filter(|info| {
+            let tag_version = Version::parse(&info.version);
+            wheels_keys.iter().any(|&platform| {
+                spec.platform_applies(&info.version, &spec::base_platform_key(platform))
+                    && match &tag_version {
+                        Some(v) => !version_map.has(v, platform),
+                        // Unparseable tag: cannot be in the Version-keyed
+                        // map, so treat as outstanding.
+                        None => true,
+                    }
+            })
+        })
+        .collect();
+
+    // Total order (see `push::pep440_sort_key`): the pairwise
+    // parse-both-or-compare-text comparator this replaces is intransitive, and
+    // the resulting order decides which candidates `new_per_run` truncates.
+    candidates.sort_by_key(|info| pep440_sort_key(&info.version));
+
+    if let Some(config) = versions_config
+        && let Some(cap) = config.new_per_run
+    {
+        match config.backfill {
+            BackfillOrder::OldestFirst => candidates.truncate(cap),
+            BackfillOrder::NewestFirst => {
+                let start = candidates.len().saturating_sub(cap);
+                candidates = candidates.split_off(start);
+            }
+        }
+    }
+
+    candidates
+}
+
+/// Maps a [`lock_derive`] `String` error to the mirror's error taxonomy
+/// (plan_python_mirror_v2 W3 acceptance contract: uv-fail→65, uv-missing→1).
+///
+/// Data errors — this version cannot produce a trustworthy lock — map to
+/// [`MirrorError::PylockError`] (exit 65, same class as `select_wheels`
+/// failures): `uv`'s nonzero exit (unsolvable requirements, bad package
+/// metadata; the message carries uv's stderr tail) and `derive_pylock`'s
+/// fail-closed re-parse rejection. Everything else — `uv` binary
+/// missing/spawn failure, timeout, interpreter materialization, lock-file
+/// I/O — is a subprocess execution failure ([`MirrorError::ExecutionFailed`],
+/// exit 1), the same convention `describe.rs::invoke_describe` uses for
+/// `ocx package describe` subprocess failures.
+///
+/// ponytail: string-sniffs the two data-error markers rather than a
+/// structured `lock_derive::Error` enum — promote to a real error type if
+/// another call site needs to distinguish more sub-failures.
+fn classify_lock_derive_error(err: String) -> MirrorError {
+    if err.contains("failed to re-parse") || err.contains("uv pip compile exited") {
+        MirrorError::PylockError(err)
+    } else {
+        MirrorError::ExecutionFailed(vec![err])
+    }
+}
+
+/// The on-disk filename for a derived PEP 751 lock. `uv pip compile` enforces
+/// PEP 751 on `-o`: the name must be `pylock.toml` or `pylock.<name>.toml`
+/// where `<name>` is non-empty and **contains no dots**. Both the version
+/// (`0.0.0.1`) and a dotted distribution name (`zope.interface`) would land
+/// dots in `<name>`, so each dot becomes a dash — found by the live W4 pypi
+/// pilot, where `pylock.pycowsay-0.0.0.1.toml` failed uv with exit 2.
+///
+/// The layout stays flat (one directory, one file per version) because nothing
+/// parses this name: the plan carries each derived lock's path verbatim in its
+/// entry's `pylock` field, `prepare --plan` reads that path, and `describe`
+/// picks any lock in the directory by extension. Dashing the dots is therefore
+/// lossy but harmless — no caller recovers a version from the filename.
+///
+/// Shared by the plan-phase candidate loop and `prepare.rs`'s standalone
+/// re-derivation so the two sites cannot drift.
+pub(crate) fn derived_lock_filename(package: &str, version: &str) -> String {
+    let name = format!("{package}-{version}").replace('.', "-");
+    format!("pylock.{name}.toml")
+}
+
+/// `python.lock`'s defaults, applied when a `pypi` spec omits the `lock:`
+/// block entirely (zero-config: universal lock, no excludes, 300s timeout).
+fn default_lock_options() -> LockOptions {
+    LockOptions {
+        universal: true,
+        extras: Vec::new(),
+        exclude: Vec::new(),
+        timeout_seconds: 300,
+    }
+}
+
+/// Resolves the [`lock_derive::UvPython`] selector for this spec's lock
+/// derivations — ONCE per plan/prepare run, shared by every candidate.
+///
+/// Universal locks (the default) resolve via `--python-version X.Y` (from
+/// `python.version`) with no interpreter materialization at all — cheaper
+/// (no `ocx package pull` in the plan phase) and, critically, compatible
+/// with fully-static interpreter builds that defeat uv's libc inspection
+/// (live W4 pilot: "Could not detect a glibc or a musl libc"). Only
+/// `universal: false` materializes the pinned `interpreter_package` for an
+/// exact-interpreter resolution.
+pub(crate) async fn resolve_uv_python(python: &PythonConfig) -> Result<lock_derive::UvPython, MirrorError> {
+    let universal = python.lock.as_ref().is_none_or(|lock| lock.universal);
+    if universal {
+        Ok(lock_derive::UvPython::Version(
+            pylock_interpreter_pin(python)?.python_version,
+        ))
+    } else {
+        let interpreter_path = lock_derive::materialize_interpreter(&python.interpreter_package)
+            .await
+            .map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
+        Ok(lock_derive::UvPython::Interpreter(interpreter_path))
+    }
+}
+
+/// Derives a single PEP 751 lock for one already-resolved Python selector and
+/// one already-known `app_version`. Shared plumbing between the plan-phase
+/// candidate loop ([`build_pypi_plan_entries`]) and `prepare.rs`'s standalone
+/// (no `--plan`) re-derivation path, both of which otherwise repeat the same
+/// `python.lock` defaulting + provenance-timestamp + request assembly.
+pub(crate) async fn derive_one_pypi_lock(
+    spec: &MirrorSpec,
+    uv_python: &lock_derive::UvPython,
+    app_version: &str,
+    output_path: &Path,
+) -> Result<Pylock, MirrorError> {
+    let Source::Pypi { index, .. } = &spec.source else {
+        return Err(MirrorError::SpecInvalid(vec![
+            "lock derivation is only defined for source.type 'pypi'".to_string(),
+        ]));
+    };
+    let python = spec.python.as_ref().ok_or_else(|| {
+        MirrorError::SpecInvalid(vec!["python config is required for source.type 'pypi'".to_string()])
+    })?;
+    let package = spec.source.pylock_app_name(&spec.name);
+    let lock_options = python.lock.clone().unwrap_or_else(default_lock_options);
+    let generated_at = Utc::now().to_rfc3339();
+
+    let request = lock_derive::DeriveLockRequest {
+        python: uv_python,
+        package,
+        version: app_version,
+        index: index.as_deref(),
+        options: &lock_options,
+        output_path,
+        generated_at: &generated_at,
+    };
+    lock_derive::derive_pylock(&request)
+        .await
+        .map_err(classify_lock_derive_error)
+}
+
+/// Builds the `PlanVersionEntry` list for a `pypi`-sourced spec (design
+/// decision A, `plan_python_mirror_v2`).
+///
+/// [`select_pypi_candidates`] picks the versions worth deriving a lock for
+/// (cheap, no subprocess spawns); the Python selector is then resolved ONCE
+/// for the whole plan run via [`resolve_uv_python`] (every candidate
+/// resolves against the same version/interpreter and index), and each
+/// candidate's lock is derived in turn and written under `locks_dir`. The
+/// lock-agnostic `build_env_plan_entries` (shared with the `pylock` branch
+/// above) does the actual per-(variant, platform) wheel selection once a
+/// lock is in hand.
+async fn build_pypi_plan_entries(
+    spec: &MirrorSpec,
+    upstream_versions: &[source::VersionInfo],
+    all_tags: &[String],
+    version_map: &VersionPlatformMap,
+    locks_dir: &Path,
+) -> Result<Vec<PlanVersionEntry>, MirrorError> {
+    let python = spec.python.as_ref().ok_or_else(|| {
+        MirrorError::SpecInvalid(vec!["python config is required for source.type 'pypi'".to_string()])
+    })?;
+
+    let candidates = select_pypi_candidates(spec, upstream_versions, version_map);
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    tokio::fs::create_dir_all(locks_dir).await.map_err(|e| {
+        MirrorError::ExecutionFailed(vec![format!(
+            "failed to create locks dir '{}': {e}",
+            locks_dir.display()
+        )])
+    })?;
+
+    let uv_python = resolve_uv_python(python).await?;
+
+    let package = spec.source.pylock_app_name(&spec.name);
+
+    let mut entries = Vec::new();
+    for version_info in candidates {
+        let output_path = locks_dir.join(derived_lock_filename(package, &version_info.version));
+        let lock = derive_one_pypi_lock(spec, &uv_python, &version_info.version, &output_path).await?;
+
+        let mut version_entries = build_env_plan_entries(spec, &lock, &version_info.version, all_tags, version_map)?;
+        let pylock_path = output_path.to_string_lossy().into_owned();
+        for entry in &mut version_entries {
+            entry.pylock = Some(pylock_path.clone());
+        }
+        entries.extend(version_entries);
+    }
+
+    Ok(entries)
+}
+
+/// Derives the `ocx_python` selection constraints for one `wheels:` platform
+/// key: the key's declared libc (or the filter-implied one for plain linux
+/// keys — musl iff the effective filter carries `musllinux*` prefixes and no
+/// `manylinux*` ones, else gnu) plus the effective filter as the
+/// admissibility/ranking list. Floors stay `None` — `select` applies its
+/// defaults (`manylinux_2_28`/`musllinux_1_2`); `python.abi` remains the one
+/// ABI pin (no per-key override).
+pub(crate) fn wheel_target_constraints(wheels: &WheelPatterns, platform: &Platform) -> VariantConstraints {
+    let filter = wheels.effective_filter(platform);
+    let libc = match spec::libc_feature(platform) {
+        Some("libc.musl") => LibcFamily::Musl,
+        Some("libc.glibc") => LibcFamily::Gnu,
+        _ => {
+            let has_musllinux = filter.iter().any(|entry| entry.starts_with("musllinux"));
+            let has_manylinux = filter.iter().any(|entry| entry.starts_with("manylinux"));
+            if has_musllinux && !has_manylinux {
+                LibcFamily::Musl
+            } else {
+                LibcFamily::Gnu
+            }
+        }
+    };
+    VariantConstraints {
+        libc: Some(libc),
+        min_manylinux: None,
+        min_musllinux: None,
+        abi: None,
+        wheel_priority: Some(filter),
+    }
+}
+
+/// Builds the interpreter pin from the spec's `python:` block.
+pub(crate) fn pylock_interpreter_pin(python: &PythonConfig) -> Result<InterpreterPin, MirrorError> {
+    let version = Version::parse(&python.version)
+        .ok_or_else(|| MirrorError::PylockError(format!("invalid python.version '{}'", python.version)))?;
+    let minor = version
+        .minor()
+        .ok_or_else(|| MirrorError::PylockError(format!("python.version '{}' needs major.minor", python.version)))?;
+    Ok(InterpreterPin {
+        python_version: format!("{}.{minor}", version.major()),
+        python_full_version: python.version.clone(),
+        abi: python.abi.clone(),
+        implementation: Implementation::CPython,
+    })
+}
+
+/// Maps a wheels key's parsed `ocx_lib::oci::Platform` to `ocx_python`'s
+/// `TargetPlatform` (os/arch only — the key's `+libc.*` os_features travel
+/// through [`wheel_target_constraints`], not this mapping).
+pub(crate) fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPlatform, MirrorError> {
+    let Platform::Specific { os, arch, .. } = platform else {
+        return Err(MirrorError::PylockError(format!(
+            "platform key '{key}' must be a concrete os/arch pair for pylock sources"
+        )));
+    };
+    let operating_system = match os {
+        OperatingSystem::Linux => TargetOperatingSystem::Linux,
+        OperatingSystem::Darwin => TargetOperatingSystem::Darwin,
+        OperatingSystem::Windows => TargetOperatingSystem::Windows,
+    };
+    let architecture = match arch {
+        Architecture::Amd64 => TargetArchitecture::Amd64,
+        Architecture::Arm64 => TargetArchitecture::Arm64,
+    };
+    Ok(TargetPlatform {
+        operating_system,
+        architecture,
     })
 }
 
@@ -567,6 +1124,7 @@ fn drift_entry(tag: &str, variant: Option<&str>, platforms: Vec<String>) -> Plan
         source_version: String::new(),
         variant: variant.map(str::to_string),
         assets: Vec::new(),
+        pylock: None,
     }
 }
 
@@ -618,6 +1176,7 @@ fn build_version_entries(
                 source_version: rv.version.clone(),
                 variant: rv.variant.clone(),
                 assets,
+                pylock: None,
             }
         })
         .collect()
@@ -897,6 +1456,7 @@ mod tests {
             source_version: version.to_string(),
             variant: None,
             assets: vec![],
+            pylock: None,
         }
     }
 
@@ -1087,6 +1647,7 @@ mod tests {
         let cmd = PlanCmd {
             spec: std::path::PathBuf::from("./nonexistent-mirror.yml"),
             format: None,
+            locks_dir: None,
         };
         let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
@@ -1331,5 +1892,823 @@ mod tests {
         assert_eq!(leaves.len(), 2, "got {leaves:?}");
         assert!(leaves.contains(&"3.13.9"));
         assert!(leaves.contains(&"slim-3.13.9"));
+    }
+
+    #[test]
+    fn plan_version_entry_omits_pylock_key_when_not_pypi_derived() {
+        // `pylock` is set only for `source.type: pypi` entries (the derived
+        // lock a version was resolved from); every other source type must
+        // leave it absent from the JSON entirely, not `null`.
+        let value = serde_json::to_value(entry("3.29.0", &["linux/amd64"], PlanVersionKind::New)).unwrap();
+        assert!(
+            value.as_object().unwrap().get("pylock").is_none(),
+            "expected no 'pylock' key, got: {value}"
+        );
+    }
+
+    // ── W2.2: pylock source — plan-phase wheel selection ────────────────────
+    //
+    // `build_pylock_plan_entries` is the registry-independent half of the
+    // pylock branch (the caller already fetched `all_tags`/`version_map` from
+    // the target registry) — the seam that reuses `select_wheels` instead of
+    // the regex `resolve_assets` (D1). Tested directly so no live OCI
+    // registry is needed; `pipeline plan`'s registry-facing prelude is
+    // unchanged for every source type.
+
+    fn pylock_fixture_spec_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_emits_wheel_assets_per_platform() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let upstream_versions = list_upstream_versions(&spec, spec_dir)
+            .await
+            .expect("pylock source must list the app's locked version");
+        assert_eq!(upstream_versions.len(), 1);
+        assert_eq!(upstream_versions[0].version, "1.0.0");
+
+        let Source::Pylock { path, .. } = &spec.source else {
+            panic!("fixture spec must be source.type: pylock");
+        };
+
+        let version_map = VersionPlatformMap::default();
+        let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map)
+            .await
+            .expect("wheel selection must succeed for the fixture lock");
+
+        assert_eq!(entries.len(), 1, "one declared (unnamed default) variant -> one entry");
+        let entry = &entries[0];
+        assert_eq!(
+            entry.version, "1.0.0",
+            "unnamed default variant must produce a bare tag"
+        );
+        assert_eq!(entry.source_version, "1.0.0");
+        assert_eq!(entry.variant, None);
+        assert!(matches!(entry.kind, PlanVersionKind::New));
+
+        let mut platforms = entry.platforms.clone();
+        platforms.sort();
+        assert_eq!(platforms, vec!["linux/amd64".to_string(), "linux/arm64".to_string()]);
+
+        // Two pure-python ("none-any") wheels apply identically on both
+        // declared platforms -> N=2 wheel `PlanAssetEntry` per platform.
+        assert_eq!(entry.assets.len(), 4, "2 wheels x 2 platforms");
+        for platform in ["linux/amd64", "linux/arm64"] {
+            let names: Vec<&str> = entry
+                .assets
+                .iter()
+                .filter(|asset| asset.platform == platform)
+                .map(|asset| asset.asset_name.as_str())
+                .collect();
+            assert_eq!(names.len(), 2, "platform {platform} must carry 2 wheel assets");
+            assert!(names.contains(&"pycowsay-1.0.0-py3-none-any.whl"));
+            assert!(names.contains(&"six-1.16.0-py2.py3-none-any.whl"));
+        }
+
+        // Wheel URLs are concrete absolute http(s) — the existing download
+        // path (pipeline/download.rs) consumes them as-is.
+        for asset in &entry.assets {
+            assert_eq!(asset.url.scheme(), "https");
+        }
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_skips_already_published_platforms() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let upstream_versions = list_upstream_versions(&spec, spec_dir).await.unwrap();
+        let Source::Pylock { path, .. } = &spec.source else {
+            panic!("fixture spec must be source.type: pylock");
+        };
+
+        // Both declared platforms already published for this version — a
+        // repeat `pipeline plan` run must report no outstanding work.
+        let mut version_map = VersionPlatformMap::default();
+        let version = Version::parse("1.0.0").unwrap();
+        version_map.add(version.clone(), "linux/amd64".parse().unwrap());
+        version_map.add(version, "linux/arm64".parse().unwrap());
+
+        let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map)
+            .await
+            .unwrap();
+        assert!(
+            entries.is_empty(),
+            "already-published (version, platform) pairs must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_wraps_select_error_as_pylock_error_exit_65() {
+        // A wheel with no tag intersecting the target platform (windows-only
+        // build, no marker, requested against linux/amd64) is
+        // `SelectError::NoCompatibleWheel` inside `ocx_python::select_wheels`
+        // — must surface as `MirrorError::PylockError` (DataError, exit 65),
+        // not panic or an unrelated error kind.
+        let dir = tempfile::tempdir().unwrap();
+        let lock_toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "windows-only-pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "windows_only_pkg-1.0.0-cp313-cp313-win_amd64.whl"
+url = "https://example.com/windows_only_pkg-1.0.0-cp313-cp313-win_amd64.whl"
+hashes = { sha256 = "3333333333333333333333333333333333333333333333333333333333cccc" }
+"#;
+        tokio::fs::write(dir.path().join("pylock.toml"), lock_toml)
+            .await
+            .unwrap();
+
+        let spec_yaml = r#"
+name: windows-only-pkg
+target:
+  registry: ocx.sh
+  repository: windows-only-pkg
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        let spec_path = dir.path().join("mirror.yml");
+        tokio::fs::write(&spec_path, spec_yaml).await.unwrap();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+
+        let upstream_versions = list_upstream_versions(&spec, dir.path()).await.unwrap();
+        let version_map = VersionPlatformMap::default();
+
+        let err = build_pylock_plan_entries(&spec, dir.path(), "pylock.toml", &upstream_versions, &[], &version_map)
+            .await
+            .expect_err("a windows-only wheel must fail selection for a linux/amd64 target");
+
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn build_pylock_plan_entries_accepts_pep440_version_beyond_three_components() {
+        // Regression (W3.2 first-green-loop blocker): a PyPI app version with
+        // more than three numeric components — pycowsay's real `0.0.0.2`, or a
+        // calendar version like `2024.1.1.1` — is a valid PEP 440 string but is
+        // NOT a parseable `ocx_lib::Version` (a ≤3-component tool-release-tag
+        // semver parser). The plan phase must not panic on it: an unparseable
+        // tag cannot be in the `Version`-keyed publish map, so it is simply
+        // treated as outstanding work.
+        let dir = tempfile::tempdir().unwrap();
+        let lock_toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "0.0.0.2"
+
+[[packages.wheels]]
+name = "pycowsay-0.0.0.2-py3-none-any.whl"
+url = "https://example.com/pycowsay-0.0.0.2-py3-none-any.whl"
+hashes = { sha256 = "5c03d8a9c7666ec102aaed4bbd6c7d35228489ce236f95f6e5d079529c6a5050" }
+"#;
+        tokio::fs::write(dir.path().join("pylock.toml"), lock_toml)
+            .await
+            .unwrap();
+
+        let spec_yaml = r#"
+name: pycowsay
+target:
+  registry: dev.ocx.sh
+  repository: ocx/pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        let spec_path = dir.path().join("mirror.yml");
+        tokio::fs::write(&spec_path, spec_yaml).await.unwrap();
+        let spec = spec::load_spec(&spec_path)
+            .await
+            .expect("fixture spec must load and validate");
+
+        let upstream_versions = list_upstream_versions(&spec, dir.path()).await.unwrap();
+        assert_eq!(upstream_versions[0].version, "0.0.0.2");
+
+        let version_map = VersionPlatformMap::default();
+        let entries =
+            build_pylock_plan_entries(&spec, dir.path(), "pylock.toml", &upstream_versions, &[], &version_map)
+                .await
+                .expect("a >3-component PEP 440 version must plan without panicking");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].version, "0.0.0.2");
+        assert_eq!(entries[0].platforms, vec!["linux/amd64".to_string()]);
+        assert!(matches!(entries[0].kind, PlanVersionKind::New));
+        assert_eq!(entries[0].assets.len(), 1, "one pure-python wheel -> one asset");
+    }
+
+    // ── dual-libc wheels keys: one entry, full keys in assets ────────────────
+
+    const DUAL_LIBC_LOCK: &str = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"
+url = "https://example.com/pycowsay-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"
+hashes = { sha256 = "aaaa" }
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"
+url = "https://example.com/pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"
+hashes = { sha256 = "bbbb" }
+"#;
+
+    fn dual_libc_spec() -> MirrorSpec {
+        let yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn build_env_plan_entries_dual_libc_keys_share_one_entry_and_base_platform() {
+        let spec = dual_libc_spec();
+        let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
+        let version_map = VersionPlatformMap::default();
+
+        let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &[], &version_map).unwrap();
+
+        assert_eq!(entries.len(), 1, "env sources emit ONE bare-tag entry");
+        let entry = &entries[0];
+        assert_eq!(entry.version, "1.0.0", "bare tag, no variant prefix");
+        assert_eq!(entry.variant, None);
+        assert_eq!(
+            entry.platforms,
+            vec!["linux/amd64".to_string()],
+            "platforms dedupes full keys onto the base CI matrix leg"
+        );
+
+        // Each full key selected its libc's wheel; assets carry the FULL key.
+        let glibc: Vec<&str> = entry
+            .assets
+            .iter()
+            .filter(|asset| asset.platform == "linux/amd64+libc.glibc")
+            .map(|asset| asset.asset_name.as_str())
+            .collect();
+        assert_eq!(glibc, vec!["pycowsay-1.0.0-cp313-cp313-manylinux_2_28_x86_64.whl"]);
+        let musl: Vec<&str> = entry
+            .assets
+            .iter()
+            .filter(|asset| asset.platform == "linux/amd64+libc.musl")
+            .map(|asset| asset.asset_name.as_str())
+            .collect();
+        assert_eq!(musl, vec!["pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"]);
+    }
+
+    #[test]
+    fn build_env_plan_entries_published_dedup_honors_os_features() {
+        // The glibc key is already published — only the musl key remains
+        // outstanding; the published sibling must NOT mask it.
+        let spec = dual_libc_spec();
+        let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
+        let mut version_map = VersionPlatformMap::default();
+        version_map.add(
+            Version::parse("1.0.0").unwrap(),
+            "linux/amd64+libc.glibc".parse().unwrap(),
+        );
+
+        let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &["1.0.0".to_string()], &version_map).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.platforms, vec!["linux/amd64".to_string()]);
+        assert_eq!(entry.assets.len(), 1, "only the musl key's wheel is planned");
+        assert_eq!(entry.assets[0].platform, "linux/amd64+libc.musl");
+    }
+
+    // ── wheels-key → selection-constraint derivation ─────────────────────────
+
+    #[test]
+    fn wheel_target_constraints_derives_libc_and_filter_per_key() {
+        let wheels: WheelPatterns = serde_yaml_ng::from_str(concat!(
+            "linux/amd64: ~\n",
+            "\"linux/arm64+libc.glibc\": ~\n",
+            "\"linux/arm64+libc.musl\": ~\n",
+            "windows/amd64: ~\n",
+        ))
+        .unwrap();
+        let by_string = |wanted: &str| {
+            wheels
+                .filters
+                .keys()
+                .find(|platform| platform.to_string() == wanted)
+                .expect("key present")
+        };
+
+        // Plain linux key: default `["any"]` filter, gnu libc (no musllinux
+        // prefix in the filter), always a NON-empty wheel_priority.
+        let plain = wheel_target_constraints(&wheels, by_string("linux/amd64"));
+        assert_eq!(plain.libc, Some(LibcFamily::Gnu));
+        assert_eq!(plain.wheel_priority, Some(vec!["any".to_string()]));
+        assert_eq!(plain.min_manylinux, None, "floors stay select-defaulted");
+        assert_eq!(plain.abi, None, "python.abi remains the one ABI pin");
+
+        let glibc = wheel_target_constraints(&wheels, by_string("linux/arm64+libc.glibc"));
+        assert_eq!(glibc.libc, Some(LibcFamily::Gnu));
+        assert_eq!(
+            glibc.wheel_priority,
+            Some(vec!["manylinux".to_string(), "any".to_string()])
+        );
+
+        let musl = wheel_target_constraints(&wheels, by_string("linux/arm64+libc.musl"));
+        assert_eq!(musl.libc, Some(LibcFamily::Musl));
+        assert_eq!(
+            musl.wheel_priority,
+            Some(vec!["musllinux".to_string(), "any".to_string()])
+        );
+
+        let windows = wheel_target_constraints(&wheels, by_string("windows/amd64"));
+        assert_eq!(
+            windows.libc,
+            Some(LibcFamily::Gnu),
+            "libc is a linux axis; gnu is inert elsewhere"
+        );
+        assert_eq!(windows.wheel_priority, Some(vec!["win".to_string(), "any".to_string()]));
+    }
+
+    #[test]
+    fn wheel_target_constraints_plain_key_with_musllinux_filter_selects_musl_tag_set() {
+        // A plain key whose EXPLICIT filter admits only musllinux wheels
+        // selects against the musl uv tag set (gnu would exclude them all).
+        let wheels: WheelPatterns = serde_yaml_ng::from_str("linux/amd64: [musllinux, any]\n").unwrap();
+        let platform = wheels.filters.keys().next().unwrap();
+
+        let constraints = wheel_target_constraints(&wheels, platform);
+        assert_eq!(constraints.libc, Some(LibcFamily::Musl));
+        assert_eq!(
+            constraints.wheel_priority,
+            Some(vec!["musllinux".to_string(), "any".to_string()])
+        );
+    }
+
+    // ── Decision A: pypi source — plan-phase candidate selection + lock derivation ──
+
+    /// Serializes tests that mutate `OCX_BINARY_PIN` / `OCX_MIRROR_UV`.
+    ///
+    /// The crate-wide lock, shared with `pipeline push`'s tests: both modules
+    /// pin `OCX_BINARY_PIN` at their own stand-in binary, and a module-local
+    /// lock leaves a push test resolving *this* module's `uv` stub. Held
+    /// across a `block_on` rather than an `await`, which is why these tests are
+    /// `#[test]` + an explicit runtime instead of `#[tokio::test]`.
+    fn pypi_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        super::super::push::ocx_env_lock()
+    }
+
+    /// Drive one async body to completion under the current thread's runtime.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(future)
+    }
+
+    fn write_executable_script(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).expect("write script");
+        let mut perms = std::fs::metadata(path).expect("stat script").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).expect("chmod script");
+    }
+
+    /// Writes a stub `uv` that consumes stdin and writes `body` to the `-o`
+    /// argument — same shape as `pipeline::lock_derive`'s own test stub, plus
+    /// real uv's pylock output-filename rule: a `-o` basename that does not
+    /// start with `pylock.` and end with `.toml` is rejected with uv's own
+    /// message (regression guard for the live W4 pilot failure — the earlier,
+    /// laxer stub let a non-conforming name through that real uv rejects).
+    fn write_uv_stub(path: &std::path::Path, body: &str, exit_code: u32) {
+        let script = format!(
+            "#!/bin/sh\n\
+             cat > /dev/null\n\
+             prev=\"\"\n\
+             outfile=\"\"\n\
+             for arg in \"$@\"; do\n\
+             \x20 if [ \"$prev\" = \"-o\" ]; then outfile=\"$arg\"; fi\n\
+             \x20 prev=\"$arg\"\n\
+             done\n\
+             if [ -n \"$outfile\" ]; then\n\
+             \x20 base=${{outfile##*/}}\n\
+             \x20 name=${{base#pylock.}}\n\
+             \x20 name=${{name%.toml}}\n\
+             \x20 case \"$base\" in\n\
+             \x20   pylock.toml) ;;\n\
+             \x20   pylock.*.toml)\n\
+             \x20     case \"$name\" in\n\
+             \x20       \"\"|*.*) echo \"error: Expected the output filename to be \\`pylock.toml\\` or \\`pylock.<name>.toml\\`, where \\`<name>\\` is non-empty and contains no dots; found \\`$base\\`\" >&2; exit 2 ;;\n\
+             \x20     esac\n\
+             \x20     ;;\n\
+             \x20   *) echo 'error: Expected the output filename to start with `pylock.` and end with `.toml` (e.g., `pylock.toml`, `pylock.dev.toml`)' >&2; exit 2 ;;\n\
+             \x20 esac\n\
+             \x20 cat > \"$outfile\" <<'LOCKEOF'\n{body}LOCKEOF\n\
+             fi\n\
+             exit {exit_code}\n"
+        );
+        write_executable_script(path, &script);
+    }
+
+    fn pypi_fixture_spec() -> MirrorSpec {
+        let yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pypi
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    fn version_info(version: &str, is_prerelease: bool) -> source::VersionInfo {
+        source::VersionInfo {
+            version: version.to_string(),
+            assets: std::collections::HashMap::new(),
+            is_prerelease,
+        }
+    }
+
+    #[test]
+    fn locks_dir_default_is_relative_locks() {
+        assert_eq!(DEFAULT_LOCKS_DIR, "locks");
+    }
+
+    #[test]
+    fn select_pypi_candidates_orders_oldest_first_and_applies_new_per_run() {
+        let mut spec = pypi_fixture_spec();
+        spec.versions = Some(crate::spec::VersionsConfig {
+            new_per_run: Some(2),
+            ..Default::default()
+        });
+        let upstream = vec![
+            version_info("3.0.0", false),
+            version_info("1.0.0", false),
+            version_info("2.0.0", false),
+        ];
+        let version_map = VersionPlatformMap::default();
+
+        let candidates = select_pypi_candidates(&spec, &upstream, &version_map);
+        let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+        // Default backfill (newest_first) with cap=2: oldest-first order among the
+        // two highest surviving versions.
+        assert_eq!(versions, vec!["2.0.0", "3.0.0"]);
+    }
+
+    #[test]
+    fn select_pypi_candidates_skips_fully_published_version() {
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false), version_info("2.0.0", false)];
+        let mut version_map = VersionPlatformMap::default();
+        version_map.add(Version::parse("1.0.0").unwrap(), "linux/amd64".parse().unwrap());
+
+        let candidates = select_pypi_candidates(&spec, &upstream, &version_map);
+        let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+        assert_eq!(versions, vec!["2.0.0"], "already-published version must be dropped");
+    }
+
+    #[test]
+    fn select_pypi_candidates_never_panics_on_unparseable_version() {
+        // Regression: a PEP 440 version beyond ocx_lib::Version's 3-component
+        // parser (e.g. a calendar version) must never panic filter::filter_versions
+        // would (its dedup step `.expect()`s a parseable tag) — this is exactly why
+        // select_pypi_candidates doesn't reuse it.
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("2024.1.1.1", false)];
+        let version_map = VersionPlatformMap::default();
+
+        let candidates = select_pypi_candidates(&spec, &upstream, &version_map);
+        assert_eq!(candidates.len(), 1, "unparseable version kept as outstanding work");
+    }
+
+    const PYPI_STUB_LOCK_BODY: &str = r#"lock-version = "1.0"
+requires-python = ">=3.9.1"
+
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-py3-none-any.whl"
+url = "https://example.com/pycowsay-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#;
+
+    /// Writes the stub `ocx` + `uv` scripts `build_pypi_plan_entries` needs, and
+    /// sets `OCX_BINARY_PIN`/`OCX_MIRROR_UV` (caller holds `pypi_env_lock`).
+    /// Returns the `TempDir` guards so callers keep them alive for the test's
+    /// duration.
+    fn install_pypi_stubs(uv_lock_body: &str, uv_exit_code: u32) -> (tempfile::TempDir, tempfile::TempDir) {
+        let interpreter_root = tempfile::tempdir().unwrap();
+        let bin = interpreter_root.path().join("content/python/install/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python3"), "").unwrap();
+
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let ocx_stub = scripts_dir.path().join("ocx");
+        write_executable_script(
+            &ocx_stub,
+            &format!(
+                "#!/bin/sh\necho '{{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}'\n",
+                interpreter_root.path().display()
+            ),
+        );
+        let uv_stub = scripts_dir.path().join("uv");
+        write_uv_stub(&uv_stub, uv_lock_body, uv_exit_code);
+
+        // SAFETY: test-only env vars, serialized by `pypi_env_lock()`.
+        unsafe {
+            std::env::set_var("OCX_BINARY_PIN", &ocx_stub);
+            std::env::set_var("OCX_MIRROR_UV", &uv_stub);
+        }
+        (interpreter_root, scripts_dir)
+    }
+
+    fn remove_pypi_stubs() {
+        // SAFETY: test-only env vars, serialized by `pypi_env_lock()`.
+        unsafe {
+            std::env::remove_var("OCX_BINARY_PIN");
+            std::env::remove_var("OCX_MIRROR_UV");
+        }
+    }
+
+    #[test]
+    fn build_pypi_plan_entries_writes_lock_and_references_it_in_the_entry() {
+        let _guard = pypi_env_lock();
+        let _stubs = install_pypi_stubs(PYPI_STUB_LOCK_BODY, 0);
+
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+        remove_pypi_stubs();
+
+        let entries = result.expect("pypi plan entries derive successfully");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].version, "1.0.0");
+        let pylock_path = entries[0]
+            .pylock
+            .clone()
+            .expect("a pypi-derived entry must carry a pylock path");
+        assert!(
+            std::path::Path::new(&pylock_path).exists(),
+            "the derived lock must exist on disk at the referenced path"
+        );
+        // Dots are dashed out of the `<name>` segment — uv rejects a dotted one.
+        assert!(pylock_path.contains("pylock.pycowsay-1-0-0.toml"), "got: {pylock_path}");
+
+        // Round-trip through JSON exactly as `plan.json` would carry it.
+        let report = PlanReport {
+            schema_version: 3,
+            has_new: true,
+            has_drift: false,
+            versions: entries,
+            target: "ocx.sh/pycowsay".to_string(),
+            ocx_mirror_rev: None,
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: PlanReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.versions[0].pylock.as_deref(), Some(pylock_path.as_str()));
+    }
+
+    #[test]
+    fn build_pypi_plan_entries_reparse_failure_maps_to_data_error_exit_65() {
+        // A sdist-only package (no [[packages.wheels]]) parses as valid TOML
+        // but is rejected by ocx_python::parse_pylock's fail-closed re-parse —
+        // must surface as PylockError (exit 65), not a generic ExecutionFailed (1).
+        let _guard = pypi_env_lock();
+        let bad_body = "lock-version = \"1.0\"\n\n[[packages]]\nname = \"pycowsay\"\nversion = \"1.0.0\"\n";
+        let _stubs = install_pypi_stubs(bad_body, 0);
+
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+        remove_pypi_stubs();
+
+        let err = result.expect_err("an unparseable derived lock must fail, not silently succeed");
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    }
+
+    #[test]
+    fn build_pypi_plan_entries_universal_mode_never_invokes_ocx() {
+        // Regression (live W4 pilot, static-python bug): `uv pip compile
+        // --python <path>` fails against a fully-static interpreter ("Could
+        // not detect a glibc or a musl libc"). Universal locks (the default)
+        // must resolve via `--python-version X.Y` instead — which means the
+        // plan phase must NOT materialize the interpreter at all. The ocx
+        // stub here hard-fails if invoked, so any reintroduced
+        // `materialize_interpreter` call in the universal path turns this red.
+        let _guard = pypi_env_lock();
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let ocx_stub = scripts_dir.path().join("ocx");
+        write_executable_script(
+            &ocx_stub,
+            "#!/bin/sh\necho 'ocx must not be invoked for universal lock derivation' >&2\nexit 1\n",
+        );
+        let uv_stub = scripts_dir.path().join("uv");
+        write_uv_stub(&uv_stub, PYPI_STUB_LOCK_BODY, 0);
+        // SAFETY: test-only env vars, serialized by `pypi_env_lock()`.
+        unsafe {
+            std::env::set_var("OCX_BINARY_PIN", &ocx_stub);
+            std::env::set_var("OCX_MIRROR_UV", &uv_stub);
+        }
+
+        let spec = pypi_fixture_spec(); // no lock: block -> universal defaults to true
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+        remove_pypi_stubs();
+
+        let entries = result.expect("universal derivation must succeed without touching ocx");
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].pylock.is_some());
+    }
+
+    #[test]
+    fn derived_lock_filename_name_segment_carries_no_dots() {
+        // Regression (live W4 pypi pilot, mirror-pypi run 30874908847): uv
+        // enforces PEP 751 on `-o`, and `<name>` in `pylock.<name>.toml` must
+        // be non-empty and dot-free. A dotted version went straight through
+        // into `<name>` and uv exited 2:
+        //   error: Expected the output filename to be `pylock.toml` or
+        //   `pylock.<name>.toml`, where `<name>` is non-empty and contains no
+        //   dots; found `pylock.pycowsay-0.0.0.1.toml`
+        for (package, version) in [
+            ("pycowsay", "0.0.0.1"),
+            ("black", "26.5.1"),
+            // A dotted distribution name (`zope.interface`) must be sanitized
+            // on the package side too, not just the version side.
+            ("zope.interface", "7.0"),
+        ] {
+            let filename = derived_lock_filename(package, version);
+            let name = filename
+                .strip_prefix("pylock.")
+                .and_then(|rest| rest.strip_suffix(".toml"))
+                .unwrap_or_else(|| panic!("filename must be `pylock.<name>.toml`, got: {filename}"));
+            assert!(!name.is_empty(), "`<name>` must be non-empty, got: {filename}");
+            assert!(!name.contains('.'), "uv rejects a dotted `<name>`; got: {filename}");
+        }
+    }
+
+    #[test]
+    fn build_pypi_plan_entries_derived_lock_filename_follows_uv_naming_rule() {
+        // Regression (live W4 pilot): real `uv pip compile` REJECTS `-o`
+        // filenames outside `pylock.toml` / `pylock.<name>.toml` with a
+        // non-empty, dot-free `<name>`. The earlier
+        // `{package}-{version}.pylock.toml` and `pylock.{package}-{version}.toml`
+        // shapes both passed a laxer stub but failed live CI — the stub now
+        // enforces uv's full rule, so this exercises it end to end on the
+        // pilot's own dotted version.
+        let _guard = pypi_env_lock();
+        let _stubs = install_pypi_stubs(PYPI_STUB_LOCK_BODY, 0);
+
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("0.0.0.1", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+        remove_pypi_stubs();
+
+        let entries = result.expect("derivation must succeed with a uv-conforming output filename");
+        let pylock_path = entries[0].pylock.as_deref().expect("entry carries a pylock path");
+        let filename = std::path::Path::new(pylock_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("pylock path has a UTF-8 filename");
+        let name = filename
+            .strip_prefix("pylock.")
+            .and_then(|rest| rest.strip_suffix(".toml"))
+            .unwrap_or_else(|| {
+                panic!("derived lock filename must match uv's `pylock.<name>.toml` rule, got: {filename}")
+            });
+        assert!(
+            !name.is_empty() && !name.contains('.'),
+            "uv requires a non-empty, dot-free `<name>`; got: {filename}"
+        );
+    }
+
+    #[test]
+    fn build_pypi_plan_entries_uv_resolution_failure_maps_to_data_error_exit_65() {
+        // W3 acceptance contract: uv-fail→65. A nonzero uv exit (unsolvable
+        // requirements, bad package metadata) means this version cannot
+        // produce a lock — a data error (PylockError, 65), NOT a generic
+        // ExecutionFailed (1), which stays reserved for uv-missing/spawn/
+        // timeout failures. The surfaced message must carry uv's stderr.
+        let _guard = pypi_env_lock();
+        let (_interpreter_root, scripts_dir) = install_pypi_stubs("", 0);
+        write_executable_script(
+            &scripts_dir.path().join("uv"),
+            "#!/bin/sh\ncat > /dev/null\necho 'no solution found for pycowsay==1.0.0' >&2\nexit 1\n",
+        );
+
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false)];
+        let version_map = VersionPlatformMap::default();
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+        remove_pypi_stubs();
+
+        let err = result.expect_err("a nonzero uv exit must fail the plan");
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+        assert!(
+            err.to_string().contains("no solution found"),
+            "the error must carry uv's stderr, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pypi_plan_entries_skips_derivation_when_no_candidates() {
+        // No uv/ocx stubs installed: if select_pypi_candidates didn't correctly
+        // drop the fully-published version, this would fail trying to spawn a
+        // real `ocx`/`uv` binary.
+        let spec = pypi_fixture_spec();
+        let upstream = vec![version_info("1.0.0", false)];
+        let mut version_map = VersionPlatformMap::default();
+        version_map.add(Version::parse("1.0.0").unwrap(), "linux/amd64".parse().unwrap());
+        let locks_root = tempfile::tempdir().unwrap();
+        let locks_dir = locks_root.path().join("locks");
+
+        let entries = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir)
+            .await
+            .expect("no candidates means no subprocess spawns, so this never touches uv/ocx");
+        assert!(entries.is_empty());
+        assert!(
+            !locks_dir.exists(),
+            "locks dir must not even be created when there's nothing to derive"
+        );
     }
 }

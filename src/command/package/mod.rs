@@ -10,9 +10,14 @@
 
 mod check;
 mod options;
-mod pipeline;
+// `pub(crate)`: `pipeline::python_push` (outside this subtree) drives the env
+// push through `pipeline::push::push_with_retry`, so both publish legs share
+// one retry ladder and one transient-exit predicate.
+pub(crate) mod pipeline;
 mod sync;
-mod target_registry;
+// `pub(crate)`: `pipeline::python_push` (outside this subtree) reaches the
+// fail-safe tag-listing helper for the wheel-registration tag-exists check.
+pub(crate) mod target_registry;
 mod validate;
 
 use ocx_lib::cli::DataInterface;

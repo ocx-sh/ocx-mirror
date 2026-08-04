@@ -56,6 +56,10 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+          # The submodule `ocx` build below has its own workspace + target dir.
+          workspaces: |
+            . -> target
+            external/ocx -> target
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Install nextest
@@ -86,6 +90,21 @@ jobs:
         with:
           name: ocx-mirror-binary
           path: target/release/ocx-mirror
+          compression-level: 0
+          retention-days: 1
+      - name: Build ocx (submodule pin)
+        # The acceptance job's checkout has no submodules, so it cannot build
+        # `ocx` itself (empty external/ocx = dangling [patch.crates-io]). This
+        # job can — its checkout is submodules:recursive — and the mount-
+        # dependent acceptance tests need an `ocx` at the exact submodule pin,
+        # not whatever release setup-ocx installs.
+        run: cargo build --release --bin ocx
+        working-directory: external/ocx
+      - name: Upload ocx Binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ocx-submodule-binary
+          path: external/ocx/target/release/ocx
           compression-level: 0
           retention-days: 1
       - name: Publish Unit Test Results
@@ -119,8 +138,13 @@ jobs:
         with:
           name: ocx-mirror-binary
           path: test/bin
+      - name: Download ocx Binary
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ocx-submodule-binary
+          path: test/bin
       - name: Prepare Binary
-        run: chmod +x test/bin/ocx-mirror
+        run: chmod +x test/bin/ocx-mirror test/bin/ocx
       - name: Setup OCX
         # Provides the `ocx` binary OcxRunner drives for install-side
         # verification. Bump the version alongside external/ocx submodule bumps.
@@ -140,6 +164,10 @@ jobs:
         run: task test:parallel -- --junit-xml=results/junit.xml
         env:
           OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
+          # Submodule-pin ocx for the mount-dependent tests (see the smoke
+          # job's "Build ocx" step); the `real_ocx_binary` fixture prefers it
+          # over a local cargo build, which cannot work in this checkout.
+          OCX_TEST_BINARY: ${{ github.workspace }}/test/bin/ocx
       - name: Publish Acceptance Test Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0

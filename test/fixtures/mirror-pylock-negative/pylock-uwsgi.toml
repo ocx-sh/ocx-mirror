@@ -1,0 +1,10 @@
+# PEP 751 lock fixture: app package "uwsgi" ships zero wheels (sdist-only).
+# Negative case (W2.6): `parse_pylock` rejects ANY package with an empty
+# `[[packages.wheels]]` list as `LockError::SdistOnly` — the "no wheel exists
+# anywhere" shape (real uwsgi has no universal wheel; installing it means
+# building from source).
+lock-version = "1.0"
+
+[[packages]]
+name = "uwsgi"
+version = "2.0.24"

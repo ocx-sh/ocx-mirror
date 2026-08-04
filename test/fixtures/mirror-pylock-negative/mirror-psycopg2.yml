@@ -1,0 +1,22 @@
+# Mirror spec for the no-wheel-for-target negative test (W2.6). Declares only
+# linux/amd64 so the lock's macOS/Windows-only wheels can never satisfy it.
+name: psycopg2
+target:
+  registry: STUB_REGISTRY
+  repository: psycopg2
+
+source:
+  type: pylock
+  path: pylock-psycopg2.toml
+
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+
+wheels:
+  linux/amd64: ~
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest

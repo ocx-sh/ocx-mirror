@@ -10,12 +10,16 @@ use std::path::PathBuf;
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
-use crate::command::package::pipeline::plan::PlanReport;
+use crate::command::package::pipeline::plan::{
+    PlanReport, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin, pylock_target_platform,
+    resolve_uv_python, wheel_target_constraints,
+};
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
 use crate::normalizer;
 use crate::pipeline::mirror_task::{MirrorTask, VariantContext};
 use crate::pipeline::orchestrator::{self, ConcurrencyParams};
+use crate::pipeline::python_prepare::{self, SelectedWheel, WheelEnvTask};
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
 use crate::spec::{self, MirrorSpec};
@@ -56,6 +60,14 @@ impl Prepare {
             .work_dir
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".ocx-mirror"));
+
+        // Env-package sources (`pylock`, `pypi`) take a parallel env-prepare
+        // path: wheels are re-selected from a lock (committed for `pylock`,
+        // derived in-pipeline for `pypi`) and composed into env packages. The
+        // archive/binary path below is untouched.
+        if spec.source.is_env() {
+            return self.execute_pylock(&spec, &spec_dir, &work_dir).await;
+        }
 
         let tasks = match &self.plan {
             Some(plan_path) => {
@@ -108,6 +120,458 @@ impl Prepare {
 
         Ok(())
     }
+
+    /// Env-prepare path for `source.type: pylock`/`pypi` specs — the parallel
+    /// to the archive/binary path in [`execute`](Self::execute).
+    ///
+    /// Builds one env task per applicable `wheels:` key of the requested
+    /// version, then downloads + repacks + composes them into
+    /// `{work_dir}/{version}/env-manifest.json`.
+    async fn execute_pylock(
+        &self,
+        spec: &MirrorSpec,
+        spec_dir: &std::path::Path,
+        work_dir: &std::path::Path,
+    ) -> Result<(), MirrorError> {
+        let client =
+            ocx_lib::oci::ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let python = spec.python.as_ref().ok_or_else(|| {
+            MirrorError::SpecInvalid(vec![
+                "python config is required for source.type 'pylock'/'pypi'".to_string(),
+            ])
+        })?;
+        // The interpreter candidate fetch is the one network dependency of
+        // task building; fetching the tag's per-platform leaf candidates here
+        // keeps `build_env_tasks` a pure (hermetically testable) local
+        // re-selection — each leg then pins its own platform LEAF manifest
+        // digest locally. One spec-wide `python.interpreter_package` — no
+        // per-key override.
+        let interpreter_candidates = fetch_interpreter_candidates(&python.interpreter_package, &client).await?;
+
+        // When `--plan` is supplied (the CI path), restrict prepare to the
+        // wheels keys discover still needs for this version. discover emits a
+        // backfill-partial entry that lists only the outstanding work, so an
+        // already-published tile is not re-composed (and not later false-red at
+        // push for a missing JUnit). The allowed set is the FULL key strings
+        // from the entry's resolved assets (they carry `+libc.*` suffixes;
+        // `entry.platforms` holds only deduped base os/arch strings), falling
+        // back to `entry.platforms` for an assets-less legacy plan. Without a
+        // plan (standalone prepare), fall back to every applicable wheels key.
+        let allowed_platforms: Option<std::collections::HashSet<String>> = match &self.plan {
+            Some(plan_path) => {
+                let plan = read_plan(plan_path).await?;
+                Some(
+                    plan.versions
+                        .iter()
+                        .find(|entry| entry.version == self.version)
+                        .map(|entry| {
+                            if entry.assets.is_empty() {
+                                entry.platforms.iter().cloned().collect()
+                            } else {
+                                entry.assets.iter().map(|asset| asset.platform.clone()).collect()
+                            }
+                        })
+                        .unwrap_or_default(),
+                )
+            }
+            None => None,
+        };
+
+        // `pypi` sources need their own task-building path (a plan-supplied
+        // derived lock to consume, or a from-scratch re-derivation when
+        // running standalone) — kept as a sibling function rather than
+        // widening `build_env_tasks`'s signature, so its existing
+        // committed-lock-only test suite stays untouched.
+        let tasks = match &spec.source {
+            spec::Source::Pypi { .. } => {
+                build_pypi_env_tasks(
+                    spec,
+                    spec_dir,
+                    &self.version,
+                    &interpreter_candidates,
+                    allowed_platforms.as_ref(),
+                    self.plan.as_deref(),
+                    work_dir,
+                )
+                .await?
+            }
+            _ => {
+                build_env_tasks(
+                    spec,
+                    spec_dir,
+                    &self.version,
+                    &interpreter_candidates,
+                    allowed_platforms.as_ref(),
+                )
+                .await?
+            }
+        };
+
+        if tasks.is_empty() {
+            return Err(MirrorError::SpecInvalid(vec![format!(
+                "version '{}' not found in pylock source or no platforms resolved",
+                self.version
+            )]));
+        }
+
+        log::info!(
+            "[{}] Preparing pylock env version {} ({} platforms)",
+            spec.name,
+            self.version,
+            tasks.len()
+        );
+
+        tokio::fs::create_dir_all(work_dir)
+            .await
+            .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
+
+        let http_client = reqwest::Client::new();
+        let concurrency = ConcurrencyParams {
+            max_downloads: spec.concurrency.max_downloads,
+            max_bundles: spec.concurrency.max_bundles,
+            compression_threads: spec::resolve_compression_threads(
+                spec.concurrency.compression_threads,
+                spec.concurrency.max_bundles,
+            ),
+        };
+
+        let manifest =
+            python_prepare::prepare_env_version(&self.version, &tasks, work_dir, &http_client, &concurrency).await?;
+
+        let manifest_path = work_dir.join(&self.version).join("env-manifest.json");
+        println!("{}", manifest_path.display());
+
+        log::debug!(
+            "[{}] Prepared {} env packages for version {}",
+            spec.name,
+            manifest.envs.len(),
+            self.version
+        );
+
+        Ok(())
+    }
+}
+
+/// Build [`WheelEnvTask`]s for `version` from the committed pylock.
+///
+/// Thin wrapper: loads the committed lock and resolves the app version, then
+/// delegates task construction to the lock-agnostic [`build_env_tasks_from_lock`].
+async fn build_env_tasks(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+    interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    allowed_platforms: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<WheelEnvTask>, MirrorError> {
+    let path = match &spec.source {
+        spec::Source::Pylock { path, .. } => path,
+        // `pypi` sources are handled by the sibling `build_pypi_env_tasks`
+        // (its caller, `execute_pylock`, dispatches before ever reaching this
+        // function for that source type) — never reached in practice, but
+        // a graceful empty result rather than a panic if it ever is.
+        _ => return Ok(Vec::new()),
+    };
+
+    let lock = crate::source::pylock::load(spec_dir, path)
+        .await
+        .map_err(|e| crate::source::pylock::classify_error("failed to load pylock source", e))?;
+    let app_version = crate::source::pylock::app_version(&lock, spec.source.pylock_app_name(&spec.name))
+        .map_err(|e| MirrorError::PylockError(e.to_string()))?;
+
+    build_env_tasks_from_lock(
+        spec,
+        spec_dir,
+        version,
+        &lock,
+        &app_version,
+        interpreter_candidates,
+        allowed_platforms,
+    )
+}
+
+/// Lock-agnostic core of [`build_env_tasks`].
+///
+/// Pure local re-selection (no source re-crawl — issue #160): when the bare
+/// env tag equals `version`, resolves a `PythonTarget` per declared,
+/// applicable `wheels:` key and runs `ocx_python::select_wheels`. The private
+/// interpreter's platform candidates are fetched by the caller (they need
+/// the registry); the per-leg leaf pin is selected locally here.
+/// Takes an already-parsed `lock`/`app_version` so it never
+/// touches the filesystem — network-free and directly unit-testable.
+fn build_env_tasks_from_lock(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+    lock: &ocx_python::Pylock,
+    app_version: &str,
+    interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    allowed_platforms: Option<&std::collections::HashSet<String>>,
+) -> Result<Vec<WheelEnvTask>, MirrorError> {
+    // Env tags are bare: a leg whose requested version is not this lock's app
+    // version has no work here.
+    if app_version != version {
+        return Ok(Vec::new());
+    }
+
+    let python = spec
+        .python
+        .as_ref()
+        .ok_or_else(|| MirrorError::SpecInvalid(vec!["python config is required for env sources".to_string()]))?;
+    let interpreter_pin = pylock_interpreter_pin(python)?;
+    let wheels_map = spec
+        .wheels
+        .as_ref()
+        .ok_or_else(|| MirrorError::SpecInvalid(vec!["wheels config is required for env sources".to_string()]))?;
+
+    let scope = ocx_python::WheelScope::new(spec.wheel_scope.clone());
+    let declared_extras = lock.extras.clone();
+    // Root = `source.package`/spec name (design decision C); resolved once per
+    // version, same as `app_version` in the caller — `entrypoints:` windows
+    // are resolved against this version here so `ocx_python::compose_env`
+    // stays version-agnostic.
+    let root_package = spec.source.pylock_app_name(&spec.name);
+    let entrypoint_selection = python.resolve_entrypoint_selection(app_version, root_package);
+
+    let mut tasks = Vec::new();
+    for platform in wheels_map.sorted_platforms() {
+        let key = platform.to_string();
+        if !spec.platform_applies(app_version, &spec::base_platform_key(platform)) {
+            continue;
+        }
+        // Restrict to the wheels keys the plan still needs. `discover` excludes
+        // already-published tiles (a backfill-partial run adds only the new
+        // keys of an existing version); without this, prepare composes the
+        // already-published key too, and push then false-reds it as
+        // `missing_junit` (its test leg was skipped, so it has no JUnit).
+        if let Some(allowed) = allowed_platforms
+            && !allowed.contains(&key)
+        {
+            continue;
+        }
+
+        let python_target = ocx_python::PythonTarget {
+            platform: pylock_target_platform(platform, &key)?,
+            variant: wheel_target_constraints(wheels_map, platform),
+            interpreter: interpreter_pin.clone(),
+        };
+
+        let selected = ocx_python::select_wheels(lock, &python_target)
+            .map_err(|e| MirrorError::PylockError(format!("wheel selection failed for platform '{key}': {e}")))?;
+
+        let mut wheels = Vec::with_capacity(selected.len());
+        for wheel in &selected {
+            let url_str = wheel.url.as_deref().ok_or_else(|| {
+                MirrorError::PylockError(format!(
+                    "wheel '{}' for package '{}' selected with no download URL",
+                    wheel.filename, wheel.name
+                ))
+            })?;
+            let url = url::Url::parse(url_str)
+                .map_err(|e| MirrorError::PylockError(format!("invalid wheel URL '{url_str}': {e}")))?;
+            let wheel_repository = ocx_python::wheel_reference(&scope, wheel).repository;
+            wheels.push(SelectedWheel {
+                package_name: wheel.name.clone(),
+                version: wheel.version.clone(),
+                filename: wheel.filename.clone(),
+                url,
+                sha256: wheel.sha256.clone(),
+                wheel_repository,
+            });
+        }
+
+        tasks.push(WheelEnvTask {
+            normalized_version: version.to_string(),
+            source_version: app_version.to_string(),
+            platform: platform.clone(),
+            target: spec.target.clone(),
+            cascade: spec.cascade.enabled,
+            spec_dir: spec_dir.to_path_buf(),
+            wheels,
+            interpreter: select_interpreter_pin(&python.interpreter_package, interpreter_candidates, platform)?,
+            requested_extras: Vec::new(), // W3: spec does not yet encode a per-app extras request
+            declared_extras: declared_extras.clone(),
+            python_target,
+            wheel_scope: scope.clone(),
+            entrypoint_selection: entrypoint_selection.clone(),
+        });
+    }
+
+    Ok(tasks)
+}
+
+/// `source.type: pypi` env-prepare task building — the `pypi` counterpart to
+/// [`build_env_tasks`] (which only reads a committed `pylock` file).
+///
+/// When `plan_path` resolves to a plan entry carrying a `pylock` path (the
+/// lock `pipeline plan` already derived for this version), reads and parses
+/// it directly — no `uv`/`ocx` subprocess needed. Otherwise (no `--plan`, or
+/// a plan entry without a `pylock` path — e.g. a schema_version-1 plan)
+/// re-derives the lock from scratch via the same `pipeline::lock_derive`
+/// path `pipeline plan` uses ([`derive_one_pypi_lock`]), so a lone
+/// `pipeline prepare` invocation still works end to end without a prior
+/// `pipeline plan` run.
+async fn build_pypi_env_tasks(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+    interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    allowed_platforms: Option<&std::collections::HashSet<String>>,
+    plan_path: Option<&std::path::Path>,
+    work_dir: &std::path::Path,
+) -> Result<Vec<WheelEnvTask>, MirrorError> {
+    let pylock_relative = match plan_path {
+        Some(path) => {
+            let plan = read_plan(path).await?;
+            plan.versions
+                .iter()
+                .find(|entry| entry.version == version)
+                .and_then(|entry| entry.pylock.clone())
+        }
+        None => None,
+    };
+
+    let (lock, app_version) = match pylock_relative {
+        Some(relative) => {
+            // The plan carries a path relative to plan.json's own directory
+            // (the same directory `--locks-dir` was written under) — resolve
+            // it against `plan_path`'s parent, not `spec_dir`.
+            let lock_path = plan_path
+                .and_then(std::path::Path::parent)
+                .unwrap_or(std::path::Path::new("."))
+                .join(&relative);
+            let contents = tokio::fs::read_to_string(&lock_path).await.map_err(|e| {
+                MirrorError::PlanError(format!("failed to read derived lock '{}': {e}", lock_path.display()))
+            })?;
+            let lock = ocx_python::parse_pylock(&contents).map_err(|e| {
+                MirrorError::PylockError(format!(
+                    "derived lock '{}' failed to re-parse: {e}",
+                    lock_path.display()
+                ))
+            })?;
+            let app_version = crate::source::pylock::app_version(&lock, spec.source.pylock_app_name(&spec.name))
+                .map_err(|e| MirrorError::PylockError(e.to_string()))?;
+            (lock, app_version)
+        }
+        None => {
+            let app_version = resolve_pypi_app_version(spec, spec_dir, version).await?;
+            let python = spec.python.as_ref().ok_or_else(|| {
+                MirrorError::SpecInvalid(vec!["python config is required for source.type 'pypi'".to_string()])
+            })?;
+            let uv_python = resolve_uv_python(python).await?;
+
+            tokio::fs::create_dir_all(work_dir)
+                .await
+                .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
+            let package = spec.source.pylock_app_name(&spec.name);
+            let output_path = work_dir.join(derived_lock_filename(package, &app_version));
+            let lock = derive_one_pypi_lock(spec, &uv_python, &app_version, &output_path).await?;
+            (lock, app_version)
+        }
+    };
+
+    build_env_tasks_from_lock(
+        spec,
+        spec_dir,
+        version,
+        &lock,
+        &app_version,
+        interpreter_candidates,
+        allowed_platforms,
+    )
+}
+
+/// Standalone-prepare (no `--plan`) resolution for a `pypi` source: finds the
+/// upstream PyPI version whose (bare) tag equals `version` — the same lookup
+/// `build_tasks_for_version` does for the archive/binary path, needed here
+/// because a `pypi` source (unlike `pylock`) has no committed lock to read
+/// the app version from directly.
+async fn resolve_pypi_app_version(
+    spec: &MirrorSpec,
+    spec_dir: &std::path::Path,
+    version: &str,
+) -> Result<String, MirrorError> {
+    let upstream_versions = list_upstream_versions(spec, spec_dir).await?;
+
+    upstream_versions
+        .iter()
+        .find(|info| info.version == version)
+        .map(|info| info.version.clone())
+        .ok_or_else(|| MirrorError::SpecInvalid(vec![format!("version '{version}' not found in pypi source")]))
+}
+
+/// Fetches the interpreter package's advertised `(leaf identifier, platform)`
+/// candidates — the per-platform manifest digests behind its tag. One network
+/// round-trip per prepare run; each leg's pin is then selected locally from
+/// this set by [`select_interpreter_pin`].
+///
+/// Pinning a platform LEAF manifest instead of the tag's top-level digest is
+/// load-bearing (ocx ≥ 0.5.3): a tag's image index is rewritten on every
+/// platform push and its old digest garbage-collected, so an index-digest pin
+/// is rejected by the publish gate at push time.
+async fn fetch_interpreter_candidates(
+    interpreter_package: &str,
+    client: &ocx_lib::oci::Client,
+) -> Result<Vec<(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)>, MirrorError> {
+    let identifier = ocx_lib::oci::Identifier::parse(interpreter_package).map_err(|e| {
+        MirrorError::PylockError(format!(
+            "invalid interpreter package reference '{interpreter_package}': {e}"
+        ))
+    })?;
+    let index = ocx_lib::oci::index::Index::from_remote(ocx_lib::oci::index::OciIndex::new(
+        ocx_lib::oci::index::OciIndexConfig { client: client.clone() },
+    ));
+    let candidates = index
+        .fetch_candidates(&identifier, ocx_lib::oci::index::IndexOperation::Resolve)
+        .await
+        .map_err(|e| {
+            MirrorError::TargetError(format!(
+                "failed to resolve interpreter candidates for '{interpreter_package}': {e:#}"
+            ))
+        })?;
+    match candidates {
+        Some(children) if !children.is_empty() => Ok(children),
+        _ => Err(MirrorError::TargetError(format!(
+            "interpreter package '{interpreter_package}' not found in its registry"
+        ))),
+    }
+}
+
+/// Selects the interpreter's platform-leaf pin for one env leg and wraps it
+/// as the composed package's `PRIVATE` dependency. Pure local selection over
+/// [`fetch_interpreter_candidates`]' result, using the same
+/// [`ocx_lib::oci::select_best`] relation `ocx package create` pins with (D1
+/// parity) — the mirror and a hand-run `create` cannot disagree on which
+/// leaf a leg depends on.
+fn select_interpreter_pin(
+    interpreter_package: &str,
+    candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    platform: &ocx_lib::oci::Platform,
+) -> Result<ocx_lib::package::metadata::dependency::Dependency, MirrorError> {
+    let winner = match ocx_lib::oci::select_best(platform, candidates) {
+        ocx_lib::oci::Selection::Found(identifier) => identifier,
+        ocx_lib::oci::Selection::None => {
+            let available: Vec<String> = candidates.iter().map(|(_, p)| p.to_string()).collect();
+            return Err(MirrorError::PylockError(format!(
+                "interpreter package '{interpreter_package}' has no entry compatible with platform '{platform}' (available: {})",
+                available.join(", ")
+            )));
+        }
+        ocx_lib::oci::Selection::Ambiguous(tied) => {
+            let tied: Vec<String> = tied.iter().map(|id| id.to_string()).collect();
+            return Err(MirrorError::PylockError(format!(
+                "interpreter package '{interpreter_package}' has {} entries tied for platform '{platform}': {}",
+                tied.len(),
+                tied.join(", ")
+            )));
+        }
+    };
+    let pinned = ocx_lib::oci::PinnedIdentifier::try_from(winner)
+        .map_err(|e| MirrorError::TargetError(format!("interpreter identifier not pinnable: {e}")))?;
+    Ok(ocx_lib::package::metadata::dependency::Dependency {
+        identifier: pinned,
+        visibility: ocx_lib::package::metadata::visibility::Visibility::PRIVATE,
+        name: None,
+    })
 }
 
 /// Read and parse a `plan.json` document written by `pipeline plan`.
@@ -662,6 +1126,7 @@ build_timestamp: none
                 asset_entry("linux/amd64", "tool-linux-amd64"),
                 asset_entry("darwin/arm64", "tool-darwin-arm64"),
             ],
+            pylock: None,
         }]);
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap();
@@ -700,6 +1165,7 @@ build_timestamp: none
             source_version: String::new(),
             variant: None,
             assets: vec![],
+            pylock: None,
         }]);
 
         let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err();
@@ -721,6 +1187,7 @@ build_timestamp: none
             source_version: "1.2.3".to_string(),
             variant: Some("slim".to_string()),
             assets: vec![asset_entry("linux/amd64", "tool-linux-amd64")],
+            pylock: None,
         }]);
 
         let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "slim-1.2.3").unwrap_err();
@@ -746,9 +1213,271 @@ build_timestamp: none
                 // Below windows/arm64's min_version (0.11.7) → must be dropped.
                 asset_entry("windows/arm64", "tool-windows-arm64"),
             ],
+            pylock: None,
         }]);
 
         let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();
         assert_eq!(platforms_of(&tasks), vec!["linux/amd64".to_string()]);
+    }
+
+    // ── W2.3: pylock env task building (network-free — interpreter dep injected) ──
+
+    /// A stand-in interpreter candidate set with a fixed digest, so
+    /// `build_env_tasks` runs without resolving a real registry manifest.
+    /// The single `any`-platform candidate is compatible with every leg.
+    fn fake_interpreter_candidates() -> Vec<(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)> {
+        let reference = format!("ocx.sh/cpython:3.13@sha256:{}", "a".repeat(64));
+        let identifier = ocx_lib::oci::Identifier::parse(&reference).expect("interpreter reference parses");
+        vec![(identifier, ocx_lib::oci::Platform::Any)]
+    }
+
+    fn pylock_fixture_spec_path() -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+    }
+
+    #[test]
+    fn interpreter_pin_selects_the_matching_libc_leaf_per_leg() {
+        // D5 leaf pinning must discriminate by the wheels key's `+libc.*`
+        // feature: the `Any`-candidate fake used elsewhere would keep every
+        // other test green even if the libc threading broke — this one reds.
+        fn candidate(digest_byte: char, platform: &str) -> (ocx_lib::oci::Identifier, ocx_lib::oci::Platform) {
+            let reference = format!("ocx.sh/cpython:3.13@sha256:{}", digest_byte.to_string().repeat(64));
+            (
+                ocx_lib::oci::Identifier::parse(&reference).expect("candidate reference parses"),
+                platform.parse().expect("candidate platform parses"),
+            )
+        }
+        let candidates = vec![
+            candidate('a', "linux/amd64+libc.glibc"),
+            candidate('b', "linux/amd64+libc.musl"),
+        ];
+
+        let musl = select_interpreter_pin(
+            "ocx.sh/cpython:3.13",
+            &candidates,
+            &"linux/amd64+libc.musl".parse().unwrap(),
+        )
+        .expect("musl leg resolves a pin");
+        assert!(
+            musl.identifier.to_string().contains(&"b".repeat(64)),
+            "musl leg must pin the musl leaf, got {}",
+            musl.identifier
+        );
+
+        let glibc = select_interpreter_pin(
+            "ocx.sh/cpython:3.13",
+            &candidates,
+            &"linux/amd64+libc.glibc".parse().unwrap(),
+        )
+        .expect("glibc leg resolves a pin");
+        assert!(
+            glibc.identifier.to_string().contains(&"a".repeat(64)),
+            "glibc leg must pin the glibc leaf, got {}",
+            glibc.identifier
+        );
+
+        // A featureless leg matches neither libc-featured offer (an offer's
+        // features must be a subset of the requirement's) — hard error naming
+        // the platform, not a silent arbitrary pick.
+        let error = select_interpreter_pin("ocx.sh/cpython:3.13", &candidates, &"linux/amd64".parse().unwrap())
+            .expect_err("featureless leg has no compatible leaf");
+        assert!(format!("{error}").contains("no entry compatible"), "got: {error}");
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_selects_wheels_per_applicable_platform() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let candidates = fake_interpreter_candidates();
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &candidates, None)
+            .await
+            .expect("build_env_tasks succeeds");
+
+        // Two declared wheels keys → two env legs.
+        assert_eq!(tasks.len(), 2, "2 wheels keys → 2 env legs");
+        let mut platforms: Vec<String> = tasks.iter().map(|task| task.platform.to_string()).collect();
+        platforms.sort();
+        assert_eq!(platforms, vec!["linux/amd64".to_string(), "linux/arm64".to_string()]);
+
+        for task in &tasks {
+            assert_eq!(task.normalized_version, "1.0.0");
+            assert_eq!(task.source_version, "1.0.0");
+            // Both fixture wheels are `none-any` → both apply on every platform.
+            assert_eq!(task.wheels.len(), 2, "2 wheels per env leg");
+            let names: Vec<&str> = task.wheels.iter().map(|wheel| wheel.filename.as_str()).collect();
+            assert!(names.iter().any(|name| name.starts_with("pycowsay-")), "{names:?}");
+            assert!(names.iter().any(|name| name.starts_with("six-")), "{names:?}");
+            for wheel in &task.wheels {
+                assert!(
+                    wheel.wheel_repository.starts_with("pip-packages/"),
+                    "repo-relative wheel repository: {}",
+                    wheel.wheel_repository
+                );
+                assert_eq!(wheel.url.scheme(), "https");
+            }
+            assert!(
+                task.interpreter.identifier.to_string().contains("cpython"),
+                "the injected interpreter dependency is threaded onto every task"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_is_empty_for_unknown_version() {
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let candidates = fake_interpreter_candidates();
+        let tasks = build_env_tasks(&spec, spec_dir, "9.9.9", &candidates, None)
+            .await
+            .expect("build_env_tasks succeeds");
+        assert!(tasks.is_empty(), "no bare env tag matches an unknown version");
+    }
+
+    #[tokio::test]
+    async fn build_env_tasks_restricts_to_plan_platforms() {
+        // Backfill-partial: the plan lists only the outstanding platform
+        // (linux/arm64), so prepare must compose that one alone — not the
+        // already-published linux/amd64 the spec also declares.
+        let spec_path = pylock_fixture_spec_path();
+        let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+        let spec_dir = spec_path.parent().unwrap();
+
+        let allowed: std::collections::HashSet<String> = ["linux/arm64".to_string()].into_iter().collect();
+        let candidates = fake_interpreter_candidates();
+        let tasks = build_env_tasks(&spec, spec_dir, "1.0.0", &candidates, Some(&allowed))
+            .await
+            .expect("build_env_tasks succeeds");
+
+        assert_eq!(tasks.len(), 1, "plan restricts to the single outstanding platform");
+        assert_eq!(tasks[0].platform.to_string(), "linux/arm64");
+    }
+
+    // ── plan_python_mirror_v2 W2.A3: pypi env-prepare dispatch ───────────────
+
+    fn pypi_fixture_spec() -> MirrorSpec {
+        let yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pypi
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+"#;
+        serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    const PYPI_DERIVED_LOCK_BODY: &str = r#"lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-py3-none-any.whl"
+url = "https://example.com/pycowsay-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#;
+
+    /// A `pypi` plan document carrying `pylock` for its single entry.
+    fn pypi_plan_with_lock(lock_relative: &str) -> PlanReport {
+        PlanReport {
+            schema_version: 3,
+            has_new: true,
+            has_drift: false,
+            versions: vec![PlanVersionEntry {
+                version: "1.0.0".to_string(),
+                platforms: vec!["linux/amd64".to_string()],
+                kind: PlanVersionKind::New,
+                source_version: "1.0.0".to_string(),
+                variant: None,
+                assets: vec![],
+                pylock: Some(lock_relative.to_string()),
+            }],
+            target: "ocx.sh/pycowsay".to_string(),
+            ocx_mirror_rev: None,
+        }
+    }
+
+    /// Writes `body` as the derived lock under `{dir}/locks/` plus the
+    /// `plan.json` that references it, returning the plan path.
+    fn write_pypi_plan(dir: &Path, body: &str) -> PathBuf {
+        let locks_dir = dir.join("locks");
+        std::fs::create_dir_all(&locks_dir).unwrap();
+        std::fs::write(locks_dir.join("pylock.pycowsay-1-0-0.toml"), body).unwrap();
+
+        let plan = pypi_plan_with_lock("locks/pylock.pycowsay-1-0-0.toml");
+        let plan_path = dir.join("plan.json");
+        std::fs::write(&plan_path, serde_json::to_string(&plan).unwrap()).unwrap();
+        plan_path
+    }
+
+    #[tokio::test]
+    async fn build_pypi_env_tasks_consumes_plan_provided_lock_without_deriving() {
+        // No OCX_BINARY_PIN/OCX_MIRROR_UV stub is installed for this test: if
+        // the plan-provided-lock path fell through to re-derivation, it would
+        // try to spawn a real `ocx`/`uv` binary and fail — proving this path
+        // never touches them.
+        let plan_dir = tempdir().unwrap();
+        let plan_path = write_pypi_plan(plan_dir.path(), PYPI_DERIVED_LOCK_BODY);
+
+        let spec = pypi_fixture_spec();
+        let candidates = fake_interpreter_candidates();
+
+        let tasks = build_pypi_env_tasks(
+            &spec,
+            Path::new("."),
+            "1.0.0",
+            &candidates,
+            None,
+            Some(&plan_path),
+            Path::new("."),
+        )
+        .await
+        .expect("consuming a plan-provided lock never spawns uv/ocx");
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].source_version, "1.0.0");
+        assert_eq!(tasks[0].platform.to_string(), "linux/amd64");
+    }
+
+    #[tokio::test]
+    async fn build_pypi_env_tasks_errors_on_unparseable_plan_provided_lock() {
+        // A sdist-only package (no [[packages.wheels]]) is valid TOML but
+        // fails ocx_python::parse_pylock's fail-closed re-parse — must
+        // surface as PylockError (exit 65), not a panic or silent skip.
+        let plan_dir = tempdir().unwrap();
+        let bad_body = "lock-version = \"1.0\"\n\n[[packages]]\nname = \"pycowsay\"\nversion = \"1.0.0\"\n";
+        let plan_path = write_pypi_plan(plan_dir.path(), bad_body);
+
+        let spec = pypi_fixture_spec();
+        let candidates = fake_interpreter_candidates();
+
+        let err = build_pypi_env_tasks(
+            &spec,
+            Path::new("."),
+            "1.0.0",
+            &candidates,
+            None,
+            Some(&plan_path),
+            Path::new("."),
+        )
+        .await
+        .expect_err("an unparseable plan-provided lock must fail, not silently succeed");
+
+        assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
     }
 }

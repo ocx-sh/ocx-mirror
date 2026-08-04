@@ -734,9 +734,19 @@ fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .map(|id| format!("\n          OCX_MIRROR_DISCORD_USER_ID: \"{id}\""))
         .unwrap_or_default();
 
+    // Env sources (`pylock`, `pypi`) publish an env package — composed metadata
+    // plus N wheel layers — where every other source publishes one archive
+    // bundle per platform. Three points in the workflow differ because of it:
+    // what `prepare` gathers, what `test` hands `ocx package test`, and (pypi
+    // only, whose lock is derived in-pipeline rather than committed) what the
+    // discover job's plan artifact carries. Everything else is source-agnostic,
+    // and an archive spec renders exactly the bytes it rendered before.
+    let is_env = spec.source.is_env();
+    let is_pypi = matches!(spec.source, spec::Source::Pypi { .. });
+
     let matrix = build_matrix(spec);
     let matrix_entries = render_matrix_entries(&matrix);
-    let test_run_steps = render_test_run_steps(&matrix);
+    let test_run_steps = render_test_run_steps(&matrix, is_env);
     let target_identifier = spec.target.reference();
 
     // The Dockerfile reaches the shell through `env:`, not an inline `${{ }}`:
@@ -768,7 +778,11 @@ fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{TRIGGER_PATHS}", &triggers)
         .replace("{MIRROR_NAME}", &spec.name)
         .replace("{SCHEDULE_BLOCK}", &schedule_block)
+        .replace("{PLAN_ARTIFACT_PATH}", plan_artifact_path(is_pypi))
+        .replace("{DERIVED_LOCKS_ARTIFACT}", &derived_locks_artifact(is_pypi))
+        .replace("{PREPARE_FLATTEN}", prepare_flatten_script(is_env))
         .replace("{TEST_MATRIX_ENTRIES}", &matrix_entries)
+        .replace("{TEST_TARGET_RESOLVE}", test_target_resolve_script(is_env))
         .replace("{TEST_RUN_STEPS}", &test_run_steps)
         // Substituted after `{TEST_RUN_STEPS}` — the placeholder lives inside the
         // container prelude that step just injected.
@@ -1109,10 +1123,35 @@ fn ocx_cli_version() -> &'static str {
 /// image's libc, which is the only way an `os.features` musl/glibc claim can be
 /// verified. JS actions keep running on the host's glibc node throughout, which
 /// is why this is a per-command wrapper rather than a job-level `container:`.
-fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
+///
+/// `is_env` switches what is handed to `ocx package test`: one bundle path for
+/// an archive/binary source, `-m <metadata> <layers…>` for an env source, whose
+/// artifact is a composed metadata document plus N wheel layers. Both forms are
+/// resolved into shell variables by [`test_target_resolve_script`].
+fn render_test_run_steps(legs: &[MatrixLeg], is_env: bool) -> String {
     if legs.is_empty() {
         return String::new();
     }
+
+    // What `ocx package test` is pointed at, and the `--platform` it declares.
+    // An env container leg names its own libc as an os_feature: `ocx package
+    // test` threads `--platform` verbatim into DEPENDENCY resolution, and an
+    // env's interpreter index may carry per-libc entries only — a bare
+    // `linux/amd64` request would match none of them. Archive legs keep the
+    // bare matrix platform, so their output is unchanged.
+    let (test_target, test_platform) = if is_env {
+        (r#"-m "${METADATA}" ${LAYERS}"#, r#""${TEST_PLATFORM}""#)
+    } else {
+        (r#""${BUNDLE}""#, r#""${{ matrix.platform }}""#)
+    };
+
+    // `set -u` is in force, so this line may only be emitted where `BUNDLE`
+    // exists — an env leg never sets it.
+    let metadata_sibling = if is_env {
+        ""
+    } else {
+        "            METADATA_SIBLING=\"${BUNDLE%.tar.xz}-metadata.json\"\n"
+    };
 
     // Emitted only when some leg declares an image, so native-only workflows
     // stay byte-identical to the pre-container renderer. `{OCX_TEST}` is the
@@ -1232,8 +1271,7 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
         ""
     };
 
-    let body = r#"{CONTAINER_PRELUDE}            METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json"
-            mkdir -p junit
+    let body = r#"{CONTAINER_PRELUDE}{METADATA_SIBLING}            mkdir -p junit
             JUNIT_FILE="junit/junit-${VERSION}-${{ matrix.platform_slug }}-${{ matrix.container_id }}.xml"
             TESTS_JSON='${{ toJson(matrix.tests) }}'
             TEST_COUNT=$(echo "${TESTS_JSON}" | jq 'length')
@@ -1246,15 +1284,15 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
               RC=0
               if [ "${TEST_KIND}" = "command" ]; then
                 TEST_CMD=$(echo "${TESTS_JSON}" | jq -r ".[$i].command")
-                {OCX_TEST} package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" -- \
+                {OCX_TEST} package test --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} -- \
                   ${{ matrix.shell }} -c "${TEST_CMD}" || RC=$?
               elif [ "${TEST_KIND}" = "script" ]; then
                 TEST_SCRIPT=$(echo "${TESTS_JSON}" | jq -r ".[$i].script")
-                {OCX_TEST} package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                {OCX_TEST} package test --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script "${TEST_SCRIPT}" || RC=$?
               else
                 TEST_INLINE=$(echo "${TESTS_JSON}" | jq -r ".[$i].script_inline")
-                printf '%s' "${TEST_INLINE}" | {OCX_TEST} package test --platform "${{ matrix.platform }}" --identifier "{TARGET_IDENTIFIER}:${VERSION}" "${BUNDLE}" \
+                printf '%s' "${TEST_INLINE}" | {OCX_TEST} package test --platform {TEST_PLATFORM} --identifier "{TARGET_IDENTIFIER}:${VERSION}" {TEST_TARGET} \
                   --script - || RC=$?
               fi
               END=$(date +%s)
@@ -1287,7 +1325,159 @@ fn render_test_run_steps(legs: &[MatrixLeg]) -> String {
     body.replace("{CONTAINER_PRELUDE}", container_prelude)
         // After `{CONTAINER_PRELUDE}` — the placeholder lives inside it.
         .replace("{CONTAINER_SETUP_BUILD}", container_setup_build)
+        .replace("{METADATA_SIBLING}", metadata_sibling)
         .replace("{OCX_TEST}", ocx_test)
+        .replace("{TEST_TARGET}", test_target)
+        .replace("{TEST_PLATFORM}", test_platform)
+}
+
+/// The `discover` job's plan-artifact `path:`, source-dependent.
+///
+/// A `pypi` source derives one PEP 751 lock per discovered version during the
+/// plan phase (`pipeline plan` writes them to `./locks`), and `prepare` needs
+/// those locks as much as it needs `plan.json` — carrying both in the one
+/// artifact is what keeps a prepare leg from re-deriving. Every other source,
+/// `pylock` included (its lock is committed in the repository), uploads the
+/// single file it always did.
+fn plan_artifact_path(is_pypi: bool) -> &'static str {
+    if is_pypi {
+        "|\n            plan.json\n            locks/"
+    } else {
+        "plan.json"
+    }
+}
+
+/// The `actions/upload-artifact` step header exactly as the template pins it.
+///
+/// [`derived_locks_artifact`] is a step the template cannot carry — it exists
+/// for one source type only — and a pin written into Rust would sit outside the
+/// Renovate customManager, which scans `templates/*.yml`. Reading the
+/// template's own line keeps both uploads on the one bot-bumped action. The
+/// fallback is inert while the template carries an upload step, which
+/// `the_derived_locks_upload_tracks_the_templates_action_pin` asserts.
+fn upload_artifact_uses() -> &'static str {
+    WORKFLOW_TEMPLATE
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("- uses: actions/upload-artifact@"))
+        .unwrap_or("- uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1")
+}
+
+/// The long-retention copy of a `pypi` source's derived locks, or nothing.
+///
+/// The `plan` artifact expires after a day, and the locks it carries are the
+/// exact resolution every published env package was built from — one 90-day
+/// copy is what makes a past publish reconstructable
+/// (`adr_pypi_lock_derivation.md`). `if-no-files-found: ignore` because a run
+/// that discovers no new version derives no lock and must not red on the empty
+/// directory.
+fn derived_locks_artifact(is_pypi: bool) -> String {
+    if !is_pypi {
+        return String::new();
+    }
+    format!(
+        r#"      # Long-retention copy of the derived locks, for audit once the 1-day
+      # plan artifact has expired (see adr_pypi_lock_derivation.md).
+      {uses}
+        with:
+          name: derived-locks
+          path: locks/
+          retention-days: 90
+          if-no-files-found: ignore
+"#,
+        uses = upload_artifact_uses(),
+    )
+}
+
+/// The prepare job's artifact-gathering script (10-space indent, emitted into
+/// that job's `run:` block).
+///
+/// Archive legs flatten every per-platform `bundle.tar.xz` and its metadata
+/// sibling into one `bundles/` namespace keyed by `bundle-{V}-{slug}`. An env
+/// source has no such file: `pipeline prepare` writes a version subtree whose
+/// `env-manifest.json` names its metadata and layers by paths relative to that
+/// directory, so the subtree travels whole and both the test job and
+/// `pipeline push`'s `enumerate_env_manifests` resolve those paths against
+/// `bundles/{V}/`.
+fn prepare_flatten_script(is_env: bool) -> &'static str {
+    if is_env {
+        r#"          # The prepared env subtree travels whole: env-manifest.json names its
+          # metadata and layers relative to this version directory.
+          V="${{ matrix.version.version }}"
+          # Same `+` → `_` translation the archive path makes: `pipeline prepare`
+          # names its on-disk version directory with the OCI-tag-safe slug while
+          # the matrix value keeps the build separator.
+          V_SLUG="${V//+/_}"
+          mkdir -p bundles
+          if [ -d ".ocx-mirror/${V_SLUG}" ]; then
+            cp -R ".ocx-mirror/${V_SLUG}" "bundles/${V}"
+          fi"#
+    } else {
+        r#"          # Flatten .ocx-mirror/{V}/{P}/bundle.tar.xz → bundles/bundle-{V}-{P_slug}.tar.xz
+          # and copy the per-platform metadata.json written by `pipeline prepare`
+          # as sibling so `ocx package test` auto-discovers the correct override
+          # (e.g. metadata-darwin.json baked content) via its bundle→metadata
+          # sibling convention. Do NOT copy the spec-level metadata.json from CWD
+          # — that always contains the default path, not the platform override.
+          V="${{ matrix.version.version }}"
+          # `pipeline prepare` normalises the build separator `+` → `_` when
+          # naming its on-disk version directory (OCI-tag safe slug); the
+          # matrix value still carries the original `+`, so translate before
+          # globbing into the platform tree.
+          V_SLUG="${V//+/_}"
+          mkdir -p bundles
+          shopt -s nullglob
+          for platform_dir in ".ocx-mirror/${V_SLUG}"/*/; do
+            [ -d "${platform_dir}" ] || continue
+            P_SLUG=$(basename "${platform_dir}")
+            cp "${platform_dir}bundle.tar.xz" "bundles/bundle-${V}-${P_SLUG}.tar.xz"
+            cp "${platform_dir}metadata.json" "bundles/bundle-${V}-${P_SLUG}-metadata.json"
+          done"#
+    }
+}
+
+/// Resolve this leg's package under test, per version (12-space indent, emitted
+/// immediately before the test-run steps inside the test job's version loop).
+///
+/// Archive legs name one bundle path. Env legs read the version's
+/// `env-manifest.json` and set `METADATA` + `LAYERS` for the
+/// `-m <metadata> <layers…>` form, picking the entry that matches this leg's
+/// libc: a musl container leg tests the musl env of a dual-libc package, while
+/// both legs of a single-env package see its one featureless entry.
+///
+/// The jq resolution is deliberately guarded (`2>/dev/null || true`, `// empty`)
+/// so a genuine miss — a version whose prepare leg failed and uploaded no
+/// manifest — reds that one version attributably through the
+/// `ocx package test … || RC=$?` capture (empty METADATA → ocx fails → one JUnit
+/// `<failure>`), instead of a bare jq exit tripping `set -e` and aborting every
+/// remaining version with no JUnit written at all.
+fn test_target_resolve_script(is_env: bool) -> &'static str {
+    if is_env {
+        r#"            VERSION_DIR="bundles/${VERSION}"
+            # The leg's own libc, declared on `--platform` as an os_feature so
+            # dependency resolution (the env's private interpreter) can select a
+            # per-libc index entry. Native legs declare no libc and stay bare.
+            TEST_PLATFORM="${{ matrix.platform }}"
+            case "${TEST_PLATFORM}" in
+              # A platform key that already declares its own os.features is
+              # authoritative — appending a second one would not even parse.
+              *+*) ;;
+              *)
+                case "${{ matrix.container_libc }}" in
+                  musl) TEST_PLATFORM="${TEST_PLATFORM}+libc.musl" ;;
+                  gnu) TEST_PLATFORM="${TEST_PLATFORM}+libc.glibc" ;;
+                esac
+                ;;
+            esac
+            ENV_JSON=$(jq -c --arg p "${{ matrix.platform }}" --arg full "${TEST_PLATFORM}" '([.envs[] | select(.platform == $full)] + [.envs[] | select(.platform == $p)]) | first // empty' "${VERSION_DIR}/env-manifest.json" 2>/dev/null || true)
+            METADATA="${VERSION_DIR}/$(printf '%s' "${ENV_JSON}" | jq -r '.metadata_path // empty' 2>/dev/null || true)"
+            LAYERS=""
+            for rel in $(printf '%s' "${ENV_JSON}" | jq -r '.layers[].path // empty' 2>/dev/null || true); do
+              LAYERS="${LAYERS} ${VERSION_DIR}/${rel}"
+            done"#
+    } else {
+        r#"            BUNDLE="bundles/bundle-${VERSION}-${{ matrix.platform_slug }}.tar.xz""#
+    }
 }
 
 /// Render the describe.yml catalog-publish workflow.
@@ -3339,7 +3529,7 @@ platforms:
     runner: ubuntu-latest
 "#,
         );
-        let shell_block = render_test_run_steps(&legs);
+        let shell_block = render_test_run_steps(&legs, false);
 
         // Must extract TEST_KIND.
         assert!(
@@ -4016,6 +4206,130 @@ announce:
         );
     }
 
+    // ── Env-package sources (pylock / pypi) ───────────────────────────────────
+
+    #[test]
+    fn an_env_spec_gathers_the_version_subtree_and_tests_the_composed_layers() {
+        // A `source.type: pylock` spec publishes an env package, so two joints
+        // of the workflow change shape: prepare copies the whole per-version
+        // subtree into `bundles/{V}/` (there is no per-platform bundle.tar.xz to
+        // flatten), and the test job resolves that version's env-manifest.json
+        // into a `-m <metadata> <layers…>` invocation.
+        let content = workflow_for("mirror-pylock.yml");
+
+        assert!(
+            content.contains(r#"cp -R ".ocx-mirror/${V_SLUG}" "bundles/${V}""#),
+            "prepare must copy the version env subtree into bundles/:\n{content}"
+        );
+        assert!(
+            !content.contains("bundle.tar.xz"),
+            "an env workflow must carry no archive bundle flattening:\n{content}"
+        );
+        assert!(
+            content.contains("env-manifest.json"),
+            "the test job must read the env manifest:\n{content}"
+        );
+        assert!(
+            content.contains(r#"-m "${METADATA}" ${LAYERS}"#),
+            "`ocx package test` must receive the composed metadata + ordered layers:\n{content}"
+        );
+        // A genuine miss — a version whose prepare leg failed and uploaded no
+        // manifest — must red that one version through the `|| RC=$?` capture,
+        // not trip `set -e` and abort every remaining version with no JUnit.
+        assert!(
+            content.contains(r#""${VERSION_DIR}/env-manifest.json" 2>/dev/null || true"#),
+            "manifest resolution must tolerate a missing manifest:\n{content}"
+        );
+        // `set -u` is in force: an env leg sets neither variable, so naming
+        // either one would abort the step before the first test runs.
+        assert!(
+            !content.contains(r#""${BUNDLE}""#) && !content.contains("METADATA_SIBLING"),
+            "an env workflow must not reference the archive BUNDLE variables:\n{content}"
+        );
+        // A container leg declares its own libc as an os_feature, so the env's
+        // private interpreter resolves against a per-libc index entry.
+        assert!(
+            content.contains(r#"--platform "${TEST_PLATFORM}""#)
+                && content.contains(r#"musl) TEST_PLATFORM="${TEST_PLATFORM}+libc.musl" ;;"#),
+            "env test invocations must declare the leg's libc:\n{content}"
+        );
+        // A committed lock needs no in-pipeline derivation, so the plan
+        // artifact stays exactly what every other source uploads.
+        assert!(
+            content.contains("          path: plan.json\n") && !content.contains("derived-locks"),
+            "a pylock spec must keep the single-path plan artifact:\n{content}"
+        );
+    }
+
+    #[test]
+    fn an_archive_spec_still_flattens_bundles_and_tests_one_file() {
+        // The other half of the env split: an archive/binary spec must render
+        // the bundle flatten and the single-bundle test target it always has.
+        let content = workflow_for("mirror-minimal.yml");
+
+        assert!(
+            content.contains(r#"cp "${platform_dir}bundle.tar.xz""#),
+            "archive prepare must still flatten bundle.tar.xz:\n{content}"
+        );
+        assert!(
+            content.contains(r#"BUNDLE="bundles/bundle-${VERSION}-${{ matrix.platform_slug }}.tar.xz""#),
+            "the archive test job must still resolve the single bundle path:\n{content}"
+        );
+        assert!(
+            content.contains(r#"METADATA_SIBLING="${BUNDLE%.tar.xz}-metadata.json""#),
+            "the archive test job must still name the metadata sibling:\n{content}"
+        );
+        assert!(
+            !content.contains("env-manifest.json"),
+            "an archive workflow must carry no env-manifest logic:\n{content}"
+        );
+        assert!(
+            content.contains("          path: plan.json\n") && !content.contains("derived-locks"),
+            "an archive spec must keep the single-path plan artifact:\n{content}"
+        );
+    }
+
+    #[test]
+    fn a_pypi_spec_ships_its_derived_locks_to_prepare_and_to_the_audit_trail() {
+        // `pypi` derives a PEP 751 lock per version during the plan phase, so
+        // `locks/` must travel to prepare inside the plan artifact, and a
+        // second long-retention copy outlives that artifact's single day.
+        let content = workflow_for("mirror-pypi.yml");
+
+        assert!(
+            content
+                .contains("          name: plan\n          path: |\n            plan.json\n            locks/\n          retention-days: 1\n"),
+            "the plan artifact must carry both plan.json and locks/:\n{content}"
+        );
+        assert!(
+            content.contains(
+                "          name: derived-locks\n          path: locks/\n          retention-days: 90\n          if-no-files-found: ignore\n"
+            ),
+            "a pypi workflow must carry the 90-day derived-locks artifact:\n{content}"
+        );
+        assert!(
+            content.contains("env-manifest.json"),
+            "pypi is an env source too, so the test job reads the env manifest:\n{content}"
+        );
+    }
+
+    #[test]
+    fn the_derived_locks_upload_tracks_the_templates_action_pin() {
+        // The audit upload is rendered from Rust, so its `uses:` line is read
+        // back out of the template: a literal here would sit outside the
+        // Renovate customManager, which only scans `templates/*.yml`.
+        let template_pin = WORKFLOW_TEMPLATE
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("- uses: actions/upload-artifact@"))
+            .expect("the workflow template pins actions/upload-artifact");
+        assert!(
+            derived_locks_artifact(true).contains(template_pin),
+            "the derived-locks upload must reuse the template's pinned action, got:\n{}",
+            derived_locks_artifact(true)
+        );
+    }
+
     // ── Zero-drift guard for the native corpus ────────────────────────────────
 
     /// Every fixture that renders successfully and declares no `containers:`.
@@ -4034,6 +4348,8 @@ announce:
         "mirror-windows-arm64.yml",
         "mirror-all-test-kinds.yml",
         "mirror-variants.yml",
+        "mirror-pylock.yml",
+        "mirror-pypi.yml",
     ];
 
     /// Render every generated file for `fixture` into one comparable blob,

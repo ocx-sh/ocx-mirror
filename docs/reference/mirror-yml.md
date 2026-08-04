@@ -8,13 +8,16 @@
 |-----|------|----------|---------|
 | `name` | string | Yes | Tool name, used in log output and notify messages |
 | `target` | object | Yes | OCI registry and repository to push to |
-| `source` | object | Yes | Upstream release source ([GitHub Releases][github-releases] or URL index) |
-| `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. *Mutually exclusive with `variants` — exactly one of the two is required. |
-| `variants` | array | No* | Alternate asset sets for the same tool, each producing its own version-tag prefix. *Mutually exclusive with `assets` — exactly one of the two is required. See [`variants`](#variants). |
+| `source` | object | Yes | Upstream release source: [GitHub Releases][github-releases], URL index, a committed [PEP 751 `pylock.toml`](#pylock), or an [index-discovered PyPI package](#pypi-source) |
+| `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. *Mutually exclusive with `variants` — exactly one of the two required for `github_release`/`url_index` sources. Not used by `source.type: pylock`/`pypi` (see `wheels`). |
+| `variants` | array | No* | Alternate asset sets for the same tool (per-variant `assets`/`metadata`/`asset_type`), each producing its own version-tag prefix. *Mutually exclusive with `assets` — exactly one of the two required for `github_release`/`url_index` sources; rejected for env sources (`pylock`/`pypi`). See [`variants`](#variants). |
 | `metadata` | object | No | Path(s) to the package metadata JSON, with optional per-platform overrides. See [`metadata`](#metadata). |
 | `bin_scan` | string | No | `off` (default), `auto`, or `verify` — derive the published `binaries` claim from the extracted bundle. See [`bin_scan`](#bin-scan). |
 | `libc_lint` | boolean | No | Check a Linux build's declared `os.features` against the libc its binaries link against (`true` by default). See [`libc_lint`](#libc-lint). |
-| `asset_type` | string | No | `Archive` (default) or `Binary` |
+| `asset_type` | string | No | `Archive` (default) or `Binary`. Not used by `source.type: pylock`/`pypi`. |
+| `python` | object | No* | Interpreter version/ABI + `interpreter_package`, plus optional [`lock`](#python-lock) and [`entrypoints`](#entrypoints) config. **Required** for `source.type: pylock` or `pypi`. See [Python apps](#pylock). |
+| `wheels` | object | No* | Per-platform wheel selection for env sources. **Required** for `source.type: pylock`/`pypi`; keys may carry `+libc.glibc`/`+libc.musl` (published as OCI `os.features`). See [`wheels`](#wheels). |
+| `wheel_scope` | string | No | Repo-naming scope prefix for [shared wheel layers](#shared-wheel-layers) (`source.type: pylock`/`pypi`). Default `pip-packages`. |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean or object | No | Cascade rolling tags on push (`true` by default), and optionally put the generated repair workflow on a timer. See [`cascade`](#cascade). |
 | `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
@@ -66,7 +69,7 @@ Maps a **platform key** to an ordered list of regexes. Each regex is matched aga
 A platform key is `<os>/<arch>` with optional suffixes:
 
 ```
-<os>/<arch>[/<variant>][/<os_version>][+libc.<flavor>...]
+<os>/<arch>[/<variant>][+libc.<flavor>[,...]]
 ```
 
 ```yaml
@@ -90,6 +93,237 @@ assets:
 ```
 
 `libc.glibc` and `libc.musl` are the recognized flavors. The two keys are distinct platforms — each needs its own regex list, and each publishes as its own image-index entry. A key with no `+libc.` tag carries no libc requirement and resolves for any host (the pre-libc behavior). Quote keys containing `+` so YAML parses them as strings.
+## Python apps (`source.type: pylock` / `pypi`) {#pylock}
+
+A `pylock` or `pypi` source mirrors a Python **application** into a runnable OCX **environment package** — the union of every resolved wheel plus a private interpreter, composed so it runs via `ocx run` on a clean machine with **no pip, uv, or venv at runtime**. This replaces the `assets`/`asset_type` archive model (both source types ignore both fields). The two types differ only in where the [PEP 751](https://peps.python.org/pep-0751/) lock comes from:
+
+- **`pylock`** — a lock file committed to the mirror repository; resolves exactly one version (the one recorded in the lock).
+- **`pypi`** — versions are discovered from a PyPI-compatible index, and a lock is derived in-pipeline per version (see [`source.type: pypi`](#pypi-source)).
+
+Everything downstream of "a lock is in hand" — wheel selection ([`wheels`](#wheels)), entrypoint synthesis ([`python.entrypoints`](#entrypoints)), composition, and [shared wheel layers](#shared-wheel-layers) — is identical for both.
+
+```yaml
+name: black                       # PEP 503-normalized to match the app package in the lock
+target:
+  registry: dev.ocx.sh
+  repository: ocx/black
+source:
+  type: pylock
+  path: black.pylock.toml         # repo-relative path to the PEP 751 lock
+python:
+  version: "3.14.6"               # interpreter version
+  abi: cp314                      # target ABI tag
+  interpreter_package: "ocx.sh/cpython:3.14.6"   # OCX package providing the interpreter
+wheels:
+  "linux/amd64+libc.glibc":       # glibc entry (default filter [manylinux, any])
+tests:
+  - name: smoke
+    script: tests/black.smoke.star
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+```
+
+### `source.type: pypi` — index-discovered apps {#pypi-source}
+
+A `pypi` source discovers upstream versions directly from a PyPI-compatible index instead of a committed lock file — useful for apps whose releases you want to track automatically rather than re-lock and commit by hand.
+
+```yaml
+name: pycowsay
+target:
+  registry: dev.ocx.sh
+  repository: ocx/pycowsay
+source:
+  type: pypi
+  package: pycowsay                # PEP 503 name on the index; defaults to `name`
+  index: https://pypi.org          # optional; Warehouse-compatible JSON API base
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/cpython:3.13.1"
+  lock:
+    universal: true                 # see python.lock below
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+```
+
+**`source` fields (`type: pypi`):**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `package` | string | No | PEP 503 name of the PyPI package to resolve. Defaults to the mirror's `name`. |
+| `index` | string | No | Warehouse-compatible index base URL — versions are read from `GET {index}/pypi/<package>/json`. Must be `http`/`https`. Default: `https://pypi.org`. |
+
+**Discovery semantics:**
+
+- A release is listed only when it has at least one file that is not [yanked (PEP 592)](https://peps.python.org/pep-0592/); a release with zero files, or with every file yanked, is dropped entirely.
+- Prerelease detection is PEP 440-aware (`uv_pep440`), not the mirror's own semver-ish version parser — a `2.0.0.dev0` release is correctly flagged as a prerelease and respects the existing `skip_prereleases`/`versions` bounds the same as any other source.
+- An index that returns 404 for the package name is a data error (malformed input — the package doesn't exist on that index, exit code 65), not an availability failure; any other failure (connection refused, timeout, 5xx, malformed JSON) stays a source-unavailable error (exit code 69).
+
+Per-version lock derivation (running `uv pip compile`) happens later, in `pipeline plan` — see [`python.lock`](#python-lock) and [`--locks-dir`](#python-lock). A universal lock (the default) resolves via `--python-version` alone; only `universal: false` materializes the pinned `interpreter_package` on disk to resolve against it.
+
+### How the app is resolved
+
+The lock lists every package in the resolved environment; `ocx-mirror` picks the one whose name **PEP 503-normalizes** (lowercase, runs of `-_.` → `-`) to the spec's `name` as *the app*, and mirrors its locked version. So a `[full]`-extras distribution keeps its distribution name: `name: google-cloud-aiplatform` (not `aiplatform`). A `name` that matches no locked package fails with exit 65. For `pypi`, the same `source.package`/`name` fallback selects which index package to resolve — there is no committed lock to cross-check the app name against until one is derived.
+
+Set `source.package` to resolve a *different* app name than the mirror `name` — e.g. a `pycowsay-musl` mirror (distinct target repo + workflow) that resolves the `pycowsay` package from a shared lock:
+
+```yaml
+source:
+  type: pylock
+  path: pycowsay.pylock.toml
+  package: pycowsay               # resolve this package; defaults to the mirror name
+```
+
+### `python` block
+
+Required for `source.type: pylock` or `pypi`. Fields:
+
+| Key | Purpose |
+|-----|---------|
+| `version` | Interpreter version (e.g. `3.14.6`). Feeds the PEP 508 marker environment used for wheel selection. |
+| `abi` | Target ABI tag (e.g. `cp314`). Every compiled wheel's ABI must match this (or be `abi3`/`none`), checked fail-closed at compose. |
+| `interpreter_package` | An OCX package that provides `python3` (a [python-build-standalone](https://github.com/astral-sh/python-build-standalone) build). Pulled in as a **private dependency** and pinned by digest; its platform-agnostic index digest is resolved per-platform at materialize. |
+| `lock` | Lock-derivation options — `source.type: pypi` only. See [`python.lock`](#python-lock). |
+| `entrypoints` | Which console scripts synthesize as OCX entrypoints. Default `auto`. See [`python.entrypoints`](#entrypoints). |
+
+### `python.lock` — pypi lock derivation {#python-lock}
+
+`source.type: pypi` has no committed lock, so `ocx-mirror` derives one per version in-pipeline (`pipeline plan`, via `uv pip compile`). `python.lock` configures that derivation; it is meaningless for `source.type: pylock` (a committed lock is already resolved) and is rejected there with exit code 65: `python.lock: only supported for source.type 'pypi' (a committed lock is already resolved)`.
+
+```yaml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/cpython:3.13.1"
+  lock:
+    universal: true            # default: true
+    extras: []                 # default: []
+    exclude: []                # default: []
+    timeout_seconds: 300       # default: 300
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|--------------|
+| `universal` | boolean | `true` | Resolve a platform/interpreter-agnostic universal lock (`uv pip compile --universal`) rather than one pinned to the resolving host. |
+| `extras` | array of strings | `[]` | Extras to include when resolving the lock (e.g. `["full"]` for `app[full]`). |
+| `exclude` | array of strings | `[]` | Package names to exclude from resolution (`uv --no-emit-package`). |
+| `timeout_seconds` | integer | `300` | Timeout for the `uv pip compile` subprocess. |
+
+Each derived lock is written under `--locks-dir` (a `pipeline plan` flag, default `./locks`, relative to the command's working directory — the same directory `plan.json` is written to) as `pylock.<package>-<version>.toml`, with a relaxed `requires-python` floor (works around a known `uv` over-strict-patch-pin issue) and a provenance comment header. `pipeline prepare --plan` reads the path straight from the plan instead of re-deriving; a standalone `pipeline prepare` (no `--plan`) re-derives it from scratch.
+
+Every dot in the `<package>-<version>` segment becomes a dash (`pylock.black-26-5-1.toml`): `uv` enforces PEP 751 on its `-o` argument, where the name between `pylock.` and `.toml` must be non-empty and dot-free. Nothing parses the name back — each plan entry's `pylock` field carries the full path — so the substitution is safe.
+
+A `uv` resolution failure (unsolvable requirements, bad package metadata) is a data error, exit 65 — the version cannot produce a trustworthy lock. A missing/unspawnable `uv` binary, a timeout, or lock-file I/O failure is a subprocess execution failure, exit 1.
+
+### `python.entrypoints` {#entrypoints}
+
+Controls which wheels' `[console_scripts]` entries synthesize as OCX entrypoints in the composed env.
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | Only the **root package's** own console scripts synthesize (root = `source.package`/mirror `name`). **New default** — previously every wheel's scripts synthesized unconditionally. |
+| `all` | Every wheel's console scripts synthesize — the pre-`auto` behavior. |
+| explicit list | Only the listed console-script names synthesize, each optionally windowed to an app-version range. |
+
+```yaml
+python:
+  entrypoints: auto   # or: all
+
+# or an explicit, version-windowed list:
+python:
+  entrypoints:
+    - name: black
+    - name: blackd
+      min_version: "24.0.0"   # inclusive
+      max_version: "25.0.0"   # exclusive
+```
+
+`min_version`/`max_version` follow the same inclusive-lower/exclusive-upper convention as `versions:` and per-platform bounds; an entry with neither is unbounded. An app version that fails to parse keeps every explicit entry (fail-open, same convention as platform excludes).
+
+**Fails closed** in two cases, both surfaced as a compose/pylock error (exit 65):
+
+- **Collision** — two different wheels register a console script under the same entrypoint name and the selection mode admits both (only possible under `all`, or an `explicit` name two wheels both provide).
+- **Miss** — an `explicit` name that no admitted wheel's console scripts actually provide.
+
+**Nuance — `auto` removes dependency console-script shims.** Under `auto`, a *dependency* wheel's own console script (e.g. a library the app depends on that ships its own CLI) no longer synthesizes as an entrypoint. If the app itself spawns that dependency's CLI as a subprocess (`subprocess.run(["some-dep-cli", ...])`), the spawn will fail to find it under `auto` — such an app needs `all`, or the dependency's script name listed explicitly.
+
+### `wheels` — per-platform wheel selection {#wheels}
+
+Env sources declare their support envelope in a top-level `wheels:` map — the env analogue of the archive `assets:` map. It is **required** for `source.type: pylock`/`pypi` and rejected for every other source; `variants:` is rejected outright for env sources (libc is a platform `os.features` axis for env packages, never a variant/tag axis).
+
+```yaml
+wheels:
+  linux/amd64:                          # value omitted → key-derived default filter
+  "linux/arm64+libc.glibc": ~           # glibc-stamped entry
+  "linux/arm64+libc.musl": [musllinux, any]   # explicit filter
+  darwin/arm64: ~
+  windows/amd64: ~
+```
+
+**Keys** are OCI platform strings — a concrete `os/arch`, optionally carrying **one** `+libc.glibc`/`+libc.musl` suffix (Linux only; no OCI `variant`/`os_version` segments, no other feature namespaces). The key is published **verbatim** as the image-index platform entry: a `+libc.*` suffix lands in OCI `os.features`, which ocx ≥ 0.4.2 clients match against the host libc at install time. Two keys sharing one base (`linux/amd64+libc.glibc` + `linux/amd64+libc.musl`) publish **two entries in one index under one bare tag** — one package, no variant-prefixed tags, no per-variant repos.
+
+**The key is a declaration, not a computation.** The mirror stamps nothing and infers nothing from wheel contents. A maintainer may legitimately publish glibc-only wheels under a plain `linux/amd64` key with an explicit `[manylinux, any]` filter — that key then installs on musl hosts too (its entry carries no `os.features`); whether that is correct is the maintainer's support-envelope call, and no warning is emitted.
+
+**Values** are ordered lists of PEP 425 platform-tag *prefixes* acting as **admissibility filter + ranking**: a tag-compatible wheel whose platform tags match no listed prefix is **excluded** (fail closed — e.g. the default `["any"]` on a plain linux key errors with exit 65 if the lock demands a compiled wheel), and earlier prefixes outrank later ones among survivors. A `~`/omitted value selects the key-derived default:
+
+| Key class | Default filter |
+|-----------|----------------|
+| `linux/*` (plain) | `["any"]` — pure wheels only, runs on any libc |
+| `linux/*+libc.glibc` | `["manylinux", "any"]` |
+| `linux/*+libc.musl` | `["musllinux", "any"]` |
+| `darwin/*` | `["macosx", "any"]` |
+| `windows/*` | `["win", "any"]` |
+
+One key's filter must not mix `manylinux*` and `musllinux*` prefixes (a single env cannot need both libcs at runtime), and a `+libc.*` key's filter must not contradict its declared libc. The filter never re-admits a wheel that tag-compatibility already excluded.
+
+**Cross-validation with `platforms:`.** Every wheels key's base `os/arch` must be declared under [`platforms:`](#platforms) (it needs a CI test leg), and every declared platform leg must be covered by at least one wheels key. `platforms:` keys stay plain — the CI matrix is a base-platform axis.
+
+**Container gating.** At push time, a `+libc.glibc` entry is gated only by the JUnit results of glibc container legs (debian/ubuntu/… — and native runners), a `+libc.musl` entry only by musl (alpine) legs, and a featureless entry by **all** legs of its base platform (it claims to run anywhere, so everything must be green). An entry whose declared libc no test leg covers fails closed. Pair a `+libc.musl` key with an alpine container leg.
+
+**Interpreter.** The single `python.interpreter_package` serves every wheels key — there is no per-key interpreter override. A dual-libc app therefore needs an interpreter package that itself resolves per-libc (its own index carrying `os.features` entries), or a static/musl build that runs on both.
+
+### What is published
+
+Each app version becomes an environment package: one content-addressed `tar.zst` layer per wheel (deterministic repack — see the [conventions ADR](https://github.com/ocx-sh/ocx-mirror/blob/main/.claude/artifacts/adr_ocx_python_conventions.md)), a composed `metadata.json` (private interpreter dependency, `PYTHONPATH`/`PATH` env, and a synthesized entrypoint per `[console_scripts]` entry). Those console-script entrypoints are the package's whole public surface: a *library* env with no console script of its own (e.g. `google-cloud-aiplatform`) publishes none. (Each launcher dispatches `python`, not `python3`: python-build-standalone ships a `python3` binary only on POSIX platforms, while `python` resolves in-package everywhere.)
+
+### Catalog description & `metadata:` {#env-catalog}
+
+The top-level `metadata:` key (and any per-variant `metadata:` override) is **rejected** for `source.type: pylock`/`pypi` with exit code 65:
+
+```
+metadata: not supported for source.type 'pylock' (env metadata is composed from the lock; use catalog:/CATALOG.md for the description)
+```
+
+An env package's `metadata.json` is *composed* from the resolved lock (interpreter dependency, env vars, entrypoints) — there is nothing for a hand-authored `metadata:` file to add, and it would only drift from what compose actually produces.
+
+`pipeline describe` publishes the registry catalog description from `CATALOG.md` as usual. When no `CATALOG.md` exists on disk, it **autogenerates** one from the root package's wheel `*.dist-info/METADATA` (`Summary` as the lead paragraph, `Keywords`/`License` as trailer lines) instead of skipping — `pylock` reads the root wheel straight from its committed lock; `pypi` looks for a lock `pipeline plan` already derived under `--locks-dir` (any one is equivalent for this purpose — core metadata doesn't vary by version) and skips silently if none is reachable yet (no prior `pipeline plan` run). An on-disk `CATALOG.md` always wins over autogen.
+
+### Shared wheel layers {#shared-wheel-layers}
+
+Two apps that both depend on the same `numpy` wheel do not need two copies of it in the registry. Each wheel layer is pushed once to a **content-addressed repository** and then cross-repository **mounted** into every app that depends on it, instead of being re-uploaded as a private layer per app.
+
+**Naming.** A wheel's standalone repository is `<wheel_scope>/<index-host>/<package>`, tagged with its `sha256` — e.g. `pip-packages/files.pythonhosted.org/numpy:<sha256>`. `<wheel_scope>` is the top-level `wheel_scope` spec key (default `pip-packages`); `<index-host>` groups wheels by the index they were downloaded from. The `sha256` tag is content-addressed, so every wheel of a package — however its build tag / ABI / platform differ — lands in that one repo as a distinct tag, and byte-identical wheels (e.g. an `abi3` wheel shared across CPython minors) dedupe onto a single tag. No per-wheel path segment is needed.
+
+**Push order.** Before pushing an app's own env package, `pipeline push` registers each not-yet-published wheel layer standalone under its content-addressed reference (skipped if already present — checked via a tag-list lookup, deduped across the whole run so a wheel shared by many apps/platforms is checked once). The app's own layer positionals then each carry a `:from=<wheel_repository>` tail (`ocx package push …/wheel.tar.zst:from=pip-packages/files.pythonhosted.org/numpy`), so the push attempts a cross-repository blob **mount** against that standalone registration before falling back to a full upload on a miss — the fallback is load-bearing, not a bug.
+
+**Visibility.** `run-summary.json` carries a `layer_reuse` counter per version, aggregated across all its pushed platforms:
+
+| Field | Meaning |
+|-------|---------|
+| `mounted` | Layers reused via cross-repository mount (no re-upload) |
+| `uploaded` | Layers freshly uploaded |
+| `verified` | Layers already present, verified rather than re-checked |
+
+Archive/binary mirrors have no shared-layer concept and always report all-zero counts.
+
+### Multi-platform
+
+Add `linux/arm64`, `darwin/arm64`, etc. to `platforms`. A **pure** app reuses one lock across all platforms. A **compiled** app needs a *universal* lock (`uv pip compile … --universal`) so each per-platform leg selects the right wheel (`manylinux_2_28_aarch64`, `macosx_11_0_arm64`, …); where no compiled wheel exists for a platform the `py3-none-any` fallback is selected.
+
+!!! note "Overlap-free layer union"
+    OCX composes the env as an overlap-free prefix-layer union, so two wheels must never install the *same* file. A valid resolved lock is collision-free by construction; a pathological `[extras]` closure that pulls mutually-exclusive distributions sharing a file (e.g. `mlflow` + `mlflow-skinny` + `mlflow-tracing`, which each ship an identical `mlflow/__init__.py`) is rejected with exit 65 — curate the lock (`uv --no-emit-package <redundant>`) to keep the superset.
 
 ## `variants` {#variants}
 
@@ -251,7 +485,7 @@ A push can fail transiently — a registry connect timeout, a blip mid-upload �
 
 **What counts as transient.** Only an `ocx package push` exit code of **75** (`TempFail`) is retried. Exit **69** (`Unavailable`) means the failure will not change on a rerun — a registry that is down stays down — so it is never retried; neither is a registry auth rejection (exit 80) nor a child process killed by a signal (no exit code at all). Getting this 75/69 split at all needs **ocx ≥ 0.5.3** — specifically in the `ocx` binary that actually runs the push subprocess, which comes from whatever `ocx.toml`/`ocx.lock` toolchain the running `ocx-mirror` is co-located with. That is a separate pin from the `ocx` version a *generated* downstream workflow bakes into its own `setup-ocx` step (see [`ocx_mirror`](#ocx-mirror)) — the two can drift out of step, and it is the co-located one that governs retry behaviour here. An older `ocx` maps every registry-client failure to exit 69, so a transient fault on a stale pin is never retried no matter what `max_retries` says, and there is deliberately no runtime warning for this.
 
-**The co-located `ocx` must be 0.5.5 or newer**, and that is a hard floor, not a degradation like the retry split above. From 0.5.5 the metadata sidecar no longer carries a top-level `platform` key — the platform travels on the `--platform` flag instead — and `ocx package push` and `ocx package test` reject a sidecar that still has one. An older binary reads it the other way round: it demands the recorded key and fails with `metadata sidecar has no recorded platform` and exit **65** on *every* push leg, which is not a retried code, so the run ends with nothing published. The same floor applies to the [`setup-ocx`](#ocx-mirror) pin in a generated downstream workflow — bumping the pinned `ocx-mirror` without regenerating CI leaves that repository failing every push.
+**The co-located `ocx` must be 0.5.5 or newer**, and that is a hard floor, not a degradation like the retry split above. From 0.5.5 the metadata sidecar no longer carries a top-level `platform` key — the platform travels on the `--platform` flag instead. Only `ocx package create` rejects a sidecar that still carries the key; `ocx package push` and `ocx package test` parse the sidecar's published form directly and simply ignore an unknown field, so the key's presence or absence makes no difference to either. An older binary reads it the other way round: it demands the recorded key and fails with `metadata sidecar has no recorded platform` and exit **65** on *every* push leg, which is not a retried code, so the run ends with nothing published. The same floor applies to the [`setup-ocx`](#ocx-mirror) pin in a generated downstream workflow — bumping the pinned `ocx-mirror` without regenerating CI leaves that repository failing every push.
 
 **Backoff.** The first retry waits 1 second; each further attempt doubles the wait, capped at 30 seconds, with ±10% jitter layered on top of the cap — so a capped delay actually lands in the 27–33 second range, not exactly 30.
 
@@ -407,6 +641,9 @@ Each entry becomes one Dockerfile `RUN`, handed verbatim to the container's own 
 
 Reuse across legs — the same setup needed on more than one platform — comes from YAML anchors, the same mechanism the fleet already uses for shared `assets:` and `source:` blocks; `setup:` is a plain list with nothing anchor-specific about it.
 
+!!! note "Container legs for Python env sources (`pylock`/`pypi`)"
+    The job still runs on the host runner — GitHub mounts a glibc `node` for JS actions, which Alpine's musl userland cannot execute — and only `ocx package test` is wrapped in `docker run <image>`, with the runner's CA bundle mounted so the gnu `ocx` binary can verify TLS inside a minimal image. Use an `alpine` leg to validate a `libc: musl` env end-to-end and a `debian`/`ubuntu` leg to sanity-check the glibc floor. The env under test is self-contained (local wheel layers); only its private interpreter is pulled from the registry.
+
 ```yaml
 platforms:
   linux/amd64:
@@ -458,7 +695,7 @@ platforms:
 
 **Platform key validation:**
 
-- Must parse as a platform key: `<os>/<arch>[/<variant>][+libc.<flavor>,...]` — the same grammar [`assets`](#assets-libc) uses. Quote any key containing `+`.
+- Must parse as a platform key: `<os>/<arch>[/<variant>][+libc.<flavor>[,...]]` — the same grammar [`assets`](#assets-libc) uses. Quote any key containing `+`.
 - A key declaring a libc must be tested under that libc: every image on `linux/amd64+libc.musl` has to be a musl base (Alpine), and every image on a `+libc.glibc` key a glibc base. The mismatch is rejected at generate time with exit 65 — a musl-static binary runs fine under glibc, so an Alpine claim tested in Ubuntu goes green having verified nothing.
 - `containers[].setup`, when present, must declare at least one command — an empty list is rejected (exit 65: drop the key instead).
 - Every `setup` entry must be non-blank and a single line. Each entry becomes one Dockerfile `RUN`; a blank entry or one containing a newline is rejected (exit 65) rather than emitted as a broken Dockerfile.

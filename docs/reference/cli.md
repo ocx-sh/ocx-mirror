@@ -91,6 +91,7 @@ ocx-mirror package pipeline plan [OPTIONS]
 |------|---------|-------------|
 | `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
 | `--format <FMT>` | auto | `plain` or `json`. Without the flag, JSON is selected automatically when `GITHUB_ACTIONS=true`. |
+| `--locks-dir <DIR>` | `./locks` | Directory derived PEP 751 locks are written to (`source.type: pypi` only; unused for other source types). Each pypi plan entry's `pylock` field carries a path relative to this command's working directory — the same directory `plan.json` is written to. See the [`python.lock` reference](./mirror-yml.md#python-lock). |
 
 Alongside `new` (not yet published) and `backfill-partial` (published for some platforms, missing for others), a plan entry can carry kind `metadata-drift`: a published `(version, platform)` whose config blob no longer matches what the spec would publish today. Drift is only ever reported, never acted on — a version already scheduled as `new` or `backfill-partial` is never also reported as drifted, since its next push writes current metadata anyway.
 

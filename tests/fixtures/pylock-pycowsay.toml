@@ -1,0 +1,27 @@
+# PEP 751 lock fixture for the `mirror-pylock.yml` plan-phase test (W2.2).
+# Adapted from crates/ocx_python/tests/fixtures/pylock/valid-multi.toml with
+# concrete http(s) wheel URLs (unlike ocx_python's `{ASSET_BASE}`-templated
+# unit fixtures) so `pipeline plan` can emit them directly as PlanAssetEntry
+# URLs. Both wheels are `none-any` — platform/libc-agnostic — so they resolve
+# identically on every declared platform, giving a deterministic N=2 wheel
+# set per platform.
+lock-version = "1.0"
+requires-python = ">=3.9"
+
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/aa/bb/pycowsay-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "1111111111111111111111111111111111111111111111111111111111aaaa" }
+
+[[packages]]
+name = "six"
+version = "1.16.0"
+
+[[packages.wheels]]
+name = "six-1.16.0-py2.py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/cc/dd/six-1.16.0-py2.py3-none-any.whl"
+hashes = { sha256 = "2222222222222222222222222222222222222222222222222222222222bbbb" }

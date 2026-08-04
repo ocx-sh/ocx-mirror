@@ -46,6 +46,22 @@ pub enum MirrorError {
     /// repository. The audit outcome, not a failure of the repair — carries
     /// the target `<registry>/<repository>`.
     CascadeUnrepaired(String),
+    /// A `pylock`-sourced mirror spec could not be resolved into plan
+    /// entries: no locked package matches the spec's app name, an invalid
+    /// platform/variant mapping, or `ocx_python::select_wheels` found no
+    /// compatible wheel. The underlying cause is malformed spec/lock content,
+    /// not a transient resource — same exit class as `SpecInvalid`. Covers
+    /// W2.2's single `select_wheels` call site (the plan phase); the fuller
+    /// `ocx_python` error-type wiring across all `resolve_assets` call sites
+    /// (`LockError`/`SelectError`/`CollisionError`/`ComposeError`) is a
+    /// separate follow-up.
+    PylockError(String),
+    /// A `source.type: pypi` discovery failure classified as malformed
+    /// input: the PyPI JSON API returned 404 (package name not found on this
+    /// index). Same exit class as `PylockError`/`SpecInvalid` — a genuinely
+    /// unreachable index (connection refused, timeout, 5xx, malformed JSON
+    /// body) stays `SourceError` (69). See `source::pypi::classify_error`.
+    PypiError(String),
 }
 
 impl MirrorError {
@@ -73,6 +89,8 @@ impl MirrorError {
             Self::WebhookUnavailable(_) => ExitCode::Unavailable,
             Self::WebhookPermissionDenied(_) => ExitCode::PermissionDenied,
             Self::CascadeUnrepaired(_) => ExitCode::DataError,
+            Self::PylockError(_) => ExitCode::DataError,
+            Self::PypiError(_) => ExitCode::DataError,
         }
     }
 }
@@ -113,6 +131,8 @@ impl std::fmt::Display for MirrorError {
             Self::WebhookUnavailable(msg) => write!(f, "webhook unavailable: {msg}"),
             Self::WebhookPermissionDenied(msg) => write!(f, "webhook permission denied: {msg}"),
             Self::CascadeUnrepaired(target) => write!(f, "cascade findings remain for {target}"),
+            Self::PylockError(msg) => write!(f, "pylock error: {msg}"),
+            Self::PypiError(msg) => write!(f, "pypi error: {msg}"),
         }
     }
 }
@@ -168,6 +188,24 @@ mod tests {
         // this variant exists to carry it through unchanged — a dispatch that
         // reported a broken cascade must not read as the tool failing (1).
         let err = MirrorError::CascadeUnrepaired("ghcr.io/ocx-sh/cmake".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn pylock_error_maps_to_data_error() {
+        // W2.2: select_wheels failures (no compatible wheel) surface via
+        // PylockError → DataError (65) — malformed lock/spec content, not a
+        // transient resource.
+        let err = MirrorError::PylockError("no compatible wheel for 'numpy' on linux/amd64".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn pypi_error_maps_to_data_error() {
+        // plan_python_mirror_v2 W1.A1: a 404 from the PyPI JSON API (unknown
+        // package name) is malformed input, not a transient resource — same
+        // exit class as PylockError.
+        let err = MirrorError::PypiError("package 'nonexistent' not found (404)".into());
         assert_eq!(err.kind_exit_code(), ExitCode::DataError);
     }
 

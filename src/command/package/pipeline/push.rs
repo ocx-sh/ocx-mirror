@@ -11,14 +11,24 @@ use std::time::Duration;
 
 use ocx_lib::cli::{DataInterface, ExitCode};
 use ocx_lib::log;
+use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
+use ocx_lib::publisher::Publisher;
 
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
+use crate::pipeline::python_prepare::EnvManifest;
+use crate::pipeline::python_push;
 use crate::run_summary::{
-    AnnounceOutcome, ExcludedPlatform, PlatformFailure, RunSummary, TestFailure, VersionStatus, VersionSummary,
+    AnnounceOutcome, ExcludedPlatform, LayerReuse, PlatformFailure, RunSummary, TestFailure, VersionStatus,
+    VersionSummary,
 };
 use crate::spec::{self, AnnounceConfig, MirrorSpec, PlatformConfig, Severity};
+
+/// The `ocx` subprocess helpers live at the pipeline layer so `python_push`
+/// shares one implementation with the archive legs; re-exported here because
+/// `patch.rs` and `announce.rs` resolve them through this module's path.
+pub(crate) use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
 
 /// `ocx-mirror package pipeline push` subcommand.
 ///
@@ -63,23 +73,40 @@ enum VpDecision {
 /// Parsed JSON output from `ocx package push --cascade --format json`.
 ///
 /// Fields align with the `PushReport` shape from subsystem-cli.md §2.4.
+///
+/// Every field defaults, so `{}` satisfies the parse (`patch::republish`
+/// relies on that) and an `ocx` predating the layer-mount counters simply
+/// reports zeros rather than failing.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct PushReport {
     /// SHA-256 manifest digest of the pushed image. Captured for audit trails
     /// but not surfaced in run-summary.json in this version.
     #[serde(default)]
     #[allow(dead_code)]
-    manifest_digest: Option<String>,
+    pub(crate) manifest_digest: Option<String>,
     #[serde(default)]
-    cascade_tags_written: Vec<String>,
+    pub(crate) cascade_tags_written: Vec<String>,
     #[serde(default)]
-    status: Option<String>,
+    pub(crate) status: Option<String>,
+    /// Layer-push outcome counts (mounted/uploaded/verified) — the shared-wheel
+    /// reuse the env path records into `run-summary.json`.
+    #[serde(default)]
+    pub(crate) layers: LayerReuse,
 }
 
 impl Push {
     pub async fn execute(&self, _printer: &DataInterface) -> Result<(), MirrorError> {
         // ── Load spec ────────────────────────────────────────────────────────
         let spec = spec::load_spec(&self.spec).await?;
+
+        // Env sources (pylock/pypi) take a parallel env-push path: env
+        // packages (wheel layers + composed metadata) instead of the
+        // archive/binary bundle. Mirrors `prepare.rs`'s `is_env()` dispatch —
+        // prepare writes env-manifest.json (never bundle-*.tar.xz) for both,
+        // so the archive loop below would silently find nothing.
+        if spec.source.is_env() {
+            return self.execute_pylock_push(&spec).await;
+        }
 
         // GHA workflow stamps the push job's html_url here so the Discord
         // embed can link push-tier successes + failures back to push logs.
@@ -269,9 +296,28 @@ impl Push {
                 cascade_tags_written: cascade_tags,
                 test_failures: all_test_failures,
                 platforms_excluded: collect_excluded_platforms(&spec, version),
+                // Archive/binary pushes have no shared-layer concept.
+                layer_reuse: LayerReuse::default(),
             });
         }
 
+        self.finalize_run(&spec, version_summaries, push_job_url).await
+    }
+
+    /// Run-level flags, `run-summary.json`, the single index announce, and the
+    /// exit verdict — everything both push paths do once every version has
+    /// been decided.
+    ///
+    /// Shared rather than duplicated because the announce is the part a second
+    /// copy would silently drift on: an env mirror that published a version and
+    /// did not announce it leaves the index behind the registry with nothing
+    /// failing.
+    async fn finalize_run(
+        &self,
+        spec: &MirrorSpec,
+        version_summaries: Vec<VersionSummary>,
+        push_job_url: Option<String>,
+    ) -> Result<(), MirrorError> {
         // ── Compute run-level flags ───────────────────────────────────────────
         let any_red = version_summaries
             .iter()
@@ -390,9 +436,349 @@ impl Push {
 
         Ok(())
     }
+
+    /// Env-push path for `source.type: pylock`/`pypi` specs — the parallel to
+    /// the archive/binary path in [`execute`](Self::execute).
+    ///
+    /// Reads `{bundles_dir}/{version}/env-manifest.json` per version (written
+    /// by `python_prepare::prepare_env_version`), evaluates JUnit go/no-go per
+    /// `(version, wheels key)` with the same `evaluate_junit`
+    /// AND-across-containers logic as the archive loop, and pushes each green
+    /// leg via `ocx package push` with the ordered wheel layers as positional
+    /// args (each carrying a `:from=<wheel_repository>` mount tail) and the
+    /// composed `metadata.json` via `-m`.
+    ///
+    /// Shared wheel layers (Decision D): before each leg's push,
+    /// `python_push::register_wheel_layers` registers any not-yet-published
+    /// wheel with the target registry, so the leg's own push can
+    /// cross-repository mount it instead of re-uploading. Registration
+    /// failures are warn-only; a miss falls back to a full upload, so the push
+    /// always succeeds either way.
+    async fn execute_pylock_push(&self, spec: &MirrorSpec) -> Result<(), MirrorError> {
+        let push_job_url = std::env::var("OCX_MIRROR_JOB_URL")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+
+        let mut manifests = python_push::enumerate_env_manifests(&self.bundles_dir)
+            .await
+            .map_err(MirrorError::TemplateError)?;
+
+        if manifests.is_empty() {
+            log::info!(
+                "[{}] No env manifests found in {}",
+                spec.name,
+                self.bundles_dir.display()
+            );
+        }
+
+        manifests.sort_by_key(|manifest: &EnvManifest| pep440_sort_key(&manifest.version));
+
+        let platform_order = spec_platform_order(spec);
+        let newest_version = manifests.last().map(|manifest| manifest.version.clone());
+
+        // One assembled annotation set for the whole run — the same map the
+        // archive leg builds per push, hoisted because every env leg and every
+        // wheel registration of this run publishes under it.
+        let annotations = crate::annotations::build_annotations(&spec.annotations);
+
+        let mut version_summaries: Vec<VersionSummary> = Vec::new();
+
+        // Read-only registry access for the wheel-registration tag-exists
+        // check (Decision D, shared wheel layers). `registered_wheels` dedupes
+        // `wheel_repository:wheel_sha256` pairs across the whole run so a
+        // wheel shared by multiple legs is checked/pushed at most once.
+        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let publisher = Publisher::new(client);
+        let mut registered_wheels: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for manifest in &manifests {
+            let version = &manifest.version;
+
+            // Spec lookups are keyed by BASE os/arch — an env entry's full
+            // wheels-key platform (`linux/amd64+libc.glibc`) would miss the
+            // `platforms:` map silently. Same-base entries tiebreak on the
+            // full key string for determinism.
+            let mut sorted_envs: Vec<_> = manifest.envs.iter().collect();
+            sorted_envs.sort_by_key(|env| {
+                (
+                    platform_order
+                        .iter()
+                        .position(|p| p == base_platform_str(&env.platform))
+                        .unwrap_or(usize::MAX),
+                    env.platform.clone(),
+                )
+            });
+
+            // ── Phase 1: decide EVERY entry of the version before pushing ────
+            //
+            // Same hazard, and same remedy, as the archive loop in
+            // [`execute`]: `--cascade` moves `latest` / `X` / `X.Y` as a side
+            // effect of the push that carries it, and the `:latest` alias
+            // below does it explicitly, so deciding and pushing entry by entry
+            // let a green glibc leg advertise a version whose musl leg had not
+            // been looked at yet. `announce_tag_union` depends on the
+            // resulting invariant: a rolling alias can never reach a partial
+            // version.
+            let mut platforms_failed: Vec<PlatformFailure> = Vec::new();
+            let mut all_test_failures: Vec<TestFailure> = Vec::new();
+            let mut ready: Vec<&crate::pipeline::python_prepare::EnvEntry> = Vec::new();
+
+            for env_entry in &sorted_envs {
+                let platform_str = &env_entry.platform;
+                let base_platform = base_platform_str(platform_str);
+                let libc = entry_libc_feature(platform_str);
+                let container_ids = gating_container_ids_for_entry(spec, base_platform, libc);
+
+                // Fail closed: an entry whose declared libc no test leg covers
+                // (e.g. a `+libc.musl` key on a platform with only glibc
+                // containers) must red, not silently push untested.
+                let decision = if container_ids.is_empty() {
+                    VpDecision::Red {
+                        platform_failure: PlatformFailure {
+                            platform: platform_str.clone(),
+                            reason: "no_libc_compatible_test_leg".to_string(),
+                            failed_tests: vec![],
+                            job_url: push_job_url.clone(),
+                        },
+                        test_failures: vec![TestFailure {
+                            version: version.to_string(),
+                            platform: platform_str.clone(),
+                            container: "_missing_".to_string(),
+                            test: "<junit>".to_string(),
+                            message: format!(
+                                "no container of platform '{base_platform}' covers libc '{}'",
+                                libc.unwrap_or("<none>")
+                            ),
+                        }],
+                    }
+                } else {
+                    // The JUnit files a `+libc.*` entry gates on are named by
+                    // its BASE platform (CI matrix legs are per base platform);
+                    // the libc discrimination is carried by `container_ids`,
+                    // which `gating_container_ids_for_entry` already filtered.
+                    // `evaluate_junit` takes the SLASH form and slugs it itself.
+                    evaluate_junit(
+                        &self.junit_dir,
+                        version,
+                        base_platform,
+                        &container_ids,
+                        &test_names_for_platform(spec, base_platform),
+                    )
+                    .await
+                };
+
+                match decision {
+                    VpDecision::Red {
+                        mut platform_failure,
+                        mut test_failures,
+                    } => {
+                        // `evaluate_junit` names failures by the base platform;
+                        // re-stamp the FULL wheels key on the platform failure
+                        // AND on every test failure, so a dual-libc red is
+                        // attributable to the right entry in run-summary.json
+                        // instead of collapsing both entries onto `linux/amd64`.
+                        platform_failure.platform = platform_str.clone();
+                        for failure in &mut test_failures {
+                            failure.platform = platform_str.clone();
+                        }
+                        platforms_failed.push(platform_failure);
+                        all_test_failures.extend(test_failures);
+                    }
+                    VpDecision::Green => ready.push(env_entry),
+                }
+            }
+
+            // ── Phase 2: push the greens, cascading only on a whole version ──
+            let mut platforms_pushed: Vec<String> = Vec::new();
+            let mut cascade_tags: Vec<String> = Vec::new();
+            let mut all_skipped_existing = platforms_failed.is_empty();
+            let mut layer_reuse = LayerReuse::default();
+            let target_ref = format!("{}:{}", spec.target.reference(), version);
+            // ocx cascade derives rolling tags by parsing the version as
+            // X.Y.Z; a PEP 440 version ocx cannot parse (e.g. pycowsay's
+            // `0.0.0.2`) is pushed as the primary tag only, without cascade.
+            let version_is_cascadable = Version::parse(version).is_some();
+
+            for env_entry in &ready {
+                let platform_str = &env_entry.platform;
+                // Nothing about this version may have gone wrong — neither a
+                // test leg in phase 1 nor an earlier push in this loop — or
+                // the rolling aliases stay where the previous version left them.
+                let cascade = version_is_cascadable && platforms_failed.is_empty();
+
+                // Register any not-yet-published wheel layers so this leg's
+                // push can `:from=` mount them instead of re-uploading
+                // (Decision D). Failures are warn-only inside
+                // `register_wheel_layers` — never abort here.
+                python_push::register_wheel_layers(
+                    &publisher,
+                    &spec.target.registry,
+                    platform_str,
+                    &env_entry.layers,
+                    &annotations,
+                    &mut registered_wheels,
+                )
+                .await;
+
+                let push_result = python_push::invoke_env_push(
+                    spec,
+                    platform_str,
+                    &target_ref,
+                    &env_entry.metadata_path,
+                    &env_entry.layers,
+                    &annotations,
+                    cascade,
+                )
+                .await;
+
+                match push_result {
+                    Ok(report) => {
+                        let status_str = report.status.as_deref().unwrap_or("pushed");
+                        if status_str == "skipped_existing" {
+                            // Don't flip all_skipped_existing to false
+                        } else {
+                            all_skipped_existing = false;
+                            layer_reuse.mounted += report.layers.mounted;
+                            layer_reuse.uploaded += report.layers.uploaded;
+                            layer_reuse.verified += report.layers.verified;
+                            platforms_pushed.push(platform_str.clone());
+                            cascade_tags.extend(report.cascade_tags_written);
+                        }
+                    }
+                    Err(msg) => {
+                        all_skipped_existing = false;
+                        log::warn!(
+                            "[{}] Env push failed for {}/{}: {}",
+                            spec.name,
+                            version,
+                            platform_str,
+                            msg
+                        );
+                        platforms_failed.push(PlatformFailure {
+                            platform: platform_str.clone(),
+                            reason: "push_error".to_string(),
+                            failed_tests: vec![],
+                            job_url: push_job_url.clone(),
+                        });
+                    }
+                }
+            }
+            if !platforms_pushed.is_empty() && !cascade_tags.iter().any(|t| t == version) {
+                cascade_tags.insert(0, version.clone());
+            }
+            {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                cascade_tags.retain(|t| seen.insert(t.clone()));
+            }
+
+            let is_newest = Some(version.as_str()) == newest_version.as_deref();
+            let status = determine_status(
+                &platforms_pushed,
+                &platforms_failed,
+                all_skipped_existing && !sorted_envs.is_empty(),
+                is_newest,
+            );
+
+            version_summaries.push(VersionSummary {
+                version: version.clone(),
+                status,
+                platforms_pushed,
+                platforms_failed,
+                cascade_tags_written: cascade_tags,
+                test_failures: all_test_failures,
+                platforms_excluded: collect_excluded_platforms(spec, version),
+                layer_reuse,
+            });
+        }
+
+        self.finalize_run(spec, version_summaries, push_job_url).await
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Total-order sort key for a PEP 440 version string:
+/// `(parsed version, original text)`.
+///
+/// `None` sorts before `Some`, so an unparseable tag lands first and the
+/// newest parseable version is LAST — which is what every "newest = last
+/// element" reader here relies on. The text tiebreaks equal parses so the key
+/// is a total order on distinct strings.
+///
+/// It replaces a pairwise comparator of the shape
+/// `match (parse(a), parse(b)) { (Some, Some) => semver, _ => text }`, which is
+/// not transitive and therefore not a valid `sort_by` predicate: with
+/// `"10.0.0"`, `"3.0.0"` and `"2.0rc1"` (the last unparseable by
+/// `ocx_lib::Version`) it yields `10.0.0 > 3.0.0 > 2.0rc1 > 10.0.0` — a cycle,
+/// for which `slice::sort_by` documents an unspecified order and permits a
+/// panic. Here that order decides push order and which version `:latest`
+/// lands on.
+///
+/// `uv_pep440` rather than `ocx_lib::package::version::Version`: upstream
+/// Python versions are PEP 440 (`0.0.0.2`, `2.0.0.dev0`), which the ≤3-component
+/// OCX parser rejects. The `Version::parse` check that decides `--cascade`
+/// stays as it is — that one asks a different question ("can ocx derive
+/// rolling tags from this?").
+pub(crate) fn pep440_sort_key(version: &str) -> (Option<ocx_python::uv_pep440::Version>, String) {
+    (version.parse().ok(), version.to_string())
+}
+
+/// The base `os/arch` half of an env entry's full wheels-key platform string
+/// (`linux/amd64+libc.glibc` → `linux/amd64`). Spec lookups (`platforms:`
+/// order, containers, tests) are keyed by base — a full-key lookup would miss
+/// silently and fall back to `_native_`/`usize::MAX`.
+fn base_platform_str(platform: &str) -> &str {
+    platform.split('+').next().unwrap_or(platform)
+}
+
+/// The `libc.*` os_feature declared on an env entry's platform string, if any.
+fn entry_libc_feature(platform: &str) -> Option<&str> {
+    let (_, features) = platform.split_once('+')?;
+    features.split('+').find(|feature| feature.starts_with("libc."))
+}
+
+/// The container IDs whose JUnit files gate one env entry, filtered by libc
+/// compatibility: a featureless entry is gated by EVERY container of its base
+/// platform (it claims to run on any libc, so all legs must be green); a
+/// `libc.glibc` entry only by gnu containers; a `libc.musl` entry only by
+/// musl (alpine) containers. A native leg (`_native_`) counts as gnu — GHA
+/// runners are glibc. An empty result means no test leg covers the entry's
+/// declared libc; the caller fails closed.
+fn gating_container_ids_for_entry(spec: &MirrorSpec, base_platform: &str, libc: Option<&str>) -> Vec<String> {
+    let containers = spec
+        .platforms
+        .as_ref()
+        .and_then(|platforms| platforms.get(base_platform))
+        .and_then(|config| config.containers.as_deref())
+        .filter(|containers| !containers.is_empty());
+
+    let Some(containers) = containers else {
+        // Native leg: a glibc runner — gates featureless and glibc entries.
+        return match libc {
+            None | Some("libc.glibc") => vec!["_native_".to_string()],
+            _ => Vec::new(),
+        };
+    };
+
+    let wanted = match libc {
+        None => None, // featureless: every container gates
+        Some("libc.musl") => Some("musl"),
+        // `libc.glibc` (any other feature namespace is rejected at spec
+        // validation) gates on gnu containers.
+        Some(_) => Some("gnu"),
+    };
+    containers
+        .iter()
+        .filter(|container| wanted.is_none_or(|libc| spec::infer_libc_from_image(&container.image) == libc))
+        .map(|container| {
+            container
+                .id
+                .clone()
+                .unwrap_or_else(|| spec::image_to_container_id(&container.image))
+        })
+        .collect()
+}
 
 /// Map `(version, platform_slug)` to the canonical bundle filename and path.
 ///
@@ -411,14 +797,16 @@ fn platform_to_slug(platform: &str) -> String {
 
 /// Derive the upstream project homepage from a mirror spec's `source:` block.
 ///
-/// `github_release` → `https://github.com/{owner}/{repo}`. `url_index` has no
-/// canonical homepage to infer (the URL points at a generated JSON index, not
-/// a project page), so we return `None` and let the notify embed render
-/// without an author link in that case.
+/// `github_release` → `https://github.com/{owner}/{repo}`. `url_index`,
+/// `pylock` and `pypi` have no canonical homepage to infer here (a generated
+/// JSON index, a committed lock file, or a package name whose PyPI project
+/// page needs the mirror's `name` as a fallback this function does not
+/// receive), so we return `None` and let the notify embed render without an
+/// author link in that case.
 fn compute_source_url(source: &spec::Source) -> Option<String> {
     match source {
         spec::Source::GithubRelease { owner, repo, .. } => Some(format!("https://github.com/{owner}/{repo}")),
-        spec::Source::UrlIndex(_) => None,
+        spec::Source::UrlIndex(_) | spec::Source::Pylock { .. } | spec::Source::Pypi { .. } => None,
     }
 }
 
@@ -1049,11 +1437,11 @@ async fn invoke_push(
 /// (`ocx package push` exit 75 only) up to `budget` further times with
 /// [`push_retry_delay`] between attempts.
 ///
-/// Extracted from [`invoke_push`] so a second push shape (a multi-layer argv
-/// rather than the single-bundle one) can share the ladder, the transience
-/// predicate and the operator-facing wording instead of duplicating them.
-/// `label` is the mirror name that prefixes every line; `target_ref` and
-/// `platform` name the leg in them.
+/// Shared by both publish paths — the archive leg via [`invoke_push`], the env
+/// leg via `pipeline::python_push::invoke_env_push` — so the ladder, the
+/// transience predicate and the operator-facing wording exist once. `label` is
+/// the mirror name that prefixes every line; `target_ref` and `platform` name
+/// the leg in them.
 ///
 /// Returns the parsed [`PushReport`] on success, or a descriptive error string
 /// (caller records it as `push_error` without aborting the run).
@@ -1397,60 +1785,6 @@ pub(crate) struct AnnounceReport {
     pub(crate) reserved_tags_dropped: Vec<String>,
 }
 
-/// Resolve the path to the `ocx` binary.
-///
-/// Preference order:
-/// 1. `OCX_BINARY_PIN` env var (per CLAUDE.md env table — set by ocx itself).
-/// 2. Current executable path (`std::env::current_exe()`).
-/// 3. `"ocx"` on `PATH` as final fallback.
-pub(crate) fn resolve_ocx_binary() -> Result<PathBuf, String> {
-    if let Ok(pin) = std::env::var("OCX_BINARY_PIN")
-        && !pin.is_empty()
-    {
-        return Ok(PathBuf::from(pin));
-    }
-
-    // The current binary is `ocx-mirror`. We want the co-located `ocx` binary.
-    if let Ok(current) = std::env::current_exe()
-        && let Some(dir) = current.parent()
-    {
-        let candidate = dir.join("ocx");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    // Fallback: hope `ocx` is on PATH.
-    Ok(PathBuf::from("ocx"))
-}
-
-/// Forward all `OCX_*` environment variables from the current process into a
-/// child command. This ensures offline mode, remote mode, registry config, and
-/// index paths are inherited by the subprocess.
-pub(crate) fn forward_ocx_env(cmd: &mut tokio::process::Command) {
-    const OCX_VARS: &[&str] = &[
-        "OCX_HOME",
-        "OCX_DEFAULT_REGISTRY",
-        "OCX_INSECURE_REGISTRIES",
-        "OCX_OFFLINE",
-        "OCX_REMOTE",
-        "OCX_CONFIG",
-        "OCX_NO_CONFIG",
-        "OCX_PROJECT",
-        "OCX_NO_PROJECT",
-        "OCX_INDEX",
-        "OCX_BINARY_PIN",
-        "OCX_NO_UPDATE_CHECK",
-        "OCX_NO_MODIFY_PATH",
-    ];
-
-    for var in OCX_VARS {
-        if let Ok(val) = std::env::var(var) {
-            cmd.env(var, val);
-        }
-    }
-}
-
 /// Write a [`RunSummary`] to the given path as pretty-printed JSON.
 async fn write_run_summary(path: &Path, summary: &RunSummary) -> Result<(), MirrorError> {
     let json = serde_json::to_string_pretty(summary)
@@ -1467,6 +1801,32 @@ async fn write_run_summary(path: &Path, summary: &RunSummary) -> Result<(), Mirr
         .map_err(|e| MirrorError::TemplateError(format!("failed to write run-summary to {}: {e}", path.display())))?;
 
     Ok(())
+}
+
+/// Serialises every test in this crate that reads or writes the process-global
+/// `OCX_*` environment — `OCX_BINARY_PIN` above all.
+///
+/// One lock, not one per test module: the hazard is a *neighbouring* module's
+/// stub. A `pipeline plan` pypi test pinning `OCX_BINARY_PIN` at its `uv`
+/// stand-in while a `pipeline push` test assumes "no `ocx` is reachable" makes
+/// the push resolve that stand-in and publish into another test's fixture — a
+/// failure that reproduces roughly one run in twelve and never in isolation.
+///
+/// `tokio::sync::Mutex` rather than `std::sync::Mutex`: `lock_derive`'s
+/// `#[tokio::test]`s must hold the guard across their subprocess `.await`s
+/// (async-aware guard, no `await_holding_lock`), while this module's and
+/// `plan`'s sync `#[test]`s take it via [`ocx_env_lock`]'s `blocking_lock`
+/// *before* entering their `Runtime::block_on`. It is not reentrant, so it is
+/// taken by the test, never by a helper.
+#[cfg(test)]
+pub(crate) static OCX_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Blocking accessor for [`OCX_ENV_LOCK`] — sync `#[test]` contexts only
+/// (`blocking_lock` panics inside a runtime; async tests lock the static
+/// directly with `.lock().await`).
+#[cfg(test)]
+pub(crate) fn ocx_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    OCX_ENV_LOCK.blocking_lock()
 }
 
 #[cfg(test)]
@@ -1493,9 +1853,8 @@ mod tests {
     /// not reentrant, so it is taken by the test rather than by
     /// [`run_push_cmd`]: the tests that mutate env need it across a wider span
     /// (set → push → assert) and would deadlock against an inner acquisition.
-    fn job_url_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    fn job_url_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        super::ocx_env_lock()
     }
 
     #[test]
@@ -2432,6 +2791,7 @@ platforms:
             cascade_tags_written: vec!["3.7.0".into()],
             test_failures: vec![],
             platforms_excluded: vec![],
+            layer_reuse: LayerReuse::default(),
         };
         assert_eq!(announce_tag_union(std::slice::from_ref(&summary)), vec!["3.7.0"]);
     }
@@ -2825,6 +3185,7 @@ platforms:
             cascade_tags_written: tags.iter().map(|s| (*s).to_string()).collect(),
             test_failures: vec![],
             platforms_excluded: vec![],
+            layer_reuse: LayerReuse::default(),
         }
     }
 
@@ -4352,5 +4713,542 @@ esac
 
         let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
         assert!(val.get("announce").is_none(), "got: {val}");
+    }
+
+    // ── Env (pylock/pypi) push dispatch ────────────────────────────────────
+
+    /// A layer whose path is version-dir-RELATIVE, exactly as
+    /// `prepare_env_version` writes it (and as `enumerate_env_manifests` now
+    /// requires — an absolute or `..`-carrying path is refused).
+    fn env_layer(name: &str) -> crate::pipeline::python_prepare::EnvLayer {
+        crate::pipeline::python_prepare::EnvLayer {
+            wheel_repository: format!("pip-packages/example.com/{name}"),
+            digest: format!("sha256:{}", "0".repeat(64)),
+            path: PathBuf::from(format!("{name}.tar.zst")),
+            package_name: name.to_string(),
+            wheel_sha256: "1".repeat(64),
+        }
+    }
+
+    /// Write `{bundles_dir}/{version}/env-manifest.json` for the given
+    /// `(platform_slug, full platform key)` entries, each carrying `layers`
+    /// wheel layers.
+    fn write_env_manifest(bundles_dir: &Path, version: &str, entries: &[(&str, &str)], layers: &[&str]) -> PathBuf {
+        use crate::pipeline::python_prepare::{EnvEntry, EnvManifest};
+
+        let version_dir = bundles_dir.join(version);
+        std::fs::create_dir_all(&version_dir).unwrap();
+
+        let manifest = EnvManifest {
+            version: version.to_string(),
+            envs: entries
+                .iter()
+                .map(|(slug, platform)| EnvEntry {
+                    platform_slug: (*slug).to_string(),
+                    platform: (*platform).to_string(),
+                    metadata_path: PathBuf::from(format!("{slug}-metadata.json")),
+                    layers: layers.iter().map(|name| env_layer(name)).collect(),
+                })
+                .collect(),
+        };
+        std::fs::write(
+            version_dir.join("env-manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        version_dir
+    }
+
+    #[test]
+    fn execute_pylock_push_reads_env_manifest_and_writes_summary() {
+        let _env_lock = job_url_env_lock();
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "1.0.0";
+        write_env_manifest(
+            bundles_dir.path(),
+            version,
+            &[("linux_amd64", "linux/amd64"), ("linux_arm64", "linux/arm64")],
+            &["pycowsay", "six"],
+        );
+
+        // mirror-pylock.yml declares no containers/tests, so each platform
+        // evaluates in native mode against a single `_native_` JUNIT. A
+        // passing suite for both platforms reaches the Green branch, so the
+        // loop attempts the env push (which fails — no `ocx` on PATH —
+        // recorded as `push_error`), exercising the multi-layer argv path.
+        for (platform, slug) in [("linux/amd64", "linux_amd64"), ("linux/arm64", "linux_arm64")] {
+            write_junit(
+                junit_dir.path(),
+                version,
+                slug,
+                "_native_",
+                &passing_junit(version, platform, "_native_"),
+            );
+        }
+
+        let spec_path = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pylock.yml"))
+            .to_path_buf();
+
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        // The push subprocess fails in the test environment (no `ocx` on
+        // PATH) → push_error → any_red → ExecutionFailed, same exit
+        // contract as the archive path. The summary must still be written.
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "expected ExecutionFailed from push_error, got {result:?}",
+        );
+        assert!(summary_path.exists(), "run-summary.json must be written");
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        assert_eq!(summary["schema_version"], serde_json::json!(1));
+
+        let versions = summary["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "one version from the env manifest");
+        assert_eq!(versions[0]["version"], serde_json::json!(version));
+
+        let failures = versions[0]["platforms_failed"].as_array().unwrap();
+        assert_eq!(failures.len(), 2, "both platforms fail via push_error: {failures:?}");
+        for f in failures {
+            assert_eq!(f["reason"], serde_json::json!("push_error"));
+        }
+    }
+
+    /// Regression: a `source.type: pypi` spec must dispatch to the env-push
+    /// path exactly like `pylock`. A dispatch matching only `Source::Pylock`
+    /// let pypi fall through to the archive loop, find no `bundle-*.tar.xz`
+    /// (prepare writes env-manifest.json for env sources), and silently
+    /// succeed with an empty summary.
+    #[test]
+    fn execute_routes_pypi_source_through_env_push() {
+        let _env_lock = job_url_env_lock();
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "1.0.0";
+        write_env_manifest(
+            bundles_dir.path(),
+            version,
+            &[("linux_amd64", "linux/amd64")],
+            &["pycowsay"],
+        );
+
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "_native_",
+            &passing_junit(version, "linux/amd64", "_native_"),
+        );
+
+        let spec_path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mirror-pypi.yml")).to_path_buf();
+
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+
+        // Env path taken → green JUNIT reaches the env push, which fails in
+        // the test environment (no `ocx` on PATH) → push_error → any_red →
+        // ExecutionFailed. The archive-path bug instead returned Ok(()) with
+        // an empty versions array (no bundle files to enumerate).
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "pypi source must take the env-push path (push_error expected), got {result:?}",
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let versions = summary["versions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1, "env manifest version must be processed");
+        assert_eq!(
+            versions[0]["platforms_failed"][0]["reason"],
+            serde_json::json!("push_error")
+        );
+    }
+
+    // ── wheels-key libc gating (os.features platform entries) ──────────────
+
+    fn env_container_spec() -> MirrorSpec {
+        let yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: debian:12
+      - image: alpine:3.20
+"#;
+        serde_yaml_ng::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn base_platform_and_libc_feature_parse_full_keys() {
+        assert_eq!(base_platform_str("linux/amd64+libc.glibc"), "linux/amd64");
+        assert_eq!(base_platform_str("linux/amd64"), "linux/amd64");
+        assert_eq!(entry_libc_feature("linux/amd64+libc.glibc"), Some("libc.glibc"));
+        assert_eq!(entry_libc_feature("linux/amd64+libc.musl"), Some("libc.musl"));
+        assert_eq!(entry_libc_feature("linux/amd64"), None);
+    }
+
+    #[test]
+    fn gating_featureless_entry_requires_all_containers() {
+        // A featureless entry claims to run on ANY libc → every container of
+        // its base platform gates it (debian AND alpine).
+        let spec = env_container_spec();
+        assert_eq!(
+            gating_container_ids_for_entry(&spec, "linux/amd64", None),
+            vec!["debian_12".to_string(), "alpine_3_20".to_string()]
+        );
+    }
+
+    #[test]
+    fn gating_glibc_entry_ignores_musl_containers() {
+        let spec = env_container_spec();
+        assert_eq!(
+            gating_container_ids_for_entry(&spec, "linux/amd64", Some("libc.glibc")),
+            vec!["debian_12".to_string()]
+        );
+    }
+
+    #[test]
+    fn gating_musl_entry_only_gated_by_musl_containers() {
+        let spec = env_container_spec();
+        assert_eq!(
+            gating_container_ids_for_entry(&spec, "linux/amd64", Some("libc.musl")),
+            vec!["alpine_3_20".to_string()]
+        );
+    }
+
+    #[test]
+    fn gating_native_leg_counts_as_gnu() {
+        // No containers declared → `_native_` (a glibc GHA runner) gates
+        // featureless + glibc entries; a musl entry has NO test leg → empty →
+        // the caller fails closed.
+        let mut spec = env_container_spec();
+        if let Some(platforms) = spec.platforms.as_mut()
+            && let Some(config) = platforms.get_mut("linux/amd64")
+        {
+            config.containers = None;
+        }
+        assert_eq!(
+            gating_container_ids_for_entry(&spec, "linux/amd64", None),
+            vec!["_native_".to_string()]
+        );
+        assert_eq!(
+            gating_container_ids_for_entry(&spec, "linux/amd64", Some("libc.glibc")),
+            vec!["_native_".to_string()]
+        );
+        assert!(gating_container_ids_for_entry(&spec, "linux/amd64", Some("libc.musl")).is_empty());
+    }
+
+    #[test]
+    fn execute_pylock_push_gates_libc_entries_per_container() {
+        // Dual-libc manifest: the glibc entry needs ONLY the debian junit and
+        // the musl entry ONLY the alpine one. With just the debian junit
+        // written, the glibc entry passes gating (reaching push → push_error,
+        // no `ocx` on PATH) while the musl entry reds as missing_junit for
+        // alpine — never the other way around.
+        let _env_lock = job_url_env_lock();
+        let spec_dir = tempdir().unwrap();
+        let spec_yaml = r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
+tests:
+  - name: version
+    command: pycowsay --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: debian:12
+      - image: alpine:3.20
+"#;
+        let spec_path = spec_dir.path().join("mirror.yml");
+        std::fs::write(&spec_path, spec_yaml).unwrap();
+
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = tempdir().unwrap().path().join("run-summary.json");
+
+        let version = "1.0.0";
+        write_env_manifest(
+            bundles_dir.path(),
+            version,
+            &[
+                ("linux_amd64", "linux/amd64+libc.glibc"),
+                ("linux_amd64", "linux/amd64+libc.musl"),
+            ],
+            &["pycowsay"],
+        );
+
+        // Only the debian (gnu) container leg wrote a junit — with the
+        // declared `version` test present so the declared-test check passes.
+        let junit = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="1.0.0.linux_amd64.debian_12" tests="1" failures="0" errors="0">
+    <testcase name="version" classname="1.0.0.linux_amd64.debian_12" time="1.0"/>
+  </testsuite>
+</testsuites>"#;
+        write_junit(junit_dir.path(), version, "linux_amd64", "debian_12", junit);
+
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "musl leg missing junit + glibc push_error → any_red, got {result:?}",
+        );
+
+        let summary: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        let failures = summary["versions"][0]["platforms_failed"].as_array().unwrap();
+        assert_eq!(failures.len(), 2, "{failures:?}");
+
+        // The glibc entry PASSED junit gating (its only gate is debian) and
+        // failed later at push (no `ocx` binary) — proving alpine's missing
+        // junit never gated it.
+        assert!(
+            failures
+                .iter()
+                .any(|f| f["platform"] == "linux/amd64+libc.glibc" && f["reason"] == "push_error"),
+            "{failures:?}"
+        );
+        // The musl entry is gated ONLY by alpine, whose junit is missing.
+        assert!(
+            failures
+                .iter()
+                .any(|f| f["platform"] == "linux/amd64+libc.musl" && f["reason"] == "missing_junit"),
+            "{failures:?}"
+        );
+
+        // The per-test rows carry the FULL wheels key too. `evaluate_junit`
+        // names them by the base platform, which collapses both libc entries
+        // onto `linux/amd64` and makes a dual-libc red unattributable in
+        // run-summary.json — and therefore in the Discord report built from it.
+        let test_failures = summary["versions"][0]["test_failures"].as_array().unwrap();
+        assert!(!test_failures.is_empty(), "the missing junit must be recorded");
+        assert!(
+            test_failures.iter().all(|f| f["platform"] == "linux/amd64+libc.musl"),
+            "{test_failures:?}"
+        );
+    }
+
+    // ── `:latest` alias for non-semver env versions ────────────────────────
+
+    /// A stand-in `ocx` that logs every invocation's argv and reports a push.
+    #[cfg(unix)]
+    fn fake_ocx_logging_push(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("fake-ocx-log");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho \"$*\" >> '{log}'\necho '{{\"cascade_tags_written\":[],\"status\":\"pushed\"}}'\n",
+                log = log.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    // ── Version verdict closes before any rolling alias moves ──────────────
+
+    /// A dual-libc spec: one glibc container leg, one musl container leg, so
+    /// each `wheels:` key is gated by exactly one of them.
+    fn dual_libc_spec_yaml() -> &'static str {
+        r#"
+name: pycowsay
+target:
+  registry: ocx.sh
+  repository: pycowsay
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  "linux/amd64+libc.glibc": ~
+  "linux/amd64+libc.musl": ~
+tests:
+  - name: version
+    command: pycowsay --version
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - image: debian:12
+      - image: alpine:3.20
+"#
+    }
+
+    /// One green suite carrying the spec's declared `version` test.
+    fn green_junit_for(version: &str, container_id: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="{version}.linux_amd64.{container_id}" tests="1" failures="0" errors="0">
+    <testcase name="version" classname="{version}.linux_amd64.{container_id}" time="1.0"/>
+  </testsuite>
+</testsuites>"#
+        )
+    }
+
+    /// Drive `pipeline push` over a dual-libc manifest for `version` where only
+    /// the debian (glibc) leg reported a JUnit, returning the fake `ocx`'s
+    /// recorded argv lines and the parsed run summary.
+    #[cfg(unix)]
+    fn push_dual_libc_with_one_red_leg(version: &str) -> (String, serde_json::Value) {
+        let dir = tempdir().unwrap();
+        let bundles_dir = tempdir().unwrap();
+        let junit_dir = tempdir().unwrap();
+        let summary_path = dir.path().join("run-summary.json");
+        let log = dir.path().join("invocations.log");
+        let script = fake_ocx_logging_push(dir.path(), &log);
+
+        let spec_path = dir.path().join("mirror.yml");
+        std::fs::write(&spec_path, dual_libc_spec_yaml()).unwrap();
+
+        write_env_manifest(
+            bundles_dir.path(),
+            version,
+            &[
+                ("linux_amd64", "linux/amd64+libc.glibc"),
+                ("linux_amd64", "linux/amd64+libc.musl"),
+            ],
+            &["pycowsay"],
+        );
+        // Only debian (gnu) reported — the musl entry's only gate (alpine) is
+        // missing, so it reds in phase 1.
+        write_junit(
+            junit_dir.path(),
+            version,
+            "linux_amd64",
+            "debian_12",
+            &green_junit_for(version, "debian_12"),
+        );
+
+        // SAFETY: test-only process env, serialised by the lock the caller holds.
+        unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
+        let result = run_push_cmd(
+            spec_path,
+            junit_dir.path().to_path_buf(),
+            bundles_dir.path().to_path_buf(),
+            summary_path.clone(),
+        );
+        // SAFETY: cleanup so neighbouring tests don't inherit the pin.
+        unsafe { std::env::remove_var("OCX_BINARY_PIN") };
+
+        assert!(
+            matches!(result, Err(MirrorError::ExecutionFailed(_))),
+            "a red entry must red the run, got {result:?}",
+        );
+
+        let invocations = std::fs::read_to_string(&log).unwrap_or_default();
+        let summary = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+        (invocations, summary)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_red_entry_stops_its_version_from_cascading_even_though_a_sibling_landed() {
+        // The env path used to decide and push entry by entry: the glibc entry
+        // was pushed with `--cascade` (a whole-version claim) before the musl
+        // entry had been looked at, moving `latest`/`X`/`X.Y` onto a version
+        // that then came out Partial. `announce_tag_union` relies on that never
+        // happening.
+        let _env_lock = job_url_env_lock();
+        let (invocations, summary) = push_dual_libc_with_one_red_leg("1.0.0");
+
+        // The green entry still publishes — nothing about phase 2 withholds it.
+        assert!(
+            invocations.contains("ocx.sh/pycowsay:1.0.0"),
+            "the green glibc entry must still be pushed, got: {invocations}",
+        );
+        assert!(
+            !invocations.contains("--cascade"),
+            "no push of a version with a red entry may cascade, got: {invocations}",
+        );
+
+        let version_summary = &summary["versions"][0];
+        assert_eq!(version_summary["status"], "partial", "got: {version_summary}");
+        let tags = version_summary["cascade_tags_written"].as_array().unwrap();
+        assert_eq!(
+            tags,
+            &vec![serde_json::json!("1.0.0")],
+            "a partial version carries only its exact tag",
+        );
+    }
+
+    // ── Version ordering: total order, newest last ─────────────────────────
+
+    #[test]
+    fn pep440_sort_key_is_a_total_order_over_versions_the_ocx_parser_rejects() {
+        // The replaced comparator was `(Some, Some) => semver, _ => text`, which
+        // on this exact triple cycles: `ocx_lib::Version` rejects `2.0rc1`, so
+        // 10.0.0 > 3.0.0 (semver), 3.0.0 > 2.0rc1 (text) and 2.0rc1 > 10.0.0
+        // (text). `sort_by` leaves the result unspecified for such a predicate.
+        let mut versions = vec![
+            "10.0.0".to_string(),
+            "3.0.0".to_string(),
+            "2.0rc1".to_string(),
+            "2.0".to_string(),
+            "0.0.0.2".to_string(),
+        ];
+        versions.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(versions, ["0.0.0.2", "2.0rc1", "2.0", "3.0.0", "10.0.0"]);
+
+        // Newest LAST is the contract every `.last()` reader here depends on.
+        assert_eq!(versions.last().map(String::as_str), Some("10.0.0"));
+
+        // A tag no PEP 440 parser accepts sorts first, so it can never be
+        // mistaken for the newest.
+        let mut mixed = vec!["nightly".to_string(), "1.0.0".to_string()];
+        mixed.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(mixed, ["nightly", "1.0.0"]);
     }
 }

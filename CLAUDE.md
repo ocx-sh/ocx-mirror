@@ -23,13 +23,14 @@ Research keywords: OCI artifacts, ORAS, GitHub Releases API, cascade tags, regis
 | Path | Purpose |
 |------|---------|
 | `src/` | The crate (binary `ocx-mirror`), package manifest at repo root |
+| `crates/ocx_python/` | Pure translation library: wheel → OCX packaging (PEP 751 lock parsing, wheel selection/repack, env composition) |
 | `external/ocx` | **git submodule** — vendored ocx; `ocx_lib` is a path dep into it |
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
 | `test/` | pytest acceptance harness (Docker registry on :5001) |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
 | `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package describe` in `oci-publish.yml` (frontmatter = title/description/keywords) |
-| `src/command/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
+| `src/command/package/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
 
 ## Dependency model (read before touching Cargo.toml)
 
@@ -39,8 +40,11 @@ Research keywords: OCI artifacts, ORAS, GitHub Releases API, cascade tags, regis
   **nested** submodules (`external/ocx/external/...`). Patches do not travel
   with path deps; dropping the table silently resolves unpatched crates.io
   releases. CI asserts the fork source via `cargo tree -i oci-client`.
-- Dependency feature lists are copied exactly from ocx's
-  `[workspace.dependencies]` — keep in sync on submodule bumps.
+- Dependency feature lists for deps shared with `ocx_lib`/`ocx_cli` are copied
+  exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
+  bumps. **Since v0.4.1** (the upstream commit that extracted ocx-mirror)
+  `reqwest`, `rustls`, `octocrab`, `url` are mirror-owned — ocx dropped them, so
+  there is no upstream source of truth for these four.
 - Clone/checkout always `--recurse-submodules`.
 
 ## Build & Development

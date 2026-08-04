@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -80,6 +81,34 @@ def mirror_binary() -> Path:
             p = p.with_suffix(".exe")
     assert p.exists(), f"ocx-mirror binary not found at {p}"
     return p
+
+
+@pytest.fixture(scope="session")
+def real_ocx_binary() -> Path:
+    """`ocx` built from the `external/ocx` submodule pin.
+
+    Cross-repository blob-mount support (the `:from=` layer tail on
+    `package push`, and the JSON `layers` push-report field it produces) is
+    recent enough that whatever `ocx` resolves from `OCX_COMMAND`/`PATH` in
+    this environment may predate it — mount-dependent tests need the pinned
+    submodule's binary.
+
+    CI provides it via ``OCX_TEST_BINARY`` (built and uploaded by the smoke
+    job, whose checkout is ``submodules: recursive``; the acceptance job's
+    checkout is not, so a cargo build here would see an empty external/ocx
+    and a dangling ``[patch.crates-io]``). Local dev falls back to building
+    from the submodule directly.
+    """
+    if env_path := os.environ.get("OCX_TEST_BINARY"):
+        p = Path(env_path)
+        assert p.exists(), f"OCX_TEST_BINARY points at a missing file: {p}"
+        return p
+    ocx_dir = PROJECT_ROOT / "external" / "ocx"
+    binary = ocx_dir / "target" / "release" / "ocx"
+    if not binary.exists():
+        subprocess.run(["cargo", "build", "--release", "--bin", "ocx"], cwd=ocx_dir, check=True)
+    assert binary.exists(), f"ocx binary not found at {binary} after build"
+    return binary
 
 
 # ---------------------------------------------------------------------------

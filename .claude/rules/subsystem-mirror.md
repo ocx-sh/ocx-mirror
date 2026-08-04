@@ -2,6 +2,7 @@
 paths:
   - src/**
   - tests/**
+  - crates/**
 ---
 
 # Mirror Subsystem
@@ -33,10 +34,12 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/package/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
 | `command/package/pipeline/cascade.rs` | `pipeline cascade` — wraps `ocx package cascade repair` (needs ocx ≥ 0.5.4), then announces the tags it moved |
 | `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
-| `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex) |
+| `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex, Pylock, Pypi) |
+| `spec/python_config.rs` | `PythonConfig` (interpreter version/ABI + `interpreter_package` ref, `lock` = pypi lock-derivation options, `entrypoints` = console-script synthesis mode) — required for `source.type: pylock`/`pypi` |
 | `spec/target.rs` | `Target` (registry + repository) |
-| `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping). Keys are `os/arch[/variant][/os_version][+libc.<flavor>]` parsed via `ocx_lib` `Platform::from_str`; a `+libc.glibc`/`+libc.musl` suffix lands in `os_features` and publishes as an OCI `os.features` entry |
+| `spec/assets.rs` | `AssetPatterns` (platform → regex[] mapping). Keys are `os/arch[/variant][+libc.<flavor>[,…]]` parsed via `ocx_lib` `Platform::from_str`; a `+libc.glibc`/`+libc.musl` suffix lands in `os_features` and publishes as an OCI `os.features` entry |
 | `spec/asset_type.rs` | `AssetTypeConfig` (Archive vs Binary) |
+| `spec/wheels.rs` | `WheelPatterns` (`wheels:` map, env sources only): platform key (optional single `+libc.<flavor>` os_feature) → ordered wheel-tag prefix filter (admissibility + ranking); `effective_filter` derives per-key defaults (`["any"]` plain linux, `["manylinux","any"]` glibc, `["musllinux","any"]` musl, macosx/win elsewhere); key published verbatim as the image-index platform entry; `base_platform_key`/`libc_feature` helpers |
 | `spec/versions_config.rs` | Version filter (min/max bounds, new_per_run, backfill order) |
 | `spec/cascade_config.rs` | `CascadeConfig` — `cascade:` as bool or `{schedule}` map (hand-rolled `Deserialize` visitor, so the map branch keeps its `unknown field` diagnostic; map implies enabled); `validate` charset-checks the cron |
 | `spec/verify_config.rs` | Checksum verify options |
@@ -49,8 +52,14 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); URL-reject validator via `policy_check_notify` |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
+| `source/pylock.rs` | PEP 751 `pylock.toml` reader → single `VersionInfo` (the app's locked version, PEP 503 name match); wheel selection happens later in `plan.rs`/`prepare.rs` via `ocx_python` |
+| `source/pypi.rs` | `source.type: pypi` discovery: `GET {index}/pypi/{package}/json` → one `VersionInfo` per release with ≥1 non-yanked file (PEP 592); PEP 440-aware prerelease flag (`uv_pep440`); `assets` stays empty (wheel selection happens later, same as `pylock`) |
 | `pipeline/orchestrator.rs` | `execute_mirror()`: prepare (concurrent) + push (sequential) |
 | `pipeline/download.rs` | Single GET buffered to a file — no retry, no resume; an empty body is an error |
+| `pipeline/lock_derive.rs` | `pipeline plan`'s per-candidate PEP 751 lock derivation for `source.type: pypi`: shells `uv pip compile` — universal locks (the default) via `--python-version X.Y`, no interpreter on disk; only `universal: false` materializes the pinned interpreter via `ocx package pull` (`--python <path>`) — relaxes the `requires-python` floor (uv#15995), stamps a provenance header, fail-closed re-parses via `ocx_python::parse_pylock` |
+| `pipeline/python_prepare.rs` | pylock/pypi env-prepare path (parallel to the archive `orchestrator::prepare_version`): per (version, wheels key) download wheels → verify(sha256==lock) → repack → collide → `compose_env` → write `metadata.json` + N `tar.zst` layers + `env-manifest.json`; entry `platform` = full wheels key (push `-p` verbatim), `platform_slug` = base slug (JUnit naming) |
+| `pipeline/python_push.rs` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade --new -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
+| `pipeline/ocx_cli.rs` | shared `ocx` subprocess helpers (`resolve_ocx_binary`, `forward_ocx_env`) used by both the archive push/describe legs and `python_push` |
 | `pipeline/verify.rs` | Checksum verify |
 | `pipeline/package.rs` | Extract archive, apply metadata, rebundle |
 | `pipeline/push.rs` | Push to registry + cascade tag compute |
@@ -111,7 +120,7 @@ same floor and moves with the submodule pointer.
 
 ## Spec Format (YAML)
 
-Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade` (bool, or a map `{schedule}` that also puts the generated repair workflow on a timer), `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`, `bin_scan` (off/auto/verify), `libc_lint` (bool, default **on** — total opt-out for the create-time libc check, mirroring `ocx package create --no-libc-lint`).
+Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade` (bool, or a map `{schedule}` that also puts the generated repair workflow on a timer), `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`, `bin_scan` (off/auto/verify), `libc_lint` (bool, default **on** — total opt-out for the create-time libc check, mirroring `ocx package create --no-libc-lint`). Env sources (`pylock`/`pypi`) replace `assets`/`asset_type`/`variants` with the required `wheels:` map (`spec/wheels.rs`); libc is an `os.features` platform axis there — bare tags, one image index, per-key entries; push gates each entry's JUnit by libc-compatible container legs (`spec::infer_libc_from_image`, shared from `src/spec.rs`).
 
 Source types:
 - `github_release`: `{owner, repo, tag_pattern}` — regex with `(?P<version>...)` capture
@@ -144,6 +153,8 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `SpecNotFound` | 79 (NotFound) | `mirror.yml` not found at spec path |
 | `ExecutionFailed` | 1 (Failure) | Mirror pipeline execution error |
 | `SourceError` | 69 (Unavailable) | Upstream source unreachable |
+| `PylockError` | 65 (DataError) | `source.type: pylock`/`pypi` resolution failure: no locked package matches the app name, invalid platform/variant, no compatible wheel (`select_wheels`), wheel sha256 ≠ lock hash, collision, or compose failure — all malformed spec/lock content, not a transient resource. Also covers a `pypi` lock-derivation `uv pip compile` non-zero exit or fail-closed re-parse rejection (`lock_derive.rs`). `RepackError` maps to `ExecutionFailed` (1); download failure to `SourceError` (69); `uv` binary missing/spawn failure, timeout, or interpreter materialization failure also maps to `ExecutionFailed` (1) |
+| `PypiError` | 65 (DataError) | `source.type: pypi` discovery failure classified as malformed input: PyPI JSON API 404 (package name not found on this index). A genuinely unreachable index (connection refused, timeout, 5xx, malformed JSON) stays `SourceError` (69) — see `source::pypi::classify_error` |
 | `TargetError` | 69 (Unavailable) | Target registry read failed (tag list / manifest fetch) — fail-safe abort instead of re-flagging published versions as new (issue #157) |
 | `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, ambiguous shell, `ocx_install:` block |
 | `RendererDrift` | 65 (DataError) | `--check` mode: generated files differ from current spec |
@@ -164,7 +175,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | Subcommand | Role in pipeline | Key invariant |
 |-----------|-----------------|---------------|
 | `pipeline generate ci` | Renderer — writes `.github/workflows/{mirror,describe,verify-generated}.yml` | Idempotent; `--check` exits 65 on drift. Emits `verify-generated.yml` (drift guard, R4) unless `allow_manual_edits: true`. Rejects hardcoded webhook URLs at parse time (R3) |
-| `pipeline plan` | Discover — find new work | Side-effect-free; calls registry + source; emits `plan.json` (schema v2 carries resolved asset URLs per entry) |
+| `pipeline plan` | Discover — find new work | Side-effect-free for `github_release`/`url_index`/`pylock`; calls registry + source, emits `plan.json` (schema v2 carries resolved asset URLs per entry). For `source.type: pypi`, additionally derives one PEP 751 lock per candidate version into `--locks-dir` (default `./locks`, via `lock_derive.rs`) — not side-effect-free for that source type; each entry's `pylock` field carries the derived lock's path |
 | `pipeline prepare --version V [--plan plan.json]` | Prepare — download + bundle | One version across all platforms; writes `bundle-{V}-{P}.tar.xz` per platform. With `--plan`, tasks come from the plan's resolved assets — the source is never queried (one crawl per run, issue #160); without it, falls back to a standalone crawl |
 | `pipeline push` | Push — publish greens | Serial driver; AND across containers for each `(V, P)`; sole cascade-tag writer in the publish pipeline (`pipeline cascade` below re-points existing aliases on dispatch) |
 | `pipeline notify` | Notify — Discord report | Reads `run-summary.json`; silent when all skipped-existing |

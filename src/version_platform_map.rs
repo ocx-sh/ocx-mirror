@@ -148,6 +148,20 @@ mod tests {
     }
 
     #[test]
+    fn libc_feature_entries_are_distinct_platforms() {
+        // Published-dedup honors `os.features`: a published glibc entry must
+        // NOT mask the musl key (or the featureless base key) of the same
+        // version — each full wheels key is its own (version, platform) tile.
+        let mut map = VersionPlatformMap::default();
+        let v = version("1.0.0");
+        map.add(v.clone(), platform("linux/amd64+libc.glibc"));
+
+        assert!(map.has(&v, &platform("linux/amd64+libc.glibc")));
+        assert!(!map.has(&v, &platform("linux/amd64+libc.musl")));
+        assert!(!map.has(&v, &platform("linux/amd64")));
+    }
+
+    #[test]
     fn multiple_platforms_per_version() {
         let mut map = VersionPlatformMap::default();
         let v = version("3.28.1_b1");

@@ -16,6 +16,12 @@ use super::metadata_config::MetadataConfig;
 /// The `name` field is optional: the default variant may omit it to produce
 /// bare (unprefixed) version tags. Non-default variants must have a name.
 ///
+/// Variants are an archive-source surface (`github_release`/`url_index`).
+/// Env-package sources (`pylock`/`pypi`) reject `variants:` entirely — their
+/// per-platform wheel selection lives in the top-level `wheels:` map, and libc
+/// is a platform `os.features` axis there, not a variant axis. Enforced
+/// source-aware in `MirrorSpec::validate`, not by the type alone.
+///
 /// `deny_unknown_fields` matches [`MirrorSpec`](super::MirrorSpec). Without it
 /// a misspelled key here is silently dropped while the same misspelling one
 /// level up is a hard error — and `libc-lint: false` (the hyphenated spelling

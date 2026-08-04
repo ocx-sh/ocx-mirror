@@ -6,6 +6,8 @@ x-shared:
   rust-sources: &rust-sources
     - '{{.ROOT_DIR}}/src/**/*.rs'
     - '{{.ROOT_DIR}}/tests/**/*'
+    - '{{.ROOT_DIR}}/crates/**/*.rs'
+    - '{{.ROOT_DIR}}/crates/**/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.lock'
     - '{{.ROOT_DIR}}/rustfmt.toml'
@@ -17,7 +19,7 @@ tasks:
     desc: Rust quality gate (format, clippy, license, build, unit tests)
     summary: |
       Runs all Rust-specific checks sequentially (fail-fast):
-        1. cargo fmt --check
+        1. cargo fmt --all --check
         2. cargo clippy
         3. hawkeye license headers
         4. cargo-deny license audit
@@ -35,20 +37,20 @@ tasks:
   format:check:
     desc: Check Rust formatting
     sources: *rust-sources
-    cmd: cargo fmt --check
+    cmd: cargo fmt --all --check
 
   format:apply:
     desc: Apply Rust formatting
-    cmd: cargo fmt
+    cmd: cargo fmt --all
 
   clippy:check:
     desc: Run clippy linter
     sources: *rust-sources
-    cmd: cargo clippy --locked --all-targets -- -D warnings
+    cmd: cargo clippy --workspace --locked --all-targets -- -D warnings
 
   clippy:fix:
     desc: Auto-fix clippy warnings
-    cmd: cargo clippy --locked --all-targets --fix --allow-dirty
+    cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
 
   build:
     desc: Build release binary
@@ -69,7 +71,9 @@ tasks:
     sources: *rust-sources
     deps:
       - install:nextest
-    cmd: cargo nextest run --release --locked {{.CLI_ARGS}}
+    # --workspace: the root package plus crates/ocx_python (external/ocx is
+    # workspace-excluded); without it only the root package's tests run.
+    cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true
