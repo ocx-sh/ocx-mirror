@@ -1046,12 +1046,17 @@ fn validate_notify_config(config: &NotifyConfig, errors: &mut Vec<String>) {
 }
 
 /// Validate the `announce:` block: the logical package and both repository
-/// slugs must be well-formed `<a>/<b>` pairs.
+/// slugs must be well-formed `<a>/<b>` pairs, and the optional catch-up
+/// schedule must be a cron expression safe to splice into a generated `on:`
+/// block (see [`validate_cron`]).
 ///
 /// A malformed value is reported as a named field error (contributing to
 /// `SpecInvalid`, exit 65) rather than a serde shape mismatch, so the message
 /// names the field and what it expected.
 fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String>) {
+    if let Some(cron) = &config.schedule {
+        validate_cron("announce.schedule", cron, errors);
+    }
     if !INDEX_PACKAGE_RE.is_match(&config.package) {
         errors.push(format!(
             "announce.package: '{}' is not a valid index package (must be '<namespace>/<package>', \
@@ -4455,6 +4460,54 @@ announce:
         assert!(
             errors.iter().any(|e| e.contains("announce.index_repo")),
             "bare repo name must error: {errors:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn load_spec_rejects_an_announce_cron_that_could_add_its_own_triggers() {
+        // `announce.schedule` is spliced into the generated workflow's `on:`
+        // block inside a single-quoted scalar, exactly as the other two cron
+        // fields are. A value that closes that scalar adds a trigger of the
+        // spec's choosing — and a scheduled announce opens index pull requests
+        // for real. Reject before render, naming the field to go fix.
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+name: announce-cron-guard
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+announce:
+  package: test/test
+  fork: ocx-contrib/index
+"#;
+        let spec_path = dir.path().join("mirror.yml");
+
+        std::fs::write(
+            &spec_path,
+            format!("{body}  schedule: \"0 4 * * 1'\\n  push:\\n    branches: [main]\\n#\"\n"),
+        )
+        .unwrap();
+        match load_spec(&spec_path).await.expect_err("injected cron must be rejected") {
+            MirrorError::SpecInvalid(errors) => assert!(
+                errors.iter().any(|e| e.contains("announce.schedule")),
+                "the error must name the field: {errors:?}"
+            ),
+            other => panic!("expected SpecInvalid, got: {other}"),
+        }
+
+        std::fs::write(&spec_path, format!("{body}  schedule: \"23 5 * * 2\"\n")).unwrap();
+        let spec = load_spec(&spec_path).await.expect("a plain cron must still load");
+        assert_eq!(
+            spec.announce.expect("announce block parsed").schedule.as_deref(),
+            Some("23 5 * * 2")
         );
     }
 }

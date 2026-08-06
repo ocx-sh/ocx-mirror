@@ -13,7 +13,7 @@
 //! | `push` | `push` | Aggregate JUNIT results, publish passing (V, P) pairs |
 //! | `notify` | `notify` | Post Discord webhook summary |
 //! | `describe` | `describe` | Publish catalog metadata (README + logo) to the registry |
-//! | `announce` | `announce` | Announce every tag the registry holds into the index (dispatch-only) |
+//! | `announce` | `announce` | Announce every tag the registry holds into the index (dispatch, or on a timer via `announce.schedule`) |
 //! | `patch` | (none) | Republish published metadata against the existing layers (CLI-only) |
 //! | `cascade` | `cascade` | Repair broken rolling aliases and announce what moved (dispatch, or on a timer via `cascade.schedule`) |
 

@@ -57,7 +57,7 @@ ocx-mirror schema <TARGET>
 
 ## `package pipeline` {#pipeline}
 
-Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce`, `patch` and `cascade` each own a standalone workflow outside that chain; the `patch` and `announce` ones are `workflow_dispatch` only, because both act on an already-published mirror on a maintainer's decision; `cascade` is dispatch too, plus an optional [schedule][spec-cascade]. The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
+Subcommands implementing the per-mirror CI pipeline. Each maps to one job in the workflow rendered by [`pipeline generate ci`](#pipeline-generate-ci): discover → prepare → test → push → notify. `describe`, `announce`, `patch` and `cascade` each own a standalone workflow outside that chain; the `patch` one is `workflow_dispatch` only, because it acts on an already-published mirror on a maintainer's decision; `cascade` and `announce` are dispatch too, each plus an optional schedule its spec opts into ([`cascade`][spec-cascade], [`announce`][spec-announce]). The test job runs `ocx package test` directly; everything else is an `ocx-mirror` invocation.
 
 ### `package pipeline generate ci` {#pipeline-generate-ci}
 
@@ -169,7 +169,7 @@ ocx-mirror package pipeline describe [OPTIONS]
 
 Announce every tag the target repository currently holds into the index, by spawning `ocx package announce --tags-from-registry`. Additive: it cannot drop a tag the index already commits, and yank markers survive.
 
-This is the catch-up path for a mirror that published before it gained an [`announce:`][spec-announce] block — the push job announces only what its own run wrote, so no future run ever covers that backlog. Driven by the generated `announce-from-registry.yml` workflow, which is `workflow_dispatch` only.
+This is the catch-up path for a mirror that published before it gained an [`announce:`][spec-announce] block — the push job announces only what its own run wrote, so no future run ever covers that backlog. Driven by the generated `announce-from-registry.yml` workflow, which is dispatched, or run on a timer when the spec sets one.
 
 ```sh
 ocx-mirror package pipeline announce [OPTIONS]
@@ -182,6 +182,8 @@ ocx-mirror package pipeline announce [OPTIONS]
 
 Needs [`OCX_ANNOUNCE_TOKEN`][env-announce-token] unless `--dry-run` is set. Exits 64 when the spec has no `announce:` block — there is no index package to announce into.
 
+**Schedule mode.** A spec that sets [`announce: { schedule: … }`][spec-announce] also gets a `schedule:` trigger on that workflow, keeping the dispatch. `dry_run` has no value outside a dispatch, so the workflow resolves `DRY_RUN` itself — `false` on a schedule event, the input's value on a dispatch — and a scheduled run therefore announces for real. A run that finds nothing new is silent: an unchanged announce commits nothing, and opens a pull request only when an earlier run stranded commits on the announce branch (`unchanged` *with* a pull request URL in the log). Green is *not* proof an announce ran: on a target other than `ghcr.io` — whose credential probe is constant — the announce step is skipped when the registry credentials are absent, and a skipped step leaves the job green, so a scheduled run on a repo whose token was never set or has been rotated looks exactly like a caught-up one. The `::notice::` from the credential check is the only signal, and on a timer nobody reads it — check it after enabling the schedule, and again after any token rotation.
+
 ### `package pipeline cascade` {#pipeline-cascade}
 
 Repair the target repository's rolling-tag graph by spawning `ocx package cascade repair`. A cascade breaks when a push lands out of order or dies half-way: `3.29.0` is published, but `3.29`, `3` and `latest` still name the version before it, so everyone installing the unpinned name gets the older package while the registry looks complete. The repair re-points those aliases at content the registry already serves — no upstream download, no new layer.
@@ -192,7 +194,7 @@ Runs from the generated `cascade.yml` workflow, emitted for every spec that publ
 gh workflow run cascade.yml --repo <owner>/<mirror> -f dry_run=false
 ```
 
-**Schedule mode.** A spec that sets [`cascade: { schedule: … }`][spec-cascade] also gets a `schedule:` trigger on that workflow, keeping the dispatch. `dry_run` has no value outside a dispatch, so the workflow resolves `DRY_RUN` itself — `false` on a schedule event, the input's value on a dispatch — and a scheduled run therefore repairs for real. A healthy one is silent green: nothing to fix, exit 0, no announce. It reds on exit 65 — findings that remain — and on exit 1 when the repair could not run at all (see the exit-code note below). Green is *not* proof a repair happened: the repair step is skipped when the registry credentials are absent, and a skipped step leaves the job green, so a scheduled run on a repo whose token was never set or has been rotated looks exactly like a healthy one. The `::notice::` from the credential check is the only signal, and on a timer nobody reads it — check it after enabling the schedule, and again after any token rotation.
+**Schedule mode.** A spec that sets [`cascade: { schedule: … }`][spec-cascade] also gets a `schedule:` trigger on that workflow, keeping the dispatch. `dry_run` has no value outside a dispatch, so the workflow resolves `DRY_RUN` itself — `false` on a schedule event, the input's value on a dispatch — and a scheduled run therefore repairs for real. A healthy one is silent green: nothing to fix, exit 0, no announce. It reds on exit 65 — findings that remain — and on exit 1 when the repair could not run at all (see the exit-code note below). Green is *not* proof a repair happened: on a target other than `ghcr.io` — whose credential probe is constant — the repair step is skipped when the registry credentials are absent, and a skipped step leaves the job green, so a scheduled run on a repo whose token was never set or has been rotated looks exactly like a healthy one. The `::notice::` from the credential check is the only signal, and on a timer nobody reads it — check it after enabling the schedule, and again after any token rotation.
 
 ```sh
 ocx-mirror package pipeline cascade [OPTIONS]

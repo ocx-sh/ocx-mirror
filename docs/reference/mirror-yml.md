@@ -620,6 +620,7 @@ announce:
 | `package` | string | Yes | Logical index package as `<namespace>/<package>`. Not derived from [`target.repository`](#target) — the physical path and the logical name are related by convention only. |
 | `fork` | string | Yes | Fork the index pull request is opened from, as `<owner>/<repo>`. |
 | `index_repo` | string | No | Index repository the pull request targets, as `<owner>/<repo>`. Defaults to `ocx-sh/index`. |
+| `schedule` | string | No | UTC cron putting the generated `announce-from-registry.yml` catch-up workflow on a timer. Absent → that workflow is dispatch-only. See **Catching up an existing mirror** below. |
 
 **Behaviour:**
 
@@ -674,13 +675,30 @@ Whichever of these a run lands on is also rendered as an **Index** row on the ru
 
 The announce only ever carries what the *current run* published, so adding `announce:` to a mirror that has already published everything reports `nothing_to_announce` on every run, indefinitely — there is nothing new to trigger it. The same applies after an announce failure: the next run has nothing to retry with.
 
-Every mirror with an `announce:` block gets a second generated workflow, `announce-from-registry.yml`, for exactly this. It is `workflow_dispatch` only — never scheduled, never triggered by a push — and it lists every tag the target repository currently holds, then unions them onto the committed index entry. Dispatch it from the repository's **Actions** tab, or:
+Every mirror with an `announce:` block gets a second generated workflow, `announce-from-registry.yml`, for exactly this. It lists every tag the target repository currently holds, then unions them onto the committed index entry. It is never triggered by a push. Dispatch it from the repository's **Actions** tab, or:
 
 ```sh
 gh workflow run announce-from-registry.yml --repo <owner>/<mirror> -f dry_run=false
 ```
 
 `dry_run` defaults to **true**: the run reports whether the index would change (`updated` or `unchanged`) and discards the rebuilt entry without opening a pull request. Pass `dry_run=false` to open it for real.
+
+**On a timer.** `announce.schedule` adds a `schedule:` trigger to that workflow, keeping the dispatch:
+
+```yaml
+announce:
+  package: bazelbuild/bazelisk
+  fork: ocx-contrib/index
+  schedule: "23 5 * * 2"   # optional; UTC cron, GitHub's syntax
+```
+
+The cron string is passed through verbatim, exactly as [`cascade.schedule`](#cascade) is: a spec is rejected (exit 65) when the expression is empty or holds a character outside cron's `0-9 A-Z a-z * / , -` charset, and GitHub validates everything beyond that.
+
+`dry_run` has no value outside a dispatch, so the workflow resolves it itself — `false` on a schedule event, the input's value on a dispatch. **A scheduled run therefore announces for real.** A run that finds nothing new is silent: an unchanged announce commits nothing, and opens no pull request unless an earlier run left unmerged commits on the announce branch, which it then ensures a pull request for (`unchanged` *with* a pull request URL in [`pipeline announce`][cli-announce]'s log). A caught-up mirror with nothing stranded produces one green run per cycle and no index traffic.
+
+Green is not proof an announce ran, though: on a target other than `ghcr.io` — whose credential probe is constant — the announce step is skipped when the registry credentials are missing, and a skipped step keeps the job green. A repo whose `OCX_MIRROR_REGISTRY_TOKEN` was never set or has since been rotated therefore produces the same silent green forever. Read the run's `::notice::` once after enabling the schedule, and again after every token rotation.
+
+The workflow keeps a `concurrency` group of its own rather than joining the push workflow's the way [`cascade.yml`](#cascade) does: it writes index pull requests only, never registry tags, so concurrent announce writers contend on a per-package index branch rather than on tags — the fast-forward path is compare-and-swap with a retry, and the spent-branch reset path can drop a racing branch commit, which the next full from-registry run re-adds. Joining the publish group would instead let a queued push cancel the pending catch-up. Give `announce.schedule` a cron of its own all the same: sharing one with [`versions.poll_interval`](#top-level) schedules the catch-up against the push job's own closing announce.
 
 The catch-up is **additive**, on the same footing as the push job's `--tags-from-file`: it cannot drop a tag the index already commits, and yank markers survive. Running it against a mirror that is already current is a no-op, so it is safe to dispatch on suspicion.
 
@@ -692,6 +710,7 @@ Its `ocx-mirror` entry point is [`pipeline announce`][cli-announce]; the same co
 
 - `package` must be a `<namespace>/<package>` pair of lowercase alphanumerics with `.`, `_` or `-`. A bare tool name is rejected with exit code 65 (`DataError`).
 - `fork` and `index_repo` must each be an `<owner>/<repo>` pair. A pasted URL is rejected the same way.
+- `schedule`, when present, must be non-empty and hold only cron's `0-9 A-Z a-z * / , -` charset. Anything else is rejected before a workflow is written, on the same reasoning as [`cascade.schedule`](#cascade).
 
 ## `catalog` {#catalog}
 
@@ -805,7 +824,7 @@ Every generated pipeline invocation in a nested spec's workflows names its own s
 
 **`--repo-root`.** Generated files are written under `--repo-root`, and every filename above is computed relative to it. Left unset, it defaults to the deepest directory every `--spec` given shares — for a single spec that is simply its parent directory, so `generate ci --spec /elsewhere/repo/mirror.yml` still writes into that repository rather than the current directory. A spec that does not resolve under `--repo-root` (explicit or inferred) is rejected with exit 64, naming `--repo-root` as the fix.
 
-**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` follows the same rule for its own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested); `patch-<dir>.yml`, `cascade-<dir>.yml` and `announce-from-registry-<dir>.yml` have no path triggers at all — they are dispatched, or (for a `cascade-<dir>.yml` with a [`schedule`](#cascade)) run on a timer. Each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
+**CI triggers per spec.** The root spec's workflow keeps the repository-wide trigger list it has always had (its own spec file, `scripts/**`, `tests/**`, `metadata*.json`) plus its own workflow file. A nested spec's workflow instead triggers only on its own subtree — `buildifier/**` plus `.github/workflows/mirror-buildifier.yml` — never the repository-wide list, so editing `buildozer/` never wakes `buildifier`'s workflow. The generated `describe-<dir>.yml` follows the same rule for its own triggers (`CATALOG.md` / `logo.*` at the root, `<dir>/**` when nested); `patch-<dir>.yml`, `cascade-<dir>.yml` and `announce-from-registry-<dir>.yml` have no path triggers at all — they are dispatched, or run on a timer when their spec opts in ([`cascade.schedule`](#cascade), [`announce.schedule`](#announce)). Each carries a distinct `name:` — sibling `describe` workflows sharing a name would share a `concurrency.group` too, since it keys on `github.workflow`.
 
 **One drift guard per repository.** `verify-generated.yml` is emitted once no matter how many specs the repository holds. Its committed `paths:` list is the union of every spec's own triggers, and the `generate ci --check` command line it bakes in names every spec explicitly with `--spec` as soon as there is more than one — `--spec` appends rather than replaces, so a guard naming only a subset would silently stop checking the rest while staying green. The guard also reds when a `.github/workflows/*.yml` file carries the `# Generated by ocx-mirror` header but is not in the current spec set's output — the file a dropped spec leaves behind, which would otherwise keep running on schedule against a spec that no longer exists. Hand-written workflows without that header are never inspected.
 

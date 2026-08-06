@@ -4,11 +4,14 @@
 
 name: announce-from-registry{WORKFLOW_SUFFIX}
 
-# Dispatch only. The nightly push job announces what its own run published;
-# this one announces everything the registry already holds, which is a
-# catch-up operation an owner asks for — never a schedule.
+# The nightly push job announces what its own run published; this one announces
+# everything the registry already holds. Dispatch is always available, and
+# defaults to reporting. An operator who wants the catch-up unattended opts in
+# with `announce: { schedule: … }` in the spec — a scheduled run announces for
+# real, and a run that finds nothing new commits nothing; it opens a pull
+# request only when an earlier run stranded commits on the announce branch.
 on:
-  workflow_dispatch:
+{ANNOUNCE_SCHEDULE_BLOCK}  workflow_dispatch:
     inputs:
       dry_run:
         description: Report what would change without opening an index pull request
@@ -16,6 +19,13 @@ on:
         default: true
 
 concurrency:
+  # Its own group, unlike cascade.yml's: this workflow writes index pull
+  # requests only, never registry tags, so concurrent announce writers contend
+  # on a per-package index branch — the fast-forward path is compare-and-swap
+  # with a retry, and the spent-branch reset path can drop a racing commit that
+  # the next full from-registry run re-adds. Joining the publish group would
+  # instead let a queued push cancel the pending catch-up. That coupling exists
+  # for cascade because cascade and push re-point the same rolling aliases.
   group: mirror-${{ github.workflow }}-announce-from-registry
   cancel-in-progress: false
 
@@ -34,7 +44,9 @@ jobs:
           # loudly — unlike the push job this workflow has nothing else to do.
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
           # Read through the environment, never interpolated into the script.
-          DRY_RUN: ${{ inputs.dry_run }}
+          # `inputs.dry_run` is empty on a schedule event, which would read as
+          # "not true" by accident — spell the scheduled answer out instead.
+          DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}
         run: |
           set -euo pipefail
           if [ "${DRY_RUN}" = "true" ]; then

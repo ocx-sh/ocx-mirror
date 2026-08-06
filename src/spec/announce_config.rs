@@ -34,6 +34,13 @@ pub struct AnnounceConfig {
     /// Index repository the pull request targets, as `<owner>/<repo>`.
     #[serde(default = "default_index_repo")]
     pub index_repo: String,
+
+    /// Cron expression for the generated `announce-from-registry.yml`'s
+    /// `schedule:` trigger. Absent → that workflow is dispatch-only.
+    /// Charset-checked by `spec::validate_announce_config`; GitHub validates
+    /// the semantics.
+    #[serde(default)]
+    pub schedule: Option<String>,
 }
 
 fn default_index_repo() -> String {

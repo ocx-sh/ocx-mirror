@@ -1320,9 +1320,16 @@ fn render_describe(spec: &MirrorSpec, slot: &SpecSlot) -> String {
 /// Render the `announce-from-registry.yml` catch-up workflow.
 ///
 /// Same placeholder set as `describe.yml` — auth steps plus a GHCR permissions
-/// block. Dispatch-only by design: the push job already announces what each run
-/// publishes, and this one exists for the backlog a mirror that opted into
-/// `announce:` late can never reach by running forward.
+/// block. Dispatch is always available and defaults to reporting: the push job
+/// already announces what each run publishes, and this one exists for the
+/// backlog a mirror that opted into `announce:` late can never reach by running
+/// forward. `announce: { schedule: … }` adds a `schedule:` trigger whose runs
+/// announce for real; a run that finds nothing new commits nothing, and opens a
+/// pull request only for commits an earlier run stranded on the announce branch
+/// (see `AnnounceReport` in `pipeline/push.rs`).
+///
+/// Keeps a concurrency group of its own rather than joining the push workflow's
+/// the way `cascade.yml` does — see the template's comment on the group.
 ///
 /// Takes **discover's** read-only permissions, not describe's. This job only
 /// lists the target's tags and fetches their manifests — the writes it performs
@@ -1336,6 +1343,10 @@ fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
+        .replace(
+            "{ANNOUNCE_SCHEDULE_BLOCK}",
+            &schedule_block(spec.announce.as_ref().and_then(|a| a.schedule.as_ref())),
+        )
         .replace("{ANNOUNCE_PERMISSIONS}", render_discover_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
         .replace("{OCX_CLI_VERSION}", ocx_cli_version())
@@ -1386,7 +1397,7 @@ fn publish_concurrency_group(spec: &MirrorSpec) -> String {
 ///
 /// The cron lands inside a single-quoted scalar unescaped; what keeps a spec
 /// from closing it and appending triggers of its own is `spec::validate_cron`,
-/// which both callers' specs pass through before any file is written.
+/// which every caller's spec passes through before any file is written.
 fn schedule_block(cron: Option<&String>) -> String {
     cron.map(|cron| format!("  schedule:\n    - cron: '{}'\n", cron))
         .unwrap_or_default()
@@ -2145,11 +2156,12 @@ mod tests {
     }
 
     #[test]
-    fn announce_from_registry_is_dispatch_only_and_carries_the_token() {
+    fn announce_from_registry_is_dispatch_only_by_default_and_carries_the_token() {
         // The Python acceptance test only text-greps `"on:"` (the locked test
-        // env has no yaml module), so the real parse lives here. A schedule or
-        // push trigger on this workflow would open an index pull request on
-        // every commit — the one thing it must never do.
+        // env has no yaml module), so the real parse lives here. A push trigger
+        // on this workflow would open an index pull request on every commit —
+        // the one thing it must never do. A schedule is opt-in per spec, so a
+        // spec that did not ask for one gets neither.
         let dir = tempdir().unwrap();
         render_fixture("mirror-ghcr-announce.yml", dir.path()).expect("announce fixture must render");
         let rendered =
@@ -2165,7 +2177,7 @@ mod tests {
         assert_eq!(
             mapping.keys().map(|k| k.as_str().unwrap()).collect::<Vec<_>>(),
             vec!["workflow_dispatch"],
-            "announce-from-registry must be dispatch-only — no push, no schedule",
+            "a spec that named no announce schedule must get a dispatch-only workflow — and never a push trigger",
         );
 
         let dry_run = &triggers["workflow_dispatch"]["inputs"]["dry_run"];
@@ -2183,6 +2195,86 @@ mod tests {
         assert_eq!(
             step["env"]["OCX_ANNOUNCE_TOKEN"].as_str(),
             Some("${{ secrets.OCX_ANNOUNCE_TOKEN }}"),
+            "got: {step:?}",
+        );
+    }
+
+    /// Parse one spec's rendered `announce-from-registry.yml`, from an inline
+    /// spec at the root.
+    fn announce_from_registry_of(yaml: &str) -> serde_yaml_ng::Value {
+        let rendered = render_announce_from_registry(&spec_from_yaml(yaml), &root_slot());
+        serde_yaml_ng::from_str(&rendered)
+            .unwrap_or_else(|e| panic!("announce-from-registry.yml must be parseable YAML: {e}\n{rendered}"))
+    }
+
+    /// `SHFMT_SPEC` with an `announce:` block, optionally on a timer.
+    fn shfmt_announcing(schedule: Option<&str>) -> String {
+        let cron = schedule
+            .map(|cron| format!("  schedule: \"{cron}\"\n"))
+            .unwrap_or_default();
+        format!("{SHFMT_SPEC}announce:\n  package: mvdan/shfmt\n  fork: ocx-contrib/index\n{cron}")
+    }
+
+    /// The keys of a rendered workflow's `on:` block, in order.
+    fn trigger_keys(parsed: &serde_yaml_ng::Value) -> Vec<&str> {
+        parsed["on"]
+            .as_mapping()
+            .unwrap_or_else(|| panic!("triggers must be a mapping, got: {:?}", parsed["on"]))
+            .keys()
+            .map(|key| key.as_str().expect("a trigger key is a string"))
+            .collect()
+    }
+
+    #[test]
+    fn an_announce_schedule_adds_a_cron_trigger_beside_the_dispatch() {
+        // The opt-in half: an operator who wants the catch-up unattended gets a
+        // timer, and keeps the manual dispatch they had.
+        let parsed = announce_from_registry_of(&shfmt_announcing(Some("23 5 * * 2")));
+        assert_eq!(
+            trigger_keys(&parsed),
+            vec!["schedule", "workflow_dispatch"],
+            "a schedule is added to the dispatch, never a push trigger and never instead of it",
+        );
+        assert_eq!(
+            parsed["on"]["schedule"][0]["cron"].as_str(),
+            Some("23 5 * * 2"),
+            "got: {:?}",
+            parsed["on"]["schedule"],
+        );
+
+        // Two separate opt-ins on two separate workflows: an operator who wants
+        // unattended announces has not asked for unattended tag repair, and the
+        // shared `schedule_block` helper makes crossing them a one-line typo.
+        assert_eq!(
+            trigger_keys(&cascade_of(&shfmt_announcing(Some("23 5 * * 2")))),
+            vec!["workflow_dispatch"],
+            "announce.schedule must not put the repair workflow on a timer",
+        );
+        assert_eq!(
+            trigger_keys(&announce_from_registry_of(&format!(
+                "{}cascade:\n  schedule: \"17 4 * * 1\"\n",
+                shfmt_announcing(None)
+            ))),
+            vec!["workflow_dispatch"],
+            "cascade.schedule must not put the announce workflow on a timer",
+        );
+    }
+
+    #[test]
+    fn the_announce_step_answers_dry_run_for_a_scheduled_event() {
+        // `inputs.dry_run` is empty outside a dispatch. Left alone it reads as
+        // "not true", which is the right answer by accident — one that a
+        // default flip would silently invert.
+        let step = announce_from_registry_of(&shfmt_announcing(None))["jobs"]["announce"]["steps"]
+            .as_sequence()
+            .expect("announce job must have steps")
+            .iter()
+            .find(|step| step["name"].as_str() == Some("Announce every registry tag into the index"))
+            .expect("the announce step must be named")
+            .clone();
+        assert_eq!(
+            step["env"]["DRY_RUN"].as_str(),
+            Some("${{ github.event_name == 'schedule' && 'false' || inputs.dry_run }}"),
             "got: {step:?}",
         );
     }

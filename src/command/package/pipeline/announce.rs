@@ -247,6 +247,7 @@ mod tests {
             package: "bazelbuild/buildifier".to_string(),
             fork: "ocx-contrib/index".to_string(),
             index_repo: "ocx-sh/index".to_string(),
+            schedule: None,
         }
     }
 

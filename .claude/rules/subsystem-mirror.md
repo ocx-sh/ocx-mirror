@@ -45,7 +45,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/tests_config.rs` | `TestEntry` (name + command); top-level `tests:` schema |
 | `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig` (`image`/`shell`/`id`/`setup` — `setup` provisions the leg's image once per leg via `docker build`); `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
-| `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`); logical index name, spelled out — never derived from `target` |
+| `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`, optional `schedule` putting the generated catch-up workflow on a timer — charset-checked by `validate_announce_config`); logical index name, spelled out — never derived from `target` |
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); URL-reject validator via `policy_check_notify` |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
@@ -177,6 +177,8 @@ concurrency:
 `cascade.yml` joins the **same** group rather than owning one: a repair and a live push both re-point the same rolling aliases. It cannot read the push workflow's `github.workflow`, so the renderer bakes the resolved literal (`mirror-<spec.name>-publish`, since the push workflow's `name:` *is* `spec.name`) into the generated file — `publish_concurrency_group` in `ci.rs`, pinned by a test that derives both ends from one render.
 
 The guarantee is mutual exclusion, not a queue: GitHub holds one *pending* run per group, so the run waiting behind the live one is cancelled when a newer run of either workflow arrives. A scheduled repair can therefore be dropped by a busy publish (grey "cancelled", never red), and a pending publish can be dropped by a repair — accepted, since Actions offers no mutex primitive and neither outcome corrupts tags. A spec must not give `cascade.schedule` the same cron as `versions.poll_interval`.
+
+`announce-from-registry.yml` keeps a group of its own (`mirror-${{ github.workflow }}-announce-from-registry`) and must **not** be folded into the publish group, even though it too can carry a schedule (`announce.schedule`). It writes index pull requests only, never registry tags, so concurrent announce writers contend on a per-package index branch: the fast-forward path is CAS with a retry, and the spent-branch reset path can drop a racing branch commit, which the next full from-registry run re-adds. Joining the publish group would instead let a queued push cancel the pending catch-up. The publish-group coupling exists solely because cascade and push re-point the same rolling aliases. A spec must not give `announce.schedule` the same cron as `versions.poll_interval` either — that schedules the catch-up against the push job's own closing announce.
 
 ### R3: Webhook URL rejection invariant
 
