@@ -37,10 +37,14 @@ pub async fn push_and_cascade(
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
     // Mirror publishes each bundle as a whole archive layer — no per-layer
-    // strip/prefix rewriting, so the layout stays at its default (none).
+    // strip/prefix rewriting, so the layout stays at its default (none). The
+    // bundle was just built from freshly downloaded upstream assets, so no
+    // repository in the target registry already holds the blob: there is no
+    // cross-repository mount source to try.
     let layers = [LayerRef::File {
         path: bundle_path.to_path_buf(),
         layout: LayerLayoutSpec::default(),
+        mount_from: None,
     }];
 
     // `true` matches the `ocx package push` default, which is what the pipeline

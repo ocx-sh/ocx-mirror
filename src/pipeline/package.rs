@@ -190,8 +190,15 @@ pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &
 /// Resolve the metadata JSON file for a given platform, falling back to the default.
 ///
 /// Returns the *authoring* form: a spec's `metadata.json` is what a publisher
-/// hand-writes, and it may carry sidecar-only fields (per-dependency
-/// `platforms` pin maps) that the published form has no room for.
+/// hand-writes, so it may leave a dependency's digest unresolved where the
+/// published form requires one.
+///
+/// Two spellings a spec may still carry are now rejected here rather than
+/// silently dropped, both from `ocx` 0.5.5: a top-level `platform` key, and a
+/// per-dependency `platforms` pin map (a dependency carries its digest on the
+/// identifier instead — `registry/repo:tag@sha256:…`). Either fails this parse,
+/// so the spec dies at `pipeline plan`/`prepare` with the upstream migration
+/// message naming the file, not later at push.
 pub fn resolve_metadata(config: &MetadataConfig, platform: &str, spec_dir: &Path) -> Result<AuthoringMetadata> {
     let metadata_path = if let Some(platform_path) = config.platforms.get(platform) {
         spec_dir.join(platform_path)
@@ -210,16 +217,12 @@ pub fn resolve_metadata(config: &MetadataConfig, platform: &str, spec_dir: &Path
 
 /// Renders the `-metadata.json` sidecar that travels beside a prepared bundle.
 ///
-/// The recorded `platform` is the whole point: `ocx package test` and `ocx
-/// package push` both resolve a bundle's platform from its sidecar and reject
-/// one that has none, so a sidecar written without it fails downstream with
-/// "metadata sidecar has no recorded platform". `ocx package create` records
-/// it via the same [`AuthoringMetadata::with_platform`]; the spec-level
-/// `metadata.json` a publisher writes by hand never carries it, because the
-/// spec is platform-independent and one file serves every platform.
+/// The sidecar carries no platform: `ocx` retired the top-level `platform` key
+/// and now rejects a sidecar still bearing it. The platform reaches `ocx
+/// package push` / `ocx package test` through their explicit `--platform` flag,
+/// which every mirror invocation passes. `platform` here is error context only.
 pub fn sidecar_json(metadata: &AuthoringMetadata, platform: &Platform) -> Result<String> {
-    let recorded = metadata.clone().with_platform(platform.clone());
-    serde_json::to_string_pretty(&recorded)
+    serde_json::to_string_pretty(metadata)
         .map_err(|e| anyhow::anyhow!("failed to serialize metadata sidecar for {platform}: {e}"))
 }
 
@@ -524,17 +527,15 @@ mod tests {
         let _metadata = resolve_metadata(&config, "linux/amd64", dir.path()).unwrap();
     }
 
-    /// The sidecar `pipeline prepare` writes must record its platform.
+    /// The sidecar `pipeline prepare` writes must carry no `platform` key.
     ///
-    /// A spec-level `metadata.json` never carries one, and byte-copying it
-    /// produced a sidecar that `ocx package test` and `ocx package push` both
-    /// reject with "metadata sidecar has no recorded platform" — the whole
-    /// mirror fleet's test leg, on the first version it actually had to test.
-    /// Asserted through `resolve_platform`, the call that did the rejecting.
+    /// `ocx` retired the field and now rejects a sidecar still carrying it with
+    /// a migration error (exit 65), so stamping one would red every test and
+    /// push leg in the fleet. Asserted on the raw JSON, since a sidecar that
+    /// re-parses proves only that this binary tolerates it.
     #[test]
-    fn sidecar_records_the_platform_it_was_prepared_for() {
+    fn sidecar_carries_no_platform_key() {
         let dir = tempfile::TempDir::new().unwrap();
-        // Exactly the shape a publisher hand-writes: no `platform` key.
         std::fs::write(
             dir.path().join("default.json"),
             r#"{"type":"bundle","version":1,"strip_components":1,"env":[]}"#,
@@ -547,19 +548,15 @@ mod tests {
         let platform: Platform = "linux/arm64".parse().unwrap();
 
         let metadata = resolve_metadata(&config, "linux/arm64", dir.path()).unwrap();
-        assert!(
-            metadata.platform().is_none(),
-            "fixture must start without a platform, or this test proves nothing"
-        );
-
         let sidecar = sidecar_json(&metadata, &platform).unwrap();
-        let written: AuthoringMetadata = serde_json::from_str(&sidecar).unwrap();
 
-        assert_eq!(
-            written.resolve_platform(Some(&platform)).unwrap(),
-            platform,
-            "sidecar must resolve to the platform it was prepared for"
+        let value: serde_json::Value = serde_json::from_str(&sidecar).unwrap();
+        assert!(
+            value.get("platform").is_none(),
+            "sidecar must not carry a platform key: {sidecar}"
         );
+        // And it is still a sidecar `ocx package push --metadata` can read.
+        serde_json::from_str::<AuthoringMetadata>(&sidecar).unwrap();
     }
 
     #[test]

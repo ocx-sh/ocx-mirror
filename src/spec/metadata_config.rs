@@ -354,7 +354,7 @@ platforms:
             // projection; the authoring form this returns is the publisher's
             // hand-written shape.
             let published = metadata
-                .to_published(&platform.parse().unwrap())
+                .to_published()
                 .unwrap_or_else(|e| panic!("to_published failed for {platform}: {e}"));
             let path_entry = published
                 .env()

@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:633c88ff788aa448d8d91863824727913a799bbc21cbec5674de7dbbf4354ecc"
+declaration_hash = "sha256:7e2c0892771dcb25b0a14bb853de83fba18a5aa60c0978b0197d199398971d94"
 generated_by = "ocx 0.5.0"
-generated_at = "2026-07-31T19:34:04Z"
+generated_at = "2026-08-06T16:33:34Z"
 
 [[tool]]
 name = "git-cliff"
@@ -42,6 +42,19 @@ repository = "ocx.sh/lychee"
 "linux/amd64" = "sha256:a4da72f61e03653d067ea731d8ffcb1651cb88199003518062d6b80223433051"
 "linux/arm64" = "sha256:80bb89d13669add2363656ecaeb07161b1593caf4d2a19d520df5c9d797fee88"
 "windows/amd64" = "sha256:2f806153cd281572a5e2c44d419e8f8d45a5c9b8c58dfea24f2e0de2643e7ad6"
+
+[[tool]]
+name = "ocx"
+group = "default"
+repository = "ocx.sh/ocx/cli"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:1a87e3610681861ce025eef8c82e1c0a81ea36addb691419b036d93c42274751"
+"darwin/arm64" = "sha256:b8a7cd8f5226e23fc959a7d203cec4d58a490575217d0b62d47a89705d811998"
+"linux/amd64" = "sha256:9b94b0ab07e109f489c567ac17875c475dea2828ce583c36767baa834b8aad25"
+"linux/arm64" = "sha256:e136c88239615d6191931eaa31d736d5e4715d74f26034c98cd60e50552dd7c6"
+"windows/amd64" = "sha256:7c39a775873fff72e0937e98654bdc914a9fa39802188fb9e987e328a5370e93"
+"windows/arm64" = "sha256:657bae2e75130194d33eefc2578905879e722d24426f5bea947e1db753010976"
 
 [[tool]]
 name = "uv"

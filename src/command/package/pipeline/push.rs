@@ -901,6 +901,13 @@ pub(crate) struct PushAttemptError {
 /// deterministic and not retried. `None` (signal-killed) is not retried either:
 /// the signal came from outside, and the runner that sent it is usually about
 /// to send another.
+///
+/// Exit 65 is likewise not retried, and from `ocx` 0.5.5 that is the code a
+/// binary *older* than 0.5.5 answers with on every leg: it demands the
+/// top-level `platform` key the sidecar no longer carries. Deliberately given
+/// no version hint — unlike the exit-64 hint `pipeline cascade` emits for a
+/// missing verb, 65 is the ordinary data-error code here and a version guess
+/// would misdirect a genuine bad-metadata run. The floor is documented instead.
 fn push_exit_is_transient(code: Option<i32>) -> bool {
     matches!(code, Some(code) if code == ExitCode::TempFail as i32)
 }

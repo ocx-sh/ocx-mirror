@@ -90,6 +90,8 @@ It is deliberately **not** the workflow's own `GITHUB_TOKEN`: the pull request t
 
 `ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package describe`). The child binary is resolved in order: `OCX_BINARY_PIN`, an `ocx` co-located with the `ocx-mirror` executable, then `ocx` on `PATH`.
 
+Whichever of those three wins must be **ocx 0.5.5 or newer**: an older binary rejects the metadata sidecar `pipeline prepare` writes and fails every push with exit 65. See [Push retry][spec-push-retry] for the full contract.
+
 Resolution-affecting `OCX_*` variables present in the environment are forwarded to that subprocess, so offline mode, registry config, and index paths behave identically inside the child:
 
 `OCX_HOME`, `OCX_DEFAULT_REGISTRY`, `OCX_INSECURE_REGISTRIES`, `OCX_OFFLINE`, `OCX_REMOTE`, `OCX_CONFIG`, `OCX_NO_CONFIG`, `OCX_PROJECT`, `OCX_NO_PROJECT`, `OCX_INDEX`, `OCX_BINARY_PIN`, `OCX_NO_UPDATE_CHECK`, `OCX_NO_MODIFY_PATH`
@@ -131,3 +133,4 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [cli-patch]: ./cli.md#pipeline-patch
 [cli-cascade]: ./cli.md#pipeline-cascade
 [spec-announce]: ./mirror-yml.md#announce
+[spec-push-retry]: ./mirror-yml.md#concurrency-push-retry

@@ -220,8 +220,10 @@ async fn invoke_cascade_repair(
 /// Clear any previous run's record, and create the directory `ocx` writes into.
 ///
 /// `ocx` writes the file with a bare `tokio::fs::write`, which does not create
-/// its parent. Removing it first is what keeps a run that moved nothing from
-/// announcing the tags an earlier run — or the dry run before it — recorded.
+/// its parent. The removal guards the narrower case that the write itself does
+/// not cover: a repair that dies *before* writing would otherwise leave an
+/// earlier run's — or the preceding dry run's — tags to be announced as if this
+/// run had moved them.
 async fn prepare_tags_file(path: &Path) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -237,11 +239,12 @@ async fn prepare_tags_file(path: &Path) -> Result<(), String> {
 
 /// The tags the repair recorded.
 ///
-/// An absent file is the ordinary "nothing was re-pointed" outcome — `ocx`
-/// writes it only when it moves something. Any other read error is reported:
-/// silently reading it as an empty set would skip the announce a repair that
-/// *did* move tags requires, and leave the index stale while the run reads
-/// green.
+/// `ocx` writes the file on every run, empty when nothing moved, so an absent
+/// file means the repair never reached its write. Reading that as an empty set
+/// matches what the empty file would have said. Any other read error is
+/// reported instead: silently reading it as empty would skip the announce a
+/// repair that *did* move tags requires, and leave the index stale while the
+/// run reads green.
 async fn recorded_tags(path: &Path) -> Result<Vec<String>, String> {
     match tokio::fs::read_to_string(path).await {
         Ok(body) => Ok(parse_announce_tags(&body)),

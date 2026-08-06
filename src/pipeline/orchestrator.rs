@@ -77,7 +77,7 @@ pub struct VersionManifest {
 /// Both forms come from the same resolved spec file, and both are needed
 /// because they land in different places: [`published`](Self::published) is the
 /// projection that becomes the OCI config blob, while
-/// [`sidecar_json`](Self::sidecar_json) is the platform-stamped file that
+/// [`sidecar_json`](Self::sidecar_json) is the file that
 /// `ocx package push --metadata` reads.
 #[derive(Clone)]
 pub(crate) struct ExpectedMetadata {
@@ -91,21 +91,18 @@ pub(crate) struct ExpectedMetadata {
     authoring: AuthoringMetadata,
     /// Published projection — byte-for-byte the config blob a push writes.
     pub published: Metadata,
-    /// `-metadata.json` sidecar, with the platform recorded.
+    /// `-metadata.json` sidecar written beside the bundle.
     pub sidecar_json: String,
 }
 
 impl ExpectedMetadata {
     /// Renders both projections from one authoring document.
     ///
-    /// The sidecar goes through [`package::sidecar_json`] rather than a plain
-    /// serialization: it is what stamps the `platform` field, and `ocx package
-    /// push --metadata` exits 65 on a sidecar that lacks one.
+    /// The sidecar goes through [`package::sidecar_json`] so both projections
+    /// stay rendered from one authoring document.
     pub(crate) fn render(authoring: AuthoringMetadata, platform: &Platform) -> Result<Self> {
         let sidecar_json = package::sidecar_json(&authoring, platform)?;
-        // The published projection is also where a dependency declared only as
-        // a `platforms` pin map collapses to this platform's pin.
-        let published = authoring.to_published(platform)?;
+        let published = authoring.to_published()?;
         Ok(Self {
             authoring,
             published,

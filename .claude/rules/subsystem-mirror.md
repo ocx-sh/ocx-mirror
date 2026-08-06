@@ -101,6 +101,14 @@ it — the invariant is enforced by keeping this repository's own `ocx.toml` /
 `ocx.lock` current, the same discipline the prepare-window invariant above
 depends on.
 
+**ocx ≥ 0.5.5 is a hard floor, not a degradation.** From 0.5.5 the sidecar
+`pipeline prepare` writes carries no top-level `platform` key (the platform
+travels on `--platform`), and an older `ocx package push` / `package test`
+demands the key and exits **65** — not a retried code — on every push leg.
+`ocx.toml` pins `ocx` itself for exactly this reason, so a local `task verify`
+and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` step carries the
+same floor and moves with the submodule pointer.
+
 ## Spec Format (YAML)
 
 Key fields: `name`, `target` (registry + repo), `source` (GithubRelease or UrlIndex), `assets` (platform → regex[]; keys may carry a `+libc.glibc`/`+libc.musl` suffix to publish per-libc variants sharing one os/arch), `asset_type` (Archive/Binary), `cascade` (bool, or a map `{schedule}` that also puts the generated repair workflow on a timer), `versions` (min/max/new_per_run/backfill), `verify`, `concurrency`, `bin_scan` (off/auto/verify), `libc_lint` (bool, default **on** — total opt-out for the create-time libc check, mirroring `ocx package create --no-libc-lint`).
