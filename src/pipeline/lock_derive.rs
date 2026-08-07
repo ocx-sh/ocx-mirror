@@ -355,12 +355,12 @@ mod tests {
     /// Serializes tests that mutate `OCX_BINARY_PIN` / `OCX_MIRROR_UV` —
     /// process-global env vars, unsafe to set concurrently across tests in
     /// the same process. Locks the crate-wide
-    /// `command::package::pipeline::push::OCX_ENV_LOCK`: `plan.rs` and
-    /// `push.rs` tests mutate the same globals, and two locks over one global
-    /// is no lock at all. Async-aware guard, held across this module's
-    /// subprocess `.await`s by design.
+    /// [`crate::test_support::OCX_ENV_LOCK`]: `plan.rs` and `push.rs` tests
+    /// mutate the same globals, and two locks over one global is no lock at
+    /// all. Async-aware guard, held across this module's subprocess `.await`s
+    /// by design.
     async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
-        crate::command::package::pipeline::push::OCX_ENV_LOCK.lock().await
+        crate::test_support::OCX_ENV_LOCK.lock().await
     }
 
     fn write_executable_script(path: &Path, body: &str) {

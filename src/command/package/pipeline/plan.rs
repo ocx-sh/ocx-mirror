@@ -2312,7 +2312,7 @@ platforms:
     /// across a `block_on` rather than an `await`, which is why these tests are
     /// `#[test]` + an explicit runtime instead of `#[tokio::test]`.
     fn pypi_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
-        super::super::push::ocx_env_lock()
+        crate::test_support::ocx_env_lock()
     }
 
     /// Drive one async body to completion under the current thread's runtime.

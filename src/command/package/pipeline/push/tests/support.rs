@@ -23,7 +23,7 @@ use super::super::*;
 /// [`run_push_cmd`]: the tests that mutate env need it across a wider span
 /// (set → push → assert) and would deadlock against an inner acquisition.
 pub fn job_url_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
-    ocx_env_lock()
+    crate::test_support::ocx_env_lock()
 }
 
 pub fn run_push_cmd(

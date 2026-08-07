@@ -19,6 +19,8 @@ mod resolver;
 mod run_summary;
 mod source;
 mod spec;
+#[cfg(test)]
+mod test_support;
 mod version_platform_map;
 
 use command::Command;
