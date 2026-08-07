@@ -23,6 +23,7 @@ stay clean diffs. A small set of files are **mirror-native** and owned here. Loa
 | Agents | all `worker-*.md` (architect, architecture-explorer, builder, doc-reviewer, explorer, researcher, reviewer, tester) |
 | Rules | `quality-core`, `quality-python`, `quality-rust`, `quality-rust-errors`, `quality-rust-exit_codes`, `workflow-intent`, `workflow-feature`, `workflow-bugfix`, `workflow-refactor`, `workflow-git`, `workflow-swarm` |
 | Templates | `templates/artifacts/*.template.md` |
+| Scripts | `scripts/review_surface.py` + `scripts/review_surface_page.html` (task `claude:review-surface` in `.claude/taskfile.yml`, included from the root taskfile; tier-map path regexes adapted per list item 2) |
 
 These are byte-identical to ocx except for the adaptation list below. A noisy diff on
 re-sync means drift — investigate before landing.

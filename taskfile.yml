@@ -9,6 +9,9 @@ includes:
   rust: ./taskfiles/rust.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
   docs: ./taskfiles/docs.taskfile.yml
+  claude:
+    taskfile: ./.claude/taskfile.yml
+    dir: ./.claude
   test:
     taskfile: ./test/taskfile.yml
     dir: ./test
