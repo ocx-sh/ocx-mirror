@@ -92,6 +92,35 @@ fn platform_applies_strips_build_metadata() {
 }
 
 #[test]
+fn platform_applies_bounds_four_segment_pep440_versions() {
+    // Env sources (`pylock`/`pypi`) feed this predicate raw PEP 440 releases,
+    // which `ocx_lib::Version` rejects — the same defect as `versions.min`:
+    // an unparseable candidate satisfied every window and every exclude.
+    let spec = spec_with_platform_windows();
+
+    assert!(
+        !spec.platform_applies("0.11.6.9", "windows/arm64"),
+        "below min_version is dropped"
+    );
+    assert!(
+        spec.platform_applies("0.11.7.0", "windows/arm64"),
+        "PEP 440-equal to min_version — min is inclusive"
+    );
+    assert!(
+        !spec.platform_applies("11.1.0.0", "darwin/amd64"),
+        "PEP 440-equal to max_version — max is exclusive"
+    );
+    assert!(
+        !spec.platform_applies("9.3.0.1", "darwin/amd64"),
+        "inside the exclude range"
+    );
+    assert!(
+        spec.exclude_hit("9.3.0.1", "darwin/amd64").is_some(),
+        "exclude visibility sees the same range"
+    );
+}
+
+#[test]
 fn exclude_hit_reports_matching_entry_with_severity_and_reason() {
     let spec = spec_with_platform_windows();
     let hit = spec.exclude_hit("0.16.0", "windows/arm64").expect("0.16.0 is excluded");

@@ -89,7 +89,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `version_platform_map.rs` | Tracks `(version, platform)` pairs across push legs |
 | `normalizer.rs` | `normalize_version()`: add build timestamp |
 | `resolver.rs` | `resolve_assets()`: apply regex patterns to asset names |
-| `filter.rs` | `filter_versions()`: apply bounds, prerelease skip, backfill cap. Also `pep440_sort_key()` — the total order over version strings that `plan` and `push` sort by |
+| `filter.rs` | `filter_versions()`: apply bounds, prerelease skip, backfill cap. Also `pep440_sort_key()` — the total order over version strings that `plan` and `push` sort by — and `version_cmp()`/`within_bounds()`, the min-inclusive/max-exclusive comparator every bound routes through (`versions.min`/`max`, `select_pypi_candidates`, per-platform windows, `exclude:` ranges): `ocx_lib::Version` first, PEP 440 for the ≥4-component releases it rejects, fail-open when neither parses |
 | `error.rs` | `MirrorError` variants and exit code mappings |
 | `lib.rs` | Library root. Public surface is `Command`, `error`, `spec` and nothing else — a wide surface would silence `dead_code`, which the crate denies on |
 | `main.rs` | `Cli` + `main()`; everything else lives in the library |

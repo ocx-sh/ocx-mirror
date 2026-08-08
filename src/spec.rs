@@ -415,22 +415,12 @@ impl MirrorSpec {
         let Some(config) = self.platforms.as_ref().and_then(|p| p.get(platform)) else {
             return true;
         };
-        let Some(parsed) = Version::parse(version).map(|v| applicability_key(&v)) else {
-            // Unparseable versions are kept — consistent with `filter.rs` bounds.
-            return true;
-        };
+        let key = applicability_key_str(version);
 
-        if let Some(min) = config.min_version.as_ref().and_then(|s| Version::parse(s))
-            && parsed < min
-        {
+        if !crate::filter::within_bounds(&key, config.min_version.as_deref(), config.max_version.as_deref()) {
             return false;
         }
-        if let Some(max) = config.max_version.as_ref().and_then(|s| Version::parse(s))
-            && parsed >= max
-        {
-            return false;
-        }
-        !config.exclude.iter().any(|entry| entry.matches(&parsed))
+        !config.exclude.iter().any(|entry| entry.matches(&key))
     }
 
     /// Returns the `exclude` entry matching `(version, platform)`, if any.
@@ -443,8 +433,8 @@ impl MirrorSpec {
     /// [`platform_applies`]: Self::platform_applies
     pub fn exclude_hit(&self, version: &str, platform: &str) -> Option<&ExcludeEntry> {
         let config = self.platforms.as_ref()?.get(platform)?;
-        let parsed = Version::parse(version).map(|v| applicability_key(&v))?;
-        config.exclude.iter().find(|entry| entry.matches(&parsed))
+        let key = applicability_key_str(version);
+        config.exclude.iter().find(|entry| entry.matches(&key))
     }
 
     /// Validate the `assets` / `variants` / `wheels` surface, source-aware.
@@ -647,6 +637,18 @@ pub(crate) fn strip_build(version: &Version) -> Version {
 /// tag.
 fn applicability_key(version: &Version) -> Version {
     strip_build(version).without_variant()
+}
+
+/// [`applicability_key`] rendered for the string comparator
+/// (`filter::within_bounds` / `filter::version_cmp`), which also understands
+/// the PEP 440 releases `ocx_lib::Version` rejects.
+///
+/// A tag that parser cannot read is passed through verbatim: it carries
+/// neither a variant prefix nor a mirror build stamp to strip, since only env
+/// sources (`pylock`/`pypi`) produce such tags and those reject `variants:`
+/// outright. The raw tag IS its own applicability key.
+fn applicability_key_str(version: &str) -> String {
+    Version::parse(version).map_or_else(|| version.to_string(), |v| applicability_key(&v).to_string())
 }
 
 #[cfg(test)]

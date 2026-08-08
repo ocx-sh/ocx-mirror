@@ -197,9 +197,10 @@ pub fn build_env_plan_entries(
 /// which panics on a real PyPI version string that has more components than
 /// that ≤3-component parser accepts (e.g. `0.0.0.2`) or a PEP 440 `uv`-only
 /// suffix (`2.0.0.dev0`) — the same reason `build_env_plan_entries` bypasses
-/// it for `pylock` (D1, `plan_python_mirror_v2`). This mirrors that
-/// function's fail-open convention instead: an unparseable tag is always
-/// kept as outstanding work.
+/// it for `pylock` (D1, `plan_python_mirror_v2`). It does share that
+/// function's bounds comparator (`filter::within_bounds`) and its fail-open
+/// convention: a tag no version parser understands is kept as outstanding
+/// work.
 pub fn select_pypi_candidates<'a>(
     spec: &MirrorSpec,
     upstream_versions: &'a [source::VersionInfo],
@@ -211,22 +212,13 @@ pub fn select_pypi_candidates<'a>(
         .map_or_else(Vec::new, WheelPatterns::sorted_platforms);
 
     let versions_config = spec.versions.as_ref();
-    let min = versions_config
-        .and_then(|c| c.min.as_ref())
-        .and_then(|s| Version::parse(s));
-    let max = versions_config
-        .and_then(|c| c.max.as_ref())
-        .and_then(|s| Version::parse(s));
+    let min = versions_config.and_then(|c| c.min.as_deref());
+    let max = versions_config.and_then(|c| c.max.as_deref());
 
     let mut candidates: Vec<&source::VersionInfo> = upstream_versions
         .iter()
         .filter(|info| !(spec.skip_prereleases && info.is_prerelease))
-        .filter(|info| {
-            let Some(parsed) = Version::parse(&info.version) else {
-                return true; // keep unparseable versions (filter.rs convention)
-            };
-            !(min.as_ref().is_some_and(|m| parsed < *m) || max.as_ref().is_some_and(|m| parsed >= *m))
-        })
+        .filter(|info| filter::within_bounds(&info.version, min, max))
         .filter(|info| {
             let tag_version = Version::parse(&info.version);
             wheels_keys.iter().any(|&platform| {

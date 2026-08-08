@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::cmp::Ordering;
+
 use ocx_lib::package::version::Version;
 
 use crate::resolver::asset_resolution::ResolvedPlatformAsset;
@@ -66,28 +68,7 @@ pub fn filter_versions(
 
     // 2. Apply min/max bounds
     if let Some(config) = versions_config {
-        let min = config.min.as_ref().and_then(|s| Version::parse(s));
-        let max = config.max.as_ref().and_then(|s| Version::parse(s));
-
-        if min.is_some() || max.is_some() {
-            versions.retain(|v| {
-                let parsed = match Version::parse(&v.version) {
-                    Some(p) => p,
-                    None => return true, // keep unparseable versions
-                };
-                if let Some(min) = &min
-                    && parsed < *min
-                {
-                    return false;
-                }
-                if let Some(max) = &max
-                    && parsed >= *max
-                {
-                    return false;
-                }
-                true
-            });
-        }
+        versions.retain(|v| within_bounds(&v.version, config.min.as_deref(), config.max.as_deref()));
     }
 
     // 3. Skip versions with no resolved platform assets
@@ -147,6 +128,60 @@ pub fn filter_versions(
     }
 
     versions
+}
+
+/// Order a version string against a declared bound (`versions.min`/`max`, a
+/// platform's `min_version`/`max_version`, an `exclude` range or an `exclude`
+/// single version).
+///
+/// `ocx_lib::Version` first: every bound is validated against that parser
+/// (`VersionsConfig::validate`, `validate_platforms`), and it disagrees with
+/// PEP 440 on strings both accept — `1.0.0+build1 < 1.0.0` here versus `>`
+/// there (build metadata versus a PEP 440 local version), and `1.2 > 1.2.0`
+/// here (a rolling parent outranks its own leaf) versus `==` there. Asking it
+/// first keeps every semver mirror comparing exactly as it does today.
+///
+/// PEP 440 second, for the tags that parser rejects: it caps at three
+/// components, so real upstream Python releases (`0.16.2.0`, `2.0.0.dev0`)
+/// parsed as nothing at all and — under the fail-open convention below —
+/// satisfied every bound they were measured against.
+///
+/// Not [`pep440_sort_key`]: that is a sort key, not a comparator. Its `None`
+/// arm sorts first, so a tag neither parser understands would fall below every
+/// `min` and be dropped rather than kept; and its text tiebreak separates
+/// PEP 440-equal versions (`1.16.6` vs `1.16.6.0`), which would push a
+/// candidate off an inclusive `min` boundary it sits exactly on.
+///
+/// `None` means no comparator related both sides — the caller leaves the
+/// version unbounded rather than guessing.
+pub(crate) fn version_cmp(candidate: &str, bound: &str) -> Option<Ordering> {
+    if let (Some(candidate), Some(bound)) = (Version::parse(candidate), Version::parse(bound)) {
+        return Some(candidate.cmp(&bound));
+    }
+    let candidate: ocx_python::uv_pep440::Version = candidate.parse().ok()?;
+    let bound: ocx_python::uv_pep440::Version = bound.parse().ok()?;
+    Some(candidate.cmp(&bound))
+}
+
+/// Whether `candidate` falls in the half-open window `[min, max)` — the
+/// min-inclusive / max-exclusive convention shared by `versions:`, per-platform
+/// `min_version`/`max_version`, and `exclude:` ranges.
+///
+/// Fail-open: a bound [`version_cmp`] cannot relate to `candidate` does not
+/// constrain it, so an unrecognisable upstream tag is surfaced as work rather
+/// than silently skipped.
+pub(crate) fn within_bounds(candidate: &str, min: Option<&str>, max: Option<&str>) -> bool {
+    if let Some(min) = min
+        && version_cmp(candidate, min) == Some(Ordering::Less)
+    {
+        return false;
+    }
+    if let Some(max) = max
+        && matches!(version_cmp(candidate, max), Some(Ordering::Greater | Ordering::Equal))
+    {
+        return false;
+    }
+    true
 }
 
 /// Total-order sort key for a PEP 440 version string:
@@ -245,6 +280,30 @@ mod tests {
     use url::Url;
 
     use super::*;
+
+    #[test]
+    fn version_cmp_asks_the_ocx_parser_first_then_pep440() {
+        // Both parsers accept these and order them differently: build metadata
+        // sorts BELOW its release here but a PEP 440 local sorts above it, and a
+        // rolling parent outranks its own leaf here but is equal there. The ocx
+        // answer is the one every semver mirror already filters by.
+        assert_eq!(version_cmp("1.0.0+build1", "1.0.0"), Some(Ordering::Less));
+        assert_eq!(version_cmp("1.2", "1.2.0"), Some(Ordering::Greater));
+
+        // Beyond that parser's three components, PEP 440 decides.
+        assert_eq!(version_cmp("0.16.2.0", "1.16.0"), Some(Ordering::Less));
+        assert_eq!(version_cmp("1.16.6.0", "1.16.6"), Some(Ordering::Equal));
+        assert_eq!(version_cmp("1.16.0rc1", "1.16.0"), Some(Ordering::Less));
+    }
+
+    #[test]
+    fn within_bounds_leaves_a_tag_neither_parser_understands_unbounded() {
+        // Fail-open: `nightly` is not an ocx version and not PEP 440, so it stays
+        // visible as work instead of being silently dropped under a floor.
+        assert!(version_cmp("nightly", "1.0.0").is_none());
+        assert!(within_bounds("nightly", Some("1.0.0"), Some("2.0.0")));
+        assert!(within_bounds("1.5.0", None, None));
+    }
 
     fn platform(s: &str) -> Platform {
         s.parse().unwrap()
@@ -365,6 +424,46 @@ mod tests {
         let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "1.0.0");
+    }
+
+    #[test]
+    fn min_bound_drops_four_segment_pep440_versions() {
+        // Live regression (pipx, `min: "1.16.0"`): `ocx_lib::Version` rejects a
+        // 4-segment PEP 440 release, and the bounds filter kept every version it
+        // could not parse — so seven sub-1.0 releases planned as new work.
+        let versions = vec![
+            rv("0.15.5.1", "0.15.5.1+ts", false),
+            rv("0.16.2.0", "0.16.2.0+ts", false),
+            rv("1.16.6", "1.16.6+ts", false),
+        ];
+
+        let config = VersionsConfig {
+            min: Some("1.16.0".to_string()),
+            ..Default::default()
+        };
+
+        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let kept: Vec<&str> = result.iter().map(|v| v.version.as_str()).collect();
+        assert_eq!(kept, ["1.16.6"]);
+    }
+
+    #[test]
+    fn max_bound_drops_four_segment_pep440_versions() {
+        // `1.0.0.0` is PEP 440-equal to `1.0.0`, and max is exclusive.
+        let versions = vec![
+            rv("0.9.0", "0.9.0+ts", false),
+            rv("1.0.0.0", "1.0.0.0+ts", false),
+            rv("1.2.3.4", "1.2.3.4+ts", false),
+        ];
+
+        let config = VersionsConfig {
+            max: Some("1.0.0".to_string()),
+            ..Default::default()
+        };
+
+        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let kept: Vec<&str> = result.iter().map(|v| v.version.as_str()).collect();
+        assert_eq!(kept, ["0.9.0"]);
     }
 
     #[test]

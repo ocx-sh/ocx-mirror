@@ -117,6 +117,28 @@ fn select_pypi_candidates_orders_oldest_first_and_applies_new_per_run() {
 }
 
 #[test]
+fn select_pypi_candidates_bounds_four_segment_pep440_versions() {
+    // Live regression (pipx, `min: "1.16.0"`): PyPI publishes 4-segment PEP 440
+    // releases, `ocx_lib::Version` rejects them, and this filter kept whatever it
+    // could not parse — so `0.15.5.1`/`0.16.2.0` planned as new work under a
+    // 1.16 floor.
+    let mut spec = pypi_fixture_spec();
+    spec.versions = Some(crate::spec::VersionsConfig {
+        min: Some("1.16.0".to_string()),
+        ..Default::default()
+    });
+    let upstream = vec![
+        version_info("0.15.5.1", false),
+        version_info("0.16.2.0", false),
+        version_info("1.16.6", false),
+    ];
+
+    let candidates = select_pypi_candidates(&spec, &upstream, &VersionPlatformMap::default());
+    let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+    assert_eq!(versions, vec!["1.16.6"], "sub-min PEP 440 releases must be dropped");
+}
+
+#[test]
 fn select_pypi_candidates_skips_fully_published_version() {
     let spec = pypi_fixture_spec();
     let upstream = vec![version_info("1.0.0", false), version_info("2.0.0", false)];

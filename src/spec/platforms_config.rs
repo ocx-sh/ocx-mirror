@@ -7,7 +7,6 @@
 //! GitHub Actions runner label and optional container matrix. Absence of
 //! `containers` means native mode; presence means container mode.
 
-use ocx_lib::package::version::Version;
 use serde::Deserialize;
 
 use super::tests_config::TestEntry;
@@ -149,37 +148,25 @@ impl ExcludeEntry {
     /// per-platform `min_version`/`max_version`). An entry with neither a
     /// `version` nor any bound matches nothing — validation rejects that shape,
     /// so this is a defensive fallback only.
-    pub fn matches(&self, version: &Version) -> bool {
+    ///
+    /// `version` is the caller's applicability key (build stamp and variant
+    /// prefix already stripped), compared through `filter::version_cmp` so a
+    /// PEP 440 release `ocx_lib::Version` rejects is still measurable.
+    pub fn matches(&self, version: &str) -> bool {
         if let Some(raw) = &self.version {
-            return Version::parse(raw).is_some_and(|v| v == *version);
+            return crate::filter::version_cmp(version, raw) == Some(std::cmp::Ordering::Equal);
         }
 
-        let min = self.min_version.as_ref().and_then(|s| Version::parse(s));
-        let max = self.max_version.as_ref().and_then(|s| Version::parse(s));
-        if min.is_none() && max.is_none() {
+        if self.min_version.is_none() && self.max_version.is_none() {
             return false;
         }
-        if let Some(min) = min
-            && *version < min
-        {
-            return false;
-        }
-        if let Some(max) = max
-            && *version >= max
-        {
-            return false;
-        }
-        true
+        crate::filter::within_bounds(version, self.min_version.as_deref(), self.max_version.as_deref())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn v(s: &str) -> Version {
-        Version::parse(s).expect("test version must parse")
-    }
 
     fn entry(yaml: &str) -> ExcludeEntry {
         serde_yaml_ng::from_str(yaml).expect("exclude entry must parse")
@@ -188,35 +175,45 @@ mod tests {
     #[test]
     fn single_version_matches_by_equality() {
         let e = entry("version: \"0.16.0\"");
-        assert!(e.matches(&v("0.16.0")));
-        assert!(!e.matches(&v("0.16.1")));
-        assert!(!e.matches(&v("0.15.0")));
+        assert!(e.matches("0.16.0"));
+        assert!(!e.matches("0.16.1"));
+        assert!(!e.matches("0.15.0"));
     }
 
     #[test]
     fn range_is_min_inclusive_max_exclusive() {
         let e = entry("min_version: \"9.0.0\"\nmax_version: \"11.1.0\"");
-        assert!(!e.matches(&v("8.9.9")));
-        assert!(e.matches(&v("9.0.0")), "min is inclusive");
-        assert!(e.matches(&v("10.5.0")));
-        assert!(!e.matches(&v("11.1.0")), "max is exclusive");
-        assert!(!e.matches(&v("11.2.0")));
+        assert!(!e.matches("8.9.9"));
+        assert!(e.matches("9.0.0"), "min is inclusive");
+        assert!(e.matches("10.5.0"));
+        assert!(!e.matches("11.1.0"), "max is exclusive");
+        assert!(!e.matches("11.2.0"));
+    }
+
+    #[test]
+    fn range_measures_four_segment_pep440_versions() {
+        // `ocx_lib::Version` rejects these; PEP 440 places them, so an env
+        // source's releases are excluded on the same boundary as any other.
+        let e = entry("min_version: \"9.0.0\"\nmax_version: \"11.1.0\"");
+        assert!(!e.matches("8.9.9.9"));
+        assert!(e.matches("9.0.0.0"), "PEP 440-equal to min, which is inclusive");
+        assert!(!e.matches("11.1.0.0"), "PEP 440-equal to max, which is exclusive");
     }
 
     #[test]
     fn open_ended_max_only_drops_everything_below() {
         let e = entry("max_version: \"9.4.0\"");
-        assert!(e.matches(&v("9.3.9")));
-        assert!(!e.matches(&v("9.4.0")));
-        assert!(!e.matches(&v("12.0.0")));
+        assert!(e.matches("9.3.9"));
+        assert!(!e.matches("9.4.0"));
+        assert!(!e.matches("12.0.0"));
     }
 
     #[test]
     fn open_ended_min_only_drops_everything_at_or_above() {
         let e = entry("min_version: \"2.0.0\"");
-        assert!(!e.matches(&v("1.9.9")));
-        assert!(e.matches(&v("2.0.0")));
-        assert!(e.matches(&v("3.1.0")));
+        assert!(!e.matches("1.9.9"));
+        assert!(e.matches("2.0.0"));
+        assert!(e.matches("3.1.0"));
     }
 
     #[test]
@@ -250,7 +247,7 @@ mod tests {
             reason: None,
             severity: Severity::Broken,
         };
-        assert!(!e.matches(&v("1.0.0")));
+        assert!(!e.matches("1.0.0"));
     }
 
     #[test]
@@ -258,7 +255,7 @@ mod tests {
         // A build-stamped version is NOT equal to the bare exclude version —
         // callers (push visibility) strip build metadata before matching.
         let e = entry("version: \"0.16.0\"");
-        assert!(!e.matches(&v("0.16.0_20260604")));
-        assert!(e.matches(&v("0.16.0")));
+        assert!(!e.matches("0.16.0_20260604"));
+        assert!(e.matches("0.16.0"));
     }
 }
