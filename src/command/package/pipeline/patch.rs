@@ -55,7 +55,7 @@ use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, build_push_args, push_once};
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
 use crate::pipeline::orchestrator;
 use crate::pipeline::target_registry::{self, PublishedImage};
-use crate::spec::{self, MirrorSpec};
+use crate::spec::{self, MirrorSpec, strip_build};
 
 /// `ocx-mirror package pipeline patch` subcommand.
 #[derive(clap::Parser)]
@@ -467,22 +467,6 @@ impl Selection {
 
     fn in_range(&self, core: &Version) -> bool {
         self.min.as_ref().is_none_or(|min| core >= min) && self.max.as_ref().is_none_or(|max| core < max)
-    }
-}
-
-/// A version with any build-metadata segment removed.
-///
-/// Bounds are written in the grammar a human reads off the spec (`3.29.0`)
-/// while a build-stamped mirror publishes `3.29.0_20260610`, and those do not
-/// compare the way the bound implies: `Version` sorts a build-stamped version
-/// *before* its own core, so `--min-version 3.29.0` would exclude the very tag
-/// it names. Comparing cores makes an inclusive lower bound cover every build of
-/// that version and an exclusive upper bound exclude every build of it.
-fn strip_build(version: &Version) -> Version {
-    match version.has_build() {
-        // A build segment implies an `X.Y.Z` core, so the parent always exists.
-        true => version.parent().unwrap_or_else(|| version.clone()),
-        false => version.clone(),
     }
 }
 

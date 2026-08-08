@@ -630,7 +630,7 @@ impl MirrorSpec {
 /// `parent()` removes the innermost component; when `has_build()` is true that
 /// component is exactly the build segment (it implies `has_patch()`, so
 /// `parent()` is always `Some`).
-fn strip_build(version: &Version) -> Version {
+pub(crate) fn strip_build(version: &Version) -> Version {
     if version.has_build() {
         version.parent().unwrap_or_else(|| version.clone())
     } else {

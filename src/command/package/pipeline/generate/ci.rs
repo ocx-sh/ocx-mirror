@@ -227,7 +227,9 @@ async fn load_one(path: &Path) -> Result<(MirrorSpec, Vec<PathBuf>), MirrorError
     let spec = spec::load_spec(path).await?;
 
     // Phase 3: content-policy validation on the parsed spec.
-    policy_check_notify(&spec)?;
+    if let Some(notify) = &spec.notify {
+        spec::policy_check_notify(notify)?;
+    }
 
     Ok((spec, chain))
 }
@@ -286,19 +288,6 @@ fn report_manual_edits(placed: &[(SpecSlot, MirrorSpec)]) {
 }
 
 // ── Policy validation ────────────────────────────────────────────────────────
-
-/// Content-policy check on the `notify:` block.
-///
-/// Delegates to `spec::policy_check_notify` so the check logic lives in one place
-/// and always returns `SpecUsageError (64)` for URL-literal webhook secrets.
-/// `load_spec` already calls this before structural validation, so this call in
-/// the renderer is a defence-in-depth guard for specs loaded via other paths.
-fn policy_check_notify(spec: &MirrorSpec) -> Result<(), MirrorError> {
-    let Some(notify) = &spec.notify else {
-        return Ok(());
-    };
-    spec::policy_check_notify(notify)
-}
 
 // ── Renderer ─────────────────────────────────────────────────────────────────
 

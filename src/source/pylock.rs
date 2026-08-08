@@ -15,6 +15,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use ocx_lib::package::version::Version;
+use ocx_python::normalize_package_name;
 use ocx_python::{LockError, LockedPackage, Pylock};
 
 use super::VersionInfo;
@@ -109,27 +110,6 @@ pub fn find_app_package<'a>(lock: &'a Pylock, app_name: &str) -> anyhow::Result<
             let locked: Vec<&str> = lock.packages.iter().map(|p| p.name.as_str()).collect();
             anyhow::anyhow!("app package '{app_name}' not found in pylock.toml (locked packages: {locked:?})")
         })
-}
-
-/// PEP 503 normalization: lowercase, runs of `-`/`_`/`.` collapsed to a
-/// single `-`. Mirrors `ocx_python::naming`'s private normalizer (not part of
-/// that crate's public API) so mirror-side app-name matching honors the same
-/// convention without widening the crate's surface for this one caller.
-fn normalize_package_name(name: &str) -> String {
-    let mut normalized = String::with_capacity(name.len());
-    let mut last_was_separator = false;
-    for ch in name.chars() {
-        if matches!(ch, '-' | '_' | '.') {
-            if !last_was_separator {
-                normalized.push('-');
-                last_was_separator = true;
-            }
-        } else {
-            normalized.push(ch.to_ascii_lowercase());
-            last_was_separator = false;
-        }
-    }
-    normalized
 }
 
 #[cfg(test)]

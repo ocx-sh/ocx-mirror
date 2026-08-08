@@ -50,7 +50,7 @@ pub use uv_pep440;
 pub use collide::{CollisionError, check_collisions};
 pub use compose::{ComposeError, EntrypointSelection, EnvComposition, EnvSpec, WheelLayer, compose_env};
 pub use lock::{LockError, LockedPackage, LockedWheel, Pylock, parse_pylock};
-pub use naming::{WheelReference, WheelScope, wheel_reference};
+pub use naming::{WheelReference, WheelScope, normalize_package_name, wheel_reference};
 pub use platform::{
     Implementation, InterpreterPin, LibcFamily, MarkerEnvironment, PlatformError, PlatformFacts, PythonTarget,
     TargetArchitecture, TargetOperatingSystem, TargetPlatform, VariantConstraints, marker_environment,

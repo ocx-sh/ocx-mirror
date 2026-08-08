@@ -133,7 +133,7 @@ fn extract_host(url: &str) -> Option<&str> {
 /// `pub(crate)`: `compose` reuses this to normalize a mirror-supplied root
 /// package name before comparing it against a wheel's parsed dist name
 /// (`EntrypointSelection::RootOnly`).
-pub(crate) fn normalize_package_name(name: &str) -> String {
+pub fn normalize_package_name(name: &str) -> String {
     let mut normalized = String::with_capacity(name.len());
     let mut last_was_separator = false;
     for ch in name.chars() {
