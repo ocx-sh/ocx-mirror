@@ -17,8 +17,8 @@
 //!
 //! - [`Command`] — the CLI dispatcher `main` calls.
 //! - [`error`] — [`MirrorError`](error::MirrorError) and its exit-code mapping.
-//! - [`spec`] — the mirror spec: parsing, validation, and the types it yields.
-//! - [`GenerateCi`] — the workflow renderer, driven directly by `tests/`.
+//! - [`spec`] — the mirror spec: parsing, validation, and the types it yields,
+//!   driven by `tests/spec_validation.rs`.
 
 mod annotations;
 mod command;
@@ -37,4 +37,3 @@ mod test_support;
 mod version_platform_map;
 
 pub use command::Command;
-pub use command::package::pipeline::generate::ci::GenerateCi;

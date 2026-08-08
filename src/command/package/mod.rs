@@ -16,8 +16,6 @@ mod options;
 pub(crate) mod pipeline;
 mod sync;
 // `pub(crate)`: `pipeline::python_push` (outside this subtree) reaches the
-// fail-safe tag-listing helper for the wheel-registration tag-exists check.
-pub(crate) mod target_registry;
 mod validate;
 
 use ocx_lib::cli::DataInterface;

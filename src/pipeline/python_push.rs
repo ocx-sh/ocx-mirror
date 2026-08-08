@@ -27,8 +27,8 @@ use ocx_lib::oci::Identifier;
 use ocx_lib::publisher::Publisher;
 
 use super::python_prepare::{EnvLayer, EnvManifest};
-use crate::command::package::target_registry;
 use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, push_once};
+use crate::pipeline::target_registry;
 use crate::run_summary::LayerReuse;
 use crate::spec::MirrorSpec;
 

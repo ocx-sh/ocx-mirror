@@ -6,16 +6,15 @@ use std::path::PathBuf;
 
 use ocx_lib::cli::progress::ProgressManager;
 use ocx_lib::log;
-use ocx_lib::oci::Platform;
 
 use super::options::{self, SyncOptions};
-use super::target_registry;
 use crate::error::MirrorError;
 use crate::filter;
 use crate::normalizer;
 use crate::pipeline::mirror_result::MirrorResult;
 use crate::pipeline::mirror_task::{MirrorTask, VariantContext};
 use crate::pipeline::orchestrator;
+use crate::pipeline::target_registry;
 use crate::resolver;
 use crate::resolver::asset_resolution::AssetResolution;
 use crate::source;
@@ -281,18 +280,6 @@ impl Sync {
         }
 
         Ok(())
-    }
-}
-
-/// Extract platform entries from an OCI manifest.
-pub(crate) fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
-    match manifest {
-        ocx_lib::oci::Manifest::ImageIndex(index) => index
-            .manifests
-            .iter()
-            .filter_map(|entry| entry.platform.as_ref().and_then(|p| Platform::try_from(p.clone()).ok()))
-            .collect(),
-        _ => vec![],
     }
 }
 

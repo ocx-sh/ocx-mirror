@@ -12,4 +12,5 @@ pub mod progress;
 pub mod push;
 pub(crate) mod python_prepare;
 pub(crate) mod python_push;
+pub(crate) mod target_registry;
 pub mod verify;

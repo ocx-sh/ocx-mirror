@@ -20,8 +20,19 @@ use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 
-use crate::command::package::sync::extract_platforms;
 use crate::error::MirrorError;
+
+/// Extract platform entries from an OCI manifest.
+pub(crate) fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
+    match manifest {
+        ocx_lib::oci::Manifest::ImageIndex(index) => index
+            .manifests
+            .iter()
+            .filter_map(|entry| entry.platform.as_ref().and_then(|p| Platform::try_from(p.clone()).ok()))
+            .collect(),
+        _ => vec![],
+    }
+}
 
 /// Lists all tags on the target repository.
 ///

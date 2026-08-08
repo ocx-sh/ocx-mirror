@@ -16,7 +16,6 @@ use ocx_lib::publisher::Publisher;
 
 use crate::command::package::pipeline::patch::patch_push_args;
 use crate::command::package::pipeline::plan;
-use crate::command::package::target_registry;
 use crate::error::MirrorError;
 use crate::junit::{self, JunitTestcase};
 use crate::pipeline::ocx_cli::announce::{
@@ -26,6 +25,7 @@ use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, PushReport, build_push_args, 
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
 use crate::pipeline::python_prepare::EnvManifest;
 use crate::pipeline::python_push;
+use crate::pipeline::target_registry;
 use crate::run_summary::{
     AnnounceOutcome, ExcludedPlatform, LayerReuse, PlatformFailure, RunSummary, TestFailure, VersionStatus,
     VersionSummary,
