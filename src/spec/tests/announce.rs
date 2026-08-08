@@ -3,6 +3,7 @@
 
 use super::super::*;
 use super::support::*;
+use crate::error::MirrorError;
 
 // ── announce ──────────────────────────────────────────────────────────
 

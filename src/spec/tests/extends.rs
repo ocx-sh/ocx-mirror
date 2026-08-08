@@ -2,6 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use super::super::*;
+use crate::error::MirrorError;
 
 // -- extends tests --
 
