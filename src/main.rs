@@ -7,23 +7,7 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 use ocx_lib::cli::progress::ProgressManager;
 use ocx_lib::cli::{self, ColorMode, DataInterface, LogLevel, LogSettings, Printer, ProgressMode};
 
-mod annotations;
-mod command;
-mod discord;
-mod error;
-mod filter;
-mod junit;
-mod normalizer;
-mod pipeline;
-mod resolver;
-mod run_summary;
-mod source;
-mod spec;
-#[cfg(test)]
-mod test_support;
-mod version_platform_map;
-
-use command::Command;
+use ocx_mirror::Command;
 
 #[derive(Parser)]
 #[command(name = "ocx-mirror", about = "Mirror upstream binary releases into OCI registries")]

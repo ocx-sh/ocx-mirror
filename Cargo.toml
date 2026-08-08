@@ -16,6 +16,10 @@ publish = false
 [workspace]
 exclude = ["external/ocx"]
 
+[lib]
+name = "ocx_mirror"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ocx-mirror"
 path = "src/main.rs"
