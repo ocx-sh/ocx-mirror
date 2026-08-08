@@ -33,6 +33,7 @@ re-sync means drift — investigate before landing.
 | File | Why native |
 |------|-----------|
 | `rules/subsystem-mirror.md` | No ocx equivalent; mirror module map, pipeline, spec, error model |
+| `skills/e2e-test/` | No ocx equivalent; tiered e2e strategy (harness / local contrib integration / dev channel) |
 | `rules/meta-plan-status.md` | Extracted from ocx's monolithic `meta-ai-config.md`, restructured standalone |
 | `rules/meta-ai-config.md` | This file |
 | `artifacts/**` | ocx-mirror ADRs, design specs, plans, research |

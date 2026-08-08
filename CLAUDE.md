@@ -92,6 +92,8 @@ Every task starts with
 
 Skills in `.claude/skills/` (ported from ocx): `/architect`,
 `/swarm-plan`, `/swarm-execute`, `/swarm-review`, `/commit`, `/finalize`.
+Mirror-native: `/e2e-test` (tiered e2e: acceptance harness → local contrib
+integration → dev.ocx.sh dev channel).
 Worker agents the swarm skills spawn live in `.claude/agents/`.
 
 Planning flow: ADR → Design Spec → Plan → Implementation. Templates →
