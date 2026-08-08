@@ -22,6 +22,13 @@ use super::super::*;
 /// not reentrant, so it is taken by the test rather than by
 /// [`run_push_cmd`]: the tests that mutate env need it across a wider span
 /// (set → push → assert) and would deadlock against an inner acquisition.
+///
+// ponytail: a process-global lock, which is why these tests must all stay in
+// one binary — moving any of them to `tests/` puts them in a separate process
+// where the guard covers nothing. The lock exists only because
+// `resolve_ocx_binary()` reads `OCX_BINARY_PIN` from the environment; thread
+// the resolved path through as a parameter instead and both the lock and the
+// same-binary constraint go away.
 pub fn job_url_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
     crate::test_support::ocx_env_lock()
 }
