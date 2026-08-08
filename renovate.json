@@ -63,7 +63,7 @@
       "customType": "regex",
       "description": "Bump the ocx CLI release the container test legs download (a renderer constant, so no manager sees it)",
       "managerFilePatterns": [
-        "/^src/command/package/pipeline/generate/ci\\.rs$/"
+        "/^src/command/package/pipeline/generate/ci/matrix\\.rs$/"
       ],
       "matchStrings": [
         "const OCX_CONTAINER_CLI_TAG: &str = \"(?<currentValue>v[^\"]+)\"; // renovate: datasource=(?<datasource>[^\\s]+) depName=(?<depName>[^\\s]+)"

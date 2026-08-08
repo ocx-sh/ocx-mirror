@@ -21,19 +21,33 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/package/mod.rs` | `PackageCommand` dispatcher: routes sync/check/validate/pipeline |
 | `command/registry/mod.rs` | **Reserved** namespace (registry-to-registry mirroring); documented placeholder, no live verb — see `adr_cli_namespace_restructure.md` |
 | `command/package/sync.rs` | Main sync command: spec → versions → filter → pipeline |
-| `command/package/target_registry.rs` | Fail-safe target-registry state loading (`list_target_tags`, `fetch_published_platforms`) shared by sync + plan; only authoritative not-found counts as absent (issue #157) |
+| `pipeline/target_registry.rs` | Fail-safe target-registry state loading (`list_target_tags`, `fetch_published_platforms`, `extract_platforms`) shared by sync + plan + push + patch + `python_push`; only authoritative not-found counts as absent (issue #157). At the pipeline layer, not under `command/`, so the env-push leg reaches it without an upward edge |
 | `command/package/check.rs` | Dry-run sync |
 | `command/package/validate.rs` | Spec validation only |
 | `command/package/options.rs` | Shared `SyncOptions` (--exact-version, --latest, --fail-fast) |
 | `command/package/pipeline/mod.rs` | `Pipeline` subcommand dispatcher; routes to generate/plan/prepare/push/notify |
 | `command/package/pipeline/generate/mod.rs` | `generate` subgroup dispatcher |
-| `command/package/pipeline/generate/ci.rs` | `pipeline generate ci` — renderer + `--check` |
+| `command/package/pipeline/generate/ci.rs` | `pipeline generate ci` — `GenerateCi`, spec loading, render orchestration |
+| `command/package/pipeline/generate/ci/matrix.rs` | Test-matrix legs, container wrapper, per-leg run steps; owns `workflow.yml`'s test loop |
+| `command/package/pipeline/generate/ci/slot.rs` | `SpecSlot` — where a spec sits under the repo root, and the file names and trigger paths that follow |
+| `command/package/pipeline/generate/ci/aux_workflows.rs` | `describe` / `announce-from-registry` / `patch` / `cascade` / `verify-generated` renderers and their templates |
+| `command/package/pipeline/generate/ci/permissions.rs` | GHCR job scopes and registry login steps |
+| `command/package/pipeline/generate/ci/drift.rs` | Writing generated files; the `--check` comparison, pin-normalised |
 | `command/package/pipeline/plan.rs` | `pipeline plan` — discover new work, emit plan.json (schema v2: entries carry `source_version`, `variant`, resolved per-platform `assets`) |
+| `command/package/pipeline/plan/env.rs` | `pylock`/`pypi` candidate selection, wheel constraints, per-version lock derivation |
+| `command/package/pipeline/plan/drift.rs` | Published-metadata drift: config-digest short circuit, leaf versions, drift entries |
 | `command/package/pipeline/prepare.rs` | `pipeline prepare --version V [--plan plan.json]` — download + bundle; `--plan` builds from discover's resolved assets, no source re-crawl (issue #160) |
 | `command/package/pipeline/push.rs` | `pipeline push` — serial push driver, writes run-summary.json |
+| `command/package/pipeline/push/alias.rs` | Rolling aliases and the backfill cascade repair (`cascade_backfilled_entries`, `re_cascade_entry`) |
+| `command/package/pipeline/push/verdict.rs` | AND-across-containers JUnit evaluation and the resulting `VersionStatus` |
+| `command/package/pipeline/push/gating.rs` | Which container legs gate a `+libc.*` platform entry |
+| `command/package/pipeline/push/bundles.rs` | Bundle discovery and slug ↔ platform-key mapping |
 | `command/package/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
 | `command/package/pipeline/cascade.rs` | `pipeline cascade` — wraps `ocx package cascade repair` (needs ocx ≥ 0.5.4), then announces the tags it moved |
-| `spec/spec.rs` | `MirrorSpec` root, `load_spec()`, extends chain resolution |
+| `spec.rs` | `MirrorSpec` root and its `impl`; shared regexes. Children glob re-exported `pub(crate)`, so callers keep saying `crate::spec::…` |
+| `spec/validate.rs` | Every validation rule. Rejected documents are covered by `tests/fixtures/invalid/*.yml`, one file per rule |
+| `spec/load.rs` | `load_spec()`, `extends:` chain resolution, shallow merge |
+| `spec/platform_keys.rs` | Slug and `container_id` derivation — the join key between `prepare`'s bundle name, the renderer's JUnit name, and `push`'s lookup |
 | `spec/source.rs` | `Source` enum (GithubRelease, UrlIndex, Pylock, Pypi) |
 | `spec/python_config.rs` | `PythonConfig` (interpreter version/ABI + `interpreter_package` ref, `lock` = pypi lock-derivation options, `entrypoints` = console-script synthesis mode) — required for `source.type: pylock`/`pypi` |
 | `spec/target.rs` | `Target` (registry + repository) |
@@ -49,7 +63,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig` (`image`/`shell`/`id`/`setup` — `setup` provisions the leg's image once per leg via `docker build`); `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
 | `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`, optional `schedule` putting the generated catch-up workflow on a timer — charset-checked by `validate_announce_config`); logical index name, spelled out — never derived from `target` |
-| `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); URL-reject validator via `policy_check_notify` |
+| `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); the URL-reject validator itself is `spec/validate.rs::policy_check_notify` |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
 | `source/pylock.rs` | PEP 751 `pylock.toml` reader → single `VersionInfo` (the app's locked version, PEP 503 name match); wheel selection happens later in `plan.rs`/`prepare.rs` via `ocx_python` |
@@ -59,7 +73,9 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/lock_derive.rs` | `pipeline plan`'s per-candidate PEP 751 lock derivation for `source.type: pypi`: shells `uv pip compile` — universal locks (the default) via `--python-version X.Y`, no interpreter on disk; only `universal: false` materializes the pinned interpreter via `ocx package pull` (`--python <path>`) — relaxes the `requires-python` floor (uv#15995), stamps a provenance header, fail-closed re-parses via `ocx_python::parse_pylock` |
 | `pipeline/python_prepare.rs` | pylock/pypi env-prepare path (parallel to the archive `orchestrator::prepare_version`): per (version, wheels key) download wheels → verify(sha256==lock) → repack → collide → `compose_env` → write `metadata.json` + N `tar.zst` layers + `env-manifest.json`; entry `platform` = full wheels key (push `-p` verbatim), `platform_slug` = base slug (JUnit naming) |
 | `pipeline/python_push.rs` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade --new -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
-| `pipeline/ocx_cli.rs` | shared `ocx` subprocess helpers (`resolve_ocx_binary`, `forward_ocx_env`) used by both the archive push/describe legs and `python_push` |
+| `pipeline/ocx_cli.rs` | The `ocx` subprocess boundary: binary resolution and `OCX_*` env forwarding |
+| `pipeline/ocx_cli/push.rs` | `ocx package push` — argv assembly, one attempt, the retry ladder (`PUSH_TIMEOUT`, `push_once`, `push_with_retry`) |
+| `pipeline/ocx_cli/announce.rs` | `ocx package announce` — token, `TagSource`, argv, one bounded invocation |
 | `pipeline/verify.rs` | Checksum verify |
 | `pipeline/package.rs` | Extract archive, apply metadata, rebundle |
 | `pipeline/push.rs` | Push to registry + cascade tag compute |
@@ -73,8 +89,11 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `version_platform_map.rs` | Tracks `(version, platform)` pairs across push legs |
 | `normalizer.rs` | `normalize_version()`: add build timestamp |
 | `resolver.rs` | `resolve_assets()`: apply regex patterns to asset names |
-| `filter.rs` | `filter_versions()`: apply bounds, prerelease skip, backfill cap |
+| `filter.rs` | `filter_versions()`: apply bounds, prerelease skip, backfill cap. Also `pep440_sort_key()` — the total order over version strings that `plan` and `push` sort by |
 | `error.rs` | `MirrorError` variants and exit code mappings |
+| `lib.rs` | Library root. Public surface is `Command`, `error`, `spec` and nothing else — a wide surface would silence `dead_code`, which the crate denies on |
+| `main.rs` | `Cli` + `main()`; everything else lives in the library |
+| `test_support.rs` | `OCX_ENV_LOCK` — the crate-wide guard serialising tests that read or write the process-global `OCX_*` environment |
 
 ## Pipeline Architecture
 
@@ -216,7 +235,7 @@ The guarantee is mutual exclusion, not a queue: GitHub holds one *pending* run p
 
 ### R3: Webhook URL rejection invariant
 
-`policy_check_notify` in `spec/notify_config.rs` validates the `discord.webhook_secret` field at spec parse time. Any value matching `discord.com`, `discordapp.com`, or the pattern `^https?://` is rejected with `SpecUsageError` (exit 64) before any file is written. The webhook URL never appears in generated files or in log output.
+`policy_check_notify` in `spec/validate.rs` validates the `discord.webhook_secret` field at spec parse time. Any value matching `discord.com`, `discordapp.com`, or the pattern `^https?://` is rejected with `SpecUsageError` (exit 64) before any file is written. The webhook URL never appears in generated files or in log output.
 
 ### R4: Generated drift guard (`verify-generated.yml`)
 
@@ -230,6 +249,26 @@ Opt-out (discouraged): top-level `allow_manual_edits: true` in `mirror.yml`. Whe
 
 - Design spec: `.claude/artifacts/system_design_mirror_test_pipeline.md` — component contracts, CLI shape, GHA job contracts, install strategy
 - ADR: `.claude/artifacts/adr_ocx_mirror_test_pipeline.md` — rationale, risk register, open-call resolutions
+
+## Test Layout
+
+Unit tests do not live inline in the module they exercise. Each module's test
+corpus sits in a sibling `tests/` directory, wired with
+`#[cfg(test)] #[path = "<mod>/tests.rs"] mod tests;` — a `#[path]` module is
+still a child, so `use super::super::*;` reaches private items unchanged.
+Cross-topic helpers go in that directory's `support.rs`.
+
+`#[path]` resolves a module's children against the directory holding its own
+file rather than a subdirectory named after it, so each child names its own
+path too. That is what keeps the corpus in `<mod>/tests/` and leaves `<mod>/`
+for production modules.
+
+Two integration surfaces sit outside the crate: `tests/spec_validation.rs`
+drives `tests/fixtures/invalid/*.yml` (one fixture per rejected document,
+expectations declared as leading `# expect:` comments), and `tests/golden/`
+holds the rendered-workflow corpus. The library target exists to make both
+possible; its public surface is deliberately `Command`, `error` and `spec` and
+nothing else, so `dead_code` keeps working on everything else.
 
 ## Quality Gate
 
