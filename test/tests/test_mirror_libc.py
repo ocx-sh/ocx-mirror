@@ -205,6 +205,10 @@ python:
   abi: cp313
   interpreter_package: "{interpreter_package}"
 
+# Stamp-free: this suite asserts on the `1.0.0` tag's os.features entries,
+# not on `build_timestamp` stamping.
+build_timestamp: none
+
 wheels:
   "linux/amd64+libc.glibc": ~
   "linux/amd64+libc.musl": ~
@@ -284,6 +288,10 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "{interpreter_package}"
+
+# Stamp-free: this suite asserts on the `1.0.0` tag's os.features entries,
+# not on `build_timestamp` stamping.
+build_timestamp: none
 
 wheels:
   linux/amd64: ~

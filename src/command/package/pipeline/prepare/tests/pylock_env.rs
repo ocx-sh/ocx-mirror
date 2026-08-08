@@ -100,6 +100,44 @@ async fn build_env_tasks_selects_wheels_per_applicable_platform() {
 }
 
 #[tokio::test]
+async fn build_env_tasks_tags_with_the_build_stamp() {
+    // F2: the env prepare path took `--version` as the published tag and
+    // gated on `app_version == version`, so a spec configured for a build
+    // stamp could neither publish one (a bare `--version` produced a bare
+    // tag) nor consume the plan's own stamped tag (the gate rejected it).
+    let spec_path = pylock_fixture_spec_path();
+    let mut spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+    spec.build_timestamp = spec::BuildTimestampFormat::Date;
+    let spec_dir = spec_path.parent().unwrap();
+
+    let stamp = normalizer::build_timestamp(&spec.build_timestamp).expect("`date` yields a stamp");
+    let stamped = format!("1.0.0_{stamp}");
+    let candidates = fake_interpreter_candidates();
+
+    // The CI path: `--version` is the plan entry's own stamped tag, published
+    // verbatim — never re-stamped here, since a `datetime` stamp recomputed in
+    // the prepare job differs from the plan job's by the seconds between them.
+    let from_plan = build_env_tasks(&spec, spec_dir, &stamped, &candidates, None)
+        .await
+        .expect("the plan's stamped tag must resolve");
+    assert_eq!(from_plan.len(), 2, "2 wheels keys → 2 env legs");
+    for task in &from_plan {
+        assert_eq!(task.normalized_version, stamped);
+        assert_eq!(task.source_version, "1.0.0", "the source version stays bare");
+    }
+
+    // Standalone: `--version <source version>` still resolves and picks up
+    // this run's stamp — the same either-form convention the archive path's
+    // `build_tasks_for_version` applies.
+    let standalone = build_env_tasks(&spec, spec_dir, "1.0.0", &candidates, None)
+        .await
+        .expect("the bare source version must resolve too");
+    assert_eq!(standalone.len(), 2);
+    assert_eq!(standalone[0].normalized_version, stamped);
+    assert_eq!(standalone[0].source_version, "1.0.0");
+}
+
+#[tokio::test]
 async fn build_env_tasks_is_empty_for_unknown_version() {
     let spec_path = pylock_fixture_spec_path();
     let spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");

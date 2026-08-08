@@ -64,6 +64,22 @@ pub fn normalize_version(version_str: &str, build: &Option<String>) -> Result<St
     }
 }
 
+/// The published tag for one env-source (`pylock`/`pypi`) version.
+///
+/// Same stamping rule as [`normalize_version`], with one difference: a version
+/// that rule rejects keeps its bare form instead of being dropped. The archive
+/// path can afford to skip an unnormalizable version (`plan.rs` filters it out
+/// with `if let Ok(..)`) because a regex-resolved release tag is semver by
+/// construction; an env source's version comes from PyPI, where a >3-component
+/// release (`0.0.0.2`) or a `.dev0` suffix is ordinary and `ocx_lib::Version`
+/// reads none of them — dropping those would stop the mirror publishing them at
+/// all. Bare is also exactly what the rest of the env pipeline already does
+/// with such a version: `push` gates `--cascade` on the same `Version::parse`,
+/// so a version that cannot carry a stamp cannot carry rolling tags either.
+pub fn env_version_tag(source_version: &str, build: &Option<String>) -> String {
+    normalize_version(source_version, build).unwrap_or_else(|_| source_version.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +148,15 @@ mod tests {
     #[test]
     fn none_format_timestamp() {
         assert!(build_timestamp(&BuildTimestampFormat::None).is_none());
+    }
+
+    #[test]
+    fn env_tag_stamps_what_it_can_and_keeps_the_rest_bare() {
+        assert_eq!(env_version_tag("1.16.6", &ts()), "1.16.6_20260310142359");
+        assert_eq!(env_version_tag("1.16.6", &None), "1.16.6");
+        // PEP 440 releases `ocx_lib::Version` cannot read stay bare rather
+        // than being dropped — they are ordinary on PyPI.
+        assert_eq!(env_version_tag("0.0.0.2", &ts()), "0.0.0.2");
+        assert_eq!(env_version_tag("2.0.0.dev0", &ts()), "2.0.0.dev0");
     }
 }

@@ -204,7 +204,14 @@ fn build_pypi_plan_entries_writes_lock_and_references_it_in_the_entry() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+    let result = block_on(build_pypi_plan_entries(
+        &spec,
+        &upstream,
+        &[],
+        &version_map,
+        &locks_dir,
+        &None,
+    ));
     remove_pypi_stubs();
 
     let entries = result.expect("pypi plan entries derive successfully");
@@ -250,7 +257,14 @@ fn build_pypi_plan_entries_reparse_failure_maps_to_data_error_exit_65() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+    let result = block_on(build_pypi_plan_entries(
+        &spec,
+        &upstream,
+        &[],
+        &version_map,
+        &locks_dir,
+        &None,
+    ));
     remove_pypi_stubs();
 
     let err = result.expect_err("an unparseable derived lock must fail, not silently succeed");
@@ -288,7 +302,14 @@ fn build_pypi_plan_entries_universal_mode_never_invokes_ocx() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+    let result = block_on(build_pypi_plan_entries(
+        &spec,
+        &upstream,
+        &[],
+        &version_map,
+        &locks_dir,
+        &None,
+    ));
     remove_pypi_stubs();
 
     let entries = result.expect("universal derivation must succeed without touching ocx");
@@ -340,7 +361,14 @@ fn build_pypi_plan_entries_derived_lock_filename_follows_uv_naming_rule() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+    let result = block_on(build_pypi_plan_entries(
+        &spec,
+        &upstream,
+        &[],
+        &version_map,
+        &locks_dir,
+        &None,
+    ));
     remove_pypi_stubs();
 
     let entries = result.expect("derivation must succeed with a uv-conforming output filename");
@@ -379,7 +407,14 @@ fn build_pypi_plan_entries_uv_resolution_failure_maps_to_data_error_exit_65() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let result = block_on(build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir));
+    let result = block_on(build_pypi_plan_entries(
+        &spec,
+        &upstream,
+        &[],
+        &version_map,
+        &locks_dir,
+        &None,
+    ));
     remove_pypi_stubs();
 
     let err = result.expect_err("a nonzero uv exit must fail the plan");
@@ -403,7 +438,7 @@ async fn build_pypi_plan_entries_skips_derivation_when_no_candidates() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let entries = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir)
+    let entries = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir, &None)
         .await
         .expect("no candidates means no subprocess spawns, so this never touches uv/ocx");
     assert!(entries.is_empty());

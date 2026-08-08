@@ -27,6 +27,7 @@ one-byte marker; nothing downstream ever executes it.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import http.server
 import json
@@ -207,7 +208,9 @@ def _write_spec(
     package: str,
     index: str,
     interpreter_package: str,
+    build_timestamp: str | None = None,
 ) -> Path:
+    stamp = f"\nbuild_timestamp: {build_timestamp}\n" if build_timestamp else ""
     spec = f"""name: {package}
 target:
   registry: {registry}
@@ -222,7 +225,7 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "{interpreter_package}"
-
+{stamp}
 wheels:
   linux/amd64: ~
 
@@ -407,6 +410,10 @@ def test_plan_then_prepare_produces_env_bundle(
             package=package,
             index=index,
             interpreter_package=interpreter_package,
+            # `build_timestamp` was silently ignored on the env path: the plan
+            # stamped nothing, so every re-publish re-pointed the bare `X.Y.Z`
+            # tag and its whole cascade at a fresh digest.
+            build_timestamp="date",
         )
         env = {
             "OCX_INSECURE_REGISTRIES": registry,
@@ -436,7 +443,10 @@ def test_plan_then_prepare_produces_env_bundle(
         assert plan["has_new"] is True, f"plan must find new work: {plan}"
         assert len(plan["versions"]) == 1
         version_entry = plan["versions"][0]
-        assert version_entry["version"] == "1.0.0"
+        tag = version_entry["version"]
+        stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d")
+        assert tag == f"1.0.0_{stamp}", f"the env plan must stamp the published tag: {version_entry}"
+        assert version_entry["source_version"] == "1.0.0", "the source version stays bare"
         assert version_entry["pylock"] is not None, "pypi plan entry must reference its derived lock"
 
         lock_path = locks_dir / Path(version_entry["pylock"]).name
@@ -456,7 +466,7 @@ def test_plan_then_prepare_produces_env_bundle(
                 "--spec",
                 str(spec_path),
                 "--version",
-                "1.0.0",
+                tag,
                 "--plan",
                 str(plan_path),
                 "--work-dir",
@@ -466,16 +476,16 @@ def test_plan_then_prepare_produces_env_bundle(
         )
         assert prepare_result.returncode == 0, f"prepare failed: {prepare_result.stderr}"
 
-        manifest_path = work_dir / "1.0.0" / "env-manifest.json"
+        manifest_path = work_dir / tag / "env-manifest.json"
         assert manifest_path.exists(), "prepare must write env-manifest.json"
         manifest = json.loads(manifest_path.read_text())
-        assert manifest["version"] == "1.0.0"
+        assert manifest["version"] == tag, "push reads the published tag off this field"
         assert len(manifest["envs"]) == 1
         env_entry = manifest["envs"][0]
         assert env_entry["platform"] == "linux/amd64"
         assert len(env_entry["layers"]) == 1
 
-        metadata_path = (work_dir / "1.0.0" / env_entry["metadata_path"]).resolve()
+        metadata_path = (work_dir / tag / env_entry["metadata_path"]).resolve()
         assert metadata_path.exists(), f"composed metadata.json must exist: {metadata_path}"
 
         # Console-script launchers dispatch `python`, never `python3`:
@@ -487,7 +497,7 @@ def test_plan_then_prepare_produces_env_bundle(
         entrypoints = json.loads(metadata_path.read_text())["entrypoints"]
         assert "console-pkg" in entrypoints, f"the console script must synthesize: {entrypoints}"
         assert entrypoints["console-pkg"]["command"] == "python", entrypoints
-        layer_path = (work_dir / "1.0.0" / env_entry["layers"][0]["path"]).resolve()
+        layer_path = (work_dir / tag / env_entry["layers"][0]["path"]).resolve()
         assert layer_path.exists(), f"repacked wheel layer must exist: {layer_path}"
     finally:
         server.shutdown()

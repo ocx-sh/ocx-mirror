@@ -171,8 +171,22 @@ pub fn filter_versions(
 /// OCX parser rejects. The `Version::parse` check that decides `--cascade`
 /// stays as it is — that one asks a different question ("can ocx derive
 /// rolling tags from this?").
+///
+/// A published tag may carry the mirror's build stamp, which OCX spells with
+/// `_` (`1.16.6_20260808`) where PEP 440 spells a local version with `+`. That
+/// form parses as nothing, and the text fallback then orders `1.16.6_…` BEFORE
+/// `1.9.0_…` and ranks any bare tag above every stamped one — so the env push
+/// loop, which sorts its manifests by this key, would push out of order and
+/// land `latest` on the wrong version. The separator is therefore retried as
+/// `+` when, and only when, the tag does not parse as it stands: a `_` PEP 440
+/// itself gives a meaning (`1.0_alpha1` → `1.0a1`) parses on the first attempt
+/// and never reaches the retry.
 pub(crate) fn pep440_sort_key(version: &str) -> (Option<ocx_python::uv_pep440::Version>, String) {
-    (version.parse().ok(), version.to_string())
+    let parsed = version
+        .parse()
+        .ok()
+        .or_else(|| version.replacen('_', "+", 1).parse().ok());
+    (parsed, version.to_string())
 }
 
 #[cfg(test)]
@@ -201,6 +215,30 @@ mod tests {
         let mut mixed = vec!["nightly".to_string(), "1.0.0".to_string()];
         mixed.sort_by_key(|v| pep440_sort_key(v));
         assert_eq!(mixed, ["nightly", "1.0.0"]);
+    }
+
+    #[test]
+    fn pep440_sort_key_orders_build_stamped_tags_by_release() {
+        // `pipeline push` sorts an env run's versions by this key, and since
+        // the env plan stamps its tags every one of them carries `_<ts>` —
+        // which PEP 440 spells `+<local>`, so the raw form parses as nothing
+        // and the key degrades to TEXT order: `1.16.6_…` would sort BEFORE
+        // `1.9.0_…` and a bare tag would outrank every stamped one, pushing
+        // the versions out of order and landing `latest` on the wrong one.
+        let mut versions = vec![
+            "1.16.6_20260808".to_string(),
+            "1.9.0_20260808".to_string(),
+            "1.16.6".to_string(),
+        ];
+        versions.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(versions, ["1.9.0_20260808", "1.16.6", "1.16.6_20260808"]);
+
+        // A `_` that PEP 440 itself gives a meaning keeps it: `1.0_alpha1`
+        // parses as-is (→ `1.0a1`), so it never reaches the build-stamp
+        // reading and must not be read as a local version.
+        let mut prereleases = vec!["1.0".to_string(), "1.0_alpha1".to_string()];
+        prereleases.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(prereleases, ["1.0_alpha1", "1.0"], "alpha sorts before the release");
     }
 
     use ocx_lib::oci::Platform;

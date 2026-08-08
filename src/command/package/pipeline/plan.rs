@@ -111,11 +111,12 @@ pub struct PlanAssetEntry {
 /// A single version entry in the plan output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanVersionEntry {
-    /// Normalized tag the pipeline publishes. Archive sources may carry a
-    /// variant prefix (`slim-3.29.0`); env sources always emit the bare app
-    /// version (libc is a platform `os.features` axis there, never a tag
-    /// prefix). The whole prepare → test → push chain keys off this string,
-    /// so each variant must carry its own tag here.
+    /// Normalized tag the pipeline publishes — including the
+    /// `build_timestamp` stamp, on every source type. Archive sources may
+    /// additionally carry a variant prefix (`slim-3.29.0_20260808`); env
+    /// sources never do (libc is a platform `os.features` axis there, not a
+    /// tag prefix). The whole prepare → test → push chain keys off this
+    /// string, so each variant must carry its own tag here.
     pub version: String,
     /// Base `os/arch` platform strings that require work (e.g.
     /// `["linux/amd64", "darwin/arm64"]`) — matches the CI matrix legs. Env
@@ -309,8 +310,16 @@ async fn build_plan_report(
     // always false here, and the patch job never fires for an env mirror.
     match &spec.source {
         Source::Pylock { path, .. } => {
-            let versions =
-                build_pylock_plan_entries(spec, spec_dir, path, &upstream_versions, &all_tags, &version_map).await?;
+            let versions = build_pylock_plan_entries(
+                spec,
+                spec_dir,
+                path,
+                &upstream_versions,
+                &all_tags,
+                &version_map,
+                &build_ts,
+            )
+            .await?;
             return Ok(env_plan_report(spec, versions));
         }
         // Discovery already ran above via `list_upstream_versions` (dispatches
@@ -321,7 +330,8 @@ async fn build_plan_report(
         // lock has been derived for a candidate version.
         Source::Pypi { .. } => {
             let versions =
-                build_pypi_plan_entries(spec, &upstream_versions, &all_tags, &version_map, locks_dir).await?;
+                build_pypi_plan_entries(spec, &upstream_versions, &all_tags, &version_map, locks_dir, &build_ts)
+                    .await?;
             return Ok(env_plan_report(spec, versions));
         }
         _ => {}

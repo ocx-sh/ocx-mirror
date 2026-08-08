@@ -16,6 +16,10 @@ python:
   abi: cp313
   interpreter_package: "ocx.sh/python/cpython:3.13.1"
 
+# Stamp-free: this corpus asserts on the tag's SHAPE (no variant prefix, one
+# entry per version), not on `build_timestamp` stamping.
+build_timestamp: none
+
 wheels:
   linux/amd64: ~
   linux/arm64: ~

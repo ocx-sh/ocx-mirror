@@ -93,6 +93,10 @@ python:
   abi: cp313
   interpreter_package: "{interpreter_package}"
 
+# Stamp-free: this suite asserts on layer reuse across two pushes of the
+# `1.0.0` tag, not on `build_timestamp` stamping.
+build_timestamp: none
+
 wheels:
   linux/amd64: ~
 

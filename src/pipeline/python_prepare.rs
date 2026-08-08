@@ -64,8 +64,8 @@ pub(crate) struct SelectedWheel {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields carried for the W2.4 push leg
 pub(crate) struct WheelEnvTask {
-    /// Bare normalized tag the pipeline publishes (e.g. `3.29.0` — env tags
-    /// carry no variant prefix).
+    /// Normalized tag the pipeline publishes (e.g. `3.29.0_20260808` — env
+    /// tags carry the spec's build stamp, but never a variant prefix).
     pub normalized_version: String,
     /// Raw upstream (app) version, pre-tag.
     pub source_version: String,

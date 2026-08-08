@@ -39,6 +39,7 @@ pub async fn build_pylock_plan_entries(
     upstream_versions: &[source::VersionInfo],
     all_tags: &[String],
     version_map: &VersionPlatformMap,
+    build_ts: &Option<String>,
 ) -> Result<Vec<PlanVersionEntry>, MirrorError> {
     let app_version = upstream_versions
         .first()
@@ -55,7 +56,7 @@ pub async fn build_pylock_plan_entries(
         .await
         .map_err(|e| source::pylock::classify_error("failed to load pylock source", e))?;
 
-    build_env_plan_entries(spec, &lock, &app_version, all_tags, version_map)
+    build_env_plan_entries(spec, &lock, &app_version, all_tags, version_map, build_ts)
 }
 
 /// Lock-agnostic core of [`build_pylock_plan_entries`].
@@ -70,12 +71,20 @@ pub async fn build_pylock_plan_entries(
 /// keeps matching `matrix.platform`. Takes an already-parsed
 /// `lock`/`app_version` so it never touches the filesystem — network-free and
 /// directly unit-testable.
+/// `build_ts` is the run's build stamp, resolved once by the caller for the
+/// whole plan exactly as the archive branch resolves it: the emitted `version`
+/// is the STAMPED publish tag, `source_version` stays the bare release.
+/// Everything keyed on release identity — platform applicability and the
+/// already-published dedup below — keeps using the bare version, because a
+/// published version's registry identity is its bare `X.Y.Z` cascade tag (the
+/// same relation `filter::filter_versions` relies on for the archive path).
 pub fn build_env_plan_entries(
     spec: &MirrorSpec,
     lock: &Pylock,
     app_version: &str,
     all_tags: &[String],
     version_map: &VersionPlatformMap,
+    build_ts: &Option<String>,
 ) -> Result<Vec<PlanVersionEntry>, MirrorError> {
     let python = spec
         .python
@@ -165,7 +174,7 @@ pub fn build_env_plan_entries(
     };
 
     Ok(vec![PlanVersionEntry {
-        version: app_version.to_string(),
+        version: normalizer::env_version_tag(app_version, build_ts),
         platforms: missing_platforms,
         kind,
         source_version: app_version.to_string(),
@@ -385,6 +394,7 @@ pub async fn build_pypi_plan_entries(
     all_tags: &[String],
     version_map: &VersionPlatformMap,
     locks_dir: &Path,
+    build_ts: &Option<String>,
 ) -> Result<Vec<PlanVersionEntry>, MirrorError> {
     let python = spec.python.as_ref().ok_or_else(|| {
         MirrorError::SpecInvalid(vec!["python config is required for source.type 'pypi'".to_string()])
@@ -408,10 +418,13 @@ pub async fn build_pypi_plan_entries(
 
     let mut entries = Vec::new();
     for version_info in candidates {
+        // Locks are keyed by SOURCE version: a lock belongs to the upstream
+        // release, while the build stamp is a property of this publish.
         let output_path = locks_dir.join(derived_lock_filename(package, &version_info.version));
         let lock = derive_one_pypi_lock(spec, &uv_python, &version_info.version, &output_path).await?;
 
-        let mut version_entries = build_env_plan_entries(spec, &lock, &version_info.version, all_tags, version_map)?;
+        let mut version_entries =
+            build_env_plan_entries(spec, &lock, &version_info.version, all_tags, version_map, build_ts)?;
         let pylock_path = output_path.to_string_lossy().into_owned();
         for entry in &mut version_entries {
             entry.pylock = Some(pylock_path.clone());

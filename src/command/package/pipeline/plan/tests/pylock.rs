@@ -35,7 +35,7 @@ async fn build_pylock_plan_entries_emits_wheel_assets_per_platform() {
     };
 
     let version_map = VersionPlatformMap::default();
-    let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map)
+    let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map, &None)
         .await
         .expect("wheel selection must succeed for the fixture lock");
 
@@ -95,7 +95,7 @@ async fn build_pylock_plan_entries_skips_already_published_platforms() {
     version_map.add(version.clone(), "linux/amd64".parse().unwrap());
     version_map.add(version, "linux/arm64".parse().unwrap());
 
-    let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map)
+    let entries = build_pylock_plan_entries(&spec, spec_dir, path, &upstream_versions, &[], &version_map, &None)
         .await
         .unwrap();
     assert!(
@@ -155,9 +155,17 @@ platforms:
     let upstream_versions = list_upstream_versions(&spec, dir.path()).await.unwrap();
     let version_map = VersionPlatformMap::default();
 
-    let err = build_pylock_plan_entries(&spec, dir.path(), "pylock.toml", &upstream_versions, &[], &version_map)
-        .await
-        .expect_err("a windows-only wheel must fail selection for a linux/amd64 target");
+    let err = build_pylock_plan_entries(
+        &spec,
+        dir.path(),
+        "pylock.toml",
+        &upstream_versions,
+        &[],
+        &version_map,
+        &None,
+    )
+    .await
+    .expect_err("a windows-only wheel must fail selection for a linux/amd64 target");
 
     assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
     assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
@@ -217,9 +225,17 @@ platforms:
     assert_eq!(upstream_versions[0].version, "0.0.0.2");
 
     let version_map = VersionPlatformMap::default();
-    let entries = build_pylock_plan_entries(&spec, dir.path(), "pylock.toml", &upstream_versions, &[], &version_map)
-        .await
-        .expect("a >3-component PEP 440 version must plan without panicking");
+    let entries = build_pylock_plan_entries(
+        &spec,
+        dir.path(),
+        "pylock.toml",
+        &upstream_versions,
+        &[],
+        &version_map,
+        &None,
+    )
+    .await
+    .expect("a >3-component PEP 440 version must plan without panicking");
 
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].version, "0.0.0.2");
@@ -248,8 +264,9 @@ url = "https://example.com/pycowsay-1.0.0-cp313-cp313-musllinux_1_2_x86_64.whl"
 hashes = { sha256 = "bbbb" }
 "#;
 
-fn dual_libc_spec() -> MirrorSpec {
-    let yaml = r#"
+fn dual_libc_spec_with(build_timestamp: &str) -> MirrorSpec {
+    let yaml = format!(
+        r#"
 name: pycowsay
 target:
   registry: ocx.sh
@@ -261,14 +278,22 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "ocx.sh/python/cpython:3.13.1"
+build_timestamp: {build_timestamp}
 wheels:
   "linux/amd64+libc.glibc": ~
   "linux/amd64+libc.musl": ~
 platforms:
   linux/amd64:
     runner: ubuntu-latest
-"#;
-    serde_yaml_ng::from_str(yaml).unwrap()
+"#
+    );
+    serde_yaml_ng::from_str(&yaml).unwrap()
+}
+
+/// The wheels-selection fixture, stamp-free — these tests assert on the tag's
+/// shape (no variant prefix, one entry per version), not on stamping.
+fn dual_libc_spec() -> MirrorSpec {
+    dual_libc_spec_with("none")
 }
 
 #[test]
@@ -277,7 +302,7 @@ fn build_env_plan_entries_dual_libc_keys_share_one_entry_and_base_platform() {
     let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
     let version_map = VersionPlatformMap::default();
 
-    let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &[], &version_map).unwrap();
+    let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &[], &version_map, &None).unwrap();
 
     assert_eq!(entries.len(), 1, "env sources emit ONE bare-tag entry");
     let entry = &entries[0];
@@ -318,13 +343,93 @@ fn build_env_plan_entries_published_dedup_honors_os_features() {
         "linux/amd64+libc.glibc".parse().unwrap(),
     );
 
-    let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &["1.0.0".to_string()], &version_map).unwrap();
+    let entries = build_env_plan_entries(&spec, &lock, "1.0.0", &["1.0.0".to_string()], &version_map, &None).unwrap();
 
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert_eq!(entry.platforms, vec!["linux/amd64".to_string()]);
     assert_eq!(entry.assets.len(), 1, "only the musl key's wheel is planned");
     assert_eq!(entry.assets[0].platform, "linux/amd64+libc.musl");
+}
+
+// ── build_timestamp on the env path ──────────────────────────────────────
+
+#[test]
+fn build_env_plan_entries_stamps_the_tag_when_build_timestamp_is_configured() {
+    // F2: `plan` computed the run's build timestamp but the env branches
+    // never received it, so an env mirror that configured a stamp published
+    // the bare `X.Y.Z` tag and re-pointed it (plus its whole cascade) on
+    // every re-publish — the exact GC hazard
+    // `MirrorSpec::cascade_without_build_stamp` warns about for `none`,
+    // silently and with no warning, because the spec DID ask for a stamp.
+    let spec = dual_libc_spec_with("date");
+    let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
+    let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
+    let stamp = build_ts.clone().expect("`date` yields a stamp");
+
+    let entries =
+        build_env_plan_entries(&spec, &lock, "1.0.0", &[], &VersionPlatformMap::default(), &build_ts).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].version,
+        format!("1.0.0_{stamp}"),
+        "the published tag carries the build stamp, as on the archive path"
+    );
+    assert_eq!(
+        entries[0].source_version, "1.0.0",
+        "the source version stays bare — the stamp is a publish-time property"
+    );
+    // Stamping is orthogonal to wheel selection: both libc keys still resolve.
+    assert_eq!(entries[0].platforms, vec!["linux/amd64".to_string()]);
+    assert_eq!(entries[0].assets.len(), 2);
+}
+
+#[test]
+fn build_env_plan_entries_keeps_the_bare_tag_without_a_build_timestamp() {
+    let spec = dual_libc_spec_with("none");
+    let lock = ocx_python::parse_pylock(DUAL_LIBC_LOCK).unwrap();
+    let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
+    assert!(build_ts.is_none(), "`none` must yield no stamp");
+
+    let entries =
+        build_env_plan_entries(&spec, &lock, "1.0.0", &[], &VersionPlatformMap::default(), &build_ts).unwrap();
+
+    assert_eq!(entries[0].version, "1.0.0");
+    assert_eq!(entries[0].source_version, "1.0.0");
+}
+
+#[test]
+fn build_env_plan_entries_keeps_a_stamp_off_a_version_ocx_cannot_parse() {
+    // A >3-component PEP 440 release (`0.0.0.2`) is not an `ocx_lib::Version`,
+    // so no build stamp can be appended to it. It must keep its bare tag
+    // rather than be dropped the way the archive path drops an unnormalizable
+    // version — PyPI publishes these routinely, and push already treats such a
+    // version as non-cascadable through the same `Version::parse` gate.
+    let lock = ocx_python::parse_pylock(
+        r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "0.0.0.2"
+
+[[packages.wheels]]
+name = "pycowsay-0.0.0.2-py3-none-any.whl"
+url = "https://example.com/pycowsay-0.0.0.2-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#,
+    )
+    .unwrap();
+    let spec = dual_libc_spec_with("date");
+    let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
+
+    let entries =
+        build_env_plan_entries(&spec, &lock, "0.0.0.2", &[], &VersionPlatformMap::default(), &build_ts).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].version, "0.0.0.2");
+    assert_eq!(entries[0].source_version, "0.0.0.2");
 }
 
 // ── wheels-key → selection-constraint derivation ─────────────────────────

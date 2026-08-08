@@ -214,10 +214,17 @@ impl Prepare {
             )]));
         }
 
+        // The version directory is named by the PUBLISHED tag, which the task
+        // builder resolved (`--version` may have named the bare release
+        // instead). It must be the one `task_dir` uses, or the manifest's
+        // paths do not sit under the directory it is written in and
+        // `enumerate_env_manifests` refuses them as out-of-tree.
+        let published_tag = tasks[0].normalized_version.clone();
+
         log::info!(
             "[{}] Preparing pylock env version {} ({} platforms)",
             spec.name,
-            self.version,
+            published_tag,
             tasks.len()
         );
 
@@ -236,16 +243,16 @@ impl Prepare {
         };
 
         let manifest =
-            python_prepare::prepare_env_version(&self.version, &tasks, work_dir, &http_client, &concurrency).await?;
+            python_prepare::prepare_env_version(&published_tag, &tasks, work_dir, &http_client, &concurrency).await?;
 
-        let manifest_path = work_dir.join(&self.version).join("env-manifest.json");
+        let manifest_path = work_dir.join(&published_tag).join("env-manifest.json");
         println!("{}", manifest_path.display());
 
         log::debug!(
             "[{}] Prepared {} env packages for version {}",
             spec.name,
             manifest.envs.len(),
-            self.version
+            published_tag
         );
 
         Ok(())
@@ -307,11 +314,21 @@ fn build_env_tasks_from_lock(
     interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
-    // Env tags are bare: a leg whose requested version is not this lock's app
-    // version has no work here.
-    if app_version != version {
+    // `--version` names either the plan entry's own (build-stamped) tag — the
+    // CI path — or the bare source version, the same either-form contract
+    // `build_tasks_for_version` gives the archive path. A leg whose requested
+    // version is neither has no work here.
+    let published_tag = if version == app_version {
+        // Standalone invocation: stamp it with this run's timestamp.
+        normalizer::env_version_tag(app_version, &normalizer::build_timestamp(&spec.build_timestamp))
+    } else if is_build_stamp_of(version, app_version) {
+        // The plan's tag, carried verbatim. Never re-stamped here: `plan` and
+        // `prepare` are separate jobs, so a `datetime` stamp recomputed now
+        // would differ from the planned one by the seconds between them.
+        version.to_string()
+    } else {
         return Ok(Vec::new());
-    }
+    };
 
     let python = spec
         .python
@@ -380,7 +397,7 @@ fn build_env_tasks_from_lock(
         }
 
         tasks.push(WheelEnvTask {
-            normalized_version: version.to_string(),
+            normalized_version: published_tag.clone(),
             source_version: app_version.to_string(),
             platform: platform.clone(),
             target: spec.target.clone(),
@@ -480,6 +497,23 @@ async fn build_pypi_env_tasks(
     )
 }
 
+/// Whether `tag` is `source_version` carrying a build-metadata stamp — i.e.
+/// the tag `normalizer::env_version_tag` would have produced for it in some
+/// earlier run of this pipeline.
+///
+/// Compared through `ocx_lib::Version` rather than by string prefix so the
+/// build separator (`+` on the wire, `_` in a tag) is normalised on both
+/// sides, the same way `spec::strip_build` decides platform applicability.
+fn is_build_stamp_of(tag: &str, source_version: &str) -> bool {
+    match (
+        ocx_lib::package::version::Version::parse(tag),
+        ocx_lib::package::version::Version::parse(source_version),
+    ) {
+        (Some(tagged), Some(source)) => tagged.has_build() && spec::strip_build(&tagged) == source,
+        _ => false,
+    }
+}
+
 /// Standalone-prepare (no `--plan`) resolution for a `pypi` source: finds the
 /// upstream PyPI version whose (bare) tag equals `version` — the same lookup
 /// `build_tasks_for_version` does for the archive/binary path, needed here
@@ -494,7 +528,10 @@ async fn resolve_pypi_app_version(
 
     upstream_versions
         .iter()
-        .find(|info| info.version == version)
+        // `--version` may name the published (build-stamped) tag as well as
+        // the bare release — same either-form contract as
+        // `build_env_tasks_from_lock`, which this feeds.
+        .find(|info| info.version == version || is_build_stamp_of(version, &info.version))
         .map(|info| info.version.clone())
         .ok_or_else(|| MirrorError::SpecInvalid(vec![format!("version '{version}' not found in pypi source")]))
 }
