@@ -11,8 +11,8 @@ use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
 use crate::command::package::pipeline::plan::{
-    PlanReport, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin, pylock_target_platform,
-    resolve_uv_python, wheel_target_constraints,
+    PlanReport, PlanVersionEntry, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin,
+    pylock_target_platform, resolve_uv_python, wheel_target_constraints,
 };
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
@@ -157,13 +157,17 @@ impl Prepare {
         // `entry.platforms` holds only deduped base os/arch strings), falling
         // back to `entry.platforms` for an assets-less legacy plan. Without a
         // plan (standalone prepare), fall back to every applicable wheels key.
+        //
+        // The entry is looked up under the same either-form contract the task
+        // builder below applies to `--version` ([`plan_entry_for_version`]) —
+        // matching only the entry's stamped tag would silently yield an EMPTY
+        // allowed set for a bare `--version`, and prepare would then compose
+        // nothing at all.
         let allowed_platforms: Option<std::collections::HashSet<String>> = match &self.plan {
             Some(plan_path) => {
                 let plan = read_plan(plan_path).await?;
                 Some(
-                    plan.versions
-                        .iter()
-                        .find(|entry| entry.version == self.version)
+                    plan_entry_for_version(&plan, &self.version)
                         .map(|entry| {
                             if entry.assets.is_empty() {
                                 entry.platforms.iter().cloned().collect()
@@ -314,10 +318,18 @@ fn build_env_tasks_from_lock(
     interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
-    // `--version` names either the plan entry's own (build-stamped) tag — the
-    // CI path — or the bare source version, the same either-form contract
-    // `build_tasks_for_version` gives the archive path. A leg whose requested
-    // version is neither has no work here.
+    // `--version` names either the bare source version — the standalone path,
+    // stamped with this run's timestamp below — or a build stamp of it, carried
+    // verbatim. A leg whose requested version is neither has no work here.
+    //
+    // The stamped form is accepted more widely than on the archive path, not
+    // identically: `build_tasks_for_version` matches only the raw upstream
+    // version, this run's normalized tag, or this run's variant-prefixed tag —
+    // all three recomputed from the CURRENT `build_timestamp`. Here
+    // `is_build_stamp_of` accepts ANY stamp of the release, deliberately: the
+    // plan and prepare run as separate jobs, so a `datetime` stamp the plan job
+    // computed never equals one recomputed here, and an exact-form contract
+    // would reject every planned tag.
     let published_tag = if version == app_version {
         // Standalone invocation: stamp it with this run's timestamp.
         normalizer::env_version_tag(app_version, &normalizer::build_timestamp(&spec.build_timestamp))
@@ -439,10 +451,7 @@ async fn build_pypi_env_tasks(
     let pylock_relative = match plan_path {
         Some(path) => {
             let plan = read_plan(path).await?;
-            plan.versions
-                .iter()
-                .find(|entry| entry.version == version)
-                .and_then(|entry| entry.pylock.clone())
+            plan_entry_for_version(&plan, version).and_then(|entry| entry.pylock.clone())
         }
         None => None,
     };
@@ -495,6 +504,21 @@ async fn build_pypi_env_tasks(
         interpreter_candidates,
         allowed_platforms,
     )
+}
+
+/// The plan entry `version` names, under the same either-form contract
+/// [`build_env_tasks_from_lock`] applies to `--version`: the entry's own
+/// (build-stamped) publish tag, the bare source version that tag was stamped
+/// from, or any other stamp of that same release.
+///
+/// The bare form is what a hand-run `pipeline prepare --version X.Y.Z --plan …`
+/// passes, and an env plan's entry is always stamped — so an equality-only
+/// lookup finds nothing there and every caller degrades silently (an empty
+/// allowed-platform set composes no env at all).
+fn plan_entry_for_version<'a>(plan: &'a PlanReport, version: &str) -> Option<&'a PlanVersionEntry> {
+    plan.versions.iter().find(|entry| {
+        entry.version == version || entry.source_version == version || is_build_stamp_of(version, &entry.source_version)
+    })
 }
 
 /// Whether `tag` is `source_version` carrying a build-metadata stamp — i.e.

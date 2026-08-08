@@ -216,11 +216,18 @@ pub(crate) fn within_bounds(candidate: &str, min: Option<&str>, max: Option<&str
 /// `+` when, and only when, the tag does not parse as it stands: a `_` PEP 440
 /// itself gives a meaning (`1.0_alpha1` → `1.0a1`) parses on the first attempt
 /// and never reaches the retry.
+///
+/// The retry rewrites the LAST `_`, not the first: the stamp is always the
+/// trailing component, and a release may itself carry earlier ones
+/// (`1.0_alpha1_20260808`). Rewriting the first would read the prerelease as
+/// part of a local version (`1.0+alpha1.20260808`), which sorts ABOVE its own
+/// release instead of below it.
 pub(crate) fn pep440_sort_key(version: &str) -> (Option<ocx_python::uv_pep440::Version>, String) {
-    let parsed = version
-        .parse()
-        .ok()
-        .or_else(|| version.replacen('_', "+", 1).parse().ok());
+    let parsed = version.parse().ok().or_else(|| {
+        version
+            .rsplit_once('_')
+            .and_then(|(release, stamp)| format!("{release}+{stamp}").parse().ok())
+    });
     (parsed, version.to_string())
 }
 
@@ -274,6 +281,23 @@ mod tests {
         let mut prereleases = vec!["1.0".to_string(), "1.0_alpha1".to_string()];
         prereleases.sort_by_key(|v| pep440_sort_key(v));
         assert_eq!(prereleases, ["1.0_alpha1", "1.0"], "alpha sorts before the release");
+
+        // Both at once: a prerelease spelled with `_` AND a build stamp. Only
+        // the LAST `_` is the stamp. Rewriting the FIRST one instead yields
+        // `1.0+alpha1.20260808` — a local version of the release, which PEP 440
+        // ranks ABOVE `1.0`, so the alpha would be pushed after its own release
+        // and could take `latest` off it.
+        let mut stamped_prerelease = vec![
+            "1.0".to_string(),
+            "1.0_20260808".to_string(),
+            "1.0_alpha1_20260808".to_string(),
+        ];
+        stamped_prerelease.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(
+            stamped_prerelease,
+            ["1.0_alpha1_20260808", "1.0", "1.0_20260808"],
+            "the stamped alpha sorts before the release; the stamped release after it"
+        );
     }
 
     use ocx_lib::oci::Platform;

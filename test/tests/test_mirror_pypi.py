@@ -27,11 +27,11 @@ one-byte marker; nothing downstream ever executes it.
 """
 from __future__ import annotations
 
-import datetime
 import hashlib
 import http.server
 import json
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -444,8 +444,10 @@ def test_plan_then_prepare_produces_env_bundle(
         assert len(plan["versions"]) == 1
         version_entry = plan["versions"][0]
         tag = version_entry["version"]
-        stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d")
-        assert tag == f"1.0.0_{stamp}", f"the env plan must stamp the published tag: {version_entry}"
+        # Shape, not today's date: the plan stamps in UTC, so pinning the
+        # literal date reds any run that crosses midnight between this line
+        # and the plan invocation above.
+        assert re.fullmatch(r"1\.0\.0_\d{8}", tag), f"the env plan must stamp the published tag: {version_entry}"
         assert version_entry["source_version"] == "1.0.0", "the source version stays bare"
         assert version_entry["pylock"] is not None, "pypi plan entry must reference its derived lock"
 

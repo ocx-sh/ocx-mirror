@@ -78,6 +78,16 @@ pub async fn build_pylock_plan_entries(
 /// already-published dedup below — keeps using the bare version, because a
 /// published version's registry identity is its bare `X.Y.Z` cascade tag (the
 /// same relation `filter::filter_versions` relies on for the archive path).
+///
+/// That identity is only ever there because the env push writes it
+/// unconditionally: `push.rs`'s env loop gates `--cascade` on
+/// `Version::parse(version).is_some()` and on nothing in this run having
+/// failed — it does **not** consult `spec.cascade.enabled`. Were that gate
+/// ever to honor `cascade: false`, a stamped env mirror would publish
+/// `X.Y.Z_<stamp>` tags only, neither the `version_map` lookup nor the
+/// `all_tags` check below would recognise the release as published, and every
+/// run would republish every version. Dedup would then have to key on the
+/// stamped tags' release cores instead of on the bare version.
 pub fn build_env_plan_entries(
     spec: &MirrorSpec,
     lock: &Pylock,

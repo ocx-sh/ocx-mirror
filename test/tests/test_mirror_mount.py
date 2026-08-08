@@ -20,6 +20,12 @@ Uses `source.type: pylock` (a committed lock), not `pypi`: the mount
 mechanics under test are identical for both (push dispatches on
 `Source::is_env()`), and a committed lock keeps the suite hermetic — no
 `uv` lock derivation between prepare and the pushes being asserted on.
+
+The spec pins no `build_timestamp`, so the suite runs the DEFAULT `datetime`
+stamp — the shape every real env mirror publishes under. Each version is
+therefore addressed by a `X.Y.Z_<14 digits>` tag that only `prepare` knows;
+it is read back off `prepare`'s stdout (the manifest path it prints) rather
+than recomputed here, since a clock-derived stamp cannot be predicted.
 """
 from __future__ import annotations
 
@@ -27,6 +33,7 @@ import hashlib
 import http.server
 import json
 import os
+import re
 import subprocess
 import threading
 import urllib.request
@@ -93,10 +100,6 @@ python:
   abi: cp313
   interpreter_package: "{interpreter_package}"
 
-# Stamp-free: this suite asserts on layer reuse across two pushes of the
-# `1.0.0` tag, not on `build_timestamp` stamping.
-build_timestamp: none
-
 wheels:
   linux/amd64: ~
 
@@ -108,6 +111,7 @@ platforms:
 
 
 def _write_junit(junit_dir: Path, version: str) -> None:
+    """Writes the passing JUnit `push` gates on. `version` is the PUBLISHED (stamped) tag."""
     xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <testsuites>
   <testsuite name="ocx-mirror.acme-mount-app.linux_amd64._native_"
@@ -153,6 +157,9 @@ def test_shared_wheel_layer_mounted_on_second_push(
         junit_dir = tmp_path / "junit"
         env = {"OCX_INSECURE_REGISTRIES": registry}
 
+        # Bare source version → the stamped tag `prepare` published it under.
+        stamped: dict[str, str] = {}
+
         for version in ("1.0.0", "2.0.0"):
             version_dir = tmp_path / version
             version_dir.mkdir()
@@ -176,9 +183,22 @@ def test_shared_wheel_layer_mounted_on_second_push(
                 env,
             )
             assert prepare_result.returncode == 0, f"prepare {version} failed: {prepare_result.stderr}"
-            assert (bundles_dir / version / "env-manifest.json").exists()
 
-            _write_junit(junit_dir, version)
+            # `prepare` prints the manifest path it wrote; its parent directory
+            # IS the published tag, so the run's stamp is read rather than
+            # recomputed from a clock this process does not share.
+            manifest_path = Path(prepare_result.stdout.strip().splitlines()[-1])
+            assert manifest_path.name == "env-manifest.json", f"unexpected prepare stdout: {prepare_result.stdout}"
+            assert manifest_path.exists()
+            tag = manifest_path.parent.name
+            assert re.fullmatch(rf"{re.escape(version)}_\d{{14}}", tag), (
+                f"the default `datetime` build stamp must tag {version} as X.Y.Z_<14 digits>, got {tag}"
+            )
+            stamped[version] = tag
+
+            # `push` keys JUnit lookup off the PUBLISHED tag, not the bare
+            # source version — a bare filename here reads as `missing_junit`.
+            _write_junit(junit_dir, tag)
 
         # Both versions' bundles are pushed via a SINGLE `pipeline push`
         # invocation (its own contract: one serial driver pass enumerates
@@ -210,16 +230,28 @@ def test_shared_wheel_layer_mounted_on_second_push(
 
     summary = json.loads(summary_path.read_text())
     versions = {v["version"]: v for v in summary["versions"]}
-    assert set(versions) == {"1.0.0", "2.0.0"}
-    for version, entry in versions.items():
-        assert entry["status"] == "published", f"{version} must fully publish: {entry}"
+    assert set(versions) == set(stamped.values()), (
+        f"the summary is keyed by the stamped publish tags {sorted(stamped.values())}: {sorted(versions)}"
+    )
+    for source_version, tag in stamped.items():
+        entry = versions[tag]
+        assert entry["status"] == "published", f"{tag} must fully publish: {entry}"
         reuse = entry["layer_reuse"]
-        assert reuse["mounted"] + reuse["uploaded"] == 1, f"{version}: exactly one wheel layer, got {reuse}"
+        assert reuse["mounted"] + reuse["uploaded"] == 1, f"{tag}: exactly one wheel layer, got {reuse}"
+
+        # The stamped tag is the primary one; the rolling aliases it advances
+        # are derived from the BARE release, which is what consumers pin.
+        cascade = entry["cascade_tags_written"]
+        assert cascade[0] == tag, f"{tag}: the stamped tag leads its own cascade set: {cascade}"
+        major, minor, _ = source_version.split(".")
+        assert {source_version, f"{major}.{minor}", major} <= set(cascade), (
+            f"{tag}: the bare cascade tags must be written too: {cascade}"
+        )
 
     # The wheel repo tag must exist on the registry after the first push —
     # read the exact repository/tag `prepare` recorded rather than
     # recomputing ocx_python's wheel-reference naming convention here.
-    manifest = json.loads((bundles_dir / "1.0.0" / "env-manifest.json").read_text())
+    manifest = json.loads((bundles_dir / stamped["1.0.0"] / "env-manifest.json").read_text())
     layer = manifest["envs"][0]["layers"][0]
     assert layer["wheel_sha256"] == sha256
     wheel_repository = layer["wheel_repository"]
@@ -233,7 +265,8 @@ def test_shared_wheel_layer_mounted_on_second_push(
     # DOES honor cross-repository blob mount (`POST .../blobs/uploads/
     # ?mount=<digest>&from=<repo>`), so the second version's push reuses the
     # blob via a real mount rather than falling back to a re-upload.
-    assert versions["2.0.0"]["layer_reuse"]["mounted"] > 0, (
+    second = versions[stamped["2.0.0"]]
+    assert second["layer_reuse"]["mounted"] > 0, (
         "second push must cross-repository MOUNT the shared wheel layer "
-        f"(this registry supports real mounts): {versions['2.0.0']['layer_reuse']}"
+        f"(this registry supports real mounts): {second['layer_reuse']}"
     )

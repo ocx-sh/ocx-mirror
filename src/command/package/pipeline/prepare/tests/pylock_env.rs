@@ -148,6 +148,54 @@ async fn build_env_tasks_is_empty_for_unknown_version() {
         .await
         .expect("build_env_tasks succeeds");
     assert!(tasks.is_empty(), "no bare env tag matches an unknown version");
+
+    // The stamped half of the either-form contract must reject just as hard:
+    // `is_build_stamp_of` compares the STRIPPED tag against the lock's app
+    // version, so a stamp of some other release resolves nothing either.
+    let stamped = build_env_tasks(&spec, spec_dir, "9.9.9_20260808", &candidates, None)
+        .await
+        .expect("build_env_tasks succeeds");
+    assert!(
+        stamped.is_empty(),
+        "a build stamp of an unknown release must not resolve the locked one: {:?}",
+        stamped.iter().map(|t| t.normalized_version.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn plan_entry_lookup_accepts_the_bare_version_of_a_stamped_entry() {
+    // The env plan ALWAYS stamps its entry tag, while a hand-run
+    // `pipeline prepare --version 1.0.0 --plan plan.json` names the bare
+    // release. An equality-only lookup missed it and yielded an empty
+    // allowed-platform set, which composes no env at all.
+    let entry = PlanVersionEntry {
+        version: "1.0.0_20260808".to_string(),
+        platforms: vec!["linux/amd64".to_string()],
+        kind: crate::command::package::pipeline::plan::PlanVersionKind::New,
+        source_version: "1.0.0".to_string(),
+        variant: None,
+        assets: Vec::new(),
+        pylock: None,
+    };
+    let plan = PlanReport {
+        schema_version: 3,
+        has_new: true,
+        has_drift: false,
+        versions: vec![entry],
+        target: "ocx.sh/acme".to_string(),
+        ocx_mirror_rev: None,
+    };
+
+    for requested in ["1.0.0", "1.0.0_20260808", "1.0.0_20260809120000"] {
+        assert!(
+            plan_entry_for_version(&plan, requested).is_some(),
+            "'{requested}' must resolve the stamped plan entry"
+        );
+    }
+    assert!(
+        plan_entry_for_version(&plan, "2.0.0").is_none(),
+        "a different release must not resolve this entry"
+    );
 }
 
 #[tokio::test]
