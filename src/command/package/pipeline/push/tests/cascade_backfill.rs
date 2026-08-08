@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use std::collections::BTreeMap;
+
 use super::super::*;
+use crate::command::package::pipeline::patch::patch_push_args;
 use crate::pipeline::ocx_cli::push::build_push_args;
+use crate::pipeline::target_registry;
 
 // ── Backfill cascade repair (BUG3) ────────────────────────────────────
 
