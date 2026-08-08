@@ -32,6 +32,12 @@
 //! `PATH`; ABI mismatch (parsed from [`RepackedWheel::filename`](crate::repack::RepackedWheel))
 //! fails here at compose, not at run.
 //!
+//! Every composition also carries a `python` entrypoint of its own — with no
+//! `command` and no `args`, so it dispatches to the private interpreter's real
+//! binary — unless a wheel already declared a console script by that name. It
+//! is what makes a bare `python` in a spec's test script reach the pinned
+//! interpreter instead of the host's.
+//!
 //! Which wheels' scripts synthesize is governed by
 //! [`EnvSpec::entrypoint_selection`] — see [`EntrypointSelection`] for the
 //! mode table, the fail-closed collision/miss errors, and the spawn-parity
@@ -265,9 +271,11 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
             // `python`, NOT `python3`: python-build-standalone ships
             // `python`/`pythonw` on Windows only, so a `python3` dispatch finds
             // nothing in the package there and falls through to the WindowsApps
-            // store-alias stub, which hangs. `python` resolves inside the
-            // interpreter package on every PBS platform under ocx 0.5.3's
-            // package-first command resolution (`Env::resolve_test_command`).
+            // store-alias stub, which hangs. `ocx launcher exec` resolves this
+            // command on the SELF-view PATH, which carries the private
+            // interpreter's `bin/` but not this package's own `entrypoints/`
+            // (see the `python` entrypoint synthesized in step 3b) — so it lands
+            // on the interpreter's real binary, never on a launcher.
             let entrypoint: Entrypoint = serde_json::from_value(json!({
                 "command": "python",
                 "args": ["-c", shim],
@@ -288,6 +296,29 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
             }
         }
     }
+
+    // 3b. The composed env always also carries `python` itself: a spec's test
+    //     script — and anything the app shells out to — must reach the
+    //     interpreter this package pinned, not whatever the host happens to
+    //     have. Without this entry a bare `python` resolves to the host copy
+    //     under `ocx package test`, and on a container image that ships none
+    //     (ubuntu, alpine, fedora) it fails to spawn at all.
+    //
+    //     `python`, NOT `python3` — same PBS-on-Windows reason as the dispatch
+    //     command above.
+    //
+    //     No `command` and no `args`: `Entrypoints::dispatch_command` then
+    //     returns the name verbatim and `ocx launcher exec` resolves it on the
+    //     SELF-view PATH. `Entrypoints::IMPLICIT_VISIBILITY` is INTERFACE, so
+    //     the root's own `entrypoints/` does not cross onto the private surface
+    //     while the private interpreter's `bin/` does — the launcher resolves to
+    //     the real interpreter and structurally cannot recurse onto itself.
+    //
+    //     `or_default` never clobbers: a wheel that genuinely declares a
+    //     `python` console script keeps its own shim.
+    entries
+        .entry(EntrypointName::try_from("python").expect("`python` matches the entrypoint-name slug pattern"))
+        .or_default();
 
     let entrypoints = Entrypoints::new(entries);
 
@@ -713,21 +744,21 @@ mod tests {
     }
 
     #[test]
-    fn library_wheel_with_no_scripts_composes_without_entrypoints() {
+    fn library_wheel_with_no_scripts_composes_without_console_script_entrypoints() {
         // A library env (no console scripts of its own — e.g.
-        // google-cloud-aiplatform) composes to an empty entrypoints map, which
-        // `Bundle` skip-serializes; it is not a compose failure.
+        // google-cloud-aiplatform) is not a compose failure; it just carries
+        // nothing beyond the always-present `python`.
         let spec = env_spec(&[], &[], "cp313");
         let wheels = vec![wheel(PURE_WHEEL, Vec::new())];
         let composition = compose_env(&spec, &wheels).expect("composition succeeds");
-        assert!(
-            composition
-                .metadata
-                .entrypoints()
-                .expect("entrypoints present")
-                .is_empty(),
-            "a library env synthesizes no entrypoints"
-        );
+        let names: Vec<&str> = composition
+            .metadata
+            .entrypoints()
+            .expect("entrypoints present")
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(names, ["python"], "a library env synthesizes no console scripts");
     }
 
     #[test]
@@ -966,6 +997,63 @@ mod tests {
         assert!(
             matches!(error, ComposeError::MissingEntrypoint { ref name } if name == "ghost"),
             "got {error:?}"
+        );
+    }
+
+    // ── The always-present `python` entrypoint ──────────────────────────────
+
+    #[test]
+    fn python_entrypoint_is_always_synthesized_alongside_console_scripts() {
+        // Regression: without this entry the composed package ships no `python`
+        // launcher, so a test script's bare `python` resolves to the HOST
+        // interpreter under `ocx package test` (or fails to spawn at all on a
+        // container image that has none).
+        let spec = env_spec(&[], &[], "cp313");
+        let wheels = vec![wheel(PURE_WHEEL, vec![console_script("mytool", "mod:func", &[])])];
+
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        let entrypoints = composition.metadata.entrypoints().expect("entrypoints present");
+        let (_, python) = entrypoints
+            .iter()
+            .find(|(name, _)| name.as_str() == "python")
+            .expect("every env carries a `python` entrypoint");
+        // No `command`, so `Entrypoints::dispatch_command` returns the name
+        // verbatim and `ocx launcher exec` resolves it on the self-view PATH —
+        // where the root's own `entrypoints/` is absent and the private
+        // interpreter's `bin/` is present. A `command: python` would resolve
+        // identically; leaving it unset is what makes the no-recursion
+        // property structural rather than incidental.
+        assert!(
+            python.command().is_none(),
+            "the `python` entrypoint dispatches its own name, not a divergent command"
+        );
+        assert!(
+            python.args().is_empty(),
+            "the `python` entrypoint bakes no args — user argv passes through verbatim"
+        );
+        assert!(
+            entrypoints.iter().any(|(name, _)| name.as_str() == "mytool"),
+            "synthesizing `python` must not displace a console script"
+        );
+        assert!(
+            !entrypoints.iter().any(|(name, _)| name.as_str() == "python3"),
+            "only `python` is synthesized: python-build-standalone has no `python3` on Windows"
+        );
+    }
+
+    #[test]
+    fn wheel_declared_python_console_script_is_not_clobbered() {
+        // A wheel that genuinely ships a `python` console script keeps its own
+        // shim; the synthesized fallback must never overwrite it.
+        let spec = env_spec(&[], &[], "cp313");
+        let wheels = vec![wheel(PURE_WHEEL, vec![console_script("python", "mod:main", &[])])];
+
+        let composition = compose_env(&spec, &wheels).expect("composition succeeds");
+        let args = sole_entrypoint_args(&composition, "python");
+        assert!(
+            args[1].contains("importlib.import_module(\"mod\")"),
+            "a wheel-declared `python` script keeps its own shim: {}",
+            args[1]
         );
     }
 
