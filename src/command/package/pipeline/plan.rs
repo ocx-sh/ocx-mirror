@@ -23,10 +23,10 @@ use ocx_python::{
 use serde::{Deserialize, Serialize};
 
 use crate::command::package::options::OutputFormat;
-use crate::command::package::pipeline::push::pep440_sort_key;
 use crate::command::package::sync::list_upstream_versions;
 use crate::error::MirrorError;
 use crate::filter;
+use crate::filter::pep440_sort_key;
 use crate::normalizer;
 use crate::pipeline::lock_derive;
 use crate::pipeline::orchestrator::{self, ExpectedMetadata, MetadataPlan};

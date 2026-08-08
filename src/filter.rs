@@ -149,8 +149,60 @@ pub fn filter_versions(
     versions
 }
 
+/// Total-order sort key for a PEP 440 version string:
+/// `(parsed version, original text)`.
+///
+/// `None` sorts before `Some`, so an unparseable tag lands first and the
+/// newest parseable version is LAST — which is what every "newest = last
+/// element" reader here relies on. The text tiebreaks equal parses so the key
+/// is a total order on distinct strings.
+///
+/// It replaces a pairwise comparator of the shape
+/// `match (parse(a), parse(b)) { (Some, Some) => semver, _ => text }`, which is
+/// not transitive and therefore not a valid `sort_by` predicate: with
+/// `"10.0.0"`, `"3.0.0"` and `"2.0rc1"` (the last unparseable by
+/// `ocx_lib::Version`) it yields `10.0.0 > 3.0.0 > 2.0rc1 > 10.0.0` — a cycle,
+/// for which `slice::sort_by` documents an unspecified order and permits a
+/// panic. Here that order decides push order and which version `:latest`
+/// lands on.
+///
+/// `uv_pep440` rather than `ocx_lib::package::version::Version`: upstream
+/// Python versions are PEP 440 (`0.0.0.2`, `2.0.0.dev0`), which the ≤3-component
+/// OCX parser rejects. The `Version::parse` check that decides `--cascade`
+/// stays as it is — that one asks a different question ("can ocx derive
+/// rolling tags from this?").
+pub(crate) fn pep440_sort_key(version: &str) -> (Option<ocx_python::uv_pep440::Version>, String) {
+    (version.parse().ok(), version.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pep440_sort_key_is_a_total_order_over_versions_the_ocx_parser_rejects() {
+        // The replaced comparator was `(Some, Some) => semver, _ => text`, which
+        // on this exact triple cycles: `ocx_lib::Version` rejects `2.0rc1`, so
+        // 10.0.0 > 3.0.0 (semver), 3.0.0 > 2.0rc1 (text) and 2.0rc1 > 10.0.0
+        // (text). `sort_by` leaves the result unspecified for such a predicate.
+        let mut versions = vec![
+            "10.0.0".to_string(),
+            "3.0.0".to_string(),
+            "2.0rc1".to_string(),
+            "2.0".to_string(),
+            "0.0.0.2".to_string(),
+        ];
+        versions.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(versions, ["0.0.0.2", "2.0rc1", "2.0", "3.0.0", "10.0.0"]);
+
+        // Newest LAST is the contract every `.last()` reader here depends on.
+        assert_eq!(versions.last().map(String::as_str), Some("10.0.0"));
+
+        // A tag no PEP 440 parser accepts sorts first, so it can never be
+        // mistaken for the newest.
+        let mut mixed = vec!["nightly".to_string(), "1.0.0".to_string()];
+        mixed.sort_by_key(|v| pep440_sort_key(v));
+        assert_eq!(mixed, ["nightly", "1.0.0"]);
+    }
+
     use ocx_lib::oci::Platform;
     use url::Url;
 

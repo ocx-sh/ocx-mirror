@@ -17,6 +17,7 @@ use ocx_lib::publisher::Publisher;
 use crate::command::package::pipeline::patch::patch_push_args;
 use crate::command::package::pipeline::plan;
 use crate::error::MirrorError;
+use crate::filter::pep440_sort_key;
 use crate::junit::{self, JunitTestcase};
 use crate::pipeline::ocx_cli::announce::{
     ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, invoke_announce,
@@ -865,32 +866,6 @@ fn registry_tag_newer_than<'a>(tags: &'a [String], version: &str) -> Option<&'a 
             let key = pep440_sort_key(tag);
             key.0.is_some() && key > own_key
         })
-}
-
-/// Total-order sort key for a PEP 440 version string:
-/// `(parsed version, original text)`.
-///
-/// `None` sorts before `Some`, so an unparseable tag lands first and the
-/// newest parseable version is LAST — which is what every "newest = last
-/// element" reader here relies on. The text tiebreaks equal parses so the key
-/// is a total order on distinct strings.
-///
-/// It replaces a pairwise comparator of the shape
-/// `match (parse(a), parse(b)) { (Some, Some) => semver, _ => text }`, which is
-/// not transitive and therefore not a valid `sort_by` predicate: with
-/// `"10.0.0"`, `"3.0.0"` and `"2.0rc1"` (the last unparseable by
-/// `ocx_lib::Version`) it yields `10.0.0 > 3.0.0 > 2.0rc1 > 10.0.0` — a cycle,
-/// for which `slice::sort_by` documents an unspecified order and permits a
-/// panic. Here that order decides push order and which version `:latest`
-/// lands on.
-///
-/// `uv_pep440` rather than `ocx_lib::package::version::Version`: upstream
-/// Python versions are PEP 440 (`0.0.0.2`, `2.0.0.dev0`), which the ≤3-component
-/// OCX parser rejects. The `Version::parse` check that decides `--cascade`
-/// stays as it is — that one asks a different question ("can ocx derive
-/// rolling tags from this?").
-pub(crate) fn pep440_sort_key(version: &str) -> (Option<ocx_python::uv_pep440::Version>, String) {
-    (version.parse().ok(), version.to_string())
 }
 
 // ── Backfill cascade repair ──────────────────────────────────────────────────
