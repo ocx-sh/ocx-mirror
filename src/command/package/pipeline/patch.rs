@@ -47,12 +47,13 @@ use ocx_lib::publisher::{ArchiveMediaType, Publisher};
 
 use crate::command::package::pipeline::announce;
 use crate::command::package::pipeline::plan::{image_drift, leaf_versions};
-use crate::command::package::pipeline::push::{
-    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, PUSH_TIMEOUT, TagSource, announce_token, build_push_args, invoke_announce,
-    push_once, resolve_ocx_binary,
-};
 use crate::command::package::target_registry::{self, PublishedImage};
 use crate::error::MirrorError;
+use crate::pipeline::ocx_cli::announce::{
+    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, invoke_announce,
+};
+use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, build_push_args, push_once};
+use crate::pipeline::ocx_cli::resolve_ocx_binary;
 use crate::pipeline::orchestrator;
 use crate::spec::{self, MirrorSpec};
 

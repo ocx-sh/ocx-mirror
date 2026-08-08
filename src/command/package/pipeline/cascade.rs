@@ -44,11 +44,11 @@ use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
 
 use crate::command::package::pipeline::announce;
-use crate::command::package::pipeline::push::{
-    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, forward_ocx_env, invoke_announce,
-    resolve_ocx_binary,
-};
 use crate::error::MirrorError;
+use crate::pipeline::ocx_cli::announce::{
+    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, invoke_announce,
+};
+use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
 use crate::spec;
 
 /// `ocx-mirror package pipeline cascade` subcommand.

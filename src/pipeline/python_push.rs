@@ -27,8 +27,8 @@ use ocx_lib::oci::Identifier;
 use ocx_lib::publisher::Publisher;
 
 use super::python_prepare::{EnvLayer, EnvManifest};
-use crate::command::package::pipeline::push::{PUSH_TIMEOUT, push_once};
 use crate::command::package::target_registry;
+use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, push_once};
 use crate::run_summary::LayerReuse;
 use crate::spec::MirrorSpec;
 
@@ -226,7 +226,7 @@ pub(crate) async fn invoke_env_push(
     let args = build_env_push_args(platform, target_ref, metadata_path, layers, annotations, cascade)?;
     let ocx_binary = crate::pipeline::ocx_cli::resolve_ocx_binary()?;
 
-    let report = crate::command::package::pipeline::push::push_with_retry(
+    let report = crate::pipeline::ocx_cli::push::push_with_retry(
         &ocx_binary,
         &args,
         spec.concurrency.max_retries,

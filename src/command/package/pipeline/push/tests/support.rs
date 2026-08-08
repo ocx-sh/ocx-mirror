@@ -4,6 +4,7 @@
 //! Helpers shared by more than one `pipeline push` test module.
 
 use super::super::*;
+use crate::run_summary::LayerReuse;
 
 /// Serialises every test that drives a push against the process env it
 /// reads — `OCX_MIRROR_JOB_URL`, `OCX_BINARY_PIN` and the announce token.

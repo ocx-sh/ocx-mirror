@@ -3,6 +3,7 @@
 
 use super::super::*;
 use super::support::*;
+use crate::run_summary::LayerReuse;
 use crate::run_summary::VersionStatus;
 use tempfile::tempdir;
 

@@ -1,13 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Shared helpers for driving the `ocx` binary as a subprocess.
+//! Driving the `ocx` binary as a subprocess.
 //!
 //! Both the archive push/describe legs (`command::package::pipeline`) and the
 //! pylock env-push leg (`pipeline::python_push`) shell out to `ocx package …`.
-//! These two helpers — binary resolution and `OCX_*` env forwarding — live at
-//! the pipeline layer so every subprocess caller shares one implementation
-//! (rather than reaching across the module tree into a single command's file).
+//! The whole subprocess boundary lives here at the pipeline layer so every
+//! caller shares one implementation: this module owns binary resolution and
+//! `OCX_*` env forwarding, [`push`] owns the `ocx package push` invocation and
+//! its retry ladder, and [`announce`] owns `ocx package announce`.
+//!
+//! It was previously split — the two helpers here, the invocations inside
+//! `command::package::pipeline::push` — which made a command module the owner
+//! of plumbing the layer below it needed, and `pipeline::python_push` had to
+//! reach upward to get at it.
+
+pub(crate) mod announce;
+pub(crate) mod push;
 
 use std::path::PathBuf;
 
