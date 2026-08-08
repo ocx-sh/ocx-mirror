@@ -1,0 +1,8 @@
+# expect: python: required
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app

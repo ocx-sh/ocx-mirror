@@ -40,55 +40,6 @@ assets:
 }
 
 #[test]
-fn validate_tag_pattern_without_version_group() {
-    let yaml = r#"
-name: cmake
-target:
-  registry: ocx.sh
-  repository: cmake
-source:
-  type: github_release
-  owner: Kitware
-  repo: CMake
-  tag_pattern: "^v(\\d+\\.\\d+\\.\\d+)$"
-assets:
-  linux/amd64:
-    - "cmake-.*\\.tar\\.gz"
-"#;
-
-    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    let errors = spec.validate(Path::new("test.yaml"));
-    assert!(
-        errors.iter().any(|e| e.contains("version")),
-        "Expected version group error, got: {errors:?}"
-    );
-}
-
-#[test]
-fn validate_invalid_regex_in_assets() {
-    let yaml = r#"
-name: cmake
-target:
-  registry: ocx.sh
-  repository: cmake
-source:
-  type: github_release
-  owner: Kitware
-  repo: CMake
-assets:
-  linux/amd64:
-    - "[invalid"
-"#;
-
-    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    let errors = spec.validate(Path::new("test.yaml"));
-    assert!(
-        errors.iter().any(|e| e.contains("regex")),
-        "Expected regex error, got: {errors:?}"
-    );
-}
-
-#[test]
 fn reject_url_index_with_neither_url_nor_versions_nor_generator() {
     let yaml = r#"
 name: test
@@ -156,30 +107,6 @@ assets:
     } else {
         panic!("Expected UrlIndex Generator source, got: {:?}", spec.source);
     }
-}
-
-#[test]
-fn validate_generator_empty_command() {
-    let yaml = r#"
-name: test
-target:
-  registry: localhost:5000
-  repository: test
-source:
-  type: url_index
-  generator:
-    command: []
-assets:
-  linux/amd64:
-    - "test\\.tar\\.gz"
-"#;
-
-    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    let errors = spec.validate(Path::new("test.yaml"));
-    assert!(
-        errors.iter().any(|e| e.contains("non-empty")),
-        "Expected empty command error, got: {errors:?}"
-    );
 }
 
 #[test]

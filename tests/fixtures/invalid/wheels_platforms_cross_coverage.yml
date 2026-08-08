@@ -1,0 +1,18 @@
+# expect: base platform 'linux/arm64' is not declared under 'platforms'
+# expect: platforms.linux/amd64: no wheels key covers this platform
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  "linux/arm64+libc.glibc": ~
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest

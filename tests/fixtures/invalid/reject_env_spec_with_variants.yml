@@ -1,0 +1,20 @@
+# expect: variants: not supported for source.type 'pylock'
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
+variants:
+  - name: musl
+    default: true
+    assets:
+      linux/amd64:
+        - "acme-.*-musl\\.tar\\.gz"

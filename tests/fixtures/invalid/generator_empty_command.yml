@@ -1,0 +1,12 @@
+# expect: non-empty
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: url_index
+  generator:
+    command: []
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"

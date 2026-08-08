@@ -1,0 +1,21 @@
+# expect: exactly one variant must be default, found 2
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    assets:
+      linux/amd64:
+        - "test-debug\\.tar\\.gz"
+  - name: release
+    default: true
+    assets:
+      linux/amd64:
+        - "test-release\\.tar\\.gz"

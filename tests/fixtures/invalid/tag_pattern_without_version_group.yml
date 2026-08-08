@@ -1,0 +1,13 @@
+# expect: version
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "cmake-.*\\.tar\\.gz"

@@ -1,0 +1,16 @@
+# expect: invalid name
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: Debug-Build
+    default: true
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"

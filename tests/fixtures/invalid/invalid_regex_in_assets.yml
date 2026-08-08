@@ -1,0 +1,12 @@
+# expect: regex
+name: cmake
+target:
+  registry: ocx.sh
+  repository: cmake
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+assets:
+  linux/amd64:
+    - "[invalid"

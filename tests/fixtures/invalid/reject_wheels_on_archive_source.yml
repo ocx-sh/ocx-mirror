@@ -1,0 +1,15 @@
+# expect: wheels: only supported for source.type 'pylock'/'pypi'
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+wheels:
+  linux/amd64: ~

@@ -1,0 +1,20 @@
+# expect: duplicate
+name: test
+target:
+  registry: ocx.sh
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+variants:
+  - name: debug
+    default: true
+    assets:
+      linux/amd64:
+        - "test\\.tar\\.gz"
+  - name: debug
+    assets:
+      linux/amd64:
+        - "test2\\.tar\\.gz"
