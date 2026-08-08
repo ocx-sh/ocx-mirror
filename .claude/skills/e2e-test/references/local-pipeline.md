@@ -140,9 +140,9 @@ inside the private interpreter package, not the host.
 - `ocx-mirror` has no `--version` flag.
 - rtk-filtered `git status`/diff output is unreliable for load-bearing
   checks — use `rtk proxy git …`.
-- Registry state persists across runs — re-pushing a version re-points
-  bare tags (see F2 in the 2026-08-08 findings). Use fresh `it/*` repo
-  names per run, or wipe the registry volume.
+- Registry state persists across runs — a same-day re-push under
+  `build_timestamp: date` produces the same tag and re-points it. Use
+  fresh `it/*` repo names per run, or wipe the registry volume.
 
 ## What this tier proves / doesn't
 
@@ -150,6 +150,6 @@ Proves: spec parsing of the real fleet, plan against live sources, real
 downloads, bundle/compose, push + cascade math + wheel-layer registration,
 JUnit verdict wiring, runtime viability of published packages.
 Does NOT prove: real `ocx package test` container legs (JUnit is
-fabricated green — a red container matrix like pipx's F1 only shows up in
-Tier 2 or a manual `ocx package test`), multi-platform index merge,
+fabricated green — a red container matrix only shows up in Tier 2 or a
+manual `ocx package test`), multi-platform index merge,
 `+libc.*` gating across legs, announce/index PRs, GHA workflow semantics.
