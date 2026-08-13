@@ -18,6 +18,12 @@ Users: repo operators publishing tool mirrors; runs locally and in GitHub Action
 Comparable tools: aqua registry, mise/asdf backends, ubi, `crane`/`oras` (raw OCI copy).
 Research keywords: OCI artifacts, ORAS, GitHub Releases API, cascade tags, registry mirroring.
 
+Principle: every ocx-mirror capability is reachable as **one command** an operator
+can paste into any CI system; rendered pipelines are a GitHub-only convenience,
+never the only path. Corporate users run GitLab, Jenkins, or a cron box, and
+their runners, proxies, and auth are not ours to model — ship the command,
+document the four-line job, let them own the pipeline.
+
 ## Layout
 
 | Path | Purpose |
@@ -79,9 +85,16 @@ Releases: `task release:prepare` → human reviews → commit + tag + push
 (see README.md).
 
 Rules in `.claude/rules/` auto-load by path (`quality-rust`, `quality-core`,
-`quality-python`, `subsystem-mirror`, `workflow-*`,
+`quality-python`, `subsystem-mirror`, `security-threat-model`, `workflow-*`,
 `meta-plan-status`, `meta-ai-config`). Design records live in
 `.claude/artifacts/` (ADRs and design specs moved from the ocx mono-repo).
+
+**Every security review reads
+[security-threat-model.md](./.claude/rules/security-threat-model.md) first** — it
+defines who this project defends against (outside attackers; the execution
+environment is trusted, by owner ruling). A finding outside that boundary is not
+a finding. This applies to human review, `/security-review`, any reviewer agent
+in `security` focus, and any cross-model adversary pass.
 
 ## Skills & Workflow
 
