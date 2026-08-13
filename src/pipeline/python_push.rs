@@ -396,6 +396,7 @@ async fn write_wheel_registration_metadata(layer: &EnvLayer, platform: &str) -> 
         dependencies: Default::default(),
         entrypoints: Default::default(),
         binaries: None,
+        integrations: Default::default(),
     });
     let json = serde_json::to_string_pretty(&metadata)
         .map_err(|e| format!("failed to serialize wheel registration metadata: {e}"))?;

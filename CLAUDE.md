@@ -48,9 +48,16 @@ document the four-line job, let them own the pipeline.
   releases. CI asserts the fork source via `cargo tree -i oci-client`.
 - Dependency feature lists for deps shared with `ocx_lib`/`ocx_cli` are copied
   exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
-  bumps. **Since v0.4.1** (the upstream commit that extracted ocx-mirror)
-  `reqwest`, `rustls`, `octocrab`, `url` are mirror-owned — ocx dropped them, so
-  there is no upstream source of truth for these four.
+  bumps. `octocrab` and `url` are mirror-owned outright — no ocx equivalent
+  exists to sync against. `rustls` is mirror-owned too: ocx only pulls it as a
+  feature of its own `reqwest` dependency, never as a bare top-level
+  dependency, so there is nothing to copy. **Since v0.5.8** `reqwest` is back
+  in ocx's `[workspace.dependencies]` (`ocx_lib` depends on it directly) — but
+  at a different major version and feature set (`0.13`, `rustls`-only, plus a
+  separate `webpki-root-certs` dep) than ocx-mirror's own `0.12` pin. The two
+  versions coexist as separate crates in the lockfile; do not force them to
+  match — bump ocx-mirror's `reqwest` only when a build error demands it, not
+  to mirror ocx's choice.
 - Clone/checkout always `--recurse-submodules`.
 
 ## Build & Development
