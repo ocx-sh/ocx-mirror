@@ -56,6 +56,7 @@ use ocx_lib::package::metadata::bundle::{Bundle, Version as BundleVersion};
 use ocx_lib::package::metadata::dependency::Dependencies;
 use ocx_lib::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
 use ocx_lib::package::metadata::env::EnvBuilder;
+use ocx_lib::package::metadata::integrations::Integrations;
 
 use crate::naming::normalize_package_name;
 use crate::platform::{PythonTarget, TargetArchitecture, TargetOperatingSystem, TargetPlatform};
@@ -377,6 +378,9 @@ pub fn compose_env(spec: &EnvSpec, wheels: &[RepackedWheel]) -> Result<EnvCompos
         dependencies,
         entrypoints,
         binaries: Some(Binaries::default()),
+        // No vendor-namespaced config to attach for a synthesized Python env —
+        // absent and empty are the same wire state (unlike `binaries`' tri-state).
+        integrations: Integrations::default(),
     };
 
     Ok(EnvComposition {
