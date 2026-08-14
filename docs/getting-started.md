@@ -118,6 +118,20 @@ The workflows are generated files: edit the spec, re-run `ocx-mirror package pip
 
 Finally, configure two repository secrets so the push job can log in to the target registry: `OCX_MIRROR_REGISTRY_USER` and `OCX_MIRROR_REGISTRY_TOKEN`. Without them the pipeline still runs — in test/validation mode with the registry push skipped.
 
+## Mirroring a whole registry {#registry-mirror}
+
+Everything above mirrors **one tool** — a `mirror.yml` spec describing one upstream source and one destination repository. `ocx-mirror registry sync` is a different job: it copies an upstream OCX index's **whole catalog**, by digest, into a registry you control, and writes a servable index tree pointing at the copy. Point a fleet's `[registries]` config at that tree and every mirrored package resolves and installs without reaching the public internet.
+
+It reads a separate spec, `registry.yml`, not `mirror.yml`:
+
+```sh
+ocx-mirror registry sync
+```
+
+The spec path is optional — it defaults to `./registry.yml` — where `package sync` requires one, because a corporate mirror repository holds exactly one `registry.yml`, unlike a tool-mirror repository, which can hold many `mirror.yml` specs.
+
+Full field list and walkthrough — [`registry.yml` reference][ref-registry-yml]; all flags — [`registry sync` CLI reference][ref-cli-registry-sync].
+
 ## Next steps {#next}
 
 - Pin version windows, exclude broken releases per platform, and wire up Discord reports — [mirror.yml reference][ref-mirror-yml].
@@ -131,7 +145,9 @@ Finally, configure two repository secrets so the push job can log in to the targ
 
 <!-- internal -->
 [ref-mirror-yml]: ./reference/mirror-yml.md
+[ref-registry-yml]: ./reference/registry-yml.md
 [ref-build-timestamp]: ./reference/mirror-yml.md#build-timestamp
 [ref-cascade]: ./reference/mirror-yml.md#cascade
 [ref-cli]: ./reference/cli.md
+[ref-cli-registry-sync]: ./reference/cli.md#registry-sync
 [ref-environment]: ./reference/environment.md
