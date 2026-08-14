@@ -1002,8 +1002,36 @@ async fn a_blob_body_longer_than_its_declared_size_is_refused() {
     sink.write_all(b"12345").await.expect("a body within its declaration");
     assert_eq!(buffer, b"12345", "accepted bytes must reach the buffer unchanged");
 
-    // Past it: refused rather than truncated. Truncating would hand the digest
-    // check a body the source never sent and blame the wrong party.
+    // The running budget, not just the per-chunk check. reqwest yields many
+    // small frames, so a sink that checks each chunk against `remaining` but
+    // never *spends* it accepts unlimited total bytes while passing every
+    // individual check — which is the unbounded-memory defect this exists to
+    // stop. One oversized write would not catch that; an accumulation past the
+    // budget in chunks that each fit is the only shape that does.
+    let mut buffer = Vec::new();
+    let mut sink = BoundedSink {
+        buffer: &mut buffer,
+        remaining: 10,
+    };
+    for chunk in 0..3 {
+        sink.write_all(b"abc")
+            .await
+            .unwrap_or_else(|error| panic!("chunk {chunk} is within the running budget: {error}"));
+    }
+    let error = sink
+        .write_all(b"abcd")
+        .await
+        .expect_err("the fourth chunk crosses the budget even though it fits on its own");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+    assert_eq!(
+        buffer.len(),
+        9,
+        "a refused chunk must not be partially written: {buffer:?}"
+    );
+
+    // Past it in one write: refused rather than truncated. Truncating would
+    // hand the digest check a body the source never sent and blame the wrong
+    // party.
     let mut buffer = Vec::new();
     let mut sink = BoundedSink {
         buffer: &mut buffer,
@@ -1017,5 +1045,43 @@ async fn a_blob_body_longer_than_its_declared_size_is_refused() {
     assert!(
         error.to_string().contains("longer than its descriptor declared"),
         "the refusal must say which party lied: {error}"
+    );
+}
+
+/// Both manifest walks must **descend** the counter, not merely carry it.
+///
+/// `within_depth` has its own test, but a test of the predicate says nothing
+/// about its use: recursing with `depth` instead of `depth + 1` leaves every
+/// call at level 0, so the ceiling is never reached and the unbounded recursion
+/// is reinstated silently. No unit test can catch that — both walks fetch over
+/// the network before they recurse — so it is asserted structurally.
+#[test]
+fn both_manifest_walks_descend_the_depth_counter() {
+    let body = module_source_without_comments();
+
+    for walk in ["copy_manifest_tree_at", "missing_descriptors_at"] {
+        let recursion = body
+            .match_indices(walk)
+            .nth(2)
+            .unwrap_or_else(|| panic!("`{walk}` should appear as definition, wrapper call, and recursion"))
+            .0;
+        let tail = &body[recursion..];
+        let call_end = tail
+            .find("))")
+            .unwrap_or_else(|| panic!("`{walk}`'s recursive call should be delimited"));
+        assert!(
+            tail[..call_end].contains("depth + 1"),
+            "`{walk}` must recurse with `depth + 1`; carrying `depth` unchanged pins every \
+             level at 0 and reinstates the unbounded recursion MANIFEST_DEPTH_CEILING exists \
+             to stop:\n{}",
+            &tail[..call_end]
+        );
+    }
+
+    // Canary: if either walk is renamed, the loop above silently stops
+    // asserting anything, so pin that both entry points still exist.
+    assert!(
+        body.contains("async fn copy_manifest_tree_at") && body.contains("async fn missing_descriptors_at"),
+        "both depth-aware walks must exist under these names, or this guard tests nothing"
     );
 }
