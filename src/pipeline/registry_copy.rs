@@ -33,15 +33,18 @@ use crate::spec::{RegistrySource, Target};
 ///
 /// Applied post-hoc in both walks: `Index::fetch_manifest_raw_bytes` has
 /// already allocated by the time it returns, so what this bounds is what
-/// travels on, not what was read. The read itself is capped one layer down, by
-/// `ocx_lib`'s `Client::fetch_manifest_raw_bytes_capped`.
+/// travels on — parsed, recursed into, republished — never what was read.
+/// `ocx_lib`'s own `fetch_manifest_raw_bytes_capped` is post-hoc for the same
+/// reason and says so (its FU-3 note): the fork's `pull_manifest_raw` does a
+/// bare `res.bytes()`, so bounding the allocation needs a capped read on the
+/// transport itself and neither layer has one.
 ///
-/// It does **not** reach a referrers response, whatever an older revision of
-/// this line claimed: the fork's `Client::pull_referrers` does an uncapped
+/// It reaches a referrers response even less far, whatever an older revision
+/// of this line claimed: `Client::pull_referrers` does the same bare
 /// `res.bytes()` and exposes no capped variant, so [`detect_referrers`] has
-/// nothing to apply a bound with. Said here rather than left as a promise,
-/// because a comment claiming a cap that does not exist is worse than no cap —
-/// it is what stops the next reader looking.
+/// nothing to apply a bound *with* — not post-hoc, not at all. Said here
+/// rather than left as a promise, because a comment claiming a cap that does
+/// not exist is worse than no cap: it is what stops the next reader looking.
 pub const MANIFEST_FETCH_CEILING: usize = 32 * 1024 * 1024;
 
 /// Bound on a single blob's **declared** size, and — through it — on the body
