@@ -948,3 +948,74 @@ fn the_blob_permit_pool_is_never_constructed_inside_the_copy_engine() {
         "and the guard is worthless if the field it protects has been renamed away"
     );
 }
+
+// ── C-022 — the recursion depth ceiling ─────────────────────────────────────
+
+/// A chain of nested image indexes is refused before the stack is exhausted.
+///
+/// `manifests[]` entries may themselves be image indexes, and a descriptor says
+/// nothing about how deep the chain below it goes — so the walk's depth is
+/// chosen by the *source*. A few hundred bytes of authored JSON is enough to
+/// recurse until the stack dies. Digest cycles are not the risk (a child's
+/// digest covers its parent's bytes, so a cycle needs a sha256 preimage);
+/// depth alone is.
+#[test]
+fn a_manifest_nested_past_the_ceiling_is_refused() {
+    let digest = digest_of(0);
+
+    for depth in 0..=MANIFEST_DEPTH_CEILING {
+        assert!(
+            within_depth(&digest, depth).is_ok(),
+            "depth {depth} is within the ceiling and must be accepted — every real \
+             multi-platform artifact is depth 1, and an index of indexes is depth 2"
+        );
+    }
+
+    let error = within_depth(&digest, MANIFEST_DEPTH_CEILING + 1).expect_err("one past the ceiling is refused");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&digest.to_string()) && rendered.contains("deep"),
+        "the refusal must name the offending manifest and say why: {rendered}"
+    );
+}
+
+// ── C-023 — the blob body is held to its declared size ──────────────────────
+
+/// A body longer than its descriptor declared is refused mid-stream.
+///
+/// `BLOB_SIZE_CEILING` bounds the *declaration*, which bounds the
+/// pre-allocation. It bounds nothing about the **stream**: `pull_blob` writes
+/// the whole response into the sink and the digest is only checked afterwards,
+/// so a source declaring 1 KiB and then streaming forever exhausts memory
+/// before any verification runs. The declared size is a claim by the same party
+/// sending the bytes — this is what makes it load-bearing.
+#[tokio::test]
+async fn a_blob_body_longer_than_its_declared_size_is_refused() {
+    use tokio::io::AsyncWriteExt;
+
+    // Under the declaration: accepted, and the bytes land verbatim.
+    let mut buffer = Vec::new();
+    let mut sink = BoundedSink {
+        buffer: &mut buffer,
+        remaining: 8,
+    };
+    sink.write_all(b"12345").await.expect("a body within its declaration");
+    assert_eq!(buffer, b"12345", "accepted bytes must reach the buffer unchanged");
+
+    // Past it: refused rather than truncated. Truncating would hand the digest
+    // check a body the source never sent and blame the wrong party.
+    let mut buffer = Vec::new();
+    let mut sink = BoundedSink {
+        buffer: &mut buffer,
+        remaining: 4,
+    };
+    let error = sink
+        .write_all(b"123456789")
+        .await
+        .expect_err("a body past its declared size must be refused");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+    assert!(
+        error.to_string().contains("longer than its descriptor declared"),
+        "the refusal must say which party lied: {error}"
+    );
+}
