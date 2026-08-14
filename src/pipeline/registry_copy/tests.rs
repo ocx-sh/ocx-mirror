@@ -166,6 +166,75 @@ fn every_tag_is_copied_verbatim_whatever_its_text() {
     }
 }
 
+/// A tag the OCI grammar cannot express is dropped, and its legal siblings are
+/// still copied.
+///
+/// The traversal key is the one that matters. A tag reaches the destination as
+/// `.../manifests/{tag}` interpolated raw, and re-parsing that URL collapses
+/// `..` — so `../../../../../prod/critical-app/manifests/latest` resolves to
+/// `https://dest/v2/prod/critical-app/manifests/latest`, PUTting upstream bytes
+/// into a repository outside the prefix `physical_repository` enforces. Nothing
+/// else on the path judges a tag: `Reference::with_tag` is a plain struct
+/// literal, and only `FromStr` applies the reference regexp.
+///
+/// The legal half is asserted too, because dropping the whole package on one
+/// bad key would hand a hostile upstream a denial of service against the other
+/// tags — the fix has to be drop-and-continue, not fail-the-package.
+#[test]
+fn a_tag_the_oci_grammar_cannot_express_is_dropped_and_its_siblings_survive() {
+    let illegal = [
+        "../../../../../prod/critical-app/manifests/latest",
+        "has/slash",
+        ".leading-dot",
+        "-leading-dash",
+        "with space",
+        "",
+    ];
+    let legal = ["1.2.3", "latest", "3.31.0_20260731", "20260814", "_underscore-start"];
+
+    let tags: BTreeMap<String, RootTag> = illegal
+        .iter()
+        .chain(legal.iter())
+        .enumerate()
+        .map(|(seed, key)| ((*key).to_string(), root_tag(digest_of(seed as u8))))
+        .collect();
+
+    let plan = tag_copy_plan(&tags);
+    let copied: Vec<&str> = plan.iter().map(|entry| entry.tag.as_str()).collect();
+
+    for key in illegal {
+        assert!(
+            !copied.contains(&key),
+            "`{key}` is not expressible as an OCI tag and must never reach a destination URL: {copied:?}"
+        );
+    }
+    for key in legal {
+        assert!(
+            copied.contains(&key),
+            "`{key}` is a legal tag and dropping it would let one hostile key deny the rest: {copied:?}"
+        );
+    }
+    assert_eq!(copied.len(), legal.len(), "{copied:?}");
+}
+
+/// Grammar, not classification: the build-stamped and bare-date forms this
+/// project deliberately refuses to *parse* must still pass the grammar check.
+/// Roughly half of real upstream tags look like these, so a validator that
+/// reached for a version parser would silently stop mirroring most of a catalog.
+#[test]
+fn the_grammar_check_never_asks_what_a_tag_means() {
+    for tag in [
+        "3.31.0_20260731",
+        "20260814",
+        "nightly",
+        "edge",
+        "a1b2c3d",
+        "2026-08-14",
+    ] {
+        assert!(super::is_legal_oci_tag(tag), "`{tag}` must pass the grammar check");
+    }
+}
+
 /// An unparseable tag sorts **first**, so a date stamp or a git sha can never
 /// be mistaken for the newest release in a log or an interrupted run.
 #[test]
@@ -300,6 +369,63 @@ fn a_descriptor_the_mirror_cannot_transport_fails_closed() {
             "a malformed descriptor is permanent, not a transient fetch failure: {error}"
         );
         assert!(!error.is_whole_run_abort(), "it fails the package, never the run");
+    }
+}
+
+/// A descriptor's `size` is foreign data and it sizes the buffer `upload`
+/// allocates **before the first byte arrives**. `i64::MAX` clears the sibling
+/// non-negative guard, and `Vec::with_capacity` at that value clears its own
+/// capacity-overflow check too — so it reaches `handle_alloc_error`, which
+/// aborts the process rather than failing the package. Reachable whenever a
+/// blob is absent at the destination and the mount declines, which is every
+/// first sync.
+#[test]
+fn a_descriptor_declaring_an_absurd_size_is_refused_before_anything_allocates() {
+    let huge = descriptor(&digest_of(7), i64::MAX);
+
+    for manifest in [
+        image_manifest(descriptor(&digest_of(0), 1), vec![huge.clone()]),
+        image_manifest(huge.clone(), vec![]),
+        image_index(vec![index_entry(&digest_of(7), i64::MAX, None)]),
+    ] {
+        let error = child_references(&manifest).expect_err("an unbounded declared size must be refused");
+        let CopyError::MalformedManifest(message) = &error else {
+            panic!("an out-of-policy size is permanent, not a transient fetch failure: {error}");
+        };
+        assert!(
+            message.contains(&digest_of(7).to_string()),
+            "the refusal must name the offending descriptor: {message}"
+        );
+        assert!(!error.is_whole_run_abort(), "it fails the package, never the run");
+    }
+}
+
+/// The boundary itself, so the ceiling cannot drift into refusing the largest
+/// blob it is meant to admit.
+#[test]
+fn a_blob_at_the_ceiling_is_admitted_and_one_byte_past_it_is_not() {
+    let digest = digest_of(1).to_string();
+    let at = i64::try_from(BLOB_SIZE_CEILING).expect("the ceiling fits an i64");
+
+    assert_eq!(
+        descriptor_target(&digest, at).expect("the ceiling itself is legal"),
+        (digest_of(1), BLOB_SIZE_CEILING)
+    );
+    assert!(descriptor_target(&digest, at + 1).is_err(), "one byte past it is not");
+}
+
+/// Defence in depth at the allocation itself. `ensure_blob` is `pub`, so a
+/// caller reaching it with a size that never passed `descriptor_target` must
+/// still not be able to reach `handle_alloc_error`. The hint is only a hint —
+/// the `Vec` grows on demand — so clamping can never truncate a body.
+#[test]
+fn the_upload_buffer_hint_is_clamped_however_large_the_declared_size() {
+    let ceiling = usize::try_from(BLOB_SIZE_CEILING).expect("a 64-bit target");
+
+    assert_eq!(capacity_hint(0), 0);
+    assert_eq!(capacity_hint(4096), 4096, "an ordinary size is passed through");
+    for absurd in [BLOB_SIZE_CEILING + 1, u64::MAX] {
+        assert!(capacity_hint(absurd) <= ceiling, "{absurd} must not size an allocation");
     }
 }
 
@@ -514,6 +640,42 @@ async fn no_more_than_max_blobs_bodies_are_in_flight_at_once() {
     assert_eq!(observed, PERMITS, "and the pool must actually be saturated");
 }
 
+/// The probe half of the ceiling. The permit pool above bounds the bodies, but
+/// the destination probe deliberately sits outside it — and `layers[]` is
+/// foreign data with no bound of its own, so one manifest at the 32 MiB ceiling
+/// holds on the order of 2×10⁵ descriptors and would put that many
+/// simultaneous `HEAD`s against the destination.
+#[tokio::test]
+async fn no_more_than_the_fanout_ceiling_of_blobs_is_probed_at_once() {
+    const TASKS: usize = BLOB_FANOUT_CEILING * 3;
+
+    let in_flight = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
+
+    let work = (0..TASKS).map(|_| async {
+        let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok::<(), CopyError>(())
+    });
+    let outcomes = bounded_fanout(work).await.expect("nothing in this fixture fails");
+
+    assert_eq!(outcomes.len(), TASKS, "every blob is still visited");
+    let observed = peak.load(Ordering::SeqCst);
+    assert!(
+        observed <= BLOB_FANOUT_CEILING,
+        "{observed} probes were in flight, ceiling is {BLOB_FANOUT_CEILING}"
+    );
+    // Not `<=` alone: a serial drive satisfies that trivially, and the whole
+    // point of leaving the probe outside the blob permit is that it stays
+    // concurrent enough to keep an all-present re-run fast.
+    assert_eq!(
+        observed, BLOB_FANOUT_CEILING,
+        "and the fan-out must actually saturate the ceiling"
+    );
+}
+
 // ── C-024 — bounded referrer refusal ────────────────────────────────────────
 
 #[test]
@@ -578,6 +740,33 @@ fn only_a_non_authoritative_destination_read_aborts_the_run() {
     }
 
     assert!(CopyError::Abort(MirrorError::TargetError("503".to_string())).is_whole_run_abort());
+}
+
+/// `Abort` is the one variant that wraps an error rather than describing one,
+/// and the default `source()` drops that link — so anything walking the chain
+/// (a `{err:#}` render, a downcast, an exit-code classifier) never reaches the
+/// `MirrorError` the variant exists to carry.
+#[test]
+fn only_the_aborting_variant_hands_back_its_inner_error() {
+    use std::error::Error as _;
+
+    let abort = CopyError::Abort(MirrorError::TargetError("503".to_string()));
+    let source = abort.source().expect("the wrapped error stays reachable");
+    assert!(
+        matches!(source.downcast_ref::<MirrorError>(), Some(MirrorError::TargetError(_))),
+        "and it is the MirrorError itself, not a re-stringified copy"
+    );
+
+    for terminal in [
+        CopyError::SourceUnavailable("connection reset".to_string()),
+        CopyError::MalformedManifest("descriptor 'x' declares a negative size".to_string()),
+        CopyError::ContentMissing { content: digest_of(1) },
+    ] {
+        assert!(
+            terminal.source().is_none(),
+            "{terminal} carries its context as text, so the chain ends here"
+        );
+    }
 }
 
 // ── Counters ────────────────────────────────────────────────────────────────

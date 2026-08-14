@@ -317,13 +317,17 @@ That is also the repair mechanism. A run interrupted halfway leaves content at t
 
 ### Recovering a damaged tree {#repair}
 
-If the index tree itself is wrong — hand-edited, truncated, or with a catalog that disagrees with the documents beside it:
+If the index tree's catalog is wrong — hand-edited, drifted from the package documents beside it, or the catalog file itself is corrupt:
 
 ```sh
 ocx-mirror registry sync --repair-catalog
 ```
 
-This rebuilds the catalog from the package documents on disk. It is not part of a normal run: it walks every package in the tree, including ones your current filters exclude. Reach for it when the tree is the problem, not on a schedule.
+This rebuilds `c/index.json` from the package documents already on disk under `p/`. It is not part of a normal run: it walks every package in the tree, including ones your current filters exclude. Reach for it when the catalog is the problem, not on a schedule.
+
+!!! warning "A truncated or unparseable package document defeats `--repair-catalog` — delete it instead"
+
+    `--repair-catalog` reads every package document under `p/` to rebuild the catalog, and a single one it cannot parse aborts the whole rebuild before any entry is corrected — healthy packages included. An ordinary `registry sync` run does no better: it fails only that one package, permanently, since nothing in a normal run rewrites a document that is already on disk. The only recovery is to delete the damaged `p/<namespace>/<package>.json` file by hand. The next `registry sync` run then re-copies that package from the source and writes a fresh document in its place — `--repair-catalog` alone does not fetch anything, so it cannot restore a document that is gone.
 
 ### Seeing what a run would do {#dry-run}
 

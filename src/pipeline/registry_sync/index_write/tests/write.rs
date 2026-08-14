@@ -11,7 +11,11 @@ use super::support::*;
 
 /// Write one package the way C-030 orders it: dispatch objects, then the root
 /// inside a per-package transaction, then `commit`, then `config.json`.
-async fn publish(store: &IndexStore, objects: &[(Digest, Vec<u8>)], root: &[u8]) -> Result<(), MirrorError> {
+async fn publish(
+    store: &IndexStore,
+    objects: &std::collections::BTreeMap<Digest, Vec<u8>>,
+    root: &[u8],
+) -> Result<(), MirrorError> {
     write_dispatch_objects(store, AS_NAME, PACKAGE, objects).await?;
     let rewritten = rewrite_root(root, POINTER)?;
     let mut transaction = store
@@ -75,9 +79,14 @@ async fn a_bare_image_manifest_is_refused_as_a_dispatch_object() {
 
     // RED — a leaf manifest.
     let (manifest_digest, manifest) = image_manifest();
-    let error = write_dispatch_objects(&store, AS_NAME, PACKAGE, &[(manifest_digest.clone(), manifest)])
-        .await
-        .expect_err("a bare image manifest must be refused");
+    let error = write_dispatch_objects(
+        &store,
+        AS_NAME,
+        PACKAGE,
+        &std::collections::BTreeMap::from([(manifest_digest.clone(), manifest)]),
+    )
+    .await
+    .expect_err("a bare image manifest must be refused");
     assert!(refusal_message(&error).contains("not an OCI image index"), "{error:?}");
     assert!(
         !store.dispatch_object_path(AS_NAME, PACKAGE, &manifest_digest).exists(),
@@ -86,9 +95,14 @@ async fn a_bare_image_manifest_is_refused_as_a_dispatch_object() {
 
     // GREEN — a genuine image index of the same size class lands.
     let (index_digest, index) = image_index("child");
-    write_dispatch_objects(&store, AS_NAME, PACKAGE, &[(index_digest.clone(), index)])
-        .await
-        .expect("an image index is accepted");
+    write_dispatch_objects(
+        &store,
+        AS_NAME,
+        PACKAGE,
+        &std::collections::BTreeMap::from([(index_digest.clone(), index)]),
+    )
+    .await
+    .expect("an image index is accepted");
     assert!(store.dispatch_object_path(AS_NAME, PACKAGE, &index_digest).exists());
 }
 
@@ -101,9 +115,14 @@ async fn a_semantically_invalid_image_index_is_refused() {
     let bytes = serde_json::to_vec(&json!({ "schemaVersion": 1, "manifests": [] })).expect("serialize");
     let claimed = ocx_lib::oci::Algorithm::Sha256.hash(&bytes);
 
-    let error = write_dispatch_objects(&store, AS_NAME, PACKAGE, &[(claimed, bytes)])
-        .await
-        .expect_err("schemaVersion 1 is not a valid image index");
+    let error = write_dispatch_objects(
+        &store,
+        AS_NAME,
+        PACKAGE,
+        &std::collections::BTreeMap::from([(claimed, bytes)]),
+    )
+    .await
+    .expect_err("schemaVersion 1 is not a valid image index");
 
     assert!(refusal_message(&error).contains("schemaVersion"), "{error:?}");
 }
@@ -114,9 +133,14 @@ async fn a_dispatch_object_whose_digest_does_not_match_is_refused() {
     let (store, _output) = store(directory.path());
     let (_correct, bytes) = image_index("child");
 
-    let error = write_dispatch_objects(&store, AS_NAME, PACKAGE, &[(digest("a lie"), bytes)])
-        .await
-        .expect_err("the store re-verifies the digest itself");
+    let error = write_dispatch_objects(
+        &store,
+        AS_NAME,
+        PACKAGE,
+        &std::collections::BTreeMap::from([(digest("a lie"), bytes)]),
+    )
+    .await
+    .expect_err("the store re-verifies the digest itself");
 
     assert!(matches!(error, MirrorError::IndexWriteError(_)), "{error:?}");
 }
@@ -132,9 +156,13 @@ async fn a_refused_dispatch_object_leaves_no_root_behind() {
     let (manifest_digest, manifest) = image_manifest();
     let root = root_document("oci://ghcr.io/ocx-sh/cmake", &[("3.28.1", &digest("a"))]);
 
-    let error = publish(&store, &[(manifest_digest, manifest)], &root)
-        .await
-        .expect_err("the dispatch write fails first");
+    let error = publish(
+        &store,
+        &std::collections::BTreeMap::from([(manifest_digest, manifest)]),
+        &root,
+    )
+    .await
+    .expect_err("the dispatch write fails first");
 
     assert!(refusal_message(&error).contains("not an OCI image index"), "{error:?}");
     assert!(
@@ -153,9 +181,14 @@ async fn the_two_error_classes_carry_the_exit_codes_c040_assigns_them() {
 
     // Foreign data that will not validate → aggregating, exit 1.
     let (manifest_digest, manifest) = image_manifest();
-    let upstream = write_dispatch_objects(&store, AS_NAME, PACKAGE, &[(manifest_digest, manifest)])
-        .await
-        .expect_err("a bare image manifest is refused");
+    let upstream = write_dispatch_objects(
+        &store,
+        AS_NAME,
+        PACKAGE,
+        &std::collections::BTreeMap::from([(manifest_digest, manifest)]),
+    )
+    .await
+    .expect_err("a bare image manifest is refused");
     assert_eq!(
         upstream.kind_exit_code(),
         ocx_lib::cli::ExitCode::Failure,
@@ -243,9 +276,13 @@ async fn a_write_repair_write_cycle_is_byte_identical() {
     let (index_digest, index) = image_index("child");
     let root = root_document("oci://ghcr.io/ocx-sh/cmake", &[("3.28.1", &digest("a"))]);
 
-    publish(&store, &[(index_digest.clone(), index.clone())], &root)
-        .await
-        .expect("first publish");
+    publish(
+        &store,
+        &std::collections::BTreeMap::from([(index_digest.clone(), index.clone())]),
+        &root,
+    )
+    .await
+    .expect("first publish");
     let catalog_path = store.source_catalog_path(AS_NAME);
     let root_path = store.root_document_path(AS_NAME, PACKAGE);
     let catalog_after_write = std::fs::read(&catalog_path).expect("read catalog");
@@ -260,9 +297,13 @@ async fn a_write_repair_write_cycle_is_byte_identical() {
         "repair rewrote the catalog it re-derived from unchanged bytes"
     );
 
-    publish(&store, &[(index_digest, index)], &root)
-        .await
-        .expect("second publish");
+    publish(
+        &store,
+        &std::collections::BTreeMap::from([(index_digest, index)]),
+        &root,
+    )
+    .await
+    .expect("second publish");
     assert_eq!(std::fs::read(&catalog_path).expect("read catalog"), catalog_after_write);
     assert_eq!(std::fs::read(&root_path).expect("read root"), root_after_write);
 }
@@ -281,9 +322,13 @@ async fn repair_catalog_leaves_a_merged_root_untouched() {
         "oci://ghcr.io/ocx-sh/cmake",
         &[("3.28.1", &survivor), ("latest", &survivor)],
     );
-    publish(&store, &[(index_digest.clone(), index.clone())], &first)
-        .await
-        .expect("first publish");
+    publish(
+        &store,
+        &std::collections::BTreeMap::from([(index_digest.clone(), index.clone())]),
+        &first,
+    )
+    .await
+    .expect("first publish");
 
     // A partial second run: the source moved both tags on, only `3.28.1`
     // copied.
@@ -294,9 +339,13 @@ async fn repair_catalog_leaves_a_merged_root_untouched() {
     ))
     .expect("parse");
     let merged = merge_root_tags(&source, Some(&destination), &confirmed(&["3.28.1"])).expect("merge");
-    publish(&store, &[(index_digest, index)], &serialize_root(&merged))
-        .await
-        .expect("second publish");
+    publish(
+        &store,
+        &std::collections::BTreeMap::from([(index_digest, index)]),
+        &serialize_root(&merged),
+    )
+    .await
+    .expect("second publish");
 
     let before_repair = std::fs::read(store.root_document_path(AS_NAME, PACKAGE)).expect("read root");
     repair_catalog(&store, AS_NAME).await.expect("repair");
@@ -323,7 +372,13 @@ async fn nothing_but_wire_content_lands_under_output() {
     let (index_digest, index) = image_index("child");
     let root = root_document("oci://ghcr.io/ocx-sh/cmake", &[("3.28.1", &digest("a"))]);
 
-    publish(&store, &[(index_digest, index)], &root).await.expect("publish");
+    publish(
+        &store,
+        &std::collections::BTreeMap::from([(index_digest, index)]),
+        &root,
+    )
+    .await
+    .expect("publish");
 
     let listing = list_recursive(&output);
     assert_eq!(listing.first().map(String::as_str), Some(AS_NAME), "{listing:?}");

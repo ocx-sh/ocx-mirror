@@ -94,23 +94,7 @@ pub async fn execute_registry_sync(
     // ── Phase 0 — bootstrap ─────────────────────────────────────────────────
     let (cache_root, store) = bootstrap(spec, options).await?;
 
-    // Ahead of the pre-flight, not after it: a repaired `c/index.json` is what
-    // `should_skip`'s third condition compares against, so repairing later
-    // would leave this run re-copying every package the corrupt catalog
-    // disagreed about (C-034).
-    if options.repair_catalog {
-        for source in &spec.sources {
-            let outcome = index_write::repair_catalog(&store, source.as_name()).await?;
-            tracing::info!(
-                "repaired the catalog for source '{}': {} roots, {} added, {} corrected, {} removed",
-                outcome.source,
-                outcome.roots,
-                outcome.added.len(),
-                outcome.corrected.len(),
-                outcome.removed.len()
-            );
-        }
-    }
+    repair_catalogs(spec, options, &store).await?;
 
     // ── Phase 1 — pre-flight, over ALL sources ──────────────────────────────
     let mut sources = Vec::with_capacity(spec.sources.len());
@@ -157,10 +141,85 @@ async fn bootstrap(spec: &RegistrySpec, options: &RegistrySyncOptions) -> Result
         ))
     })?;
     let cache_root = cache::cache_root(options.cache_dir.as_deref());
-    let locks_dir = cache::locks_dir(&cache_root, &spec.output)?;
+    let locks_dir = cache::locks_dir(&cache_root, &spec.output).await?;
     // `with_locks_root` is mandatory and forgetting it is silent — the default
     // puts the lock directory inside the tree the operator serves and commits.
     Ok((cache_root, index_write::build_index_store(&spec.output, &locks_dir)))
+}
+
+/// `--repair-catalog`, over every source — **ahead of the pre-flight** (C-034).
+///
+/// Ahead of it, not after: a repaired `c/index.json` is what `should_skip`'s
+/// third condition compares against, so repairing later would leave this run
+/// re-copying every package the corrupt catalog disagreed about.
+///
+/// Two things the flag does *not* do:
+///
+/// - **Nothing at all under `--dry-run`** (C-043, S-019). `regenerate_catalog`
+///   rewrites `c/index.json` wholesale, dropping every entry whose root the tree
+///   lacks — the single most destructive write this binary makes into a served,
+///   committed tree, and `--dry-run`'s own promise is that it writes nothing.
+/// - **Nothing for a source whose subtree does not exist yet.** Repair is
+///   per-source, so an absent one is not a failure of the *run*: `bootstrap`
+///   creates `output:` alone, which makes absence the ordinary state of a first
+///   run and of every run that adds a source. `regenerate_catalog` refuses it —
+///   correctly, for `ocx index regenerate`, where a repair verb pointed at
+///   nothing is a user error — and that refusal is `IndexWriteError` (74), which
+///   aborts the whole run having repaired nothing, including the sources that
+///   were fine.
+///
+/// Only the absence is tolerated: the probe fails *closed*, and every other
+/// failure of the repair itself still aborts (C-040).
+///
+/// # Errors
+///
+/// [`MirrorError::IndexWriteError`] (74) for a local filesystem failure while
+/// re-deriving a catalog.
+async fn repair_catalogs(
+    spec: &RegistrySpec,
+    options: &RegistrySyncOptions,
+    store: &IndexStore,
+) -> Result<(), MirrorError> {
+    if !options.repair_catalog {
+        return Ok(());
+    }
+    if options.dry_run {
+        // Said, not silent: the operator asked for the repair and is not
+        // getting it, and a silent skip is indistinguishable from a repair that
+        // found nothing to do.
+        tracing::info!("--dry-run: not repairing any catalog, because a dry run writes nothing");
+        return Ok(());
+    }
+
+    for source in &spec.sources {
+        let as_name = source.as_name();
+        // The subtree, derived the way `regenerate_catalog` derives it —
+        // through `source_config_path`, the one public accessor that exposes
+        // it. `<subtree>/config.json` always has a parent; the fallback keeps
+        // the impossible branch on the fail-closed side rather than skipping.
+        let config_path = store.source_config_path(as_name);
+        let subtree = config_path.parent().unwrap_or(&config_path);
+        // `unwrap_or(true)` deliberately: a probe that could not answer is not
+        // an absence, so the repair runs and raises the real I/O failure.
+        if !tokio::fs::try_exists(subtree).await.unwrap_or(true) {
+            tracing::info!(
+                "nothing to repair for source '{as_name}': '{}' does not exist yet",
+                subtree.display()
+            );
+            continue;
+        }
+
+        let outcome = index_write::repair_catalog(store, as_name).await?;
+        tracing::info!(
+            "repaired the catalog for source '{}': {} roots, {} added, {} corrected, {} removed",
+            outcome.source,
+            outcome.roots,
+            outcome.added.len(),
+            outcome.corrected.len(),
+            outcome.removed.len()
+        );
+    }
+    Ok(())
 }
 
 /// One source after pre-flight — everything phase 2 needs, fetched once.
@@ -206,7 +265,7 @@ async fn prepare_source<'spec>(
     // `CatalogDocument` would change the digest of an unchanged source.
     let catalog_digest = Algorithm::Sha256.hash(&catalog_bytes).to_string();
 
-    let digest_path = cache::digest_file(cache_root, &spec.output, as_name)?;
+    let digest_path = cache::digest_file(cache_root, &spec.output, as_name).await?;
     let recorded_digest = cache::read_recorded_digest(&digest_path).await?;
     let local_catalog = store
         .read_source_catalog(as_name)
@@ -546,11 +605,13 @@ async fn write_package(
 ) -> Result<(), MirrorError> {
     // First, unconditionally: `root exists ⇒ its dispatch objects exist`
     // (C-033). Content-addressed and idempotent, so the ordering is free.
-    let dispatch: Vec<(Digest, Vec<u8>)> = objects
-        .iter()
-        .map(|(digest, bytes)| (digest.clone(), bytes.clone()))
-        .collect();
-    index_write::write_dispatch_objects(store, as_name, &package.name, &dispatch).await?;
+    //
+    // `objects` by reference, never rebuilt into a `Vec` of pairs: it holds one
+    // verified manifest body per distinct `content` digest for the whole
+    // package, and copying it to change container shape would double the one
+    // buffer that sits outside C-026's `max_blobs × largest_blob` ceiling —
+    // for a callee that only iterates it.
+    index_write::write_dispatch_objects(store, as_name, &package.name, objects).await?;
 
     // `Value` end to end so forward-compat fields ride through both sides
     // (C-047), then one key mutated (C-028).

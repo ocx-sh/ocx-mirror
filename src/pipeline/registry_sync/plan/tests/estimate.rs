@@ -33,3 +33,13 @@ fn each_distinct_digest_is_counted_once() {
 fn a_fully_warm_destination_estimates_zero() {
     assert_eq!(dry_run_byte_estimate(&[]), 0);
 }
+
+#[test]
+fn absurd_descriptor_sizes_saturate_instead_of_overflowing() {
+    // `size` is foreign data off an upstream manifest, so nothing upstream of
+    // this function bounds it. Summed unchecked, two near-maximum descriptors
+    // panic a debug build outright and wrap a release one to an under-count.
+    let missing = [(digest("a"), u64::MAX - 1), (digest("b"), u64::MAX - 1)];
+
+    assert_eq!(dry_run_byte_estimate(&missing), u64::MAX);
+}

@@ -62,8 +62,13 @@ pub fn report_results(results: &[MirrorResult], format: OutputFormat, printer: &
 
     match format {
         OutputFormat::Json => {
-            if let Ok(json) = serde_json::to_string_pretty(results) {
-                println!("{json}");
+            // Said, not swallowed: `--format json` emitting nothing is
+            // indistinguishable from a run that produced no results, and an
+            // all-succeeded run still exits 0 — so a silent `Err` here reads as
+            // success to whatever is parsing the output.
+            match serde_json::to_string_pretty(results) {
+                Ok(json) => println!("{json}"),
+                Err(error) => tracing::error!("cannot render the results as JSON: {error}"),
             }
         }
         OutputFormat::Plain => {

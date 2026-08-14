@@ -360,3 +360,37 @@ fn renders_without_panicking_under_dry_run_with_a_zero_byte_estimate() {
     report.estimated_bytes = Some(0);
     assert_renders_without_panicking(&report);
 }
+
+// ── The JSON arm's failure branch ───────────────────────────────────────────
+
+/// A serialization failure must be **reported**, never dropped.
+///
+/// Structural, and it has to be: every field of [`RegistrySyncReport`]
+/// serializes infallibly, so no fixture in this file — or anywhere — can drive
+/// `to_string_pretty` into its `Err`. That is precisely why the branch needs a
+/// guard rather than a test: nothing else would ever notice it being written
+/// back as a swallow, and the swallow's observable behaviour is
+/// **no output at all** under `--format json`, which for a run with no failed
+/// package also exits 0 — indistinguishable to a parser from a run that
+/// produced nothing.
+///
+/// Comments are stripped first: the branch's own comment explains the shape it
+/// replaced, and an unstripped scan would match that explanation instead of the
+/// code.
+#[test]
+fn the_json_arm_reports_a_serialization_failure_instead_of_dropping_it() {
+    let source: String = include_str!("../report.rs")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        source.contains(r#"Err(error) => tracing::error!("cannot render the run report as JSON: {error}")"#),
+        "the Err arm must log, and must carry the cause — a bare arm says only that something went wrong"
+    );
+    assert!(
+        !source.contains("if let Ok(json) = serde_json::to_string_pretty"),
+        "the `if let Ok` form has no Err arm at all, which is the swallow this guard exists to catch"
+    );
+}
