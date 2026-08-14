@@ -19,7 +19,9 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 |------|---------|
 | `command.rs` | Top-level `Command` dispatcher: `Package` (subcommand group) + `Schema`; threads printer + progress |
 | `command/package/mod.rs` | `PackageCommand` dispatcher: routes sync/check/validate/pipeline |
-| `command/registry/mod.rs` | **Reserved** namespace (registry-to-registry mirroring); documented placeholder, no live verb — see `adr_cli_namespace_restructure.md` |
+| `command/registry/mod.rs` | `RegistryCommand` dispatcher for `ocx-mirror registry <verb>` — currently just `Sync`; sibling to `command/package`, wired into the top-level `Command::Registry` arm |
+| `command/registry/sync.rs` | `registry sync` CLI verb (`Sync`): spec path positional (default `./registry.yml`) + `RegistrySyncOptions`; loads the spec, runs the sync, renders the report, maps the outcome to an exit code (C-045) |
+| `command/registry/options.rs` | `RegistrySyncOptions` — shared `registry` verb flags: `--dry-run`, `--fail-fast`, `--repair-catalog`, `--cache-dir`, `--format`; `pub(crate)` because `pipeline::registry_sync` takes it directly, the same upward edge `command/package/pipeline` already carries for `pipeline::python_push` |
 | `command/package/sync.rs` | Main sync command: spec → versions → filter → pipeline |
 | `pipeline/target_registry.rs` | Fail-safe target-registry state loading (`list_target_tags`, `fetch_published_platforms`, `extract_platforms`) shared by sync + plan + push + patch + `python_push`; only authoritative not-found counts as absent (issue #157). At the pipeline layer, not under `command/`, so the env-push leg reaches it without an upward edge |
 | `command/package/check.rs` | Dry-run sync |
@@ -64,6 +66,8 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
 | `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`, optional `schedule` putting the generated catch-up workflow on a timer — charset-checked by `validate_announce_config`); logical index name, spelled out — never derived from `target` |
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); the URL-reject validator itself is `spec/validate.rs::policy_check_notify` |
+| `spec/registry.rs` | `RegistrySpec` root (`registry.yml`) + `RegistrySource`, `RegistryConcurrency`, `OnError` — a different root type from `MirrorSpec`, not a variant of it (C-001…C-004, C-006); re-exported through `spec.rs` alongside `MirrorSpec`, `lib.rs` untouched (C-008) |
+| `spec/prescan.rs` | `pre_scan()` — raw-`serde_yaml_ng::Value` scan of the merged `registry.yml` document before typed deserialization: credential deny-list at any depth, the `kind:` discriminator, `sources[].index` userinfo (C-005); every rejection is `SpecUsageError` (64), no offending value ever echoed |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
 | `source/pylock.rs` | PEP 751 `pylock.toml` reader → single `VersionInfo` (the app's locked version, PEP 503 name match); wheel selection happens later in `plan.rs`/`prepare.rs` via `ocx_python` |
@@ -81,6 +85,15 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/push.rs` | Push to registry + cascade tag compute |
 | `pipeline/mirror_task.rs` | `MirrorTask`: self-contained work unit |
 | `pipeline/mirror_result.rs` | `MirrorResult`: Pushed/Skipped/Failed |
+| `pipeline/registry_copy.rs` | The copy engine: by-digest transfer of manifests and blobs from a source registry into the destination registry (C-021…C-026, C-046) — classifies nothing, no tag parsed or cascade computed; a sibling of `pipeline/registry_sync.rs`, not a child, matching the crate's flat-siblings-with-child-directories shape (`orchestrator.rs`, `push.rs` + `push/alias.rs`) |
+| `pipeline/registry_sync.rs` | `registry sync`'s run: pre-flight over every source (client → catalog → filter/expand), then collision detection across all sources, then the per-source copy pass, then the report (C-040, C-044); children own the rest |
+| `pipeline/registry_sync/glob.rs` | `Glob` — compiled `include:`/`exclude:` package-name pattern, literal characters plus `*` only, built on the direct `regex` dependency (C-009, C-010) |
+| `pipeline/registry_sync/destination.rs` | Where a copied package lands: `DestinationTemplate` expansion (`{registry}`/`{namespace}`/`{package}`), the OCI repository grammar guard, prefix containment, the `oci://` pointer, collision detection (C-011…C-015) — the destination trust boundary, every rule refuses rather than normalises |
+| `pipeline/registry_sync/catalog.rs` | The source side: SSRF-guarded HTTP client + the three index-tree fetches (`config.json`, `c/index.json`, `p/<ns>/<pkg>.json`), plus the SSRF check on a root's physical `repository` host (C-016…C-020) — two separate trust mechanisms for two trust situations: the index base URL is operator-authored config, a root's `repository` pointer is foreign data |
+| `pipeline/registry_sync/cache.rs` | The run's out-of-tree state: the source-catalog digest file and the lock directory, both derived from `sha256(canonicalized output path)` and kept outside `output:` (C-037, C-038) |
+| `pipeline/registry_sync/index_write.rs` | Writing the servable index tree: store construction (locks redirected out of `output:`), the root rewrite + tag merge, the per-package `CatalogTransaction`, dispatch objects, `config.json`, the skip predicate, `--repair-catalog` (C-027…C-036, C-047) — writes are additive; the mirror owns its own tag-union merge because `CatalogTransaction::write_root` itself is merge-blind |
+| `pipeline/registry_sync/plan.rs` | The pre-flight phase: filter → expand → collide → short-circuit → per-root fallback → work list, plus the `--dry-run` byte estimate (C-039, C-043) — runs before a single byte is copied, over every source |
+| `pipeline/registry_sync/report.rs` | The run report + its two renderings (C-042, C-043's output half); local `OutputFormat` + free `report_*` function convention, since no `Printable` trait is reachable from this crate |
 | `pipeline.rs` | Shared pipeline helpers (e.g. `propagate_exit_code`) |
 | `annotations.rs` | GHA annotation emission for test failures |
 | `discord.rs` | Discord webhook HTTP client |
@@ -199,6 +212,8 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `WebhookUnavailable` | 69 (Unavailable) | Discord 5xx / timeout in `pipeline notify` |
 | `WebhookPermissionDenied` | 77 (PermissionDenied) | Discord 401/403 — webhook secret likely rotated |
 | `CascadeUnrepaired` | 65 (DataError) | `ocx package cascade repair` ran and findings remain — carries `ocx`'s own exit 65 through unchanged, so an audit result never reads as the tool breaking (which stays `ExecutionFailed`) |
+| `IndexWriteError` | 74 (IoError) | A local filesystem write into the served index tree under `output:` failed (root document, `c/index.json`, `config.json`, dispatch object, `--repair-catalog`) — always aborts the run, never the package. **Two classes, not one**: `registry_sync/index_write.rs`'s own `refused()` helper documents the split by *whose fault it is* — a shape or validation refusal of *upstream* bytes (a root that is not a JSON object, a dispatch object that fails `validate_image_index`) fails only that package as `ExecutionFailed` (1) instead, so a hostile source cannot deny a whole mirror by publishing one malformed package; only a genuinely local write failure (disk full, `EACCES`, a broken output tree) is `IndexWriteError` |
+| `IndexFormatUnsupported` | 65 (DataError) | A source index declared a `config.json` `format_version` above the one `ocx_lib` supports (carries the declared version) — not transient, so `SourceError` (69) would make CI retry forever on something retry can never fix; the run writes nothing |
 
 ## Test Pipeline {#test-pipeline}
 
