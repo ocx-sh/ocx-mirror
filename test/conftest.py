@@ -40,7 +40,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     registry = os.environ.get("REGISTRY", "localhost:5001")
     start_registry(registry)
-    start_registry(os.environ.get("MIRROR_REGISTRY", "localhost:5002"))
+    start_registry(os.environ.get("MIRROR_REGISTRY", "localhost:5002"), "mirror_registry")
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +59,7 @@ def registry() -> str:
 def mirror_registry() -> str:
     """Destination registry for `registry sync` acceptance tests — `registry` plays the upstream source."""
     addr = os.environ.get("MIRROR_REGISTRY", "localhost:5002")
-    start_registry(addr)
+    start_registry(addr, "mirror_registry")
     return addr
 
 
