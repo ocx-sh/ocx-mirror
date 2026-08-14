@@ -6,7 +6,7 @@ platform entries: a dual-libc spec (`linux/amd64+libc.glibc` +
 platform entries for the same os/arch, distinguished only by `os.features`;
 a featureless key publishes a single entry with no `os.features` at all.
 
-Both tests run the real prepare → push pipeline against the `:5001` registry
+Both tests run the real prepare → push pipeline against the `registry`
 fixture with the real `ocx` binary (same setup as test_mirror_mount.py), then
 assert on the raw OCI image index fetched straight from the registry.
 """

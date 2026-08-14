@@ -20,7 +20,7 @@ follows the same hermetic-stubbing conventions as `test_mirror_pylock.py`:
 The positive case additionally needs `pipeline prepare` to resolve the pinned
 interpreter's manifest *digest*, which is an in-process registry call
 (`ocx_lib`'s OCI client, not a subprocess) and therefore cannot be stubbed via
-`OCX_BINARY_PIN`. It runs against the real `:5001` registry fixture, with a
+`OCX_BINARY_PIN`. It runs against the real `registry` fixture, with a
 throwaway interpreter package pushed there via the real `ocx` binary
 (`real_ocx_binary`/`push_stub_ocx_package`, conftest.py) — the content is a
 one-byte marker; nothing downstream ever executes it.

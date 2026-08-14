@@ -14,7 +14,7 @@ This exercises the pipeline against the REAL `ocx` binary built from the
 `external/ocx` submodule pin (`real_ocx_binary`, conftest.py) — the mount
 tail syntax and the JSON `layers` push-report field are recent additions
 that an older `ocx` resolved from PATH/OCX_COMMAND in this environment would
-not understand — and the real `:5001` registry fixture.
+not understand — and the real `registry` fixture.
 
 Uses `source.type: pylock` (a committed lock), not `pypi`: the mount
 mechanics under test are identical for both (push dispatches on

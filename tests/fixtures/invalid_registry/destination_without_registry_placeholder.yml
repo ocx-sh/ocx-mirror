@@ -1,0 +1,16 @@
+# With two sources, `{registry}` is the only thing keeping two sources'
+# same-named packages apart. The single-source form of this same document is
+# valid — see `a_second_source_is_what_makes_a_registry_less_destination_invalid`.
+# expect: {registry}
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream
+  - registry: localhost:5003
+    index: https://other.example/
+    as: other

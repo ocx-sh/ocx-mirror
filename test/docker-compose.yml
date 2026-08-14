@@ -9,3 +9,11 @@ services:
     image: registry:2
     ports:
       - "5001:5000"
+
+  # Destination registry for `registry sync` acceptance tests — `registry`
+  # above plays the upstream source. Session-scoped via the `mirror_registry`
+  # fixture in test/conftest.py.
+  mirror_registry:
+    image: registry:2
+    ports:
+      - "5002:5000"

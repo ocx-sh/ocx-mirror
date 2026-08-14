@@ -1,0 +1,15 @@
+# The glob grammar is literal characters plus `*`, and `*` already crosses `/`
+# — the subject is the whole two-segment package name. `**` is a pattern from a
+# different grammar and would read as meaning something it does not.
+# expect: kitware/**
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream
+    include:
+      - "kitware/**"

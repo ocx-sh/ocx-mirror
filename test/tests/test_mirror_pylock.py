@@ -9,8 +9,8 @@ fail-safe "first publish" branch instead of needing a real OCI registry.
 Run under ``OCX_TESTS_NO_REGISTRY=1`` so conftest.py's session hook never
 starts the Docker registry either — these tests never touch it.
 
-Phase B (a real plan -> prepare -> push e2e against :5001) is deferred; see
-the skip below.
+Phase B (a real plan -> prepare -> push e2e against the `registry` fixture)
+is deferred; see the skip below.
 """
 from __future__ import annotations
 

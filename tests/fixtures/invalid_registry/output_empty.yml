@@ -1,0 +1,12 @@
+# An empty `output:` resolves to the current directory, which would scatter a
+# served index tree across whatever the run happened to be started from.
+# expect: output
+target:
+  registry: localhost:5002
+  repository: mirror
+output: ""
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream

@@ -1,0 +1,7 @@
+# expect: sources: at least one source is required
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+sources: []
