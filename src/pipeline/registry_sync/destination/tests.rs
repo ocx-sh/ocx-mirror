@@ -606,6 +606,64 @@ fn messages(error: MirrorError) -> Vec<String> {
     }
 }
 
+// ── Preserved-pointer reachability ──────────────────────────────────────────
+
+/// The reachable shapes, which are exactly "the landing path ends in the
+/// upstream repository, on a segment boundary".
+///
+/// Both prefix depths are here because they are the two the shipped templates
+/// actually produce: a single-source spec drops `{registry}` and lands one
+/// segment under the prefix, the documented multi-source one keeps it and lands
+/// two. An equality check against `target.repository` would pass the first and
+/// warn on the second, which is why the rule is a tail match.
+#[test]
+fn a_landing_path_ending_in_the_upstream_repository_is_reachable() {
+    for (physical, repository) in [
+        // `path_prefix = "ocx-mirror"`.
+        ("ocx-mirror/kubernetes/kubectl", "kubernetes/kubectl"),
+        // `path_prefix = "ocx-mirror/ocx.sh"` — the documented example.
+        ("ocx-mirror/ocx.sh/kubernetes/kubectl", "kubernetes/kubectl"),
+        // A host-only mirror: no prefix at all, the path is the repository.
+        ("kubernetes/kubectl", "kubernetes/kubectl"),
+        // Depth is not the rule; the tail is. An upstream repository of any
+        // number of segments works the same way.
+        ("corp/a/b/c/deep", "a/b/c/deep"),
+    ] {
+        assert!(
+            !mirror_path_mismatch(physical, repository),
+            "{physical:?} is reachable from {repository:?} through a path prefix"
+        );
+    }
+}
+
+/// The unreachable shapes — no `path_prefix` value resolves any of these, so
+/// the warning is a statement of fact rather than a guess.
+///
+/// The indirected case is the one that motivates the check at all: the root's
+/// `repository` is transport-only and may name a path unrelated to the catalog
+/// key the template expanded, so the copy lands somewhere no client asks for.
+#[test]
+fn a_landing_path_that_does_not_end_in_the_upstream_repository_is_refused() {
+    for (physical, repository) in [
+        // Indirection: the catalog key expanded to `kitware/cmake`, but the
+        // source serves the content from an unrelated physical path.
+        ("mirror/kitware/cmake", "ocx-contrib/cmake-releases"),
+        // A suffix match that is not a segment match — `not` is not a prefix
+        // any registry serves the way this reads.
+        ("corp/notkubectl", "kubectl"),
+        // The tail is right but the order is not.
+        ("kubernetes/kubectl/corp", "kubernetes/kubectl"),
+        // A leading-slash path is not "the empty prefix"; that case is the
+        // equality above.
+        ("/kubernetes/kubectl", "kubernetes/kubectl"),
+    ] {
+        assert!(
+            mirror_path_mismatch(physical, repository),
+            "{physical:?} is not reachable from {repository:?} through any path prefix"
+        );
+    }
+}
+
 // ── Exit-code class ─────────────────────────────────────────────────────────
 
 /// Every refusal in this module is plan-time, malformed-input, exit 65.

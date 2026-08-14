@@ -55,6 +55,7 @@ def write_registry_spec(
     output: Path,
     sources: list[SourceSpec],
     destination: str = "{namespace}/{package}",
+    rewrite_pointers: bool = True,
     on_error: OnError = "continue",
     kind: str | None = "registry",
     extra: dict[str, object] | None = None,
@@ -65,6 +66,13 @@ def write_registry_spec(
     deserialization (C-005); it is not a `RegistrySpec` field, and an absent
     or wrong value is a hard exit 64. Pass `kind=None` to write a document
     without it — the only reason to do so is to test that rejection.
+
+    `rewrite_pointers` defaults to `True`, which is **not** the field's own
+    default. Most of this corpus asserts the mirrored root's `repository`
+    against `destination_pointer(...)`, and that assertion only means anything
+    under a rewrite. `False` omits the key entirely rather than writing it, so
+    the scenario that covers the shipped default exercises the same minimal
+    document an operator writes.
 
     `extra` merges arbitrary top-level keys into the document, for the
     documents whose whole point is being invalid (a `password:` key, an
@@ -77,6 +85,8 @@ def write_registry_spec(
         "on_error": on_error,
         "sources": [source.to_dict() for source in sources],
     }
+    if rewrite_pointers:
+        document["rewrite_pointers"] = True
     if kind is not None:
         document["kind"] = kind
     if extra:

@@ -35,6 +35,23 @@ fn absent_optional_blocks_take_their_documented_defaults() {
     );
     assert_eq!(spec.concurrency.max_blobs, 4);
     assert_eq!(spec.concurrency.max_retries, 3);
+    assert!(
+        !spec.rewrite_pointers,
+        "a mirrored index must keep the upstream pointer unless the operator asks otherwise"
+    );
+}
+
+/// `rewrite_pointers` is a plain bool, opted into by writing it.
+///
+/// Pinned separately from the defaults above because the two directions fail
+/// differently: a wrong default silently re-homes an operator's whole fleet,
+/// while a field that does not read at all silently ignores the operator who
+/// wanted the old behaviour back.
+#[test]
+fn rewrite_pointers_is_read_when_the_document_sets_it() {
+    let spec = parse(&format!("{VALID_BODY}\nrewrite_pointers: true\n"));
+
+    assert!(spec.rewrite_pointers);
 }
 
 #[test]

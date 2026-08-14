@@ -125,11 +125,13 @@ def verify_catalog_digests(fixture_root: Path) -> list[str]:
 
 
 def verify_root_repository(tree_root: Path, package: str, expected_repository: str) -> list[str]:
-    """Checks that `package`'s root document exists and its `repository` field is the rewritten pointer.
+    """Checks that `package`'s root document exists and its `repository` field is `expected_repository`.
 
-    The rewrite is the whole point of a mirror's index write (C-028) — a root
-    that still names the *source* repository is silent data corruption, not
-    a missing feature.
+    Which address that is depends on the spec's `rewrite_pointers`: the
+    destination pointer under a rewrite (C-028), the source's own under the
+    default. The caller states which one it expects — a root carrying the
+    *other* one is silent data corruption in either direction, so this helper
+    deliberately has no opinion of its own.
     """
     root_path = tree_root / "p" / f"{package}.json"
     if not root_path.is_file():

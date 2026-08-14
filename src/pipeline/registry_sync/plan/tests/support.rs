@@ -14,6 +14,10 @@ pub const PREFIX: &str = "mirror";
 
 /// A spec whose `destination:` uses all three placeholders, so a test that
 /// changes the source's `as:` or the catalog key changes the repository.
+///
+/// `rewrite_pointers` is `true` here, **against the field's own default**, so
+/// that every expansion test can assert the pointer it produces. The default
+/// (preserve) is exercised by [`preserving`], which flips it back.
 pub fn spec(destination: &str) -> RegistrySpec {
     RegistrySpec {
         target: Target {
@@ -22,9 +26,19 @@ pub fn spec(destination: &str) -> RegistrySpec {
         },
         output: std::path::PathBuf::from("./public"),
         destination: destination.to_string(),
+        rewrite_pointers: true,
         on_error: OnError::default(),
         sources: Vec::new(),
         concurrency: RegistryConcurrency::default(),
+    }
+}
+
+/// [`spec`] with `rewrite_pointers` back at its default — the mirrored index
+/// keeps whatever pointer the source published.
+pub fn preserving(destination: &str) -> RegistrySpec {
+    RegistrySpec {
+        rewrite_pointers: false,
+        ..spec(destination)
     }
 }
 

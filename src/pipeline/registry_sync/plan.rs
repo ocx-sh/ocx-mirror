@@ -58,8 +58,14 @@ pub struct PackageWork {
     /// Where its content lands: `target.repository` + the expanded template,
     /// validated and contained.
     pub physical_repository: String,
-    /// The `oci://` pointer written into the mirrored root.
-    pub pointer: String,
+    /// The `oci://` pointer written into the mirrored root, or `None` to
+    /// republish the source's own pointer verbatim.
+    ///
+    /// **The whole of `rewrite_pointers`, resolved once.** The mode is read in
+    /// [`expand_source`] and nowhere else; every consumer downstream branches
+    /// on this `Option` rather than re-reading the spec, so there is exactly
+    /// one place the two deployments diverge.
+    pub pointer: Option<String>,
 }
 
 /// One source's pre-flight outcome.
@@ -173,7 +179,15 @@ pub fn expand_source(
         }
         let expanded = template.expand(as_name, name).map_err(spec_invalid)?;
         let repository = physical_repository(&spec.target, &expanded)?;
-        let pointer = wire_pointer(&spec.target, &repository)?;
+        // Not called at all under preserve, rather than called and discarded:
+        // `wire_pointer` validates the `oci://` composition, and validating a
+        // string this run will never publish would fail specs that are
+        // perfectly serviceable. The path the copy *does* use is already
+        // validated by `physical_repository` above.
+        let pointer = spec
+            .rewrite_pointers
+            .then(|| wire_pointer(&spec.target, &repository))
+            .transpose()?;
         work.push(PackageWork {
             name: name.clone(),
             physical_repository: repository,

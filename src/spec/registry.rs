@@ -51,6 +51,29 @@ pub struct RegistrySpec {
     /// `{package}` — plain substitution, no template engine (C-011).
     pub destination: String,
 
+    /// Whether the mirrored index points at [`Self::target`], or keeps the
+    /// `repository` pointer the source published.
+    ///
+    /// **Default `false`** — preserve. The mirrored root then names the
+    /// upstream host, and clients reach the copy through ocx's own
+    /// `[mirrors."<host>"]` map, which rewrites transport only: package
+    /// identity, digests and cache keys stay keyed upstream. That is the
+    /// deployment an artifact-manager remote already implements, and it is why
+    /// this is the default rather than the opt-in.
+    ///
+    /// `true` restores the self-describing tree: every root points at
+    /// `target`, and a client needs no `[mirrors]` entry at all — at the cost
+    /// of re-homing every package onto the corporate host.
+    ///
+    /// It governs **only** the published pointer. `target`, `destination` and
+    /// the expansion template decide where the artifacts land under either
+    /// value; keeping that path reachable through the client's `[mirrors]`
+    /// prefix is the operator's job, and
+    /// [`mirror_path_mismatch`](crate::pipeline::registry_sync::destination::mirror_path_mismatch)
+    /// warns when it provably is not.
+    #[serde(default)]
+    pub rewrite_pointers: bool,
+
     /// What a per-package failure does to the rest of the run. Governs
     /// per-package failures only; a non-authoritative destination read aborts
     /// the run under either value (C-040).

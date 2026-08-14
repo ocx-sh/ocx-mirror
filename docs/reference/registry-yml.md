@@ -1,6 +1,6 @@
 # registry.yml Reference
 
-`registry.yml` describes a **whole-registry mirror**: it copies the OCI content of one or more upstream OCX indexes into a registry you control, and writes an index tree pointing at your copy. A machine configured against that tree resolves and installs every mirrored package without reaching the public internet.
+`registry.yml` describes a **whole-registry mirror**: it copies the OCI content of one or more upstream OCX indexes into a registry you control, and writes an index tree describing your copy. A machine configured against that tree resolves and installs every mirrored package without reaching the public internet.
 
 It is consumed by `ocx-mirror registry sync`. One repository holds exactly one `registry.yml` — unlike [`mirror.yml`](mirror-yml.md), where a repository may hold many specs for many tools.
 
@@ -14,6 +14,7 @@ The two files describe different jobs. `mirror.yml` packages an upstream tool's 
 | `target` | object | Yes | Destination registry and the repository **prefix** everything is written beneath. See [`target`](#target). |
 | `output` | path | Yes | Directory the index tree is written into — one subtree per source. See [`output`](#output). |
 | `destination` | string | Yes | Template deciding each package's destination repository. See [`destination`](#destination). |
+| `rewrite_pointers` | boolean | No | `false` (default) keeps the upstream address in the published index; `true` re-homes it onto `target`. See [`rewrite_pointers`](#rewrite-pointers). |
 | `sources` | array | Yes | Upstream indexes to mirror, at least one. See [`sources`](#sources). |
 | `on_error` | string | No | `continue` (default) or `fail_fast`. See [`on_error`](#on-error). |
 | `concurrency` | object | No | Blob copy limits and retry count. See [`concurrency`](#concurrency). |
@@ -170,7 +171,51 @@ Two packages that would expand to the same destination are refused before anythi
 
 !!! danger "Editing `destination` after the first publish re-homes everything"
 
-    Same one-way door as [`as`](#as), for the same reason. The next run copies every package again under the new paths and leaves the old repositories behind forever. The mirror warns when it notices that a package's recorded destination no longer matches what the current template produces — but the warning arrives after the template already changed, so treat the template as fixed once you have published.
+    Same one-way door as [`as`](#as), for the same reason. The next run copies every package again under the new paths and leaves the old repositories behind forever. Under [`rewrite_pointers: true`](#rewrite-pointers) the mirror warns when it notices that a package's recorded destination no longer matches what the current template produces — but the warning arrives after the template already changed, so treat the template as fixed once you have published.
+
+## `rewrite_pointers` {#rewrite-pointers}
+
+```yaml
+rewrite_pointers: false   # the default
+```
+
+Governs one thing only: **the address the published index names**. It has no effect on what is copied or where it lands — `target` and `destination` decide that under either value.
+
+There are two ways to point a fleet at a mirror, and this key chooses between them.
+
+=== "`false` — preserve (default)"
+
+    The mirrored index keeps naming the upstream host. Clients reach your copy through ocx's own [`[mirrors]`][ocx-mirrors] map, which rewrites transport and nothing else:
+
+    ```toml
+    [registries."ocx.sh"]
+    index = "https://pages.corp.example/ocx.sh"
+
+    [mirrors."ocx.sh"]
+    registry = "https://artifactory.corp.example/ocx-mirror"
+    ```
+
+    Package identity, digests and cache paths stay keyed to `ocx.sh`. A machine that later loses the mirror entry falls back to upstream and finds the same content under the same names, and a package pinned by digest resolves identically either way. This is the shape an Artifactory or Nexus remote repository already implements, which is why it is the default.
+
+=== "`true` — rewrite"
+
+    Every mirrored root is rewritten to point at `target`, so the tree is self-describing and a client needs no `[mirrors]` entry:
+
+    ```toml
+    [registries."ocx.sh"]
+    index = "https://pages.corp.example/ocx.sh"
+    ```
+
+    The cost is that every package is re-homed onto your host. The mirror becomes the only address the fleet knows for that content, and going back means republishing every root.
+
+**Under the default, the landing path must be reachable through your `[mirrors]` prefix.** A client asks the mirror for `<path_prefix>/<upstream repository>` — nothing else — so the path your template produces has to *end* in the upstream repository. Both of these work:
+
+| `target.repository` + `destination` | Landing path | `registry = ".../<prefix>"` |
+|---|---|---|
+| `ocx-mirror` + `{namespace}/{package}` | `ocx-mirror/kubernetes/kubectl` | `ocx-mirror` |
+| `ocx-mirror` + `{registry}/{namespace}/{package}` | `ocx-mirror/ocx.sh/kubernetes/kubectl` | `ocx-mirror/ocx.sh` |
+
+The mirror warns per package when the two provably cannot agree — when the landing path does not end in the upstream repository, so that no prefix value resolves one to the other. It warns rather than refuses: the copy is still valid, and the mismatch may be intentional if you run a rewriting proxy in front.
 
 ## `on_error` {#on-error}
 
@@ -248,12 +293,19 @@ Run it:
 ocx-mirror registry sync
 ```
 
-Consumers point at the published tree:
+Consumers point at the published tree, and at the registry holding the copy:
 
 ```toml
 [registries."ocx.sh"]
 index = "https://pages.corp.example/ocx.sh"
+
+[mirrors."ocx.sh"]
+registry = "https://artifactory.corp.example/ocx-mirror/ocx.sh"
 ```
+
+The `[mirrors]` prefix ends in `ocx.sh` because the `destination` template above starts with `{registry}`. Drop `{registry}` from the template — legal for a single-source spec — and the prefix is `ocx-mirror` alone.
+
+Set [`rewrite_pointers: true`](#rewrite-pointers) instead and the `[mirrors]` entry is unnecessary: the index then names `artifactory.corp.example` directly, at the cost of re-homing every package onto it.
 
 ### The CI job {#ci}
 
@@ -342,6 +394,8 @@ Reports the packages that would be copied and the number of bytes that would tra
 - **It never deletes.** No pruning verb, no way to remove a package or a tag. A tag that upstream retires stays in your mirror forever; that is the same property that stops a transient upstream failure from silently removing a version your fleet is pinned to.
 - **It does not copy signatures or attestations.** A package carrying them fails with an error naming up to 10 of the referrer digests found and the total count, rather than being mirrored silently incomplete. Signature mirroring arrives with signing support.
 - **It does not filter by version.** A mirrored package brings its whole tag set. Copying a subset would leave rolling tags like `latest` pointing at versions you never copied.
+- **It does not write your clients' `[mirrors]` config.** Under the default [`rewrite_pointers: false`](#rewrite-pointers) that config is what makes the copy reachable, and it is yours to distribute. Note that a package's address in the index is transport-only and need not match the source's own `registry:` — a source whose packages point at several hosts needs one `[mirrors]` entry per host.
 
 <!-- internal -->
 [cli-registry-sync]: ./cli.md#registry-sync
+[ocx-mirrors]: https://ocx.sh/docs/reference/configuration
