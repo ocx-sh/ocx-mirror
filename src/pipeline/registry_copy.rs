@@ -29,16 +29,35 @@ use crate::error::MirrorError;
 use crate::filter::pep440_sort_key;
 use crate::spec::{RegistrySource, Target};
 
-/// Bound on any single referrers or manifest response body.
+/// Bound on a **manifest** body this mirror republishes or recurses into.
+///
+/// Applied post-hoc in both walks: `Index::fetch_manifest_raw_bytes` has
+/// already allocated by the time it returns, so what this bounds is what
+/// travels on, not what was read. The read itself is capped one layer down, by
+/// `ocx_lib`'s `Client::fetch_manifest_raw_bytes_capped`.
+///
+/// It does **not** reach a referrers response, whatever an older revision of
+/// this line claimed: the fork's `Client::pull_referrers` does an uncapped
+/// `res.bytes()` and exposes no capped variant, so [`detect_referrers`] has
+/// nothing to apply a bound with. Said here rather than left as a promise,
+/// because a comment claiming a cap that does not exist is worse than no cap —
+/// it is what stops the next reader looking.
 pub const MANIFEST_FETCH_CEILING: usize = 32 * 1024 * 1024;
 
-/// Bound on a single blob's **declared** size (C-023).
+/// Bound on a single blob's **declared** size, and — through it — on the body
+/// this mirror will read for one (C-023).
 ///
 /// A descriptor's `size` is foreign data, and it sizes the buffer [`upload`]
 /// allocates before the first byte arrives. `i64::MAX` clears the sibling
 /// non-negative guard and clears `Vec::with_capacity`'s own capacity-overflow
 /// check too, so it reaches `handle_alloc_error` — which **aborts the process**
 /// rather than unwinding into a failed package.
+///
+/// Bounding the declaration is only half of it, and on its own it bounds
+/// nothing that matters: a declaration is a claim, and [`BoundedSink`] is
+/// what holds the *body* to it. Without that second half a source could
+/// declare 4 KiB and stream forever, and `max_blobs × largest_blob` would be a
+/// ceiling only against a source that told the truth.
 ///
 /// 4 GiB, and it is a policy ceiling rather than a memory budget.
 /// [`MANIFEST_FETCH_CEILING`] bounds manifest bodies at 32 MiB, but a layer is
@@ -67,6 +86,28 @@ pub const BLOB_SIZE_CEILING: u64 = 4 * 1024 * 1024 * 1024;
 /// sane `concurrency.max_blobs` (default 4): below it, this would silently cap
 /// the operator's own knob.
 const BLOB_FANOUT_CEILING: usize = 64;
+
+/// Levels of nested image index either manifest walk descends before refusing
+/// (C-022).
+///
+/// An entry of `manifests[]` may itself be an image index — the OCI image spec
+/// admits it, and a descriptor says nothing about how deep the chain below it
+/// goes — so the walk's depth is chosen by the source, not by this mirror. A
+/// chain of indexes each naming one more is a few hundred bytes to author and
+/// ends in stack exhaustion. Digest cycles are not the risk: a child's digest
+/// covers its parent's bytes, so a cycle would need a sha256 preimage. Depth
+/// alone is. [`detect_referrers`] was bounded to one level for this same
+/// reason; this walk was not.
+///
+/// 8, counting the dispatch object the tag names as level 0. Every
+/// multi-platform artifact published anywhere is **depth 1** — one image index
+/// whose `manifests[]` are image manifests. That is what `ocx` itself
+/// publishes, and what `docker buildx` emits including its attestation
+/// entries. The deepest shape anyone actually ships is an index grouping other
+/// indexes, at depth 2. 8 clears that by 4×, so no plausible artifact is
+/// refused, while a hostile chain is cut two orders of magnitude before the
+/// recursion is a problem.
+const MANIFEST_DEPTH_CEILING: usize = 8;
 
 /// Referrer digests named in a detection failure before the message is
 /// truncated to a total count (C-024).
@@ -300,9 +341,11 @@ pub enum CopyError {
     SourceUnavailable(String),
     /// The source served a manifest this mirror cannot transport faithfully —
     /// an unparseable descriptor digest, a negative size, a declared size past
-    /// [`BLOB_SIZE_CEILING`], a body past [`MANIFEST_FETCH_CEILING`]. Distinct
-    /// from [`Self::SourceUnavailable`] because retrying cannot fix it: the
-    /// bytes are what they are.
+    /// [`BLOB_SIZE_CEILING`], a body past [`MANIFEST_FETCH_CEILING`], a blob
+    /// body past the size its own descriptor declared, a chain of nested image
+    /// indexes past [`MANIFEST_DEPTH_CEILING`]. Distinct from
+    /// [`Self::SourceUnavailable`] because retrying cannot fix it: the bytes
+    /// are what they are.
     MalformedManifest(String),
     /// The destination rejected a push.
     PushRejected(String),
@@ -476,6 +519,20 @@ fn verify_digest(expected: &Digest, bytes: &[u8]) -> Result<(), CopyError> {
         expected: expected.clone(),
         actual,
     })
+}
+
+/// Refuse a manifest nested past [`MANIFEST_DEPTH_CEILING`].
+///
+/// Called at the entry of both walks, before the fetch rather than after it, so
+/// a chain authored to exhaust the stack costs the mirror one refusal and not
+/// one more round trip per level.
+fn within_depth(digest: &Digest, depth: usize) -> Result<(), CopyError> {
+    if depth <= MANIFEST_DEPTH_CEILING {
+        return Ok(());
+    }
+    Err(CopyError::MalformedManifest(format!(
+        "manifest {digest} sits {depth} image indexes deep, past the {MANIFEST_DEPTH_CEILING}-level ceiling"
+    )))
 }
 
 /// What one manifest references, one level down.
@@ -705,6 +762,22 @@ pub async fn copy_manifest_tree(
     digest: &Digest,
     context: &CopyContext,
 ) -> Result<(CopyStats, Vec<u8>), CopyError> {
+    copy_manifest_tree_at(source_reference, destination_reference, digest, context, 0).await
+}
+
+/// [`copy_manifest_tree`] with the recursion depth threaded through.
+///
+/// Split rather than adding a parameter to the public entry point: `depth` is
+/// an implementation detail of the walk, and a caller passing anything but 0
+/// would silently move the ceiling it exists to enforce.
+async fn copy_manifest_tree_at(
+    source_reference: &Reference,
+    destination_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+    depth: usize,
+) -> Result<(CopyStats, Vec<u8>), CopyError> {
+    within_depth(digest, depth)?;
     let identifier = source_identifier(source_reference).clone_with_digest(digest.clone());
     let fetched = context
         .source_index
@@ -748,11 +821,12 @@ pub async fn copy_manifest_tree(
             for (child_digest, _size) in children {
                 let child_source = addressed(source_reference, &child_digest);
                 let child_destination = addressed(destination_reference, &child_digest);
-                let (child_stats, _child_bytes) = Box::pin(copy_manifest_tree(
+                let (child_stats, _child_bytes) = Box::pin(copy_manifest_tree_at(
                     &child_source,
                     &child_destination,
                     &child_digest,
                     context,
+                    depth + 1,
                 ))
                 .await?;
                 stats.merge(child_stats);
@@ -987,6 +1061,57 @@ impl UploadFailure {
     }
 }
 
+/// A `Vec` sink that refuses to accept more than `limit` bytes.
+///
+/// [`BLOB_SIZE_CEILING`] bounds the *declared* size and so bounds the
+/// pre-allocation, but nothing bounded the **stream**: `pull_blob` writes the
+/// whole response into the sink and the digest is only checked afterwards, so a
+/// source that declares 1 KiB and then streams forever exhausts memory before
+/// any verification runs. The declared size is a claim by the same party
+/// sending the bytes; this makes it load-bearing.
+///
+/// Refusing is correct rather than truncating: a body longer than its
+/// descriptor claims cannot hash to the expected digest, so the copy was going
+/// to fail regardless — failing at the first over-long chunk turns an
+/// unbounded read into a bounded one and says why.
+struct BoundedSink<'buffer> {
+    buffer: &'buffer mut Vec<u8>,
+    remaining: u64,
+}
+
+impl tokio::io::AsyncWrite for BoundedSink<'_> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+        chunk: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let accepted = chunk.len() as u64;
+        if accepted > self.remaining {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "blob body is longer than its descriptor declared",
+            )));
+        }
+        self.remaining -= accepted;
+        self.buffer.extend_from_slice(chunk);
+        std::task::Poll::Ready(Ok(chunk.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 /// The buffer [`upload`] pre-sizes for a blob declaring `size` bytes.
 ///
 /// A **hint**, never a contract: the `Vec` grows on demand, so a clamp costs
@@ -1025,9 +1150,15 @@ async fn upload(
     let source = addressed(source_reference, digest);
     retry_while(context.max_retries, UploadFailure::retryable, || async {
         let mut body = Vec::with_capacity(capacity_hint(size));
+        // Bounded by the descriptor's own claim, not just pre-sized by it —
+        // see `BoundedSink`. `size` has already passed `BLOB_SIZE_CEILING`.
+        let sink = BoundedSink {
+            buffer: &mut body,
+            remaining: size,
+        };
         context
             .source_client
-            .pull_blob(&source, digest_string, &mut body)
+            .pull_blob(&source, digest_string, sink)
             .await
             .map_err(UploadFailure::Pull)?;
 
@@ -1165,6 +1296,23 @@ pub async fn missing_descriptors(
     digest: &Digest,
     context: &CopyContext,
 ) -> Result<Vec<(Digest, u64)>, CopyError> {
+    missing_descriptors_at(source_reference, destination_reference, digest, context, 0).await
+}
+
+/// [`missing_descriptors`] with the recursion depth threaded through.
+///
+/// The `--dry-run` walk recurses exactly as the copy walk does, so it needs the
+/// same ceiling: a hostile chain would exhaust the stack before a single byte
+/// was ever going to move, which is the one path an operator reaches for
+/// *because* it is supposed to be harmless.
+async fn missing_descriptors_at(
+    source_reference: &Reference,
+    destination_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+    depth: usize,
+) -> Result<Vec<(Digest, u64)>, CopyError> {
+    within_depth(digest, depth)?;
     let identifier = source_identifier(source_reference).clone_with_digest(digest.clone());
     let fetched = context
         .source_index
@@ -1191,11 +1339,12 @@ pub async fn missing_descriptors(
             for (child_digest, _size) in children {
                 let child_source = addressed(source_reference, &child_digest);
                 let child_destination = addressed(destination_reference, &child_digest);
-                let nested = Box::pin(missing_descriptors(
+                let nested = Box::pin(missing_descriptors_at(
                     &child_source,
                     &child_destination,
                     &child_digest,
                     context,
+                    depth + 1,
                 ))
                 .await?;
                 missing.extend(nested);
