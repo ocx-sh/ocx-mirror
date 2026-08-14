@@ -557,6 +557,11 @@ async fn sync_package(
 /// `objects` is keyed by digest, so two tags pointing at the same dispatch
 /// object write it once.
 ///
+/// Both `package` and `entry.tag` are `{:?}`-formatted (CWE-117): the key is a
+/// catalog key and the tag comes straight out of the same upstream root's
+/// `tags{}`, and neither has passed a charset guard on the way into a log an
+/// operator reads.
+///
 /// # Errors
 ///
 /// C-040's whole-run abort class, via [`tag_failure`].
@@ -571,7 +576,7 @@ fn record_tag(
     match copied {
         Ok((stats, bytes)) => {
             tracing::info!(
-                "copied '{package}' tag '{}': {} manifest(s), {} blob(s) skipped, {} mounted, {} uploaded ({} bytes)",
+                "copied {package:?} tag {:?}: {} manifest(s), {} blob(s) skipped, {} mounted, {} uploaded ({} bytes)",
                 entry.tag,
                 stats.manifests,
                 stats.blobs_skipped,
@@ -671,12 +676,22 @@ fn finish(failures: Vec<String>) -> PackageStep {
 /// [`MirrorError`] is propagated **verbatim**: re-wrapping it would change the
 /// exit code of an abort that is not a destination-read failure.
 ///
+/// **The tag is `{:?}`-formatted, never bare** (CWE-117). It comes straight out
+/// of an upstream root's `tags{}` and passes no charset guard, and this string
+/// is the one that becomes [`PackageReport::detail`] — which an operator reads
+/// twice over, once in a CI log and once through `print_table` on their own
+/// terminal. Escaping here rather than at either rendering site is what covers
+/// both, and it stays necessary after the tag grammar is validated upstream:
+/// a rejected tag's rejection message still names it.
+///
+/// [`PackageReport::detail`]: report::PackageReport::detail
+///
 /// # Errors
 ///
 /// The whole-run abort class.
 fn tag_failure(tag: &str, error: CopyError) -> Result<String, MirrorError> {
     if !error.is_whole_run_abort() {
-        return Ok(format!("tag '{tag}': {error}"));
+        return Ok(format!("tag {tag:?}: {error}"));
     }
     match error {
         CopyError::Abort(inner) => Err(inner),

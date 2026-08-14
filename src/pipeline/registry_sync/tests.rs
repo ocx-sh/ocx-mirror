@@ -194,7 +194,7 @@ fn every_aggregating_copy_failure_fails_only_its_package() {
         let rendered = format!("{error}");
         let message = tag_failure("1.2.3", error).expect("an aggregating failure must not abort the run");
         assert!(
-            message.starts_with("tag '1.2.3': "),
+            message.starts_with("tag \"1.2.3\": "),
             "the tag is the context an operator needs, missing from {message}"
         );
         assert!(
@@ -220,6 +220,63 @@ fn an_abort_propagates_its_inner_error_verbatim() {
             "the inner error must reach the exit-code mapping unchanged"
         );
     }
+}
+
+// ── CWE-117 — a foreign tag never reaches a message raw ─────────────────────
+
+/// A tag is authored by the source — it comes straight out of an upstream
+/// root's `tags{}` map and passes no charset guard anywhere on this path.
+///
+/// [`tag_failure`]'s string is the one that becomes `PackageReport.detail`, and
+/// an operator reads that twice: once in a CI log, where a newline forges lines
+/// they take at face value, and once through `print_table` on their own
+/// terminal, where `\u{202e}` reverses what is shown and an ANSI escape is
+/// interpreted. Escaping at this one site is what covers both renderings.
+///
+/// This does not become redundant when the tag grammar is validated upstream:
+/// a rejected tag's own rejection message still has to name it.
+#[test]
+fn a_foreign_tag_is_escaped_into_the_failure_message_that_names_it() {
+    let forged = tag_failure(
+        "1.2.3\n[2026-08-14 INFO] copied 121 of 121 packages ok",
+        CopyError::PushRejected("507 insufficient storage".to_string()),
+    )
+    .expect("an aggregating failure must not abort the run");
+    assert!(
+        !forged.contains('\n') && forged.contains("\\n"),
+        "the newline must be escaped, not echoed: {forged:?}"
+    );
+
+    let spoofed = tag_failure(
+        "1.2.3\u{202e}",
+        CopyError::SourceUnavailable("connection reset".to_string()),
+    )
+    .expect("an aggregating failure must not abort the run");
+    assert!(
+        !spoofed.contains('\u{202e}') && spoofed.contains("\\u{202e}"),
+        "the direction override must be escaped: {spoofed:?}"
+    );
+
+    // Escaped, still identifiable — an operator has to be able to tell which
+    // tag failed, so this must not degrade into dropping the value.
+    assert!(spoofed.contains("1.2.3"), "the tag itself must survive: {spoofed:?}");
+}
+
+/// The same escape on the success path, which no failure test reaches.
+///
+/// `record_tag`'s `tracing::info!` names both the catalog key and the tag, and
+/// a run that copies cleanly is exactly the run whose log an operator skims
+/// rather than reads — the best place to forge a line. `tracing` has no capture
+/// seam in this crate, so this is asserted on the format string itself, with
+/// comments stripped first: the doc comment above the function names the
+/// convention, and an unstripped scan would match that instead of the code.
+#[test]
+fn the_copy_log_line_escapes_both_the_catalog_key_and_the_tag() {
+    let body = function_body("record_tag");
+    assert!(
+        body.contains("copied {package:?} tag {:?}:"),
+        "both foreign strings must be {{:?}}-formatted in the success log line"
+    );
 }
 
 // ── C-040 — the write-side classifier ───────────────────────────────────────
@@ -388,7 +445,7 @@ fn a_failed_tag_never_reaches_the_confirmed_set() {
         assert!(confirmed.is_empty(), "a failed tag must not be confirmed");
         assert!(objects.is_empty(), "a failed tag contributes no dispatch object");
         assert_eq!(failures.len(), 1, "the failure is counted and reported");
-        assert!(failures[0].starts_with("tag '1.2.3': "));
+        assert!(failures[0].starts_with("tag \"1.2.3\": "));
     }
 }
 
