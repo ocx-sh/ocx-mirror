@@ -46,6 +46,7 @@ nav:
   - Getting Started: getting-started.md
   - Reference:
       - mirror.yml: reference/mirror-yml.md
+      - registry.yml: reference/registry-yml.md
       - CLI: reference/cli.md
       - Environment: reference/environment.md
   - Changelog: changelog.md
