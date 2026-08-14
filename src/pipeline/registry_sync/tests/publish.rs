@@ -58,12 +58,22 @@ async fn store_at(directory: &Path) -> (IndexStore, std::path::PathBuf) {
     )
 }
 
-/// The work item for [`PACKAGE`], as the plan phase resolves it.
+/// The work item for [`PACKAGE`], as the plan phase resolves it under
+/// `rewrite_pointers: true`.
 fn package_work() -> plan::PackageWork {
     plan::PackageWork {
         name: PACKAGE.to_string(),
         physical_repository: PHYSICAL.to_string(),
-        pointer: POINTER.to_string(),
+        pointer: Some(POINTER.to_string()),
+    }
+}
+
+/// [`package_work`] as the plan phase resolves it under the default
+/// (`rewrite_pointers: false`): no pointer, so the source's own is republished.
+fn preserving_work() -> plan::PackageWork {
+    plan::PackageWork {
+        pointer: None,
+        ..package_work()
     }
 }
 
@@ -176,6 +186,74 @@ fn list_recursive(root: &Path) -> Vec<String> {
     }
     found.sort();
     found
+}
+
+/// `rewrite_pointers: false` republishes the source's own `repository`, and
+/// changes nothing else.
+///
+/// The strong form of the assertion is **byte equality against the source
+/// document**, not a field comparison: preserving is meant to be the *absence*
+/// of the rewrite, so a run whose tag set is fully confirmed must reproduce the
+/// upstream bytes exactly. A field check would pass an implementation that
+/// writes the upstream pointer back through a typed round trip — which is the
+/// one thing `rewrite_root`'s own doc forbids, because it silently drops the
+/// forward-compat fields this crate does not model.
+///
+/// Falsified by rewriting unconditionally: `repository` then reads [`POINTER`].
+#[tokio::test]
+async fn preserving_republishes_the_upstream_pointer_byte_for_byte() {
+    let directory = tempfile::TempDir::new().expect("temp dir");
+    let (store, _output) = store_at(directory.path()).await;
+
+    let (release, bytes) = image_index("3.28.1");
+    let source = root_document(&[("3.28.1", &release)]);
+    write_package(
+        &store,
+        AS_NAME,
+        &preserving_work(),
+        &source,
+        None,
+        &confirmed(&["3.28.1"]),
+        &objects(&[(release.clone(), bytes)]),
+    )
+    .await
+    .expect("the publish");
+
+    let published = published_root(&store);
+    let document: Value = serde_json::from_slice(&published).expect("parse root document");
+    assert_eq!(
+        document["repository"],
+        json!(UPSTREAM),
+        "the mirrored root must keep the pointer the source published"
+    );
+    assert_eq!(
+        published, source,
+        "preserving is the absence of the rewrite, so the bytes must round-trip unchanged"
+    );
+}
+
+/// The same publish under `rewrite_pointers: true` — the pair is what makes the
+/// switch's effect the *only* difference between the two outcomes.
+#[tokio::test]
+async fn rewriting_replaces_the_upstream_pointer_with_the_destination() {
+    let directory = tempfile::TempDir::new().expect("temp dir");
+    let (store, _output) = store_at(directory.path()).await;
+
+    let (release, bytes) = image_index("3.28.1");
+    write_package(
+        &store,
+        AS_NAME,
+        &package_work(),
+        &root_document(&[("3.28.1", &release)]),
+        None,
+        &confirmed(&["3.28.1"]),
+        &objects(&[(release.clone(), bytes)]),
+    )
+    .await
+    .expect("the publish");
+
+    let document: Value = serde_json::from_slice(&published_root(&store)).expect("parse root document");
+    assert_eq!(document["repository"], json!(POINTER));
 }
 
 /// **S-026, behaviourally — the regression every `index_write` test passes

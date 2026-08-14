@@ -15,6 +15,7 @@
 //! ANSI escape reaches their terminal. `char::escape_debug` escapes both
 //! classes and supplies the quoting these messages already implied.
 
+use ocx_lib::log;
 use ocx_lib::oci::Identifier;
 use ocx_lib::oci::index::parse_physical_repository;
 
@@ -244,6 +245,67 @@ pub fn wire_pointer(target: &Target, physical: &str) -> Result<String, MirrorErr
     })?;
 
     Ok(pointer)
+}
+
+/// Warn when a preserved-pointer package lands where no client can reach it.
+///
+/// Only meaningful under `rewrite_pointers: false`. The mirrored root then
+/// names the upstream host, so a client resolves the copy through ocx's
+/// `[mirrors."<host>"]` map — and `MirrorMap::rewrite_repository` asks the
+/// mirror for `<path_prefix>/<upstream repository>`, nothing else. A landing
+/// path that does not end in the upstream repository is therefore unreachable
+/// through **any** `path_prefix` the operator could configure.
+///
+/// A diagnostic, not a gate: the copy still proceeds, because the operator may
+/// be running a rewriting proxy this tool cannot see, and because refusing here
+/// would abort a run over a client-side config the mirror does not own.
+///
+/// `registry` is named alongside the repository for a reason that is easy to
+/// miss: a root's pointer is transport-only and may name a **different host**
+/// than the source's own `registry:`, and that host needs its own `[mirrors]`
+/// entry. Printing the whole upstream reference is what makes that visible.
+///
+/// Every foreign string is `{:?}`-formatted (CWE-117) — `registry` and
+/// `repository` are parsed out of a document the source authored, and `name` is
+/// a catalog key, all on their way into a log an operator reads.
+pub fn warn_on_mirror_path_mismatch(name: &str, registry: &str, repository: &str, physical: &str) {
+    if mirror_path_mismatch(physical, repository) {
+        log::warn!(
+            "{name:?} keeps its upstream pointer {registry:?}/{repository:?} but lands at {physical:?} — \
+             no `[mirrors]` path prefix resolves one to the other, so clients will not find this copy"
+        );
+    }
+}
+
+/// Whether `physical` is unreachable through every possible `[mirrors]` path
+/// prefix — the pure half of [`warn_on_mirror_path_mismatch`].
+///
+/// Reachable iff `physical` is `<prefix>/<repository>` for some non-empty
+/// prefix, or `repository` exactly. A **tail** match, deliberately not equality
+/// against `target.repository` + `repository`: the default multi-source
+/// template inserts the source's `as:` name, so `ocx-mirror/ocx.sh/ns/pkg` and
+/// `ocx-mirror/ns/pkg` are both reachable — with `path_prefix` of
+/// `ocx-mirror/ocx.sh` and `ocx-mirror` respectively — and an equality check
+/// would warn on the first, which is the shape the documented example produces.
+///
+/// The `/` boundary is what makes the tail a *segment* match: without it
+/// `corp/notkubectl` would read as reaching `kubectl` through the prefix
+/// `corp/not`, which is not a path any registry serves. A prefix of `"/"`
+/// alone is rejected for the same reason — that is a leading-slash path, not an
+/// empty prefix, and `physical == repository` above is how a genuinely empty
+/// prefix answers.
+///
+/// Split out as its own function, in the [`pointer_drift`] shape, so the rule is
+/// exercisable without a logger.
+///
+/// [`pointer_drift`]: super::index_write
+fn mirror_path_mismatch(physical: &str, repository: &str) -> bool {
+    if physical == repository {
+        return false;
+    }
+    !physical
+        .strip_suffix(repository)
+        .is_some_and(|prefix| prefix.len() > 1 && prefix.ends_with('/'))
 }
 
 /// One catalog key's destination, as the plan phase resolved it.

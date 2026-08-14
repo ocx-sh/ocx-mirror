@@ -448,7 +448,9 @@ async fn sync_package(
     }
 
     let destination_root = local_root.as_ref().map(|read| read.bytes.as_slice());
-    index_write::warn_on_pointer_drift(destination_root, &package.name, &package.pointer);
+    if let Some(pointer) = package.pointer.as_deref() {
+        index_write::warn_on_pointer_drift(destination_root, &package.name, pointer);
+    }
 
     // Re-parsed rather than threaded out of `validate_root_host`, so that
     // function stays the single SSRF guard on this path instead of doubling as
@@ -459,6 +461,20 @@ async fn sync_package(
             package.name
         ))
     })?;
+
+    // The mirror image of the drift warning above, and mutually exclusive with
+    // it: under a rewrite the published pointer is ours and drift is the risk,
+    // under preserve it is upstream's and reachability is. Placed here rather
+    // than in the plan phase because the upstream repository only exists once
+    // the root has been fetched — plan time sees the catalog key alone.
+    if package.pointer.is_none() {
+        destination::warn_on_mirror_path_mismatch(
+            &package.name,
+            &source_registry,
+            &source_repository,
+            &package.physical_repository,
+        );
+    }
 
     let mut confirmed = BTreeSet::new();
     let mut objects: BTreeMap<Digest, Vec<u8>> = BTreeMap::new();
@@ -623,7 +639,16 @@ async fn write_package(
     let source_value: serde_json::Value = serde_json::from_slice(root_bytes)
         .map_err(|error| MirrorError::ExecutionFailed(vec![format!("source root is not valid JSON: {error}")]))?;
     let merged = index_write::merge_root_tags(&source_value, destination_root, confirmed)?;
-    let rewritten = index_write::rewrite_root(&serialize_root(&merged), &package.pointer)?;
+    // `None` is `rewrite_pointers: false`, and the serialized merge *is* the
+    // document to publish: `merge_root_tags` works over `Value` end to end, so
+    // the source's own `repository` has already ridden through verbatim
+    // alongside every forward-compat field. Preserving is the absence of the
+    // mutation, never a second mutation writing the upstream value back.
+    let serialized = serialize_root(&merged);
+    let rewritten = match package.pointer.as_deref() {
+        Some(pointer) => index_write::rewrite_root(&serialized, pointer)?,
+        None => serialized,
+    };
 
     // Opened only now: upstream's contract is that every network round trip
     // happens before the catalog lock is taken, and the transaction is per

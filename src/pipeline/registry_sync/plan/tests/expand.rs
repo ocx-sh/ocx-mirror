@@ -24,7 +24,41 @@ fn every_selected_key_expands_to_a_contained_repository() {
             ),
         ]
     );
-    assert_eq!(work[0].pointer, "oci://registry.test/mirror/ocx.sh/kitware/cmake");
+    assert_eq!(
+        work[0].pointer.as_deref(),
+        Some("oci://registry.test/mirror/ocx.sh/kitware/cmake")
+    );
+}
+
+/// `rewrite_pointers: false` — the default — resolves to no pointer at all,
+/// which is what tells the publish half to republish the source's own.
+///
+/// Asserted on the whole work list rather than one entry: the mode is a
+/// property of the run, so a single package answering `None` while its
+/// neighbour answers `Some` would be the interesting failure.
+#[test]
+fn preserving_resolves_no_pointer_while_the_destination_is_unchanged() {
+    let spec = preserving("{registry}/{namespace}/{package}");
+    let catalog = catalog(&["kitware/cmake", "ninja-build/ninja"]);
+
+    let work = expand_source(&spec, &source(&[], &[]), "ocx.sh", &catalog).expect("expand");
+
+    assert!(
+        work.iter().all(|package| package.pointer.is_none()),
+        "preserve must resolve no pointer for any package"
+    );
+    // The landing path is the switch's blind spot on purpose: it is still the
+    // template's, so the copy is byte-for-byte the same work either way.
+    assert_eq!(
+        destinations(&work),
+        vec![
+            ("kitware/cmake".to_string(), "mirror/ocx.sh/kitware/cmake".to_string()),
+            (
+                "ninja-build/ninja".to_string(),
+                "mirror/ocx.sh/ninja-build/ninja".to_string()
+            ),
+        ]
+    );
 }
 
 #[test]

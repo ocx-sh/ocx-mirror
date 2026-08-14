@@ -249,6 +249,121 @@ def test_cold_sync_publishes_every_package_and_writes_a_servable_tree(
     assert set(catalog_of(tree)) == {package_a, package_b}
 
 
+def test_the_default_preserves_the_upstream_pointer_while_still_copying_the_content(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """`rewrite_pointers` absent — the shipped default — publishes the upstream address.
+
+    The pair of assertions is the whole point, and neither half means anything
+    alone: the content must land at the destination exactly as it does under a
+    rewrite, *and* the mirrored root must still name the upstream registry. A
+    run that skipped the copy would satisfy the pointer assertion, and a run
+    that rewrote would satisfy the copy assertion.
+
+    Written with the key omitted rather than set to `false`, because that is
+    the document an operator gets from following the reference: the default
+    must be preserve without anyone opting in.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": digest}, {digest: body})],
+    )
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+        rewrite_pointers=False,
+    )
+
+    result = run_sync(sync, spec)
+    assert result.returncode == 0, outcome(result)
+
+    # Copied, byte for byte, to the same place a rewriting run would put it.
+    assert fetch_manifest(mirror_registry, destination_repository(package), "1.0.0")[0] == digest
+
+    # And the published root still sends a client to the upstream registry,
+    # which is what makes the client-side `[mirrors]` map the thing that
+    # redirects it.
+    tree = output / SOURCE_AS
+    problems = (
+        verify_root_repository(tree, package, f"oci://{registry}/{package}")
+        + verify_tag_content(tree, package, "1.0.0", digest)
+        + verify_dispatch_object_exists(tree, package, digest)
+    )
+    assert problems == []
+    assert destination_pointer(mirror_registry, package) not in (
+        tree / "p" / f"{package}.json"
+    ).read_text(), "no part of the destination address may leak into a preserved root"
+
+
+def test_a_preserved_pointer_whose_landing_path_is_unreachable_warns_without_failing(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """An indirected package under the default lands where no `[mirrors]` prefix reaches.
+
+    The destination expands from the catalog key while the preserved pointer
+    names the *physical* path, so a client asks the mirror for
+    `<prefix>/ocx-contrib/<pkg>` and the copy sits at `<prefix>/testns/<pkg>`.
+    No prefix value resolves one to the other, which is precisely the case the
+    warning exists for.
+
+    Asserted as a warning and an exit 0 together: downgrading it to a failure
+    would abort a run over client-side configuration this tool does not own,
+    and dropping it would ship a mirror nobody can pull from, silently.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    physical_path = f"ocx-contrib/{package}"
+    digest, body = seed_version(ocx_binary, registry, physical_path, "1.0.0", tmp_path / "push")
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": digest}, {digest: body}, physical_path=physical_path)],
+    )
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+        rewrite_pointers=False,
+    )
+
+    result = run_sync(sync, spec)
+    assert result.returncode == 0, outcome(result)
+
+    noise = result.stdout + result.stderr
+    assert "path prefix" in noise, f"the unreachable landing path must be reported\n{outcome(result)}"
+    # Both halves of the disagreement, so the operator can see which one to fix.
+    assert physical_path in noise, outcome(result)
+    assert destination_repository(package) in noise, outcome(result)
+
+    # Still copied and still published — a warning, not a refusal.
+    assert fetch_manifest(mirror_registry, destination_repository(package), "1.0.0")[0] == digest
+
+
 def test_the_destination_is_derived_from_the_catalog_key_not_the_physical_repository(
     sync: MirrorRunner,
     ocx_binary: Path,
