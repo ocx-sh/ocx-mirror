@@ -32,16 +32,34 @@ def registry_is_reachable(registry: str) -> bool:
         return False
 
 
-def start_registry(registry: str) -> None:
-    """Start the registry via docker-compose if it is not already running."""
+def start_registry(registry: str, service: str = "registry") -> None:
+    """Start one compose service if the registry it serves is not already up.
+
+    ``service`` is named rather than defaulted to the whole project because
+    the two registries can be up independently. GitHub Actions supplies the
+    source registry as a job *service container* bound to host 5001, so a
+    bare ``docker compose up -d`` — which starts every service — fails to
+    bind that port and exits 1, taking the whole session down before a test
+    runs. Bringing up only the service that owns the address asked for works
+    whether the other one is already bound, bound by something else, or not
+    running at all.
+    """
     if registry_is_reachable(registry):
         return
 
-    subprocess.run(
-        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d"],
-        check=True,
+    result = subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", service],
         capture_output=True,
+        text=True,
     )
+    # Surfaced rather than left to `check=True`: a bare CalledProcessError
+    # reports the argv and swallows the stderr that says *why*, which is the
+    # only part that identifies a port clash.
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"docker compose up -d {service} failed with exit {result.returncode}\n"
+            f"stdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
+        )
 
     # Wait for the registry to become reachable (up to 15 s).
     for _ in range(30):
