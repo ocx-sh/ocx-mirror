@@ -33,7 +33,7 @@
 //!
 //! Contracts C-027…C-036 and C-047 of `plan_registry_mirror_sync.md`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ocx_lib::file_structure::{CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
@@ -310,11 +310,15 @@ pub async fn write_root(
 /// bytes that are not a valid OCI image index — see [`refused`] for why a shape
 /// refusal must not abort the run. The store's own failures, including its
 /// digest re-verification, stay [`MirrorError::IndexWriteError`] (exit 74).
+/// Takes the caller's map by reference rather than a slice of pairs: the
+/// orchestrator accumulates these in a `BTreeMap`, and a `&[(K, V)]` parameter
+/// forced it to rebuild the whole thing — cloning every manifest body — purely
+/// to change the container's shape. The body iterates identically either way.
 pub async fn write_dispatch_objects(
     store: &IndexStore,
     as_name: &str,
     repository: &str,
-    objects: &[(Digest, Vec<u8>)],
+    objects: &BTreeMap<Digest, Vec<u8>>,
 ) -> Result<(), MirrorError> {
     for (digest, bytes) in objects {
         let index: ImageIndex = serde_json::from_slice(bytes).map_err(|error| {

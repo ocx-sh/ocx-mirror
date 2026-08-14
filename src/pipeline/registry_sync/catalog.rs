@@ -419,11 +419,17 @@ async fn fetch_index_document_capped(
     let url = document_url(index_base, relative);
     let document = document_name(index_base, relative);
 
-    let mut response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|error| MirrorError::SourceError(format!("index fetch failed for {document}: {error}")))?;
+    // `without_url` is load-bearing, not tidiness: `reqwest::Error`'s `Display`
+    // ends with `" for url ({url})"` — the whole URL, path included — so
+    // appending it verbatim re-emits the very capability path [`document_name`]
+    // withheld, one field later in the same message. The **path** case only:
+    // userinfo in a `sources[].index` is refused outright at spec load
+    // (`spec/prescan.rs`), and this does not stand in for that guard.
+    let fetch_failed = |error: reqwest::Error| {
+        MirrorError::SourceError(format!("index fetch failed for {document}: {}", error.without_url()))
+    };
+
+    let mut response = client.get(&url).send().await.map_err(fetch_failed)?;
 
     let status = response.status();
     if status == reqwest::StatusCode::NOT_FOUND {
@@ -448,11 +454,7 @@ async fn fetch_index_document_capped(
     // a hostile endpoint) still cannot stream more than the cap into memory:
     // the running total is checked before each chunk is appended.
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| MirrorError::SourceError(format!("index fetch failed for {document}: {error}")))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(fetch_failed)? {
         if body.len() + chunk.len() > ceiling {
             return Err(MirrorError::SourceError(format!(
                 "index document {document} exceeds the {ceiling}-byte cap"

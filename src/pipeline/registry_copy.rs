@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::{StreamExt, TryStreamExt};
 use ocx_lib::oci::index::RootTag;
 use ocx_lib::oci::native::oci_client::client::BlobMountResponse;
 use ocx_lib::oci::native::oci_client::errors::{OciDistributionError, OciErrorCode};
@@ -30,6 +31,42 @@ use crate::spec::{RegistrySource, Target};
 
 /// Bound on any single referrers or manifest response body.
 pub const MANIFEST_FETCH_CEILING: usize = 32 * 1024 * 1024;
+
+/// Bound on a single blob's **declared** size (C-023).
+///
+/// A descriptor's `size` is foreign data, and it sizes the buffer [`upload`]
+/// allocates before the first byte arrives. `i64::MAX` clears the sibling
+/// non-negative guard and clears `Vec::with_capacity`'s own capacity-overflow
+/// check too, so it reaches `handle_alloc_error` — which **aborts the process**
+/// rather than unwinding into a failed package.
+///
+/// 4 GiB, and it is a policy ceiling rather than a memory budget.
+/// [`MANIFEST_FETCH_CEILING`] bounds manifest bodies at 32 MiB, but a layer is
+/// the opposite kind of object: the largest real one this module's own ceiling
+/// note cites is 221 MB, and 4 GiB clears that by ~19×, so no plausible layer —
+/// up to and including a CUDA-sized wheel — is refused. What it buys is that
+/// `max_blobs × largest_blob` becomes a number an operator can compute (16 GiB
+/// at the default `max_blobs: 4`) instead of `max_blobs × i64::MAX`. The knob
+/// for the actual budget is `concurrency.max_blobs`, never this.
+pub const BLOB_SIZE_CEILING: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Blobs of one manifest whose destination probe may be in flight at once.
+///
+/// The run-scoped permit pool bounds the pull → verify → push window, but the
+/// probe deliberately sits outside it so an all-present re-run is not
+/// serialised to `max_blobs`. `layers[]` is foreign data with no bound of its
+/// own — one manifest at [`MANIFEST_FETCH_CEILING`] holds on the order of 2×10⁵
+/// descriptors — so without a ceiling here that is 2×10⁵ simultaneous `HEAD`s
+/// against the destination.
+///
+/// 64: the same bound and the same reasoning as `pipeline plan`'s
+/// `DRIFT_SCAN_CONCURRENCY`, itself copied from `LocalIndex::refresh_tags` in
+/// `ocx_lib` — enough that a several-hundred-layer env package resolves in a
+/// handful of rounds, low enough that the burst does not read as an attack to a
+/// registry that answers bursts with `429`. It must stay **at or above** any
+/// sane `concurrency.max_blobs` (default 4): below it, this would silently cap
+/// the operator's own knob.
+const BLOB_FANOUT_CEILING: usize = 64;
 
 /// Referrer digests named in a detection failure before the message is
 /// truncated to a total count (C-024).
@@ -262,9 +299,10 @@ pub enum CopyError {
     /// A manifest or blob could not be pulled from the source.
     SourceUnavailable(String),
     /// The source served a manifest this mirror cannot transport faithfully —
-    /// an unparseable descriptor digest, a negative size, a body past
-    /// [`MANIFEST_FETCH_CEILING`]. Distinct from [`Self::SourceUnavailable`]
-    /// because retrying cannot fix it: the bytes are what they are.
+    /// an unparseable descriptor digest, a negative size, a declared size past
+    /// [`BLOB_SIZE_CEILING`], a body past [`MANIFEST_FETCH_CEILING`]. Distinct
+    /// from [`Self::SourceUnavailable`] because retrying cannot fix it: the
+    /// bytes are what they are.
     MalformedManifest(String),
     /// The destination rejected a push.
     PushRejected(String),
@@ -329,7 +367,18 @@ impl std::fmt::Display for CopyError {
     }
 }
 
-impl std::error::Error for CopyError {}
+impl std::error::Error for CopyError {
+    /// [`Self::Abort`] is the one variant that *wraps* an error rather than
+    /// describing one, and the derived default would drop that link — leaving a
+    /// `{err:#}` render, a downcast, or an exit-code classifier unable to reach
+    /// the [`MirrorError`] the variant exists to carry.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Abort(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 /// Every key of the source root's `tags{}`, in copy order (C-021).
 ///
@@ -345,7 +394,11 @@ impl std::error::Error for CopyError {}
 ///
 /// A **yanked** tag is copied like any other: the marker travels with the root
 /// document, so refusing the tag here would make the mirror disagree with the
-/// source about which digests exist.
+/// source about which digests exist. That is a *semantic* refusal and it still
+/// stands. [`is_legal_oci_tag`] below is a different question — a tag the OCI
+/// grammar cannot express cannot be published to the destination at all, so
+/// dropping it is the only faithful option rather than a judgement about
+/// meaning.
 ///
 /// Ordering is `pep440_sort_key` and is **legibility only, never a gate** — it
 /// makes the log read chronologically and an interrupt deterministic. Its
@@ -354,6 +407,25 @@ impl std::error::Error for CopyError {}
 pub fn tag_copy_plan(tags: &BTreeMap<String, RootTag>) -> Vec<TagCopyPlan> {
     let mut plan: Vec<TagCopyPlan> = tags
         .iter()
+        .filter(|(tag, _)| {
+            // A tag key is foreign data and reaches the destination URL as
+            // `.../manifests/{tag}`, interpolated raw. `Reference::with_tag` is
+            // a plain struct literal — only `FromStr` applies the reference
+            // regexp, and it is not on this path — so nothing else judges it.
+            // The URL is then re-parsed, and the WHATWG parser collapses `..`:
+            // a key of `../../../../../prod/app/manifests/latest` resolves to
+            // `https://dest/v2/prod/app/manifests/latest`, escaping the prefix
+            // `destination::physical_repository` exists to enforce and PUTting
+            // upstream bytes into a repository the operator never named.
+            let legal = is_legal_oci_tag(tag);
+            if !legal {
+                // `{tag:?}` for the same reason every other foreign-string site
+                // in this crate uses it: the key is unfiltered upstream text and
+                // a raw `{}` would let it forge log lines (CWE-117).
+                tracing::warn!("dropping tag {tag:?}: not a legal OCI tag, so it cannot be published");
+            }
+            legal
+        })
         .map(|(tag, entry)| TagCopyPlan {
             tag: tag.clone(),
             content: entry.content.clone(),
@@ -361,6 +433,31 @@ pub fn tag_copy_plan(tags: &BTreeMap<String, RootTag>) -> Vec<TagCopyPlan> {
         .collect();
     plan.sort_by_cached_key(|entry| pep440_sort_key(&entry.tag));
     plan
+}
+
+/// Whether `tag` is expressible as an OCI tag: `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}`.
+///
+/// **Grammar, never classification.** The doc on [`tag_copy_plan`] forbids
+/// `AliasTag::parse`, `variant_names`, `resolve_cascade_tags` and `decompose`,
+/// and it is right to — a mirror holding a filtered subset would compute a
+/// different cascade than the source published. This function asks only whether
+/// a string *can be written down* as a tag, never what it means, so a
+/// build-stamped `3.31.0_20260731` and a bare `20260814` both pass unexamined.
+/// Conflating "the mirror parses no tag" with "the mirror validates no tag" is
+/// how a path traversal reached the destination registry; they are orthogonal.
+///
+/// Hand-rolled rather than a `Regex`: the grammar is ASCII-only and four
+/// predicates long, so a `LazyLock<Regex>` would cost a dependency edge and a
+/// first-call compile to express less clearly. Length is checked in bytes, which
+/// is exact here because every accepted character is ASCII.
+fn is_legal_oci_tag(tag: &str) -> bool {
+    let mut characters = tag.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first.is_ascii_alphanumeric() || first == '_')
+        && tag.len() <= 128
+        && characters.all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
 }
 
 // ── Pure decisions ──────────────────────────────────────────────────────────
@@ -420,15 +517,23 @@ fn child_references(manifest: &Manifest) -> Result<ChildReferences, CopyError> {
     }
 }
 
-/// Parse one descriptor's `(digest, size)` — fail closed on either.
+/// Parse one descriptor's `(digest, size)` — fail closed on any of the three.
 ///
 /// A descriptor is foreign data: an unparseable digest would otherwise be
-/// skipped, and a negative size would wrap into an enormous `u64`.
+/// skipped, a negative size would wrap into an enormous `u64`, and a size past
+/// [`BLOB_SIZE_CEILING`] sizes an allocation the process does not survive. The
+/// refusal happens here, beside the sibling guards, so it names the offending
+/// descriptor instead of arriving as a silently clamped buffer.
 fn descriptor_target(digest: &str, size: i64) -> Result<(Digest, u64), CopyError> {
     let parsed = Digest::try_from(digest)
         .map_err(|_| CopyError::MalformedManifest(format!("descriptor digest '{digest}' is not a digest")))?;
     let size = u64::try_from(size)
         .map_err(|_| CopyError::MalformedManifest(format!("descriptor '{digest}' declares a negative size {size}")))?;
+    if size > BLOB_SIZE_CEILING {
+        return Err(CopyError::MalformedManifest(format!(
+            "descriptor '{digest}' declares {size} bytes, past the {BLOB_SIZE_CEILING}-byte ceiling"
+        )));
+    }
     Ok((parsed, size))
 }
 
@@ -525,6 +630,26 @@ async fn with_blob_permit<T>(
         ]))
     })?;
     work.await
+}
+
+/// Drive `work` with at most [`BLOB_FANOUT_CEILING`] futures polled at once.
+///
+/// The sibling of [`with_blob_permit`] one level up: that pool bounds how many
+/// blob *bodies* are resident, this bounds how many destination *probes* are in
+/// flight, and only the second of those is a function of how many descriptors
+/// the source chose to declare.
+///
+/// `stream::iter` is also lazy where `try_join_all` is not — the futures are
+/// built as slots free up, so a manifest declaring 2×10⁵ layers no longer
+/// materialises 2×10⁵ pending state machines before the first probe is sent.
+async fn bounded_fanout<T, F>(work: impl Iterator<Item = F>) -> Result<Vec<T>, CopyError>
+where
+    F: Future<Output = Result<T, CopyError>>,
+{
+    futures::stream::iter(work)
+        .buffer_unordered(BLOB_FANOUT_CEILING)
+        .try_collect()
+        .await
 }
 
 /// The logical identifier for a reference, for the ocx-side read seam.
@@ -634,15 +759,22 @@ pub async fn copy_manifest_tree(
             }
         }
         ChildReferences::Blobs(blobs) => {
-            // `try_join_all` returns results in input order, so the counters and
-            // the log are deterministic without a sort; the semaphore inside
-            // `ensure_blob` is what bounds how many run at once.
-            let outcomes = futures::future::try_join_all(blobs.iter().map(|(blob_digest, size)| {
-                ensure_blob(source_reference, destination_reference, blob_digest, *size, context)
+            // Each future carries its own blob's size back rather than being
+            // zipped against the input afterwards, so the counters no longer
+            // depend on the order results arrive in — `buffer_unordered` yields
+            // in completion order, and a zip against it would pair an
+            // `Uploaded` outcome with a different blob's byte count. The summed
+            // `CopyStats` is identical whichever order they land in, which is
+            // the determinism that actually matters here; the per-blob log
+            // lines are emitted inside `ensure_blob` and were already
+            // concurrent.
+            let outcomes = bounded_fanout(blobs.iter().map(|(blob_digest, size)| async move {
+                let outcome = ensure_blob(source_reference, destination_reference, blob_digest, *size, context).await?;
+                Ok((outcome, *size))
             }))
             .await?;
-            for (outcome, (_, size)) in outcomes.into_iter().zip(blobs.iter()) {
-                stats.record(outcome, *size);
+            for (outcome, size) in outcomes {
+                stats.record(outcome, size);
             }
         }
     }
@@ -743,8 +875,9 @@ pub async fn ensure_blob(
     }
 
     // The permit covers pull → verify → push, which is the only window holding
-    // a blob in memory. The probe and the mount attempt allocate nothing, so
-    // bounding them too would only slow the all-present re-run.
+    // a blob in memory. The probe and the mount attempt stay outside it so an
+    // all-present re-run is not serialised down to `max_blobs`; how many of
+    // those run at once is the caller's `BLOB_FANOUT_CEILING`, not this pool.
     with_blob_permit(&context.blob_semaphore, async {
         upload(
             source_reference,
@@ -854,6 +987,21 @@ impl UploadFailure {
     }
 }
 
+/// The buffer [`upload`] pre-sizes for a blob declaring `size` bytes.
+///
+/// A **hint**, never a contract: the `Vec` grows on demand, so a clamp costs
+/// one reallocation on content that should not exist and can never truncate a
+/// body. It is clamped anyway because this is the exact allocation
+/// [`BLOB_SIZE_CEILING`] exists to stop and [`ensure_blob`] is `pub` — a caller
+/// reaching it with a size that never passed [`descriptor_target`] must not be
+/// able to reintroduce the process abort.
+fn capacity_hint(size: u64) -> usize {
+    // `try_from` rather than a cast: on a 32-bit target the ceiling exceeds
+    // `usize::MAX`, and a hint of zero is the right answer there — the `Vec`
+    // still grows to whatever the pull delivers.
+    usize::try_from(size.min(BLOB_SIZE_CEILING)).unwrap_or(0)
+}
+
 /// Pull the blob, verify it against its digest, then push it.
 ///
 /// The whole sequence is one retry unit. A rate limit on the push therefore
@@ -876,7 +1024,7 @@ async fn upload(
 ) -> Result<(), CopyError> {
     let source = addressed(source_reference, digest);
     retry_while(context.max_retries, UploadFailure::retryable, || async {
-        let mut body = Vec::with_capacity(usize::try_from(size).unwrap_or_default());
+        let mut body = Vec::with_capacity(capacity_hint(size));
         context
             .source_client
             .pull_blob(&source, digest_string, &mut body)

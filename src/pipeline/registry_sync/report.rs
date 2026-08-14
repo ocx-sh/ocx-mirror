@@ -107,11 +107,16 @@ impl RegistrySyncReport {
 /// [`OutputFormat::Json`].
 pub fn report_registry_sync(report: &RegistrySyncReport, format: OutputFormat, printer: &DataInterface) {
     match format {
-        OutputFormat::Json => {
-            if let Ok(json) = serde_json::to_string_pretty(report) {
-                println!("{json}");
-            }
-        }
+        OutputFormat::Json => match serde_json::to_string_pretty(report) {
+            Ok(json) => println!("{json}"),
+            // Dropping this silently emits **nothing at all** under
+            // `--format json`, and a run whose packages all succeeded then
+            // exits 0 — indistinguishable, to whatever parses the output, from
+            // a run that produced no packages. Every field here serializes
+            // infallibly today; the branch exists so that stops being an
+            // unstated assumption the moment one does not.
+            Err(error) => tracing::error!("cannot render the run report as JSON: {error}"),
+        },
         OutputFormat::Plain => {
             // Per-source granularity the package table below cannot show: a
             // short-circuited source contributes zero package rows by

@@ -59,35 +59,35 @@ fn default_cache_root_falls_back_to_a_relative_dot_cache_with_no_home() {
 
 // ── digest_file / locks_dir shape (C-038) ────────────────────────────────────
 
-#[test]
-fn digest_file_and_locks_dir_match_the_c038_shape() {
+#[tokio::test]
+async fn digest_file_and_locks_dir_match_the_c038_shape() {
     let cache = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
-    let hash = output_digest(output.path()).unwrap();
+    let hash = output_digest(output.path()).await.unwrap();
 
     assert_eq!(hash.len(), 64, "sha256 hex digest must be 64 characters");
     assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
 
     assert_eq!(
-        digest_file(cache.path(), output.path(), "ocx.sh").unwrap(),
+        digest_file(cache.path(), output.path(), "ocx.sh").await.unwrap(),
         cache.path().join("registry-sync").join(&hash).join("ocx.sh.digest"),
     );
     assert_eq!(
-        locks_dir(cache.path(), output.path()).unwrap(),
+        locks_dir(cache.path(), output.path()).await.unwrap(),
         cache.path().join("registry-sync").join("locks").join(&hash),
     );
 }
 
-#[test]
-fn digest_file_is_deterministic_and_scoped_by_as_name() {
+#[tokio::test]
+async fn digest_file_is_deterministic_and_scoped_by_as_name() {
     let cache = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
 
-    let first = digest_file(cache.path(), output.path(), "ocx.sh").unwrap();
-    let second = digest_file(cache.path(), output.path(), "ocx.sh").unwrap();
+    let first = digest_file(cache.path(), output.path(), "ocx.sh").await.unwrap();
+    let second = digest_file(cache.path(), output.path(), "ocx.sh").await.unwrap();
     assert_eq!(first, second, "path derivation must be a pure function of its inputs");
 
-    let other_source = digest_file(cache.path(), output.path(), "example.com").unwrap();
+    let other_source = digest_file(cache.path(), output.path(), "example.com").await.unwrap();
     assert_eq!(
         first.parent(),
         other_source.parent(),
@@ -96,17 +96,17 @@ fn digest_file_is_deterministic_and_scoped_by_as_name() {
     assert_ne!(first, other_source);
 }
 
-#[test]
-fn digest_file_and_locks_dir_error_when_output_does_not_exist() {
+#[tokio::test]
+async fn digest_file_and_locks_dir_error_when_output_does_not_exist() {
     let cache = TempDir::new().unwrap();
     let missing_output = cache.path().join("does-not-exist");
 
     assert!(matches!(
-        digest_file(cache.path(), &missing_output, "ocx.sh"),
+        digest_file(cache.path(), &missing_output, "ocx.sh").await,
         Err(MirrorError::IndexWriteError(_))
     ));
     assert!(matches!(
-        locks_dir(cache.path(), &missing_output),
+        locks_dir(cache.path(), &missing_output).await,
         Err(MirrorError::IndexWriteError(_))
     ));
 }
@@ -154,14 +154,14 @@ impl Drop for RestoreCwd {
 /// (macOS resolves `/tmp` through a symlink) — and containment must be
 /// checked by `Path::starts_with` component matching, never a string prefix
 /// (`/out-of-tree` starts with the string `/out` without being inside it).
-fn assert_contained_outside_output(
+async fn assert_contained_outside_output(
     cache_root: &Path,
     canonical_cache: &Path,
     output_shape: &Path,
     canonical_output: &Path,
 ) {
-    let locks = locks_dir(cache_root, output_shape).unwrap();
-    let digest = digest_file(cache_root, output_shape, "ocx.sh").unwrap();
+    let locks = locks_dir(cache_root, output_shape).await.unwrap();
+    let digest = digest_file(cache_root, output_shape, "ocx.sh").await.unwrap();
 
     for derived in [locks, digest] {
         assert!(
@@ -176,8 +176,17 @@ fn assert_contained_outside_output(
     }
 }
 
+/// Stays a plain `#[test]` driving its own runtime rather than a
+/// `#[tokio::test]`: the relative-path shape below needs `CWD_LOCK` held while
+/// the (now async) derivation runs, and holding a `std::sync::MutexGuard`
+/// across an `.await` is the Block-tier pattern `quality-rust.md` forbids.
+/// `block_on` keeps the guard inside one blocking call instead.
 #[test]
 fn digest_file_and_locks_dir_stay_outside_output_for_every_output_shape() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
     let cache = TempDir::new().unwrap();
     let output = TempDir::new().unwrap();
     std::fs::create_dir(output.path().join("nested")).unwrap();
@@ -194,14 +203,24 @@ fn digest_file_and_locks_dir_stay_outside_output_for_every_output_shape() {
     let dot_dot = output.path().join("nested").join("..");
 
     for shape in [output.path().to_path_buf(), trailing_separator, dot_dot] {
-        assert_contained_outside_output(cache.path(), &canonical_cache, &shape, &canonical_output);
+        runtime.block_on(assert_contained_outside_output(
+            cache.path(),
+            &canonical_cache,
+            &shape,
+            &canonical_output,
+        ));
     }
 
     // A genuinely relative path can only be produced by changing the
     // process's current directory.
     let relative_output = PathBuf::from(output.path().file_name().unwrap());
     let _cwd = RestoreCwd::enter(output.path().parent().unwrap());
-    assert_contained_outside_output(cache.path(), &canonical_cache, &relative_output, &canonical_output);
+    runtime.block_on(assert_contained_outside_output(
+        cache.path(),
+        &canonical_cache,
+        &relative_output,
+        &canonical_output,
+    ));
 }
 
 // ── read_recorded_digest / record_digest (C-039) ─────────────────────────────

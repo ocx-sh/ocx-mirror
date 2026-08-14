@@ -296,14 +296,19 @@ fn catalog_fingerprint(local_catalog: &CatalogIndex) -> String {
 /// De-duplication is by digest, so a blob shared by six platform manifests is
 /// counted once — the map keeps the last size seen for a digest, and a digest
 /// is content, so two entries for it cannot disagree.
+///
+/// Saturating, not wrapping: every `size` here came off a foreign manifest, so
+/// a source that declares two near-`u64::MAX` descriptors would otherwise panic
+/// the dry run in a debug build and wrap it to an under-count in a release one.
+/// `u64::MAX` is a visibly absurd estimate, which is the correct thing to print
+/// for a visibly absurd manifest.
 pub fn dry_run_byte_estimate(missing: &[(Digest, u64)]) -> u64 {
     missing
         .iter()
         .map(|(digest, size)| (digest, size))
         .collect::<std::collections::BTreeMap<_, _>>()
         .values()
-        .copied()
-        .sum()
+        .fold(0, |total, size| total.saturating_add(**size))
 }
 
 /// Compile one source's `include:` or `exclude:` list.

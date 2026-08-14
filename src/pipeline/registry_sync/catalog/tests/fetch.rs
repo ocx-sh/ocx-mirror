@@ -362,6 +362,75 @@ async fn a_fetch_error_names_the_origin_and_document_never_the_base_url_path() {
 }
 
 #[tokio::test]
+async fn a_transport_failure_does_not_re_emit_the_base_url_path() {
+    // The same capability-URL rule as above, on the branch that actually
+    // leaked. A refused connection never reaches the status check, so the
+    // message carries `reqwest::Error`'s own `Display` — which ends with
+    // `" for url ({url})"`, the whole URL, path and all, one field after
+    // `document_name` deliberately withheld it.
+    install_crypto_provider();
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        // Bound only to claim a port nothing answers on: the listener is
+        // dropped here, so the connect is refused rather than served.
+        listener.local_addr().expect("local address")
+    };
+    let base = format!("http://{dead}/s3cr3t-capability");
+    let client = build_source_index_client(&base, &loopback_trusted())
+        .await
+        .expect("a trusted loopback host builds a client");
+
+    let rendered = fetch_source_config(&client, &base)
+        .await
+        .expect_err("a refused connection is not a document")
+        .to_string();
+
+    assert!(
+        !rendered.contains("s3cr3t-capability"),
+        "the transport error re-emitted the base URL path: {rendered}"
+    );
+    assert!(
+        rendered.contains(&format!("http://{dead}")) && rendered.contains("config.json"),
+        "the message must still say which source and which document: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn a_body_stream_failure_does_not_re_emit_the_base_url_path_either() {
+    // The same message on the streaming branch. reqwest 0.12 attaches no URL to
+    // a body-decode error, so this is a lock rather than a repair — a reqwest
+    // that started attaching one would land the identical leak here instead.
+    let index = TestIndex::start(vec![Route::declared_length(
+        "/s3cr3t-capability/config.json",
+        "{",
+        999_999,
+    )])
+    .await;
+    let base = format!("{}/s3cr3t-capability", index.base_url());
+    let client = build_source_index_client(&base, &loopback_trusted())
+        .await
+        .expect("a trusted loopback host builds a client");
+
+    // A cap above the declared length, so the declared-oversize refusal stands
+    // aside and the body actually streams — and then ends early.
+    let rendered = fetch_index_document_capped(&client, &base, "config.json", 2_000_000)
+        .await
+        .expect_err("a body that stops short of its declared length is not a document")
+        .to_string();
+
+    assert!(
+        !rendered.contains("s3cr3t-capability"),
+        "the streaming branch re-emitted the base URL path: {rendered}"
+    );
+    assert!(
+        rendered.contains(&index.base_url()) && rendered.contains("config.json"),
+        "the message must still say which source and which document: {rendered}"
+    );
+}
+
+#[tokio::test]
 async fn a_refused_catalog_key_is_escaped_into_the_message() {
     // CWE-117. The key has passed no charset guard when it reaches this
     // message — that is the guard refusing it — so a newline in it would forge

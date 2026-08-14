@@ -597,3 +597,10 @@ fn the_blob_pool_is_run_scoped_and_packages_are_sequential() {
 // set that still gets the union wrong.
 #[path = "tests/publish.rs"]
 mod publish;
+
+// The repair phase is reachable the same way and for the same reason: it takes
+// a spec, an options struct and a store, and touches no network — so what
+// `--repair-catalog` writes, and the two cases where it must write nothing, are
+// asserted against a real tree rather than against the source text.
+#[path = "tests/repair.rs"]
+mod repair;

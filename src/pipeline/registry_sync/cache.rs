@@ -48,9 +48,12 @@ fn default_cache_root(xdg_cache_home: Option<OsString>, home: Option<PathBuf>) -
 /// [`MirrorError::IndexWriteError`] when `output` cannot be canonicalized —
 /// in practice, when it does not exist yet. Deriving these paths is the
 /// caller's responsibility to sequence after the output tree exists.
-fn output_digest(output: &Path) -> Result<String, MirrorError> {
-    let canonical = std::fs::canonicalize(output).map_err(|e| {
-        MirrorError::IndexWriteError(format!("cannot canonicalize output path '{}': {e}", output.display()))
+async fn output_digest(output: &Path) -> Result<String, MirrorError> {
+    let canonical = tokio::fs::canonicalize(output).await.map_err(|error| {
+        MirrorError::IndexWriteError(format!(
+            "cannot canonicalize output path '{}': {error}",
+            output.display()
+        ))
     })?;
     // Hash the raw encoded bytes, not `Path::display()`'s lossy rendering --
     // two distinct non-UTF-8 paths must not collide onto the same digest.
@@ -69,10 +72,10 @@ fn output_digest(output: &Path) -> Result<String, MirrorError> {
 /// # Errors
 ///
 /// [`MirrorError::IndexWriteError`] when `output` cannot be canonicalized.
-pub fn digest_file(cache_root: &Path, output: &Path, as_name: &str) -> Result<PathBuf, MirrorError> {
+pub async fn digest_file(cache_root: &Path, output: &Path, as_name: &str) -> Result<PathBuf, MirrorError> {
     Ok(cache_root
         .join("registry-sync")
-        .join(output_digest(output)?)
+        .join(output_digest(output).await?)
         .join(format!("{as_name}.digest")))
 }
 
@@ -90,11 +93,11 @@ pub fn digest_file(cache_root: &Path, output: &Path, as_name: &str) -> Result<Pa
 /// # Errors
 ///
 /// [`MirrorError::IndexWriteError`] when `output` cannot be canonicalized.
-pub fn locks_dir(cache_root: &Path, output: &Path) -> Result<PathBuf, MirrorError> {
+pub async fn locks_dir(cache_root: &Path, output: &Path) -> Result<PathBuf, MirrorError> {
     Ok(cache_root
         .join("registry-sync")
         .join("locks")
-        .join(output_digest(output)?))
+        .join(output_digest(output).await?))
 }
 
 /// Read the source-catalog digest the last fully successful run recorded, if
@@ -110,10 +113,10 @@ pub fn locks_dir(cache_root: &Path, output: &Path) -> Result<PathBuf, MirrorErro
 pub async fn read_recorded_digest(path: &Path) -> Result<Option<String>, MirrorError> {
     let bytes = match tokio::fs::read(path).await {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
             return Err(MirrorError::IndexWriteError(format!(
-                "cannot read cached digest '{}': {e}",
+                "cannot read cached digest '{}': {error}",
                 path.display()
             )));
         }
@@ -131,7 +134,7 @@ pub async fn read_recorded_digest(path: &Path) -> Result<Option<String>, MirrorE
     }
 }
 
-/// Record the source-catalog digest after a fully successful run (C-030).
+/// Record the source-catalog digest after a fully successful run (C-039).
 ///
 /// Called **only** on full success: a run with any failure leaves the previous
 /// value in place, so the next run re-compares instead of short-circuiting past
@@ -142,17 +145,17 @@ pub async fn read_recorded_digest(path: &Path) -> Result<Option<String>, MirrorE
 /// [`MirrorError::IndexWriteError`] when the file cannot be written.
 pub async fn record_digest(path: &Path, digest: &str) -> Result<(), MirrorError> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            MirrorError::IndexWriteError(format!("cannot create cache directory '{}': {e}", parent.display()))
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            MirrorError::IndexWriteError(format!("cannot create cache directory '{}': {error}", parent.display()))
         })?;
     }
     // ponytail: plain write, not a tempfile+rename dance -- the doc above (and
     // C-039) already treats a lost or torn write as harmless (one extra
     // comparison pass next run), so an atomic publish would defend against a
     // risk the design says does not matter.
-    tokio::fs::write(path, format!("{digest}\n"))
-        .await
-        .map_err(|e| MirrorError::IndexWriteError(format!("cannot write cached digest '{}': {e}", path.display())))
+    tokio::fs::write(path, format!("{digest}\n")).await.map_err(|error| {
+        MirrorError::IndexWriteError(format!("cannot write cached digest '{}': {error}", path.display()))
+    })
 }
 
 #[cfg(test)]
