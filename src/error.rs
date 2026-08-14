@@ -62,6 +62,25 @@ pub enum MirrorError {
     /// unreachable index (connection refused, timeout, 5xx, malformed JSON
     /// body) stays `SourceError` (69). See `source::pypi::classify_error`.
     PypiError(String),
+
+    // ── `registry sync` variants ────────────────────────────────────────────
+    /// A write into the served index tree under `output:` failed — a root
+    /// document, `c/index.json`, `config.json`, or a dispatch object.
+    ///
+    /// Not structurally forced: every existing variant carries a freeform
+    /// `String`. It earns its own identity because the output tree is a
+    /// distinct failure surface with a distinct remedy (fix the filesystem,
+    /// re-run), and reusing `TemplateError` — which shares the exit code —
+    /// would make the message lie about what failed.
+    IndexWriteError(String),
+    /// A source index declared a `config.json` `format_version` above the one
+    /// `ocx_lib` supports; carries the version the source declared.
+    ///
+    /// Its own variant because the outcome is not transient: a source on a
+    /// newer format stays on it, so classifying this as `SourceError` (69)
+    /// would make CI retry forever on something retry can never fix. The run
+    /// writes nothing.
+    IndexFormatUnsupported(u64),
 }
 
 impl MirrorError {
@@ -91,6 +110,9 @@ impl MirrorError {
             Self::CascadeUnrepaired(_) => ExitCode::DataError,
             Self::PylockError(_) => ExitCode::DataError,
             Self::PypiError(_) => ExitCode::DataError,
+            // `registry sync` variants
+            Self::IndexWriteError(_) => ExitCode::IoError,
+            Self::IndexFormatUnsupported(_) => ExitCode::DataError,
         }
     }
 }
@@ -133,6 +155,11 @@ impl std::fmt::Display for MirrorError {
             Self::CascadeUnrepaired(target) => write!(f, "cascade findings remain for {target}"),
             Self::PylockError(msg) => write!(f, "pylock error: {msg}"),
             Self::PypiError(msg) => write!(f, "pypi error: {msg}"),
+            // `registry sync` variants
+            Self::IndexWriteError(msg) => write!(f, "index write error: {msg}"),
+            Self::IndexFormatUnsupported(version) => {
+                write!(f, "unsupported source index format_version: {version}")
+            }
         }
     }
 }
@@ -206,6 +233,25 @@ mod tests {
         // package name) is malformed input, not a transient resource — same
         // exit class as PylockError.
         let err = MirrorError::PypiError("package 'nonexistent' not found (404)".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn index_write_error_maps_to_io_error() {
+        // C-041: a failed write into the served `output:` tree is an I/O
+        // failure (74), not a data one — the bytes were fine, the filesystem
+        // refused them. It does not reuse `TemplateError` (also 74) because
+        // the two name different remedies to the operator.
+        let err = MirrorError::IndexWriteError("failed to write ./public/ocx.sh/c/index.json".into());
+        assert_eq!(err.kind_exit_code(), ExitCode::IoError);
+    }
+
+    #[test]
+    fn index_format_unsupported_maps_to_data_error() {
+        // C-041: a source declaring a newer index format is malformed input
+        // for this ocx (65), never `SourceError` (69) — 69 reads as transient
+        // and would have CI retry forever on something retry cannot fix.
+        let err = MirrorError::IndexFormatUnsupported(2);
         assert_eq!(err.kind_exit_code(), ExitCode::DataError);
     }
 

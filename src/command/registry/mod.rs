@@ -1,19 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `ocx-mirror registry` — reserved namespace (not yet implemented).
+//! `ocx-mirror registry` subcommand group.
 //!
-//! Sibling to [`super::package`]. Will host registry-to-registry mirroring:
-//! copying repositories/tags between OCI registries, and whole-index
-//! mirroring of language ecosystems (e.g. all of PyPI) — as distinct from a
-//! single upstream package, which is a `package` source type. Two registry
-//! kinds are planned; their shape is deliberately unsettled and will be
-//! pinned down in a dedicated ADR.
+//! Sibling to [`super::package`]. Where `package` mirrors one upstream tool's
+//! releases, `registry` copies whole OCX index sources — every package a source
+//! catalog lists — into a corporate registry, and writes a servable index tree
+//! whose root documents point at where the bytes now are.
 //!
-//! No `RegistryCommand` is wired into the top-level [`crate::command::Command`]
-//! enum yet: clap rejects an empty subcommand enum, and a live-but-empty verb
-//! would be misleading. The first real registry subcommand introduces the
-//! enum and its `Registry` arm.
-//
-// TODO(registry ADR): add RegistryCommand once the registry-mirroring design
-// lands. See .claude/artifacts/adr_cli_namespace_restructure.md and issue #5.
+//! See `.claude/artifacts/adr_registry_mirror_sync.md`.
+
+// `pub(crate)`: `pipeline::registry_sync` takes `RegistrySyncOptions`, the same
+// upward edge `command::package::pipeline` already carries for
+// `pipeline::python_push`.
+pub(crate) mod options;
+mod sync;
+
+use ocx_lib::cli::DataInterface;
+
+use crate::error::MirrorError;
+
+/// Dispatcher for `ocx-mirror registry <subcommand>`.
+#[derive(clap::Subcommand)]
+pub enum RegistryCommand {
+    /// Mirror whole index sources into a corporate registry
+    Sync(sync::Sync),
+}
+
+impl RegistryCommand {
+    pub async fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
+        match self {
+            Self::Sync(cmd) => cmd.execute(printer).await,
+        }
+    }
+}
