@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-08-14
+
+### Added
+
+- Python wheel → OCX packaging library *(ocx_python)*
+- Env sources — pylock & pypi, wheels platform keys, env pipeline & container CI *(mirror)*
+- Alias newest non-semver env version under :latest *(push)*
+- Add the e2e-test skill (tiered e2e strategy) *(claude)*
+- Mirror whole index sources into a corporate registry *(registry)*
+
+### Changed
+
+- Extract push_with_retry from invoke_push *(push)*
+- Extract the push test module into push/tests/ *(push)*
+- Extract the ci renderer test module into ci/tests/ *(generate)*
+- Extract the spec test module into spec/tests/ *(spec)*
+- Move the crate-wide env lock into src/test_support.rs *(test)*
+- Add a library target with a minimal public surface *(crate)*
+- Move the rejected-document corpus into tests/fixtures/invalid *(spec)*
+- Move the ocx subprocess surface into pipeline/ocx_cli *(pipeline)*
+- Move target_registry down and close the command subtree *(pipeline)*
+- Move pep440_sort_key beside the other version ordering *(filter)*
+- Extract the remaining oversized test modules *(pipeline)*
+- Split the ci renderer into per-concern modules *(generate)*
+- Split the push driver into per-concern modules *(push)*
+- Extract the notify test module into notify/tests/ *(notify)*
+- Split validation, loading and platform keys out of spec.rs *(spec)*
+- Split env sources and drift detection out of plan.rs *(plan)*
+- Remove the three verified duplicate helpers
+
+### Documentation
+
+- Record why the push env lock pins its tests to one binary *(test)*
+- Sync the module map with the new layout *(claude)*
+- Drop fixed-defect references from the e2e-test skill *(claude)*
+- Document the registry sync verb and registry.yml *(registry)*
+
+### Fixed
+
+- Strip CR from every jq capture in generated test scripts *(generate)*
+- Cascade the platforms an earlier run published *(push)*
+- Stamp env tags with build_timestamp *(plan)*
+- Bound the PEP 440 releases the ocx version parser rejects *(filter)*
+- Ship a `python` entrypoint in every composed env *(python)*
+- Apply the opus review findings on the env-defect fixes *(review)*
+- Close the defects the review round found *(registry)*
+- Escape foreign tag strings on the message path *(registry)*
+- Bound the blob read and the manifest recursion depth *(registry)*
+- Start only the compose service the harness asked for *(test)*
+
 ## [0.5.3] - 2026-08-06
 
 ### Added
@@ -17,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Drop the false download resumption claims
+
+### Release
+
+- V0.5.3
 
 ## [0.5.2] - 2026-08-03
 
@@ -182,6 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.5.4]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.3..v0.5.4
 [0.5.3]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.2..v0.5.3
 [0.5.2]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.1..v0.5.2
 [0.5.1]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.0..v0.5.1
