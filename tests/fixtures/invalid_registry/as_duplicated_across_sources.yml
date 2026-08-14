@@ -1,0 +1,16 @@
+# Two sources sharing an `as:` share an output subtree and a `{registry}`
+# expansion, so the second overwrites the first's roots wholesale.
+# expect: as:
+# expect: upstream
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{registry}/{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream
+  - registry: localhost:5003
+    index: https://other.example/
+    as: upstream

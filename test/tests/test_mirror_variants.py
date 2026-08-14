@@ -10,7 +10,7 @@ same manifest.
 That second pass is the whole reason a repository with variants still answers
 to a bare `1.2.3`. It has no unit coverage — the alias tags only exist after a
 real `push_cascade` against a real registry — so it is pinned here, against the
-`:5001` fixture registry, by reading the tag list and the manifest digests back
+`registry` fixture, by reading the tag list and the manifest digests back
 off the registry HTTP API.
 """
 from __future__ import annotations

@@ -1,0 +1,17 @@
+# A plaintext `index:` puts the run's whole control plane — every package name,
+# `content` digest and destination `repository` — on the wire for an on-path
+# attacker to rewrite, and digest verification cannot help because the digests
+# arrive in the same tampered document. Refused unless the host is listed in
+# that source's `trusted_hosts:`, which this one is not.
+# expect: sources[0].index
+# expect: https
+# expect: trusted_hosts
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: http://index.example/
+    as: upstream

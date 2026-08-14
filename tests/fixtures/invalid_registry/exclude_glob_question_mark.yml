@@ -1,0 +1,15 @@
+# `exclude:` is compiled by the same engine as `include:`, and an unconditional
+# veto that silently matched nothing is the worse of the two failures — this
+# fixture is what proves the second list is scanned at all.
+# expect: kitware/cmake-?
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream
+    exclude:
+      - "kitware/cmake-?"

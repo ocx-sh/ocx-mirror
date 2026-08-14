@@ -40,6 +40,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         return
     registry = os.environ.get("REGISTRY", "localhost:5001")
     start_registry(registry)
+    start_registry(os.environ.get("MIRROR_REGISTRY", "localhost:5002"))
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,14 @@ def pytest_sessionstart(session: pytest.Session) -> None:
 @pytest.fixture(scope="session")
 def registry() -> str:
     addr = os.environ.get("REGISTRY", "localhost:5001")
+    start_registry(addr)
+    return addr
+
+
+@pytest.fixture(scope="session")
+def mirror_registry() -> str:
+    """Destination registry for `registry sync` acceptance tests — `registry` plays the upstream source."""
+    addr = os.environ.get("MIRROR_REGISTRY", "localhost:5002")
     start_registry(addr)
     return addr
 
@@ -173,6 +182,54 @@ def asset_server(tmp_path: Path):
             self.requests = requests
 
         def url(self, path: str) -> str:
+            return f"{self.base_url}/{path}"
+
+    yield Server()
+    httpd.shutdown()
+
+
+@pytest.fixture()
+def published_index_server(tmp_path: Path):
+    """Local HTTP server serving a hand-authored published-shape ocx-index tree.
+
+    `registry sync`'s source read is a set of plain GETs against an `index:`
+    base URL (`config.json`, `c/index.json`, `p/<ns>/<pkg>.json`) — this
+    fixture is that base URL. Populate `.dir` with
+    ``src.static_index.write_published_index_tree`` before pointing a spec's
+    `index:` at ``.url()``; the handler reads from disk per request, so
+    writing the tree before or after the server starts is equally fine.
+
+    Every request is recorded on ``.requests`` as ``"<METHOD> <path>"``, the
+    same shape ``asset_server`` uses. Two scenarios need it: the no-op re-run
+    (S-002) counts catalog fetches, and the SSRF refusal (S-007) proves the
+    run reached the root document before refusing — "zero registry requests"
+    otherwise only proves nothing ran at all.
+    """
+    index_dir = tmp_path / "index"
+    index_dir.mkdir()
+    requests: list[str] = []
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def send_head(self):
+            # Both GET and HEAD route through here, so one override sees every
+            # read of the served tree regardless of how it was requested.
+            requests.append(f"{self.command} {self.path}")
+            return super().send_head()
+
+    httpd = http.server.HTTPServer(
+        ("127.0.0.1", 0),
+        lambda *args: Handler(*args, directory=str(index_dir)),
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    class Server:
+        def __init__(self):
+            self.dir = index_dir
+            self.base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+            self.requests = requests
+
+        def url(self, path: str = "") -> str:
             return f"{self.base_url}/{path}"
 
     yield Server()

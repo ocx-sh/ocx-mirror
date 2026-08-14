@@ -1,0 +1,14 @@
+# Zero blobs in flight copies nothing, and would do it silently — the run would
+# report success having transferred no bytes.
+# expect: max_blobs
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+concurrency:
+  max_blobs: 0
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream

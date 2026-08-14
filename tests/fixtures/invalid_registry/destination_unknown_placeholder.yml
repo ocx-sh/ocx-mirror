@@ -1,0 +1,13 @@
+# The placeholder set is closed so an unknown name is an error rather than an
+# empty substitution — a template engine's default would collapse every package
+# onto one destination.
+# expect: tenant
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{tenant}/{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream

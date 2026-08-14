@@ -1,0 +1,14 @@
+# A registry with a path segment parses fine — the segment silently migrates
+# into the repository, re-homing every copied package one level up from where
+# the operator wrote it. Refused, not absorbed.
+# expect: target.registry
+# expect: ghcr.io/ocx-contrib
+target:
+  registry: ghcr.io/ocx-contrib
+  repository: mirror
+output: public
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream

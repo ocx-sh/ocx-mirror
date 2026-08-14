@@ -1,0 +1,14 @@
+# `as:` is both the served subtree name under `output:` and the `{registry}`
+# expansion, so it has to be one legal OCI path component. Copying the registry
+# address across is the obvious thing to do and brings the port with it.
+# expect: as:
+# expect: localhost:5001
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{registry}/{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: localhost:5001

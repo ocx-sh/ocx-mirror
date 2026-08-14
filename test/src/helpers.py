@@ -57,9 +57,22 @@ def start_registry(registry: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def push_stub_ocx_package(ocx_binary: Path, registry: str, ref: str, work_dir: Path) -> None:
+def push_stub_ocx_package(
+    ocx_binary: Path,
+    registry: str,
+    ref: str,
+    work_dir: Path,
+    *,
+    content: bytes = b"stub",
+) -> None:
     """Pushes a minimal one-layer Bundle package to ``{registry}/{ref}`` via
     the real ``ocx`` binary.
+
+    ``content`` is the layer's only file. It is a parameter because the layer
+    is otherwise byte-identical between calls, so two versions of the same
+    package would land on one manifest digest — and a cascade scenario
+    (S-009) needs `1.2` and `latest` to resolve to *different* digests for
+    the assertion to be able to fail.
 
     Used to stand in for a private interpreter package: `ocx-mirror`'s
     in-process interpreter-digest resolution (``fetch_manifest_digest``)
@@ -78,8 +91,8 @@ def push_stub_ocx_package(ocx_binary: Path, registry: str, ref: str, work_dir: P
     layer_path = work_dir / "stub-layer.tar.gz"
     with tarfile.open(layer_path, "w:gz") as tar:
         info = tarfile.TarInfo(name="bin/marker")
-        info.size = len(b"stub")
-        tar.addfile(info, io.BytesIO(b"stub"))
+        info.size = len(content)
+        tar.addfile(info, io.BytesIO(content))
 
     env = {
         "PATH": os.environ.get("PATH", ""),
@@ -106,3 +119,83 @@ def push_stub_ocx_package(ocx_binary: Path, registry: str, ref: str, work_dir: P
         env=env,
     )
     assert result.returncode == 0, f"failed to push stub package {ref} to {registry}: {result.stderr}"
+
+
+def push_ocx_description(
+    ocx_binary: Path,
+    registry: str,
+    repository: str,
+    work_dir: Path,
+    *,
+    readme: str = "# stub\n",
+) -> None:
+    """Pushes a `__ocx.desc` description to ``{registry}/{repository}`` via the real ``ocx`` binary.
+
+    The reserved description tag never appears in a root's ``tags{}`` (ocx
+    filters reserved tags at render), so it is fetched by name per package —
+    which is what S-012 checks travelled.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    readme_path = work_dir / "README.md"
+    readme_path.write_text(readme)
+
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "OCX_INSECURE_REGISTRIES": registry,
+        "OCX_HOME": str(work_dir / "ocx-home"),
+    }
+    result = subprocess.run(
+        [
+            str(ocx_binary),
+            "package",
+            "describe",
+            f"{registry}/{repository}",
+            "--readme",
+            str(readme_path),
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert result.returncode == 0, f"failed to describe {repository} on {registry}: {result.stderr}"
+
+
+def fetch_manifest(registry: str, repository: str, reference: str) -> tuple[str, bytes]:
+    """GETs `repository:reference`'s manifest from `registry` over the raw OCI HTTP API.
+
+    Returns the digest the registry claims (`Docker-Content-Digest`) and the
+    exact response bytes — the verbatim form a published-shape index tree's
+    dispatch object must carry (`src.static_index.write_published_index_tree`).
+    """
+    request = urllib.request.Request(f"http://{registry}/v2/{repository}/manifests/{reference}")
+    request.add_header(
+        "Accept",
+        "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json",
+    )
+    with urllib.request.urlopen(request) as response:
+        return response.headers["Docker-Content-Digest"], response.read()
+
+
+def put_manifest(registry: str, repository: str, reference: str, body: bytes, media_type: str) -> str:
+    """PUTs a raw manifest to `repository:reference` on `registry`, bypassing `ocx` entirely.
+
+    The only way to seed a descriptor `ocx`'s own writers never produce — an
+    attestation/referrer child with no `platform` key (S-024). There is no
+    `oras`/`crane` dependency to reach for instead, and `push_stub_ocx_package`
+    goes through the real `ocx` binary, which never omits `platform`.
+
+    A malformed `body` surfaces as `urllib.error.HTTPError` from `urlopen`
+    itself (the registry answers 400) — no extra handling needed here, same
+    as `fetch_manifest`.
+
+    Returns the digest the registry claims for the pushed content
+    (`Docker-Content-Digest`).
+    """
+    request = urllib.request.Request(
+        f"http://{registry}/v2/{repository}/manifests/{reference}",
+        data=body,
+        method="PUT",
+        headers={"Content-Type": media_type},
+    )
+    with urllib.request.urlopen(request) as response:
+        return response.headers["Docker-Content-Digest"]

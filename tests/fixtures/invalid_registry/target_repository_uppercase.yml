@@ -1,0 +1,14 @@
+# The destination prefix is the containment boundary every copied package
+# lands under, so it is refused rather than lowercased — `str::to_lowercase`
+# folds U+212A KELVIN SIGN onto `k` and would manufacture collisions.
+# expect: target.repository
+# expect: repository must be lowercase
+target:
+  registry: localhost:5002
+  repository: Mirror
+output: public
+destination: "{namespace}/{package}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream
