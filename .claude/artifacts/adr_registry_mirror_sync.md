@@ -404,7 +404,7 @@ the expanded set — no case normalisation anywhere.
 **What gets written into the root is `"oci://" + physical`, and it must round-trip.**
 `IndexRoot.repository` is a strict wire contract: `parse_physical_repository`
 (`crates/…/oci/index/ocx_index.rs:301-327`) hard-fails a missing scheme
-(`Error::MalformedPhysicalRef` ⇒ exit 65 at every consumer), and beyond the scheme it re-parses
+(`Error::MalformedPhysicalRef`), and beyond the scheme it re-parses
 `host/path` through `Identifier::parse_with_default_registry` and demands an **exact** round-trip —
 `registry() == host`, `repository() == path`, no tag, no digest (`:322-325`). So the mirror writes
 
@@ -461,18 +461,37 @@ that package's root document is written (decision 8), so a partially-copied `tag
 visible. Order *among* tags is therefore free — which is why `pep440_sort_key` can be used for
 legibility without carrying any correctness weight.
 
-**Failure of one tag fails the package, not the tag.** If a tag's `content` digest cannot be pulled —
-upstream deleted the manifest but left the index entry — writing a root with fewer tags than the
-source would be a silent cascade break at the destination. The package is counted failed, no root is
-written, and the summary names the tag.
+**Failure of one tag drops that tag, not the package.** If a tag's `content` digest cannot be pulled
+— upstream deleted the manifest but left the index entry — that tag is simply absent from the
+`confirmed` set and does not enter the root. The package is counted failed and the summary names the
+tag, but the root **is** written, carrying the tags that did copy.
+
+> **Amended after implementation.** This paragraph originally read "fails the package, not the tag …
+> no root is written", on the reasoning that a root with fewer tags than the source is a silent
+> cascade break. That reasoning does not survive contact with the merge: the written root is the
+> **union** of what the destination already published and what this run confirmed (C-047), so a
+> failed tag falls back to the digest the last good run published rather than vanishing. Nothing is
+> ever deleted, so there is no cascade break to prevent. The original rule would have let one broken
+> upstream pointer hold every other tag of that package hostage indefinitely, and it is contradicted
+> by the design's own `confirmed` set — a set that is *filtered* only makes sense if partial
+> publication is the intent. Two guards keep the weakened rule honest: nothing confirmed **and** no
+> destination root ⇒ no root is written at all (an empty `tags{}` root would advertise content the
+> mirror does not hold and satisfy every `should_skip` condition forever), and the run still exits
+> non-zero.
 
 ### Failover, repair, and the visibility guarantee
 
 **Guarantee (owner requirement).** *A release enters the mirrored index only after the mirror
-succeeded.* Concretely: a package's root document is written only after every manifest and blob its
-`tags{}` names is confirmed present at the destination, and `c/index.json` is published only by
-`CatalogTransaction::commit` at the end of the source's pass. The published tree therefore never
-names content that is not there.
+succeeded.* Concretely, and **per tag rather than per package**: a tag appears in the written root
+only once every manifest and blob its `content` digest names is confirmed present at the destination
+— that is exactly what the `confirmed` set is, and a tag joins it only inside the success arm of the
+copy. `c/index.json` is then published only by `CatalogTransaction::commit` at the end of the
+source's pass. The published tree therefore never names content that is not there.
+
+Stating the guarantee per tag is not a weakening of the owner's requirement — it is the requirement
+applied at the granularity a release actually has. A package is not a release; its tags are. Holding
+back forty-three confirmed releases because a forty-fourth is broken upstream would publish *less*
+verified content, not more.
 
 **The converse is deliberately not guaranteed**, and that is the whole subject of this section:
 content *can* be at the destination with no root naming it. That is the interrupted state, it is
@@ -590,6 +609,72 @@ problem, and inventing a second answer here would be the wrong place for it.
 
 ## Open question 1 (resolved): where the blob-copy seam lives
 
+> **AMENDED 2026-08-14 — Seam 1 is superseded. Everything in this section below this box, and
+> Implementation-Plan item 2, describes work that is CUT.** There is no upstream `ocx` change. The
+> heading below calling the wrapper list "the single authoritative list" no longer holds; the
+> authoritative surface is now the plan's A-009 table
+> (`.claude/state/plans/plan_registry_mirror_sync.md`), verified by compiling against it.
+>
+> **What ships instead.** Reads: `Index::fetch_manifest_raw_bytes` (`oci/index.rs:442`) — already
+> public, returns verbatim bytes + digest + parsed manifest, the same seam `persist_dispatch` uses.
+> Writes: the fork's own `native::Client` (`push_blob`, `mount_blob`, `push_manifest_raw`,
+> `blob_exists`, `fetch_blob_size`, `pull_referrers`), constructed in ocx-mirror. Auth:
+> `ocx_lib::auth::Auth::get_or_fallback` — ocx's own `OCX_AUTH_<slug>_*` → docker-credential-store →
+> anonymous chain, unchanged. Registry-side SSRF: the public `ssrf::GuardedResolver` installed on the
+> fork's public `ClientConfig.dns_resolver` field.
+>
+> **This is materially Seam 2, which scored 72 against Seam 1's 118. Recorded plainly rather than
+> re-scored.** Seam 2 lost on exactly two criteria and both are now mitigated concretely: *one auth
+> path* — auth still routes through ocx's own public `Auth`; *SSRF policy in one place* — the policy
+> is still ocx's `GuardedResolver` and `resolve_and_validate`, merely installed by this repo instead
+> of by `ClientBuilder`. What changed the answer is a constraint the matrix never scored: **the PR
+> must stand alone.** A submodule pointer must reference a commit that exists upstream, so Seam 1
+> makes an `ocx-sh/ocx` merge a *build* prerequisite and this PR cannot merge or release on its own.
+>
+> **Residual, accepted and bounded.** ocx-mirror now owns registry-*client construction policy* — TLS
+> roots, timeouts, chunk size, protocol, resolver wiring. That is a `quality-core.md` *Don't Own
+> Non-Domain Code* Warn. It is bounded by a test asserting the three settings `ClientBuilder::new`
+> sets that `ClientConfig::default()` does not (`push_chunk_size`, `read_timeout`, `connect_timeout`
+> — `builder.rs:98-114`). The copy ladder itself still delegates to the fork.
+>
+> **The SSRF guard is source-side only** — as this ADR already mandates at *Source-side input
+> validation*. A guarded **destination** client refuses `localhost:5002` and an RFC1918 Artifactory,
+> i.e. the acceptance harness and the motivating deployment both (`ssrf.rs:88-91` rejects loopback,
+> RFC1918, link-local and CGNAT). The destination registry is operator-authored config, inside the
+> threat model's trusted boundary.
+>
+> **Both halves pin. Corrected 2026-08-15 — an earlier revision of this box claimed the index half
+> could not, and that was wrong.**
+>
+> Registry half: `GuardedResolver` on the fork's `ClientConfig.dns_resolver`. Index half:
+> `resolve_and_validate(host, port, trusted_hosts)` pre-flight, then
+> **`ClientBuilder::resolve_to_addrs(&host, &addresses)`** with the addresses that call already
+> returned (`ssrf.rs:234` returns them; the earlier design discarded them), skipped only when the host
+> is an IP literal. `redirect::Policy::none()` on both.
+>
+> **The retracted claim, and why it was wrong.** The box previously said `GuardedResolver` implements
+> reqwest **0.13**'s `dns::Resolve` while ocx-mirror is on 0.12.28, therefore no pin was available,
+> therefore pre-flight validation alone was accepted — with "add reqwest 0.13" recorded as the
+> rejected alternative. The first half is true and irrelevant: **reqwest 0.12 has
+> `ClientBuilder::resolve_to_addrs`** (`reqwest-0.12.28/src/async_impl/client.rs:2278`), which pins
+> the connect without any resolver trait. No version bump was ever needed, so the rejected-alternative
+> framing answered a question that does not arise, and is withdrawn.
+>
+> **What the false premise licensed.** The client re-resolves on the first GET, so a malicious source
+> registry — which controls authoritative DNS for its own index hostname and needs no network position
+> at all — serves a short-TTL record and flips it to `169.254.169.254` or an RFC1918 address between
+> validation and connect. Blind SSRF, CWE-918 via CWE-367, against exactly the perimeter this floor
+> exists to protect.
+>
+> **The reasoning error, named so it is not re-derived.** The second argument — *"the index base URL is
+> operator-authored spec config, inside the trusted boundary"* — **conflates the string with the DNS
+> answer.** The operator authored the hostname. They did not vouch for the source's nameserver, and it
+> is the nameserver that decides what address the socket opens against. An operator-authored hostname
+> is a trusted *string*, never a trusted *resolution*.
+>
+> That upstream's own `ReqwestIndexTransport::new()` (`ocx_index.rs:203-208`) installs no resolver is
+> true and is not a licence — it is upstream's gap, not a standard to match.
+
 **Two corrections to the framing, both verified in the trees.**
 
 **Correction 1 — the primitives already exist, and the trait is `pub`.** `OciTransport`
@@ -666,9 +751,20 @@ Peak resident memory is therefore `blob_concurrency × largest_blob`. The larges
 asset is bazel's `dist.zip` at 221 MB (operability research §6), so `buffer_unordered(8)` would peak
 near 1.8 GB. **`RegistryConcurrency::max_blobs` defaults to 4** for this reason — and it is a knob on
 a type this design owns, not a re-defaulting of `ConcurrencyConfig::max_downloads`, whose 8 stays what
-every existing package mirror gets (`src/spec/concurrency_config.rs:39-41`). A streaming copy
-(`pull_blob_to_file` exists at `transport.rs:94`; a streaming `push_blob` does not) is deferred —
-trigger: a catalog blob exceeds ~500 MB, or a real run is observed OOMing.
+every existing package mirror gets (`src/spec/concurrency_config.rs:39-41`).
+
+**Corrected 2026-08-14 — the stated reason for buffering was wrong.** "A streaming `push_blob` does
+not exist" is false: the fork exposes public `push_blob_stream` and `pull_blob_stream`. The real
+reason to keep buffering is that **`sha256(pulled) == expected` before any push cannot be satisfied
+by a naive tee-stream** — the bytes must be complete and verified before the first one is sent.
+Recorded explicitly, because a future optimisation reading the old justification would delete the
+buffer and verify-before-push together. Streaming is deferred on that basis; trigger unchanged (a
+catalog blob exceeds ~500 MB, or a real run is observed OOMing), and any streaming design must say
+how it preserves verify-before-push.
+
+**The ceiling also depends on two conditions the implementation must hold**: one **run-scoped**
+`Arc<Semaphore>` (not one per call) and **sequential** package processing — concurrency inside a
+package, never across them.
 
 **And the digest check does not change this.** `sha256(pulled_bytes)` is computed over the buffer that
 is already resident, so the mandatory verification costs CPU, not memory.
@@ -989,7 +1085,10 @@ pub struct RegistryConcurrency {
 ```
 
 Two knobs, both meaningful. `max_retries` reuses the **retry shape** `push_with_retry` already
-implements (1s doubling to a 30s cap, ±10% jitter) — the shape, not the type.
+implements (1s doubling to a 30s cap) — the shape, not the type — but **not** its ±10% jitter:
+`registry_copy.rs::retry_delay` is a plain deterministic doubling ladder, because it stands in for a
+`Retry-After` header the fork never surfaces to its caller (`is_rate_limited`'s doc comment,
+`registry_copy.rs`), leaving nothing for jitter to desynchronise.
 
 **Validation rules, all at load unless noted:**
 
@@ -1206,7 +1305,7 @@ committed tree.
 |---|---|---|
 | `p/<ns>/<pkg>.json` | Parse raw bytes to `serde_json::Value`, mutate **exactly** the `repository` key, re-serialize. `IndexRoot` is `Deserialize`-only (`wire.rs:144-159`) and has no `deny_unknown_fields` for fleet forward-compat, so a *typed* round-trip would silently drop newer fields the mirror must pass through | `wire_writer::serialize_root(&Value)` (`:59`) via `CatalogTransaction::write_root` (`index_store.rs:1103-1124`) — **not** the bare `write_root_document` (`:757`): `write_root` writes the bytes atomically *and* upserts the derived catalog entry under the one held lock. See *the `repository_check` hook* below |
 | `c/index.json` | **Derived, never copied** — ratified constraint: *"the catalog is authored, never mirrored"*. The mirror's catalog is the filtered subset, keyed on `sha256(rewritten root)` | `CatalogTransaction::commit`; `regenerate_catalog` (`regenerate.rs:121`) is the repair path |
-| `config.json` | **Always written.** Fetch the source's, parse to gate `format_version` against `SUPPORTED_FORMAT_VERSION` (`wire.rs:49`), then write the **raw source bytes** verbatim. Parse-to-check, write-raw: `IndexFormatConfig` models only two keys, so a parse→`serialize_config` round trip would drop any sibling field. Source has none ⇒ write `{"format_version": 1}` | raw passthrough, or `serialize_config` (`:106`) for the synthesized case |
+| `config.json` | **Write-if-absent** *(corrected 2026-08-14 — this row said "always written")*. Fetch the source's, parse to gate `format_version` against `SUPPORTED_FORMAT_VERSION` (`wire.rs:49`), then write the **raw source bytes** verbatim **only when the file does not already exist**, matching `IndexStore::ensure_source_config`'s own semantics. Unconditional writing breaks two things: the atomic rename churns mtime even for byte-identical content, destroying the no-op-run mtime stability this ADR sells three rows below as what makes a scheduled run safe against a committed tree; and it clobbers an operator-authored `name_segments`, which is jurisdiction-affecting and which ocx explicitly refuses to guess. A corrupt or stale file is `--repair-catalog`'s job, not every sync's. Parse-to-check, write-raw: `IndexFormatConfig` models only two keys, so a parse→`serialize_config` round trip would drop any sibling field. Source has none ⇒ write `{"format_version": 1}` | raw passthrough, or `serialize_config` (`:106`) for the synthesized case |
 | `o/<algo>/<hex>.json` dispatch objects | Copied byte-for-byte; the digest pins them | `IndexStore::write_dispatch_object` (`:393`) |
 | `<repository>:__ocx.desc` | **Explicitly copied** per package. Skipped by any `root.tags{}` walk because the tag is classified administrative | copy engine |
 
@@ -1286,7 +1385,7 @@ per-variant style (`:146-218`).
 
 | NFR | Position |
 |---|---|
-| **Scalability** | Full public catalog ceiling, cold: **121 packages** ⇒ ~1,585 release-builds, ~9,510 blobs, ~210 GB, ~60,000 requests. A real filtered corporate run is tens of packages. Enumeration is a static file — it does not scale with registry size, only with catalog size |
+| **Scalability** | Full public catalog ceiling, cold: **121 packages** ⇒ ~1,585 release-builds, ~9,510 blobs, ~210 GB, ~60,000 requests — **plus referrers detection, which this figure omitted** *(corrected 2026-08-14)*: one `/referrers/<digest>` query per copied manifest, ~308 per cmake-sized package, so a full-catalog cold run adds tens of thousands of small requests. It is bounded (depth 1, no recursion) but it is not free, and a rate-limited registry will feel it. A real filtered corporate run is tens of packages. Enumeration is a static file — it does not scale with registry size, only with catalog size |
 | **Latency** | No-op run: 1 request with the source-catalog cache, ~121 small GETs without. K changed packages: 1 + K root fetches + only the blobs those roots newly reference |
 | **Availability** | Continue-on-error / fail-at-end by default (`on_error`). **Reactive** 429 / `Retry-After` backoff only, reusing `push_with_retry`'s 1s-doubling-to-30s ±10% jitter shape. The distinction is load-bearing: regsync's `ratelimit` is **proactive** — a pre-flight quota check reading a remaining-pulls header before a step, not a 429 handler — and GHCR publishes no such header, so the proactive mechanism has nothing to read. Defer it until a Docker Hub source exists |
 | **Security** | Zero credentials in the spec, refused by a pre-scan that reports the key path and never the value; auth entirely ocx's; SSRF guard on the source client with per-source `trusted_hosts`; every destination path routed through `Identifier::validate_repository` and containment-checked against `target.repository`; `sha256(pulled) == expected` before every push; bounded referrers detection; credential non-forwarding across host boundaries is ocx#272, kept in `ocx_lib` by Seam 1. Full treatment: *Source-side input validation*. Trust residual: open question 3 |
@@ -1303,9 +1402,11 @@ per-variant style (`:146-218`).
        *"enforced by keeping this repository's own `ocx.toml` / `ocx.lock` current"*, so the pin moving
        with the pointer is not optional. Fix the now-false `reqwest` sentence (below) and declare
        `serde_json` `preserve_order` explicitly while here. Blast radius in the next section.
-2. [ ] **Upstream (ocx)**: the four new `Client` wrappers, `fetch_manifest_raw_bytes` promoted to
-       `pub`, and `list_referrers` on `OciTransport` (default impl) plus its `Client` wrapper —
-       signatures in *The upstream contract*. Additive, mechanical, independently verifiable.
+2. [x] ~~**Upstream (ocx)**: the four new `Client` wrappers, `fetch_manifest_raw_bytes` promoted to
+       `pub`, and `list_referrers` on `OciTransport` (default impl) plus its `Client` wrapper.~~
+       **CUT 2026-08-14 — no upstream change is needed and none may be made.** Every capability is
+       already public at the v0.5.8 pin; see the amendment box on Open question 1. Seam 1 would have
+       made an `ocx-sh/ocx` merge a *build* prerequisite for a PR that must stand alone.
 3. [ ] **`RegistrySpec`** in `src/spec/registry.rs` + `RegistryConcurrency` + the raw-`Value` pre-scan
        (credentials / `kind` / index userinfo, none of which echo a value) wired between
        `src/spec/load.rs:59` and `:61` + the grammar validations. Fixture per rejected document under
@@ -1518,6 +1619,8 @@ feature. Step 7 makes it reachable. Nothing before step 7 is user-visible.
 
 | Date | Author | Change |
 |------|--------|--------|
+| 2026-08-15 | architect (opus) | **Correction: the index-HTTP SSRF gap was accepted on a false premise. Both halves now pin.** The prior amendment claimed no resolver pin was available on this crate's own HTTP client because `GuardedResolver` implements reqwest **0.13**'s `dns::Resolve` while ocx-mirror is on 0.12.28. True, and irrelevant: reqwest 0.12 has `ClientBuilder::resolve_to_addrs` (`reqwest-0.12.28/src/async_impl/client.rs:2278`), and `resolve_and_validate` already returns the validated `Vec<SocketAddr>` (`ssrf.rs:234`) — the design simply discarded them. Index half now pins with `.resolve_to_addrs(&host, &addresses)`, skipped only for IP literals; `redirect::Policy::none()` unchanged; **no version bump was ever needed**, so the "add reqwest 0.13" rejected-alternative framing is withdrawn rather than retained. What the premise licensed: a malicious source registry, authoritative for its own index hostname and needing no network position, serves a short-TTL record and flips it to `169.254.169.254` or RFC1918 between validation and connect — blind SSRF, CWE-918 via CWE-367. The secondary argument (*"the index base URL is operator-authored spec config, inside the trusted boundary"*) is recorded as **rejected**, with its specific error named: it **conflates the string with the DNS answer** — the operator authored the hostname, not the source's nameserver, and an operator-authored hostname is a trusted string, never a trusted resolution. Status stays **Proposed**. |
+| 2026-08-14 | architect (opus) | **Amendment: Seam 1 superseded, plus five corrections found while decomposing and building.** *Seam:* Open question 1 carries an amendment box — there is **no upstream `ocx` change** and Implementation-Plan item 2 is **cut**. Reads go through the already-public `Index::fetch_manifest_raw_bytes` (`oci/index.rs:442`), writes through the fork's own `native::Client`, auth through `ocx_lib::auth::Auth::get_or_fallback`, registry-side SSRF through the public `GuardedResolver` + `ClientConfig.dns_resolver`. This is materially **Seam 2** (scored 72 vs Seam 1's 118); recorded plainly rather than re-scored, with both losing criteria mitigated concretely and the deciding constraint named — a submodule pointer must reference an upstream commit, so Seam 1 makes an `ocx` merge a *build* prerequisite for a PR that must stand alone. Residual accepted: ocx-mirror owns registry-client *construction policy* (a *Don't Own Non-Domain Code* Warn), bounded by a test on the three settings `ClientBuilder::new` sets that `ClientConfig::default()` does not. *SSRF split:* the guard is **source-side only**, as *Source-side input validation* already mandated — a guarded destination refuses `localhost:5002` and RFC1918 Artifactory alike; and the index-HTTP half takes **pre-flight `resolve_and_validate` + `redirect::Policy::none()`** rather than a pinned resolver, because `GuardedResolver` implements reqwest **0.13**'s `dns::Resolve` and this crate is on 0.12.28 (adding 0.13 directly rejected per `CLAUDE.md`). *Corrections:* `config.json` is **write-if-absent**, not always-written — an unconditional atomic rename churns mtime against this ADR's own no-op-stability claim and clobbers operator `name_segments`; the `max_blobs: 4` justification "a streaming `push_blob` does not exist" is **false** (the fork has public `push_blob_stream`/`pull_blob_stream`) and the real reason is that verify-before-push cannot be satisfied by a naive tee — recorded so an optimisation does not delete the verification with the buffer, along with the two conditions the ceiling depends on (run-scoped semaphore, sequential packages); the ~60,000-request budget **omitted referrers detection** (~308 queries per cmake-sized package). *Unchanged and confirmed:* the lock claim at *Index-store construction* ("the lock covers the catalog write window only, not the whole run") was already correct — the plan's run-scoped transaction was the thing that disagreed, and the plan was fixed. Status stays **Proposed**. |
 | 2026-08-14 | architect (opus) | **Revision against a three-reviewer panel (21 Block findings) and two new owner requirements.** *Shape:* Option C reaffirmed by owner ruling; Option E added to the options table with its real advantages and its real score (62 vs C's 55), Option B's false "needs a proxying registry" con corrected against `mirror_map.rs:67-75`, and the compensatory weighted sum replaced by the binary air-gap gate the Decision Drivers already state — A and B eliminated by the gate rather than outvoting it. *New requirement A (failover / auto-repair):* write-root-last restated as an owner **guarantee**; repair folded into a three-condition skip predicate (root present ∧ tags ⊇ source ∧ catalogued with matching digest) so an interrupted run self-heals with no verb and no journal; `regenerate_catalog` scoped to `--repair-catalog` with its limits named; `on_error: continue \| fail_fast` added, defaulting to `continue`. *New requirement B (cascade / non-version tags):* the mirror computes **no** cascade — three tag classes specified, every `tags{}` key copied by digest whatever its text, `pep440_sort_key` used as an ordering key only (`src/filter.rs:225-232`, `None` sorts first), and `resolve_cascade_tags` (`crates/…/package/cascade.rs:207`) recorded as the thing that must **not** be re-run against a filtered subset. *Ships-broken defects:* the written pointer is `"oci://" + destination` and round-trip-checked through `parse_physical_repository`; the `repository_check` hook specified as `parse_physical_repository` (correcting the review's `local_index.rs:435` premise — that is `commit_root_tags`, which writes through the bare `write_root_document`). *Correctness:* `kind` folded into the raw-`Value` pre-scan; catalog membership added to the skip predicate; the widened-`include:` blind spot closed by a name-set condition costing zero requests; cache moved out of `output:` and reduced to one digest; the 503 contradiction resolved by naming the whole-run-abort and aggregating error classes apart; `RegistryConcurrency` replaces the incompatible shared `ConcurrencyConfig`; **`blob_anchor` cut** (nothing writes to it, and it would land on a `Target` with no `deny_unknown_fields`) with a v2 trigger. *Security, all in scope under `security-threat-model.md`:* SSRF guard wired with per-source `trusted_hosts`; destination expansion routed through `Identifier::validate_repository` with prefix containment, refusing uppercase rather than lowercasing; the credential pre-scan explicitly forbidden from echoing the value (`policy_check_notify` at `validate.rs:412`,`:417` does, and following it literally would log the token); `sources[].index` userinfo rejected; `sha256(pulled) == expected` mandated before every push; referrers detection bounded; `extends:` resolved as supported via the post-merge pre-scan. *Honesty:* sizing re-derived from **121 packages** (~1,585 builds, ~9,510 blobs, ~210 GB, ~60,000 requests); the in-range BREAKING scan redone and corrected from one entry to **three**, with the `${…}` metadata-grammar change flagged as a real touchpoint on `src/spec/metadata_config.rs`; miscited lines fixed (`index_store.rs:832`/`:886`/`:894`, `ocx_index.rs:1004`, `CLAUDE.md:51-53`, `regenerate.rs:283-285` identified as a test helper with `context.rs:234-238` + `file_structure.rs:117` as the production sites); the Seam-1 surface given as exact signatures with `ProgressFn`'s private-module problem resolved; `run_locks_dir` defined as stable-per-output-tree; insider-attacker trust analysis cut to a pointer per the threat model. *Trims:* `{a,b}` glob alternation, `blob_exists`, the freshness-manifest analysis. Copy engine relocated to `src/pipeline/registry_copy.rs`. Validation checklist rebuilt around the new obligations. |
 | 2026-08-13 | architect (opus) | Submodule-bump blast radius folded into Migration: CLI contract verified low-risk (both suspected breakages predate the current pin; both parsed JSON reports gained fields tolerantly), `ocx.toml` pin bump made non-optional, and the `reqwest`-is-mirror-owned sentence in `Cargo.toml:42-45` + `CLAUDE.md` recorded as **now false** with a `cargo tree` verification step. Added the `locks_root` redirect to the component contract — `IndexStore::new` defaults it to `root/locks`, which would ship a lock directory inside the served, committed tree — plus the wrapped-layout choice (servable-ADR OQ1 does not apply), the no-symlinks-under-`p/` constraint, and `commit`'s unconditional `c/index.json.etag` removal. Kept `CatalogTransaction::write_root` over the bare `write_root_document` and recorded why. Operability: Harbor's `Execution` counter set adopted as the summary line, its single-active-replication toggle recorded as an operator responsibility this tool cannot render (decision 11), and regsync's `ratelimit` corrected to proactive — which is why reactive-only is right against a header-less GHCR. |
 | 2026-08-13 | architect (opus) | Initial draft. Records the twelve settled decisions; resolves the blob-copy seam to thin `ocx_lib` wrappers (Seam 1) after finding the primitives already exist and are `pub` at the `OciTransport` level with only the *instance route* missing, and that the vendored fork already implements `pull_referrers` with the fallback-tag schema; resolves pruning to append-only; recommends accepting the trust residual in writing. Flags two defects in the settled decisions: the exit-64 credential rejection is unreachable behind `deny_unknown_fields`, and the catalog-digest short-circuit cannot survive a rewrite that changes every root's digest by construction. Names the `push_blob(Vec<u8>)` memory ceiling and drops default blob concurrency to 4. |
