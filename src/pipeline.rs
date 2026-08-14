@@ -12,5 +12,10 @@ pub mod progress;
 pub mod push;
 pub(crate) mod python_prepare;
 pub(crate) mod python_push;
+// `registry_copy` is a sibling of `registry_sync`, not a child: it is shared
+// machinery below the command layer, and flat siblings with per-module child
+// directories is this module's own shape.
+pub mod registry_copy;
+pub mod registry_sync;
 pub(crate) mod target_registry;
 pub mod verify;

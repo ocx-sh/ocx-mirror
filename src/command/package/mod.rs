@@ -5,11 +5,14 @@
 //!
 //! Mirrors upstream package releases into an OCI registry. Groups the one-shot
 //! mirror verbs (`sync`, `check`, `validate`) with the pre-publish test
-//! `pipeline`. Sibling namespace `registry` (reserved) will host
-//! registry-to-registry mirroring; see `adr_cli_namespace_restructure`.
+//! `pipeline`. Sibling namespace [`super::registry`] hosts whole-index
+//! mirroring; see `adr_cli_namespace_restructure`.
 
 mod check;
-mod options;
+// `pub(crate)`: `pipeline::registry_sync::report` and `command::registry`
+// render through the same `OutputFormat`, so both spellings of `--format` stay
+// one type.
+pub(crate) mod options;
 // `pub(crate)`: `pipeline::python_push` (outside this subtree) drives the env
 // push through `pipeline::push::push_with_retry`, so both publish legs share
 // one retry ladder and one transient-exit predicate.

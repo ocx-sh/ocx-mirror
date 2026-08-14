@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-mod package;
-// Reserved namespace — registry-to-registry mirroring. Documented placeholder
-// only; no `Registry` arm on `Command` until the first subcommand lands.
-// See .claude/artifacts/adr_cli_namespace_restructure.md.
-mod registry;
+pub(crate) mod package;
+pub(crate) mod registry;
 #[cfg(feature = "jsonschema")]
 mod schema;
 
@@ -20,6 +17,10 @@ pub enum Command {
     #[command(subcommand)]
     Package(package::PackageCommand),
 
+    /// Mirror whole OCX index sources into a corporate OCI registry
+    #[command(subcommand)]
+    Registry(registry::RegistryCommand),
+
     /// Generate JSON Schema for mirror types
     #[cfg(feature = "jsonschema")]
     Schema(schema::Schema),
@@ -29,6 +30,7 @@ impl Command {
     pub async fn execute(&self, printer: &DataInterface, progress: &ProgressManager) -> Result<(), MirrorError> {
         match self {
             Self::Package(cmd) => cmd.execute(printer, progress).await,
+            Self::Registry(cmd) => cmd.execute(printer).await,
             #[cfg(feature = "jsonschema")]
             Self::Schema(cmd) => cmd.execute().await,
         }

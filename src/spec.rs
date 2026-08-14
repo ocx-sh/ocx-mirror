@@ -14,7 +14,9 @@ mod notify_config;
 mod ocx_mirror_config;
 mod platform_keys;
 mod platforms_config;
+mod prescan;
 mod python_config;
+mod registry;
 mod source;
 mod strip_components_config;
 mod target;
@@ -46,7 +48,13 @@ pub use ocx_mirror_config::OcxMirrorConfig;
 pub(crate) use platform_keys::*;
 #[allow(unused_imports)]
 pub use platforms_config::{ContainerConfig, ExcludeEntry, PlatformConfig, Severity};
+#[allow(unused_imports)]
+pub(crate) use prescan::*;
 pub use python_config::{LockOptions, PythonConfig};
+// `RegistrySpec` lands in the tier `MirrorSpec` already occupies, which is
+// what makes `tests/registry_spec_validation.rs` reachable without touching
+// `lib.rs` (C-008). Its children ride along so the pipeline can name them.
+pub use registry::{OnError, RegistryConcurrency, RegistrySource, RegistrySpec};
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;

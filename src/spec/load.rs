@@ -12,16 +12,23 @@ use std::path::Path;
 
 use ocx_lib::log;
 
-use super::MirrorSpec;
 use super::validate::policy_check_notify;
+use super::{KIND_KEY, MirrorSpec, RegistrySpec, pre_scan};
 use crate::error::MirrorError;
 
-/// Load and validate a mirror spec from a YAML file, resolving `extends` chains.
+/// Read a spec off disk, resolve its `extends:` chain, and shallow-merge the
+/// result into one document.
 ///
-/// If the spec contains an `extends` key, the referenced base file is loaded first
-/// and the child's top-level keys are shallow-merged on top. Chains of arbitrary
-/// depth are supported; circular references are detected and rejected.
-pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
+/// Type-agnostic on purpose: every root type does exactly this work, and only
+/// the deserialize target and the checks around it differ. `extends:` is
+/// stripped from the merged value, so no root type needs a field for it.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecNotFound`] (79) when `spec_path` or any chain member is
+/// unreadable, [`MirrorError::SpecInvalid`] (65) for a YAML parse error or a
+/// malformed `extends:` chain.
+async fn resolve_and_merge(spec_path: &Path) -> Result<serde_yaml_ng::Value, MirrorError> {
     if !spec_path.exists() {
         return Err(MirrorError::SpecNotFound(spec_path.display().to_string()));
     }
@@ -32,31 +39,45 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
 
     let chain = resolve_extends_chain(spec_path, &content).await?;
 
-    let merged = if chain.is_empty() {
+    if chain.is_empty() {
         // No extends — parse directly
-        serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content)
-            .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?
-    } else {
-        // Load chain in reverse (grandparent first), shallow-merge each layer on top
-        let mut base = serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new());
-        for path in chain.iter().rev() {
-            let file_content = tokio::fs::read_to_string(path)
-                .await
-                .map_err(|e| MirrorError::SpecNotFound(format!("{}: {e}", path.display())))?;
-            let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&file_content)
-                .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error in {}: {e}", path.display())]))?;
-            shallow_merge(&mut base, value);
-        }
-        // Finally merge the child (spec_path itself) on top
-        let child: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)
-            .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
-        shallow_merge(&mut base, child);
-        // Strip the extends key from the merged result
-        if let serde_yaml_ng::Value::Mapping(ref mut map) = base {
-            map.remove("extends");
-        }
-        base
-    };
+        return serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content)
+            .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]));
+    }
+
+    // Load chain in reverse (grandparent first), shallow-merge each layer on top
+    let mut base = serde_yaml_ng::Value::Mapping(serde_yaml_ng::Mapping::new());
+    for path in chain.iter().rev() {
+        let file_content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| MirrorError::SpecNotFound(format!("{}: {e}", path.display())))?;
+        let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&file_content)
+            .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error in {}: {e}", path.display())]))?;
+        shallow_merge(&mut base, value);
+    }
+    // Finally merge the child (spec_path itself) on top
+    let child: serde_yaml_ng::Value = serde_yaml_ng::from_str(&content)
+        .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
+    shallow_merge(&mut base, child);
+    // Strip the extends key from the merged result
+    if let serde_yaml_ng::Value::Mapping(ref mut map) = base {
+        map.remove("extends");
+    }
+
+    Ok(base)
+}
+
+/// Load and validate a mirror spec from a YAML file, resolving `extends` chains.
+///
+/// If the spec contains an `extends` key, the referenced base file is loaded first
+/// and the child's top-level keys are shallow-merged on top. Chains of arbitrary
+/// depth are supported; circular references are detected and rejected.
+///
+/// The `registry.yml` pre-scan is deliberately **not** wired in here: its
+/// `kind:` job makes an absent discriminator a hard exit 64, which every
+/// existing `mirror.yml` would then hit (C-007).
+pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
+    let merged = resolve_and_merge(spec_path).await?;
 
     let spec: MirrorSpec = serde_yaml_ng::from_value(merged)
         .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
@@ -82,6 +103,48 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
             "[{}] build_timestamp: none with cascade publishing — re-pointing a cascade tag orphans the prior digest, which registry GC can reap and break @sha256: pins; set build_timestamp: date|datetime or configure registry retention (see the mirror.yml build_timestamp reference)",
             spec.name
         );
+    }
+
+    Ok(spec)
+}
+
+/// Load and validate a `registry.yml` — the `registry sync` root type (C-007).
+///
+/// Strict order, each step's failure mapping fixed: absent file →
+/// [`MirrorError::SpecNotFound`] (79) → read → `extends:` merge →
+/// [`pre_scan`] ([`MirrorError::SpecUsageError`], 64) → deserialize
+/// ([`MirrorError::SpecInvalid`], 65) → [`RegistrySpec::validate`]
+/// ([`MirrorError::SpecInvalid`], 65).
+///
+/// The pre-scan runs **before** deserialization, copying `load_spec`'s
+/// `policy_check_notify` precedent of running before `validate()` so a usage
+/// violation exits 64 rather than 65. Running it post-merge is also what lets
+/// a credential hidden in an `extends:` base be caught with no chain-walking
+/// of its own.
+///
+/// **`kind:` is stripped alongside `extends:` before deserialization.**
+/// [`RegistrySpec`] carries `deny_unknown_fields` and has no `kind` field
+/// (C-001), so leaving it in the merged value would make *every* valid
+/// `registry.yml` fail serde. The pre-scan has already read it by then.
+///
+/// # Errors
+///
+/// See the order above; every step maps to exactly one variant.
+pub async fn load_registry_spec(spec_path: &Path) -> Result<RegistrySpec, MirrorError> {
+    let mut merged = resolve_and_merge(spec_path).await?;
+
+    pre_scan(&merged, spec_path)?;
+
+    if let serde_yaml_ng::Value::Mapping(ref mut map) = merged {
+        map.remove(KIND_KEY);
+    }
+
+    let spec: RegistrySpec = serde_yaml_ng::from_value(merged)
+        .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
+
+    let errors = spec.validate(spec_path);
+    if !errors.is_empty() {
+        return Err(MirrorError::SpecInvalid(errors));
     }
 
     Ok(spec)

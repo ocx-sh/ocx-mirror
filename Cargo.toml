@@ -48,7 +48,14 @@ clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
 anyhow = "1.0.102"
 futures = "0.3.32"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+# `preserve_order` is necessary, not belt-and-braces: `ocx_lib`'s
+# `wire_writer::serialize_root` is a pass-through with no ordering enforcement
+# of its own, so without the feature `serde_json::Map` reverts to `BTreeMap`,
+# every rewritten index root re-emits in alphabetical key order, and
+# `sha256(root bytes)` changes for documents that did not semantically change —
+# with no compile error anywhere. Inherited today only through Cargo feature
+# unification with `ocx_lib`; declared here so it survives an upstream change.
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_yaml_ng = "0.10.0"
 schemars = { version = "1.2.1", optional = true }
 chrono = "0.4.44"
