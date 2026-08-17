@@ -78,10 +78,12 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          # 0.3.7 predates `package announce`, `push --announce-file` and
-          # `push --annotation`, so the old pin could not announce at all and
-          # would reject the annotation flag with exit 64.
-          version: "0.5.0"
+          # Floor is 0.5.0: 0.3.7 predates `package announce`,
+          # `push --announce-file` and `push --annotation`, so the old pin could
+          # not announce at all and would reject the annotation flag with exit
+          # 64. Kept level with the `external/ocx` submodule pin so the CLI that
+          # publishes a release is the one the release was built against.
+          version: "0.5.8"
 
       - name: Publish to registry
         env:

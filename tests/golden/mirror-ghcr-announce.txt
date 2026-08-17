@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       # ghcr.io authenticates with this run's own GITHUB_TOKEN, which is
       # always present — so the credential probe is constant. The shared
       # OCX_MIRROR_REGISTRY_* org secrets hold ocx.sh credentials and are
@@ -110,7 +110,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       # ghcr.io authenticates with this run's own GITHUB_TOKEN, which is
       # always present — so the credential probe is constant. The shared
       # OCX_MIRROR_REGISTRY_* org secrets hold ocx.sh credentials and are
@@ -176,7 +176,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       # ghcr.io authenticates with this run's own GITHUB_TOKEN, which is
       # always present — so the credential probe is constant. The shared
       # OCX_MIRROR_REGISTRY_* org secrets hold ocx.sh credentials and are
@@ -232,7 +232,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       # `pipeline plan` reads the target's tags. ghcr.io answers an
       # anonymous read of a missing or private repository with 403 DENIED
       # rather than 404, so an unauthenticated discover can never see the
@@ -288,7 +288,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: plan
@@ -349,7 +349,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: bundle-*
@@ -478,7 +478,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: bundle-*
@@ -589,7 +589,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: run-summary
@@ -633,7 +633,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       # ghcr.io authenticates with this run's own GITHUB_TOKEN, which is
       # always present — so the credential probe is constant. The shared
       # OCX_MIRROR_REGISTRY_* org secrets hold ocx.sh credentials and are
@@ -721,7 +721,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.6"
+          version: "0.5.8"
       - name: Check generated workflows are up to date
         # Exits 65 (DataError) on drift; the path-only hint names the stale file.
         run: |
