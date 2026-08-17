@@ -11,6 +11,13 @@ Upstream projects publish their releases as loose archives on [GitHub Releases][
 - **Two-phase pipeline** — prepare (download, verify, bundle) runs concurrently; push runs sequentially by version so cascade tags (`X.Y.Z` → `X.Y` → `X` → `latest`) always land in semver order.
 - **Generated CI pipelines** — [`pipeline generate ci`][cli-generate-ci] renders complete [GitHub Actions][github-actions] workflows that discover new versions on a schedule, smoke-test every `(version, platform)` pair before publishing, and report results to [Discord][discord].
 
+## Beyond one tool at a time
+
+Two sibling namespaces serve corporate deployments that cannot reach the public internet:
+
+- **[`registry sync`][ref-registry-yml]** copies whole upstream OCX indexes — every package they list — into a registry you control, and writes the index tree describing your copy.
+- **[`dist sync`][ref-dist-yml]** mirrors the bootstrap layer: ocx's own release archives and the `dist.json` manifest naming them, into a generic HTTP store. It is what lets a machine with no route to `github.com` install `ocx` in the first place.
+
 ## Install
 
 `ocx-mirror` is itself distributed as an OCX package:
@@ -35,6 +42,8 @@ ocx --global add ocx.sh/ocx/mirror
 <!-- internal -->
 [getting-started]: ./getting-started.md
 [ref-mirror-yml]: ./reference/mirror-yml.md
+[ref-registry-yml]: ./reference/registry-yml.md
+[ref-dist-yml]: ./reference/dist-yml.md
 [ref-cli]: ./reference/cli.md
 [ref-environment]: ./reference/environment.md
 [cli-generate-ci]: ./reference/cli.md#pipeline-generate-ci

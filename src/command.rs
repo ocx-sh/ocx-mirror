@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub(crate) mod dist;
 pub(crate) mod package;
 pub(crate) mod registry;
 #[cfg(feature = "jsonschema")]
@@ -21,6 +22,11 @@ pub enum Command {
     #[command(subcommand)]
     Registry(registry::RegistryCommand),
 
+    /// Mirror the OCX distribution (release archives + dist.json) into a
+    /// generic store
+    #[command(subcommand)]
+    Dist(dist::DistCommand),
+
     /// Generate JSON Schema for mirror types
     #[cfg(feature = "jsonschema")]
     Schema(schema::Schema),
@@ -31,6 +37,7 @@ impl Command {
         match self {
             Self::Package(cmd) => cmd.execute(printer, progress).await,
             Self::Registry(cmd) => cmd.execute(printer).await,
+            Self::Dist(cmd) => cmd.execute(printer).await,
             #[cfg(feature = "jsonschema")]
             Self::Schema(cmd) => cmd.execute().await,
         }

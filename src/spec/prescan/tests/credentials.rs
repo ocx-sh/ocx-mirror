@@ -108,12 +108,12 @@ fn every_deny_listed_key_is_refused() {
 fn a_credential_under_an_innocuous_key_name_is_a_known_limit() {
     let yaml = format!("kind: registry\nregistry_auth:\n  name: token\n  value: {SENTINEL}\n");
 
-    assert!(pre_scan(&merged(&yaml), Path::new(SPEC_PATH)).is_ok());
+    assert!(pre_scan(&merged(&yaml), Path::new(SPEC_PATH), REGISTRY_KIND).is_ok());
 }
 
 #[test]
 fn a_valid_registry_spec_carries_no_credential_shaped_key() {
     // Also pins the inverse: no legitimate `registry.yml` key collides with
     // the deny-list, so the guard costs operators nothing.
-    assert!(pre_scan(&merged(VALID_SPEC), Path::new(SPEC_PATH)).is_ok());
+    assert!(pre_scan(&merged(VALID_SPEC), Path::new(SPEC_PATH), REGISTRY_KIND).is_ok());
 }

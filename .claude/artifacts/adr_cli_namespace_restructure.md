@@ -93,6 +93,16 @@ self-assertions and the downstream drift guard.
    rejected as deprecation debt for a surface with a single, self-correcting consumer.
 3. **`schema` stays top-level** — it generates JSON Schema for spec types
    (source-agnostic, cross-cutting); it is not a package operation.
+4. **`dist` is a third namespace, not a verb under either sibling** *(added 2026-08-18)*.
+   Both existing namespaces are defined by what they produce: `package` publishes OCX
+   packages, `registry` copies OCX packages someone else published. `dist` mirrors
+   ocx's own release archives plus the `dist.json` manifest into a generic HTTP store —
+   it produces no OCX package, contacts no OCI registry, and its output is consumed by
+   `curl` in a shell installer before any ocx binary exists. `package dist` would put a
+   non-package operation under the package namespace; a `registry` verb would put a
+   registry-free operation under the registry namespace. The grouping signal this ADR
+   exists to protect is what makes it a sibling. Full design:
+   [adr_dist_mirror_sync.md](./adr_dist_mirror_sync.md).
 
 ### Python package mirroring — plausibility finding
 
@@ -145,7 +155,10 @@ ocx-mirror
 │   │   ├── generate ci
 │   │   ├── plan | prepare | push | notify | describe
 │   └── watch                     # DIRECTION ONLY (#5) — not yet implemented
-├── registry                      # RESERVED skeleton — no live subcommand yet
+├── registry                      # whole-index mirroring (adr_registry_mirror_sync.md)
+│   └── sync
+├── dist                          # bootstrap-layer mirroring (adr_dist_mirror_sync.md)
+│   └── sync
 └── schema                        # top-level utility (source-agnostic)
 ```
 
@@ -192,3 +205,4 @@ ocx-mirror
 | Date | Author | Change |
 |------|--------|--------|
 | 2026-06-14 | Michael Herwig | Initial draft, accepted; refactor landed in `08119e0` |
+| 2026-08-18 | Michael Herwig | Amended: `registry` is live (`sync`), and a third top-level namespace `dist` added for bootstrap-layer mirroring. Sub-decision 4 below records why it is a namespace rather than a `package` or `registry` verb. Full design in [adr_dist_mirror_sync.md](./adr_dist_mirror_sync.md) |

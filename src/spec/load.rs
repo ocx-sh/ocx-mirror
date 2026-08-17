@@ -13,7 +13,7 @@ use std::path::Path;
 use ocx_lib::log;
 
 use super::validate::policy_check_notify;
-use super::{KIND_KEY, MirrorSpec, RegistrySpec, pre_scan};
+use super::{DIST_KIND, DistSpec, KIND_KEY, MirrorSpec, REGISTRY_KIND, RegistrySpec, pre_scan};
 use crate::error::MirrorError;
 
 /// Read a spec off disk, resolve its `extends:` chain, and shallow-merge the
@@ -133,13 +133,48 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
 pub async fn load_registry_spec(spec_path: &Path) -> Result<RegistrySpec, MirrorError> {
     let mut merged = resolve_and_merge(spec_path).await?;
 
-    pre_scan(&merged, spec_path)?;
+    pre_scan(&merged, spec_path, REGISTRY_KIND)?;
 
     if let serde_yaml_ng::Value::Mapping(ref mut map) = merged {
         map.remove(KIND_KEY);
     }
 
     let spec: RegistrySpec = serde_yaml_ng::from_value(merged)
+        .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
+
+    let errors = spec.validate(spec_path);
+    if !errors.is_empty() {
+        return Err(MirrorError::SpecInvalid(errors));
+    }
+
+    Ok(spec)
+}
+
+/// Load and validate a `dist.yml`.
+///
+/// Same five steps as [`load_registry_spec`] against the same helpers — only
+/// the `kind:` the pre-scan demands and the deserialize target differ. In
+/// particular the credential deny-list runs unchanged, which is why the
+/// upload credentials block is spelled `identity:` and holds only environment
+/// variable *names*: an `auth:` key is refused at any depth, and the guard is
+/// worth more than the field name.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecNotFound`] (79) for an unreadable file,
+/// [`MirrorError::SpecUsageError`] (64) for a pre-scan rejection, and
+/// [`MirrorError::SpecInvalid`] (65) for a parse error or a validation
+/// failure.
+pub async fn load_dist_spec(spec_path: &Path) -> Result<DistSpec, MirrorError> {
+    let mut merged = resolve_and_merge(spec_path).await?;
+
+    pre_scan(&merged, spec_path, DIST_KIND)?;
+
+    if let serde_yaml_ng::Value::Mapping(ref mut map) = merged {
+        map.remove(KIND_KEY);
+    }
+
+    let spec: DistSpec = serde_yaml_ng::from_value(merged)
         .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
 
     let errors = spec.validate(spec_path);

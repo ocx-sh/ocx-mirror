@@ -1,6 +1,6 @@
 # CLI Reference
 
-`ocx-mirror` mirrors upstream binary releases into OCI registries. Package-mirroring commands live under the `package` namespace and take a [`mirror.yml`][ref-mirror-yml] spec: `package sync`, `package check`, and `package validate` form the local loop, while the `package pipeline` family implements the generated CI pipeline job by job. `schema` is a top-level utility. A sibling `registry` namespace mirrors a whole upstream index into a corporate registry instead of one tool at a time — [`registry sync`](#registry-sync) takes a [`registry.yml`][ref-registry-yml] spec.
+`ocx-mirror` mirrors upstream binary releases into OCI registries. Package-mirroring commands live under the `package` namespace and take a [`mirror.yml`][ref-mirror-yml] spec: `package sync`, `package check`, and `package validate` form the local loop, while the `package pipeline` family implements the generated CI pipeline job by job. `schema` is a top-level utility. A sibling `registry` namespace mirrors a whole upstream index into a corporate registry instead of one tool at a time — [`registry sync`](#registry-sync) takes a [`registry.yml`][ref-registry-yml] spec. A third `dist` namespace mirrors the bootstrap layer — ocx's own release archives and the `dist.json` manifest naming them — into a generic HTTP store rather than a registry; [`dist sync`](#dist-sync) takes a [`dist.yml`][ref-dist-yml] spec.
 
 ## Global flags {#global-flags}
 
@@ -266,6 +266,32 @@ ocx-mirror registry sync [SPEC] [OPTIONS]
 
 Full field reference — [`registry.yml`][ref-registry-yml].
 
+## `dist sync` {#dist-sync}
+
+Mirror the OCX **bootstrap layer** — the `ocx` release archives plus the `dist.json` manifest naming them — into a generic HTTP store, and rewrite every manifest URL to point at your copy. Nothing here touches an OCI registry: `install.sh` runs `curl` with no token and no `jq`, so the bootstrap path can only read plain files.
+
+```sh
+ocx-mirror dist sync [SPEC] [OPTIONS]
+```
+
+| Argument / flag | Default | Description |
+|-----------------|---------|-------------|
+| `[SPEC]` | `./dist.yml` | Path to the distribution spec. Optional, like `registry sync`'s — a distribution mirror repo holds exactly one spec |
+| `--dry-run` | off | Resolve and filter the manifest and report what would be mirrored, without downloading, writing, or uploading anything |
+| `--format <FMT>` | `plain` | Output format: `plain` (table + summary) or `json` |
+
+There is no `--cache-dir` — the run keeps no delta state, and asks the destination with a `HEAD` instead — and no `--fail-fast`, because a failed archive already stops the run before anything is published.
+
+**Clobber-safe.** A run that cannot place every selected archive writes **no manifest at all**. The destination keeps its previous, internally consistent manifest rather than gaining one that promises archives the store does not hold. Archives that did land stay on disk, so the corrected re-run is cheap.
+
+**Ordered publishes.** Archives first, then the content-addressed snapshot, then the sidecar, and the rolling `dist.json` last — a consumer reading mid-run resolves either the old manifest or the new one, and both are fully backed.
+
+**Idempotent.** An archive already in `output:` whose bytes match the manifest digest is re-verified, not re-downloaded; a file the destination already holds is skipped on the strength of a `HEAD`, not a local ledger.
+
+**Digests are upstream's.** `sha256` is copied from the source manifest and never recomputed — re-deriving it from what arrived would verify the copy against itself.
+
+Full field reference — [`dist.yml`][ref-dist-yml].
+
 ## Exit codes {#exit-codes}
 
 Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
@@ -273,11 +299,11 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 | Code | Meaning | Raised by |
 |------|---------|-----------|
 | 0 | Success | — |
-| 1 | Pipeline execution failure (download, push, verify, republish, a cascade repair that could not run at all, or a failed post-patch / post-repair announce); for `registry sync`, one or more packages failed to copy (digest mismatch, malformed manifest, a rejected push, referrers present, or source content missing) — reported per package in the summary, the run continues per `on_error` | `sync`, `prepare`, `push`, `pipeline patch`, `pipeline cascade`, `registry sync` |
-| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root`, an unparseable `--version`/`--min-version`/`--max-version`, a `--version` the registry does not publish or that names a cascade alias; for `registry sync`, a credential-shaped key anywhere in `registry.yml`, a missing or wrong `kind:`, or `sources[].index` carrying userinfo | `validate`, `pipeline generate ci`, `pipeline announce`, `pipeline patch`, `registry sync` |
-| 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed, cascade findings remain; for `registry sync`, `registry.yml` validation failed (bad `target`/`destination`/`as:`/glob syntax, duplicate `as:`, a missing `{registry}` placeholder with more than one source, an expanded destination that fails the OCI grammar or collides with another package) or a source declared an index `format_version` newer than this build supports | all |
-| 69 | Upstream source or target registry unreachable; Discord 5xx / timeout; for `registry sync`, a source's index tree could not be fetched (unreachable, an unparseable or hostless base URL, or a host refused by the SSRF floor), a root's `repository` pointer was unparseable or SSRF-refused, or the destination registry answered a blob-presence probe without a definite yes or no, aborting the whole run | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch`, `registry sync` |
-| 74 | I/O error: template render or file write failure; for `registry sync`, a local write into the served index tree failed (root document, `c/index.json`, `config.json`, a dispatch object, or `--repair-catalog`) | `pipeline generate ci`, `push`, `registry sync` |
+| 1 | Pipeline execution failure (download, push, verify, republish, a cascade repair that could not run at all, or a failed post-patch / post-repair announce); for `registry sync`, one or more packages failed to copy (digest mismatch, malformed manifest, a rejected push, referrers present, or source content missing) — reported per package in the summary, the run continues per `on_error`; for `dist sync`, an `upload.identity` environment variable was unset or empty, one or more archives failed to download or verify, two releases rendered to the same `publish.layout` path, `select:` left no release at all, or an upload was rejected — no manifest is published in any of those cases | `sync`, `prepare`, `push`, `pipeline patch`, `pipeline cascade`, `registry sync`, `dist sync` |
+| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root`, an unparseable `--version`/`--min-version`/`--max-version`, a `--version` the registry does not publish or that names a cascade alias; for `registry sync`, a credential-shaped key anywhere in `registry.yml`, a missing or wrong `kind:`, or `sources[].index` carrying userinfo; the same three rules apply to `dist.yml` under `dist sync` | `validate`, `pipeline generate ci`, `pipeline announce`, `pipeline patch`, `registry sync`, `dist sync` |
+| 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed, cascade findings remain; for `registry sync`, `registry.yml` validation failed (bad `target`/`destination`/`as:`/glob syntax, duplicate `as:`, a missing `{registry}` placeholder with more than one source, an expanded destination that fails the OCI grammar or collides with another package) or a source declared an index `format_version` newer than this build supports; for `dist sync`, `dist.yml` validation failed (empty `output`, a plaintext or userinfo-bearing `source`/`publish.base_url`, an unknown `publish.layout` placeholder, an `Authorization` entry in `upload.headers`) or the upstream manifest declared a `schema` newer than this build supports | all |
+| 69 | Upstream source or target registry unreachable; Discord 5xx / timeout; for `registry sync`, a source's index tree could not be fetched (unreachable, an unparseable or hostless base URL, or a host refused by the SSRF floor), a root's `repository` pointer was unparseable or SSRF-refused, or the destination registry answered a blob-presence probe without a definite yes or no, aborting the whole run; for `dist sync`, the upstream `dist.json` could not be fetched or parsed, or its body exceeded the 8 MiB cap | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch`, `registry sync`, `dist sync` |
+| 74 | I/O error: template render or file write failure; for `registry sync`, a local write into the served index tree failed (root document, `c/index.json`, `config.json`, a dispatch object, or `--repair-catalog`); for `dist sync`, a write into `output:` failed (an archive, `dist.json`, its sidecar, or a snapshot) | `pipeline generate ci`, `push`, `registry sync`, `dist sync` |
 | 77 | Discord 401/403 — webhook secret likely rotated | `pipeline notify` |
 | 79 | Spec file not found | all |
 
@@ -287,6 +313,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 <!-- internal -->
 [ref-mirror-yml]: ./mirror-yml.md
 [ref-registry-yml]: ./registry-yml.md
+[ref-dist-yml]: ./dist-yml.md
 [ref-multi-spec]: ./mirror-yml.md#multi-spec
 [spec-announce]: ./mirror-yml.md#announce
 [spec-cascade]: ./mirror-yml.md#cascade

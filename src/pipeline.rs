@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+// `dist_sync` mirrors the *bootstrap* layer — ocx's own release archives and
+// `dist.json` — rather than OCX packages, so it shares nothing with
+// `registry_sync` beyond the download and verify helpers below.
+pub mod dist_sync;
 pub mod download;
 pub(crate) mod lock_derive;
 pub mod mirror_result;
