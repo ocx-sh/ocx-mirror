@@ -3,6 +3,7 @@
 
 use crate::error::MirrorError;
 use crate::source::url_index::RemoteIndex;
+use crate::spec::DistSpec;
 use schemars::generate::SchemaSettings;
 
 #[derive(clap::Args)]
@@ -15,6 +16,10 @@ pub struct Schema {
 #[derive(clap::ValueEnum, Clone)]
 pub enum SchemaTarget {
     UrlIndex,
+    /// `dist.yml`. The tagged `identity:` enum renders as a `oneOf`, so an
+    /// editor offers `token_env` under `bearer` and the two `*_env` names
+    /// under `basic` — the invalid combinations never autocomplete.
+    Dist,
 }
 
 impl Schema {
@@ -22,6 +27,10 @@ impl Schema {
         match self.target {
             SchemaTarget::UrlIndex => {
                 let json = generate_schema::<RemoteIndex>("https://ocx.sh/schemas/url-index/v1.json");
+                println!("{json}");
+            }
+            SchemaTarget::Dist => {
+                let json = generate_schema::<DistSpec>("https://ocx.sh/schemas/dist/v1.json");
                 println!("{json}");
             }
         }

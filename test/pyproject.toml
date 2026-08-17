@@ -6,6 +6,12 @@ requires-python = ">=3.10"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = [
+    # Parametrises the `upload_store` fixture so a test can make the first N
+    # PUTs answer a chosen status — the only way to drive `dist sync`'s retry
+    # loop end to end through the real HTTP client.
+    "upload_store: configure the fake upload store (fail_puts=N, status=S)",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-xdist>=3.5"]

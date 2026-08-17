@@ -47,6 +47,7 @@ nav:
   - Reference:
       - mirror.yml: reference/mirror-yml.md
       - registry.yml: reference/registry-yml.md
+      - dist.yml: reference/dist-yml.md
       - CLI: reference/cli.md
       - Environment: reference/environment.md
   - Changelog: changelog.md

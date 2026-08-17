@@ -48,8 +48,11 @@ pub const CREDENTIAL_DENY_LIST: &[&str] = &[
 /// same key it was read from, alongside `extends:`.
 pub const KIND_KEY: &str = "kind";
 
-/// The only `kind:` this spec type accepts.
+/// The `kind:` a `registry.yml` must declare.
 pub const REGISTRY_KIND: &str = "registry";
+
+/// The `kind:` a `dist.yml` must declare.
+pub const DIST_KIND: &str = "dist";
 
 /// The remedy clause every credential rejection ends with.
 ///
@@ -65,7 +68,7 @@ const CREDENTIAL_REMEDY: &str = "set OCX_AUTH_<slug>_TOKEN in the environment in
 ///
 /// 1. **Credential deny-list** — any key in [`CREDENTIAL_DENY_LIST`], at any
 ///    depth, whatever the value's type.
-/// 2. **`kind` discriminator** — absent, non-string, or not `"registry"` at
+/// 2. **`kind` discriminator** — absent, non-string, or not `expected_kind` at
 ///    the top level.
 /// 3. **`sources[].index` userinfo** — a URL whose authority carries a
 ///    non-empty userinfo component.
@@ -80,9 +83,9 @@ const CREDENTIAL_REMEDY: &str = "set OCX_AUTH_<slug>_TOKEN in the environment in
 ///
 /// [`MirrorError::SpecUsageError`](crate::error::MirrorError::SpecUsageError)
 /// (exit 64) for every rejection above, first violation wins.
-pub fn pre_scan(merged: &Value, spec_path: &Path) -> Result<(), MirrorError> {
+pub fn pre_scan(merged: &Value, spec_path: &Path, expected_kind: &str) -> Result<(), MirrorError> {
     scan_for_credentials(merged, "", spec_path)?;
-    check_kind(merged, spec_path)?;
+    check_kind(merged, spec_path, expected_kind)?;
     check_source_index_userinfo(merged, spec_path)
 }
 
@@ -126,15 +129,15 @@ fn scan_for_credentials(value: &Value, path: &str, spec_path: &Path) -> Result<(
 /// Absent, non-string and wrong-value `kind:` are one rejection: the document
 /// is not a registry spec, and which way it is wrong tells the operator
 /// nothing they cannot see in their own file.
-fn check_kind(merged: &Value, spec_path: &Path) -> Result<(), MirrorError> {
+fn check_kind(merged: &Value, spec_path: &Path, expected_kind: &str) -> Result<(), MirrorError> {
     match merged
         .as_mapping()
         .and_then(|map| map.get(KIND_KEY))
         .and_then(Value::as_str)
     {
-        Some(REGISTRY_KIND) => Ok(()),
+        Some(kind) if kind == expected_kind => Ok(()),
         _ => Err(MirrorError::SpecUsageError(format!(
-            "{}: {KIND_KEY}: a registry spec must declare `{KIND_KEY}: {REGISTRY_KIND}`",
+            "{}: {KIND_KEY}: a {expected_kind} spec must declare `{KIND_KEY}: {expected_kind}`",
             spec_path.display()
         ))),
     }

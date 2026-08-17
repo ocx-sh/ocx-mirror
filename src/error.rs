@@ -81,6 +81,18 @@ pub enum MirrorError {
     /// would make CI retry forever on something retry can never fix. The run
     /// writes nothing.
     IndexFormatUnsupported(u64),
+
+    // ── `dist sync` variants ────────────────────────────────────────────────
+    /// The upstream `dist.json` declared a `schema` this binary cannot
+    /// re-emit; carries the version the manifest declared.
+    ///
+    /// Its own variant for the same reason as
+    /// [`Self::IndexFormatUnsupported`]: the outcome is not transient, so
+    /// classifying it as `SourceError` (69) would have CI retry forever on
+    /// something retry can never fix. A newer schema may reorder or re-nest
+    /// what the jq-free installers parse positionally, so the run writes
+    /// nothing rather than guessing.
+    DistSchemaUnsupported(u64),
 }
 
 impl MirrorError {
@@ -113,6 +125,8 @@ impl MirrorError {
             // `registry sync` variants
             Self::IndexWriteError(_) => ExitCode::IoError,
             Self::IndexFormatUnsupported(_) => ExitCode::DataError,
+            // `dist sync` variants
+            Self::DistSchemaUnsupported(_) => ExitCode::DataError,
         }
     }
 }
@@ -159,6 +173,10 @@ impl std::fmt::Display for MirrorError {
             Self::IndexWriteError(msg) => write!(f, "index write error: {msg}"),
             Self::IndexFormatUnsupported(version) => {
                 write!(f, "unsupported source index format_version: {version}")
+            }
+            // `dist sync` variants
+            Self::DistSchemaUnsupported(schema) => {
+                write!(f, "unsupported dist.json schema: {schema}")
             }
         }
     }
