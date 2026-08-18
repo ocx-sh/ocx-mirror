@@ -336,10 +336,11 @@ pub(crate) async fn list_upstream_versions(
                 .await
                 .map_err(|e| source::pylock::classify_error("failed to read pylock source", e))
         }
-        spec::Source::Pypi { index, .. } => {
+        spec::Source::Pypi { .. } => {
             let package_name = spec.source.pylock_app_name(&spec.name);
-            log::debug!("Fetching PyPI JSON index for {}", package_name);
-            source::pypi::list_versions(package_name, index.as_deref())
+            let indexes = spec.source.pypi_indexes();
+            log::debug!("Querying {} simple index(es) for {}", indexes.len(), package_name);
+            source::pypi::list_versions(package_name, &indexes)
                 .await
                 .map_err(|e| source::pypi::classify_error("failed to list PyPI releases", e))
         }

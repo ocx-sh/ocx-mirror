@@ -36,17 +36,48 @@ pub enum Source {
         #[serde(default)]
         package: Option<String>,
     },
-    /// PyPI-discovered Python application: versions come from the index's JSON API
-    /// and a PEP 751 lock is derived in-pipeline per version (see pipeline plan).
+    /// PyPI-discovered Python application: versions come from a Simple
+    /// Repository API index (PEP 503 / PEP 691) and a PEP 751 lock is derived
+    /// in-pipeline per version (see pipeline plan).
     Pypi {
         /// PEP 503 name of the PyPI package. Defaults to the mirror's `name`.
         #[serde(default)]
         package: Option<String>,
-        /// Warehouse-compatible index base URL (JSON API at `{index}/pypi/<pkg>/json`).
-        /// Default: https://pypi.org
+        /// Simple Repository API index bases, highest priority first.
+        ///
+        /// A list rather than one key because a corporate deployment routinely
+        /// resolves an internal index *and* a public one — `pip` spells that
+        /// `--extra-index-url`, `uv` spells it `[[tool.uv.index]]`, and npm
+        /// spells it per-scope registries, so the shape has to be plural to
+        /// survive the sibling ecosystems.
+        ///
+        /// Empty (the default) means pypi.org. There is deliberately **no**
+        /// credential key here: a `mirror.yml` is community-contributed, and a
+        /// spec able to name an environment variable is a spec able to
+        /// exfiltrate it. Credentials resolve from the request's own host
+        /// (see `crate::auth`).
         #[serde(default)]
-        index: Option<String>,
+        indexes: Vec<PackageIndex>,
     },
+}
+
+/// One upstream package index.
+///
+/// A struct rather than a bare string so the sibling ecosystems can add their
+/// own routing key without a second spelling of the same list — npm's
+/// per-scope registries being the next one.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PackageIndex {
+    /// The index base URL, exactly as the operator writes it for `pip` or
+    /// `uv` — `https://nexus.corp.example/repository/pypi-remote/simple`.
+    ///
+    /// No suffix is appended to it: every vendor lays its Simple API out
+    /// differently (`/api/pypi/<repo>/simple` on Artifactory,
+    /// `/repository/<repo>/simple` on Nexus), and guessing one is what
+    /// confined the previous implementation to pypi.org.
+    pub url: String,
 }
 
 impl Source {
@@ -64,6 +95,21 @@ impl Source {
             } => package,
             _ => spec_name,
         }
+    }
+
+    /// The index bases a `pypi` source resolves against, highest priority
+    /// first — the configured list, or pypi.org when the spec names none.
+    ///
+    /// One place owns the default so discovery and lock derivation cannot
+    /// disagree about which index a spec meant.
+    pub fn pypi_indexes(&self) -> Vec<String> {
+        let Source::Pypi { indexes, .. } = self else {
+            return Vec::new();
+        };
+        if indexes.is_empty() {
+            return vec![crate::source::pypi::DEFAULT_INDEX.to_string()];
+        }
+        indexes.iter().map(|index| index.url.clone()).collect()
     }
 
     /// Whether this source resolves an application package into an env
@@ -196,17 +242,38 @@ impl Source {
                     errors.push("source.path must not be empty".to_string());
                 }
             }
-            Source::Pypi { package, index } => {
+            Source::Pypi { package, indexes } => {
                 if let Some(package) = package
                     && package.trim().is_empty()
                 {
                     errors.push("source.package must not be empty".to_string());
                 }
-                if let Some(index) = index {
-                    match url::Url::parse(index) {
-                        Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {}
-                        Ok(_) => errors.push(format!("source.index '{index}' must be an http(s) URL")),
-                        Err(e) => errors.push(format!("source.index '{index}' is not a valid URL: {e}")),
+                for (position, index) in indexes.iter().enumerate() {
+                    match url::Url::parse(&index.url) {
+                        Ok(parsed) if parsed.scheme() == "http" || parsed.scheme() == "https" => {
+                            // Userinfo in a committed spec is a credential in a
+                            // committed spec, whatever the intent — and this
+                            // file is contributed, not operator-authored. It
+                            // would also reach the `uv` subprocess argv, where
+                            // `/proc/<pid>/cmdline` is world-readable.
+                            // Refused, never stripped: an operator who wrote it
+                            // meant it, and silently dropping it would resolve
+                            // against an index they did not name.
+                            if !parsed.username().is_empty() || parsed.password().is_some() {
+                                errors.push(format!(
+                                    "source.indexes[{position}].url must not embed credentials; \
+                                     set OCX_AUTH_<slug>_TOKEN in the environment instead"
+                                ));
+                            }
+                        }
+                        Ok(_) => errors.push(format!(
+                            "source.indexes[{position}].url '{}' must be an http(s) URL",
+                            index.url
+                        )),
+                        Err(e) => errors.push(format!(
+                            "source.indexes[{position}].url '{}' is not a valid URL: {e}",
+                            index.url
+                        )),
                     }
                 }
             }

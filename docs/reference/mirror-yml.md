@@ -126,7 +126,7 @@ platforms:
 
 ### `source.type: pypi` — index-discovered apps {#pypi-source}
 
-A `pypi` source discovers upstream versions directly from a PyPI-compatible index instead of a committed lock file — useful for apps whose releases you want to track automatically rather than re-lock and commit by hand.
+A `pypi` source discovers upstream versions directly from a package index instead of a committed lock file — useful for apps whose releases you want to track automatically rather than re-lock and commit by hand.
 
 ```yaml
 name: pycowsay
@@ -136,7 +136,8 @@ target:
 source:
   type: pypi
   package: pycowsay                # PEP 503 name on the index; defaults to `name`
-  index: https://pypi.org          # optional; Warehouse-compatible JSON API base
+  indexes:                         # optional; defaults to pypi.org
+    - url: https://pypi.org/simple
 python:
   version: "3.13.1"
   abi: cp313
@@ -153,13 +154,43 @@ platforms:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `package` | string | No | PEP 503 name of the PyPI package to resolve. Defaults to the mirror's `name`. |
-| `index` | string | No | Warehouse-compatible index base URL — versions are read from `GET {index}/pypi/<package>/json`. Must be `http`/`https`. Default: `https://pypi.org`. |
+| `indexes` | list | No | [Simple Repository API](https://packaging.python.org/specifications/simple-repository-api/) bases, **highest priority first**. Each entry is `{ url: … }`. Must be `http`/`https` and must not embed credentials. Default: `https://pypi.org/simple`. |
+
+The URL is the index base exactly as you would give it to `pip` or `uv` — nothing is appended to it, because every vendor lays its Simple API out differently:
+
+| Index | `url` |
+|---|---|
+| PyPI | `https://pypi.org/simple` |
+| Artifactory | `https://art.corp.example/artifactory/api/pypi/pypi-remote/simple` |
+| Nexus | `https://nexus.corp.example/repository/pypi-remote/simple` |
+| devpi | `https://devpi.corp.example/root/pypi/+simple` |
 
 **Discovery semantics:**
 
-- A release is listed only when it has at least one file that is not [yanked (PEP 592)](https://peps.python.org/pep-0592/); a release with zero files, or with every file yanked, is dropped entirely.
+- Both serializations are accepted: the [PEP 691](https://peps.python.org/pep-0691/) JSON form is requested first through content negotiation, and a [PEP 503](https://peps.python.org/pep-0503/) HTML page is parsed when that is all the index serves. Artifactory and Nexus serve only the latter.
+- Versions are read from the *filenames* the index lists, not from a separate version endpoint — PEP 700's `versions` key exists only at `api-version` 1.1+ and has no HTML equivalent.
+- A version is listed only when it has at least one file that is not [yanked (PEP 592)](https://peps.python.org/pep-0592/); a version whose every file is yanked is dropped entirely.
 - Prerelease detection is PEP 440-aware (`uv_pep440`), not the mirror's own semver-ish version parser — a `2.0.0.dev0` release is correctly flagged as a prerelease and respects the existing `skip_prereleases`/`versions` bounds the same as any other source.
-- An index that returns 404 for the package name is a data error (malformed input — the package doesn't exist on that index, exit code 65), not an availability failure; any other failure (connection refused, timeout, 5xx, malformed JSON) stays a source-unavailable error (exit code 69).
+- With several indexes, the **first one that has the project wins** and the rest are not consulted. Candidates are never merged across indexes: that is what stops a public index from answering for an internal package name ([dependency confusion](https://docs.astral.sh/uv/concepts/indexes/)). `uv pip compile` is pinned to the matching `--index-strategy first-index`.
+- An index that returns 404 for the package name does not have it, so the next index is tried; 404 from *every* index is a data error (malformed input, exit code 65). Any other failure — connection refused, timeout, 5xx, 401, malformed body — is a source-unavailable error (exit code 69), because it means "unknown", not "absent".
+
+### Authentication and TLS {#pypi-authentication}
+
+**No credentials belong in `mirror.yml`.** A URL carrying userinfo (`https://user:token@host/…`) is refused when the spec loads. Credentials are resolved from the **host being requested**, in this order:
+
+1. `OCX_AUTH_<slug>_TYPE`, `OCX_AUTH_<slug>_USER`, `OCX_AUTH_<slug>_TOKEN` — `<slug>` is the host with every non-alphanumeric character replaced by `_`, so `nexus.corp.example` reads `OCX_AUTH_nexus_corp_example_TOKEN`. This is the same mechanism [`registry.yml`](./registry-yml.md#authentication) and `ocx` itself use.
+2. `netrc` — `$NETRC` if set, else `~/.netrc`, matched on `machine <host>`. This is the file `uv` already reads, so the mirror's own downloads and the resolver it shells out to agree by construction.
+3. Anonymous.
+
+One credential covers the whole run for that host: index discovery, `uv pip compile`, and the wheel downloads. Credentials are passed to `uv` through the environment, never on its command line. A lock naming wheels on several hosts resolves each host's credential separately, so a corporate token is never sent to `pypi.org`.
+
+```sh
+export OCX_AUTH_nexus_corp_example_USER=ci-mirror
+export OCX_AUTH_nexus_corp_example_TOKEN="$NEXUS_TOKEN"
+ocx-mirror package sync mirror.yml
+```
+
+Behind a TLS-intercepting proxy, point `SSL_CERT_FILE` at a bundle containing your corporate root, or `SSL_CERT_DIR` at a directory of PEM files. The public roots stay trusted alongside it, so a run that reaches both an internal index and pypi.org works with no verification disabled.
 
 Per-version lock derivation (running `uv pip compile`) happens later, in `pipeline plan` — see [`python.lock`](#python-lock) and [`--locks-dir`](#python-lock). A universal lock (the default) resolves via `--python-version` alone; only `universal: false` materializes the pinned `interpreter_package` on disk to resolve against it.
 

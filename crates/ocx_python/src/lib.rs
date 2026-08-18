@@ -47,6 +47,12 @@ pub mod select;
 // for all four uv-* crates, and the README bump procedure stays true.
 pub use uv_pep440;
 
+// PEP 503/691 file listings name a version only inside a wheel or sdist
+// filename; `ocx-mirror`'s pypi discovery parses them with the same crate
+// `select` already uses for wheel tags, so one pin owns filename grammar
+// for the whole repo.
+pub use uv_distribution_filename;
+
 pub use collide::{CollisionError, check_collisions};
 pub use compose::{ComposeError, EntrypointSelection, EnvComposition, EnvSpec, WheelLayer, compose_env};
 pub use lock::{LockError, LockedPackage, LockedWheel, Pylock, parse_pylock};

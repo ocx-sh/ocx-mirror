@@ -263,7 +263,8 @@ target:
 source:
   type: pypi
   package: acme-app
-  index: "ftp://pypi.example.com"
+  indexes:
+    - url: "ftp://pypi.example.com"
 python:
   version: "3.13.1"
   abi: cp313
@@ -277,8 +278,45 @@ wheels:
     assert!(
         errors
             .iter()
-            .any(|e| e.contains("source.index") && e.contains("http(s)")),
+            .any(|e| e.contains("source.indexes[0].url") && e.contains("http(s)")),
         "Expected bad index URL error, got: {errors:?}"
+    );
+}
+
+/// A credential in a committed spec is refused, not stripped: `mirror.yml` is
+/// contributed, and the URL would also reach the `uv` subprocess argv, where
+/// `/proc/<pid>/cmdline` is world-readable.
+#[test]
+fn validate_reject_pypi_index_url_with_userinfo() {
+    let yaml = r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pypi
+  package: acme-app
+  indexes:
+    - url: "https://ci:hunter2@nexus.corp.example/repository/pypi/simple"
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+wheels:
+  linux/amd64: ~
+"#;
+
+    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+    let errors = spec.validate(Path::new("test.yaml"));
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("source.indexes[0].url") && e.contains("must not embed credentials")),
+        "Expected a credential-in-URL rejection, got: {errors:?}"
+    );
+    assert!(
+        !errors.iter().any(|e| e.contains("hunter2")),
+        "the rejection must not echo the secret: {errors:?}"
     );
 }
 

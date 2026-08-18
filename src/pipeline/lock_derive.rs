@@ -23,6 +23,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ocx_lib::utility::string_ext::StringExt as _;
+
 use ocx_python::Pylock;
 
 use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
@@ -140,7 +142,8 @@ pub(crate) struct DeriveLockRequest<'a> {
     pub python: &'a UvPython,
     pub package: &'a str,
     pub version: &'a str,
-    pub index: Option<&'a str>,
+    /// Simple API index bases, highest priority first (`spec::Source::pypi_indexes`).
+    pub indexes: &'a [String],
     pub options: &'a LockOptions,
     pub output_path: &'a Path,
     /// RFC 3339 timestamp stamped into the provenance header. Supplied by
@@ -163,7 +166,7 @@ fn resolve_uv_binary() -> PathBuf {
 
 /// Builds the `uv pip compile` argv for one lock derivation. Pure and
 /// unit-testable — locks the flag shape without spawning a subprocess.
-fn build_uv_compile_args(request: &DeriveLockRequest<'_>) -> Result<Vec<String>, String> {
+fn build_uv_compile_args(request: &DeriveLockRequest<'_>, resolved: &[ResolvedIndex]) -> Result<Vec<String>, String> {
     let output_str = request
         .output_path
         .to_str()
@@ -200,12 +203,96 @@ fn build_uv_compile_args(request: &DeriveLockRequest<'_>) -> Result<Vec<String>,
         args.push("--no-emit-package".to_string());
         args.push(excluded.clone());
     }
-    if let Some(index) = request.index {
-        args.push("--index-url".to_string());
-        args.push(format!("{}/simple", index.trim_end_matches('/')));
+    // uv 0.12 deprecates `--index-url`/`--extra-index-url` in favour of
+    // `--default-index`/`--index`, and treats the *default* index as LOWEST
+    // priority regardless of position. Our list is highest-first, so the last
+    // entry becomes the default and every earlier one an `--index`. Naming the
+    // default explicitly also drops uv's implicit pypi.org fallback, which an
+    // air-gapped site must not silently resolve against.
+    if let Some((default, rest)) = resolved.split_last() {
+        for index in rest {
+            args.push("--index".to_string());
+            args.push(index.argument());
+        }
+        args.push("--default-index".to_string());
+        args.push(default.argument());
     }
 
+    // Pinned rather than inherited: `first-index` limits candidates to the
+    // first index that has the package, which is what stops a public index
+    // from answering for a private package name (dependency confusion). The
+    // other two strategies are named `unsafe-*` upstream for that reason.
+    args.push("--index-strategy".to_string());
+    args.push("first-index".to_string());
+
     Ok(args)
+}
+
+/// One index as `uv` will see it: the URL, plus the name its credentials are
+/// passed under when the mirror resolved any.
+pub(crate) struct ResolvedIndex {
+    /// `UV_INDEX_<NAME>_USERNAME`/`_PASSWORD` key — uv's documented
+    /// normalization is "the uppercase version of the index name, with
+    /// non-alphanumeric characters replaced by underscores", which is exactly
+    /// `to_slug` uppercased.
+    name: String,
+    url: String,
+    credential: Option<crate::auth::Credential>,
+}
+
+impl ResolvedIndex {
+    /// `<name>=<url>` when credentials ride along, the bare URL otherwise.
+    ///
+    /// Bare when there is nothing to pass: uv then runs its own credential
+    /// lookup (netrc, keyring) against that URL untouched, so an operator who
+    /// configured uv directly keeps working.
+    fn argument(&self) -> String {
+        if self.credential.is_some() {
+            format!("{}={}", self.name, self.url)
+        } else {
+            self.url.clone()
+        }
+    }
+}
+
+/// Resolves each index's credential once per derivation.
+///
+/// Credentials are handed to `uv` through the **environment**, never through
+/// argv: `/proc/<pid>/cmdline` is world-readable for the lifetime of the
+/// process, so a token in `--default-index https://user:token@host/` is
+/// readable by every other process on a shared runner.
+fn resolve_indexes(indexes: &[String]) -> Result<Vec<ResolvedIndex>, String> {
+    indexes
+        .iter()
+        .map(|url| {
+            let parsed = url::Url::parse(url).map_err(|error| format!("index '{url}' is not a valid URL: {error}"))?;
+            let credential = crate::auth::resolve(&parsed).map_err(|error| error.to_string())?;
+            let name = parsed
+                .host_str()
+                .map(|host| host.to_slug().to_uppercase())
+                .unwrap_or_else(|| "INDEX".to_string());
+            Ok(ResolvedIndex {
+                name,
+                url: url.clone(),
+                credential,
+            })
+        })
+        .collect()
+}
+
+/// The `UV_INDEX_<NAME>_USERNAME`/`_PASSWORD` pairs for the child process.
+fn index_environment(resolved: &[ResolvedIndex]) -> Vec<(String, String)> {
+    resolved
+        .iter()
+        .filter_map(|index| index.credential.as_ref().map(|credential| (index, credential)))
+        .flat_map(|(index, credential)| {
+            let (user, secret) = credential.as_basic_pair();
+            [
+                (format!("UV_INDEX_{}_USERNAME", index.name), user),
+                (format!("UV_INDEX_{}_PASSWORD", index.name), secret),
+            ]
+        })
+        .collect()
 }
 
 /// Builds the PEP 508 requirement piped to `uv pip compile` on stdin: the
@@ -223,12 +310,16 @@ fn build_requirement(package: &str, version: &str, extras: &[String]) -> String 
 /// for it to write `request.output_path`, bounded by
 /// `request.options.timeout_seconds`.
 async fn invoke_uv_compile(request: &DeriveLockRequest<'_>) -> Result<(), String> {
-    let args = build_uv_compile_args(request)?;
+    let resolved = resolve_indexes(request.indexes)?;
+    let args = build_uv_compile_args(request, &resolved)?;
     let requirement = build_requirement(request.package, request.version, &request.options.extras);
 
     let uv_binary = resolve_uv_binary();
     let mut cmd = tokio::process::Command::new(&uv_binary);
     cmd.args(&args);
+    for (key, value) in index_environment(&resolved) {
+        cmd.env(key, value);
+    }
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -514,6 +605,7 @@ mod tests {
 
     #[test]
     fn build_uv_compile_args_includes_universal_and_index() {
+        let indexes = ["https://example.com/simple/".to_string()];
         let options = LockOptions {
             universal: true,
             extras: Vec::new(),
@@ -524,20 +616,26 @@ mod tests {
             python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
-            index: Some("https://example.com/pypi/"),
+            indexes: &indexes,
             options: &options,
             output_path: Path::new("/work/pylock.toml"),
             generated_at: "2026-07-05T00:00:00Z",
         };
 
-        let args = build_uv_compile_args(&request).unwrap();
+        let args = build_uv_compile_args(&request, &resolve_indexes(request.indexes).unwrap()).unwrap();
 
         assert!(args.contains(&"--universal".to_string()));
+        // The URL is passed exactly as configured — no `/simple` appended,
+        // since every vendor lays its Simple API out differently.
         let index_flag = args
             .iter()
-            .position(|a| a == "--index-url")
-            .expect("--index-url present");
-        assert_eq!(args[index_flag + 1], "https://example.com/pypi/simple");
+            .position(|a| a == "--default-index")
+            .expect("--default-index present");
+        assert_eq!(args[index_flag + 1], "https://example.com/simple/");
+        assert!(
+            !args.contains(&"--index-url".to_string()),
+            "the deprecated flag must not come back: {args:?}"
+        );
         let exclude_flag = args
             .iter()
             .position(|a| a == "--no-emit-package")
@@ -547,6 +645,114 @@ mod tests {
         assert_eq!(args[python_flag + 1], "/opt/python/bin/python3");
         let output_flag = args.iter().position(|a| a == "-o").expect("-o present");
         assert_eq!(args[output_flag + 1], "/work/pylock.toml");
+    }
+
+    /// Ordering contract: our list is highest-priority first, uv's
+    /// `--default-index` is always LOWEST priority, so the last entry is the
+    /// default and every earlier one an `--index`.
+    #[test]
+    fn build_uv_compile_args_maps_priority_order_onto_uv_flags() {
+        let options = sample_options();
+        let python = UvPython::Version("3.13".to_string());
+        let indexes = [
+            "https://nexus.corp.example/repository/pypi-internal/simple".to_string(),
+            "https://pypi.org/simple".to_string(),
+        ];
+        let request = DeriveLockRequest {
+            python: &python,
+            package: "pycowsay",
+            version: "1.0.0",
+            indexes: &indexes,
+            options: &options,
+            output_path: Path::new("/work/pylock.toml"),
+            generated_at: "2026-07-05T00:00:00Z",
+        };
+
+        let args = build_uv_compile_args(&request, &resolve_indexes(request.indexes).unwrap()).unwrap();
+
+        let first = args.iter().position(|a| a == "--index").expect("--index present");
+        assert_eq!(args[first + 1], indexes[0], "the highest-priority index is an --index");
+        let default = args
+            .iter()
+            .position(|a| a == "--default-index")
+            .expect("--default-index present");
+        assert_eq!(
+            args[default + 1],
+            indexes[1],
+            "the lowest-priority index is the default"
+        );
+        let strategy = args
+            .iter()
+            .position(|a| a == "--index-strategy")
+            .expect("--index-strategy present");
+        assert_eq!(
+            args[strategy + 1],
+            "first-index",
+            "the dependency-confusion-safe strategy is pinned, not inherited"
+        );
+    }
+
+    /// Credentials reach `uv` through the environment and never through argv:
+    /// `/proc/<pid>/cmdline` is world-readable for the process lifetime, so a
+    /// token in a flag is readable by every other process on the runner.
+    #[test]
+    fn index_credentials_travel_in_the_environment_not_argv() {
+        let _guard = crate::test_support::ocx_env_lock();
+
+        // SAFETY: serialised by the crate-wide env lock held above.
+        unsafe {
+            std::env::set_var("OCX_AUTH_nexus_corp_example_USER", "ci-mirror");
+            std::env::set_var("OCX_AUTH_nexus_corp_example_TOKEN", "hunter2");
+        }
+
+        let options = sample_options();
+        let python = UvPython::Version("3.13".to_string());
+        let indexes = ["https://nexus.corp.example/repository/pypi/simple".to_string()];
+        let request = DeriveLockRequest {
+            python: &python,
+            package: "pycowsay",
+            version: "1.0.0",
+            indexes: &indexes,
+            options: &options,
+            output_path: Path::new("/work/pylock.toml"),
+            generated_at: "2026-07-05T00:00:00Z",
+        };
+
+        let resolved = resolve_indexes(request.indexes).unwrap();
+        let args = build_uv_compile_args(&request, &resolved).unwrap();
+        let environment = index_environment(&resolved);
+
+        // SAFETY: same lock.
+        unsafe {
+            std::env::remove_var("OCX_AUTH_nexus_corp_example_USER");
+            std::env::remove_var("OCX_AUTH_nexus_corp_example_TOKEN");
+        }
+
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("hunter2") || arg.contains("ci-mirror")),
+            "no credential may appear in argv: {args:?}"
+        );
+        // uv's documented normalization: the index name uppercased with
+        // non-alphanumeric characters replaced by underscores.
+        assert!(
+            args.contains(&"NEXUS_CORP_EXAMPLE=https://nexus.corp.example/repository/pypi/simple".to_string()),
+            "a credentialed index is passed as <name>=<url>: {args:?}"
+        );
+        assert_eq!(
+            environment,
+            vec![
+                (
+                    "UV_INDEX_NEXUS_CORP_EXAMPLE_USERNAME".to_string(),
+                    "ci-mirror".to_string()
+                ),
+                (
+                    "UV_INDEX_NEXUS_CORP_EXAMPLE_PASSWORD".to_string(),
+                    "hunter2".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -561,16 +767,17 @@ mod tests {
             python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
-            index: None,
+            indexes: &[],
             options: &options,
             output_path: Path::new("/work/pylock.toml"),
             generated_at: "2026-07-05T00:00:00Z",
         };
 
-        let args = build_uv_compile_args(&request).unwrap();
+        let args = build_uv_compile_args(&request, &resolve_indexes(request.indexes).unwrap()).unwrap();
 
         assert!(!args.contains(&"--universal".to_string()));
-        assert!(!args.contains(&"--index-url".to_string()));
+        assert!(!args.contains(&"--default-index".to_string()));
+        assert!(!args.contains(&"--index".to_string()));
     }
 
     #[test]
@@ -585,13 +792,13 @@ mod tests {
             python: &python,
             package: "pycowsay",
             version: "1.0.0",
-            index: None,
+            indexes: &[],
             options: &options,
             output_path: Path::new("/work/pylock.toml"),
             generated_at: "2026-07-05T00:00:00Z",
         };
 
-        let args = build_uv_compile_args(&request).unwrap();
+        let args = build_uv_compile_args(&request, &resolve_indexes(request.indexes).unwrap()).unwrap();
 
         let version_flag = args
             .iter()
@@ -684,7 +891,7 @@ hashes = { sha256 = "aaaa" }
             python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
-            index: None,
+            indexes: &[],
             options: &options,
             output_path: &output_path,
             generated_at: "2026-07-05T00:00:00Z",
@@ -728,7 +935,7 @@ hashes = { sha256 = "aaaa" }
             python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
-            index: None,
+            indexes: &[],
             options: &options,
             output_path: &output_path,
             generated_at: "2026-07-05T00:00:00Z",
@@ -765,7 +972,7 @@ hashes = { sha256 = "aaaa" }
             python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "uwsgi",
             version: "2.0.24",
-            index: None,
+            indexes: &[],
             options: &options,
             output_path: &output_path,
             generated_at: "2026-07-05T00:00:00Z",
@@ -803,7 +1010,7 @@ hashes = { sha256 = "aaaa" }
             python: &UvPython::Interpreter(PathBuf::from("/opt/python/bin/python3")),
             package: "pycowsay",
             version: "1.0.0",
-            index: None,
+            indexes: &[],
             options: &options,
             output_path: &output_path,
             generated_at: "2026-07-05T00:00:00Z",

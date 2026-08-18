@@ -27,6 +27,7 @@ one-byte marker; nothing downstream ever executes it.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.server
 import json
@@ -83,15 +84,33 @@ def stub_registry() -> str:
     server.shutdown()
 
 
-def _make_pypi_handler(projects: dict[str, bytes], wheels: dict[str, bytes]) -> type:
+def _make_pypi_handler(
+    projects: dict[str, bytes],
+    wheels: dict[str, bytes],
+    credentials: tuple[str, str] | None = None,
+) -> type:
+    """Simple Repository API stand-in (PEP 503 project URL, PEP 691 JSON body).
+
+    ``credentials`` makes it an authenticated index: every request without the
+    matching HTTP Basic header answers 401, which is what a corporate Nexus or
+    Artifactory does.
+    """
+    expected_auth = None
+    if credentials is not None:
+        user, secret = credentials
+        expected_auth = "Basic " + base64.b64encode(f"{user}:{secret}".encode()).decode()
+
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            parts = self.path.strip("/").split("/")
-            if len(parts) == 3 and parts[0] == "pypi" and parts[2] == "json" and parts[1] in projects:
-                self._send(200, projects[parts[1]], "application/json")
+            if expected_auth is not None and self.headers.get("Authorization") != expected_auth:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="pypi"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
-            if len(parts) == 3 and parts[0] == "pypi" and parts[2] == "json":
-                self._send(404, json.dumps({"message": "Not Found"}).encode(), "application/json")
+            parts = self.path.strip("/").split("/")
+            if len(parts) == 1 and parts[0] in projects:
+                self._send(200, projects[parts[0]], "application/vnd.pypi.simple.v1+json")
                 return
             if len(parts) == 2 and parts[0] == "wheels" and parts[1] in wheels:
                 self._send(200, wheels[parts[1]], "application/octet-stream")
@@ -111,9 +130,13 @@ def _make_pypi_handler(projects: dict[str, bytes], wheels: dict[str, bytes]) -> 
     return Handler
 
 
-def _start_fake_pypi(projects: dict[str, bytes], wheels: dict[str, bytes]) -> tuple[str, http.server.HTTPServer]:
-    """Starts a local stand-in for a PyPI-compatible index. Returns its base URL + server."""
-    server = http.server.HTTPServer(("127.0.0.1", 0), _make_pypi_handler(projects, wheels))
+def _start_fake_pypi(
+    projects: dict[str, bytes],
+    wheels: dict[str, bytes],
+    credentials: tuple[str, str] | None = None,
+) -> tuple[str, http.server.HTTPServer]:
+    """Starts a local stand-in for a Simple API index. Returns its base URL + server."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), _make_pypi_handler(projects, wheels, credentials))
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -134,7 +157,18 @@ def _unreachable_index() -> str:
 
 
 def _project_json(releases: dict[str, list[dict[str, object]]]) -> bytes:
-    return json.dumps({"info": {}, "releases": releases, "urls": [], "vulnerabilities": []}).encode()
+    """Renders a PEP 691 project page from ``{version: [file, ...]}``.
+
+    The input shape is kept version-keyed because that is how the tests read;
+    the Simple API itself lists only files, and versions are derived from their
+    filenames (`source::pypi`).
+    """
+    files = [
+        {"filename": entry["filename"], "url": f"../wheels/{entry['filename']}", "hashes": {}, "yanked": entry.get("yanked", False)}
+        for entries in releases.values()
+        for entry in entries
+    ]
+    return json.dumps({"meta": {"api-version": "1.0"}, "files": files}).encode()
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -219,7 +253,8 @@ target:
 source:
   type: pypi
   package: {package}
-  index: {index}
+  indexes:
+    - url: {index}
 
 python:
   version: "3.13.1"
@@ -291,9 +326,91 @@ def test_plan_maps_unreachable_index_to_unavailable(mirror_binary: Path, stub_re
     assert result.returncode == 69, f"expected exit 69 (Unavailable) for unreachable index, got {result.returncode}\nstderr: {result.stderr}"
 
 
+def test_plan_authenticates_to_a_private_index(mirror_binary: Path, stub_registry: str, tmp_path: Path) -> None:
+    """A credential-gated index is reachable through either auth rung, and unreachable without one.
+
+    Both rungs are host-keyed — `OCX_AUTH_<slug>_*` (the slug is the host with
+    every non-alphanumeric byte replaced, so `127.0.0.1` reads
+    `OCX_AUTH_127_0_0_1_*`) and netrc's `machine` entry. Nothing about the
+    credential appears in `mirror.yml`.
+    """
+    releases = {"1.0.0": [{"filename": "acme_app-1.0.0-py3-none-any.whl", "yanked": False}]}
+    index, server = _start_fake_pypi(
+        projects={"acme-app": _project_json(releases)},
+        wheels={},
+        credentials=("ci-mirror", "s3cr3t"),
+    )
+    try:
+        interpreter_package = "ocx.sh/python/cpython:3.13.1"
+        ocx_stub = _write_ocx_pull_stub(tmp_path, interpreter_package)
+        uv_stub = tmp_path / "uv-fail.sh"
+        _write_executable(uv_stub, "#!/bin/sh\ncat > /dev/null\necho 'resolution failed' >&2\nexit 1\n")
+
+        spec_path = _write_spec(
+            tmp_path,
+            registry=stub_registry,
+            repository="pypi-private-index",
+            package="acme-app",
+            index=index,
+            interpreter_package=interpreter_package,
+        )
+        plan = ["package", "pipeline", "plan", "--spec", str(spec_path), "--locks-dir", str(tmp_path / "locks")]
+        # A netrc the developer's own ~/.netrc cannot stand in for.
+        absent_netrc = str(tmp_path / "no-such-netrc")
+
+        anonymous = _run_mirror(
+            mirror_binary,
+            plan,
+            {"OCX_INSECURE_REGISTRIES": stub_registry, "NETRC": absent_netrc},
+        )
+
+        env_auth = _run_mirror(
+            mirror_binary,
+            plan,
+            {
+                "OCX_INSECURE_REGISTRIES": stub_registry,
+                "NETRC": absent_netrc,
+                "OCX_AUTH_127_0_0_1_USER": "ci-mirror",
+                "OCX_AUTH_127_0_0_1_TOKEN": "s3cr3t",
+                "OCX_BINARY_PIN": str(ocx_stub),
+                "OCX_MIRROR_UV": str(uv_stub),
+            },
+        )
+
+        netrc_path = tmp_path / "netrc"
+        netrc_path.write_text("machine 127.0.0.1 login ci-mirror password s3cr3t\n")
+        netrc_path.chmod(0o600)
+        netrc_auth = _run_mirror(
+            mirror_binary,
+            plan,
+            {
+                "OCX_INSECURE_REGISTRIES": stub_registry,
+                "NETRC": str(netrc_path),
+                "OCX_BINARY_PIN": str(ocx_stub),
+                "OCX_MIRROR_UV": str(uv_stub),
+            },
+        )
+    finally:
+        server.shutdown()
+
+    # 401 is "unknown", not "absent": SourceError (69), never the 65 an unknown
+    # package name gets — a wrong credential must not read as a typo'd package.
+    assert anonymous.returncode == 69, (
+        f"expected exit 69 (Unavailable) for an unauthenticated index, got {anonymous.returncode}"
+        f"\nstderr: {anonymous.stderr}"
+    )
+    for label, result in (("OCX_AUTH", env_auth), ("netrc", netrc_auth)):
+        assert result.returncode == 65, (
+            f"{label}: discovery must get past the index and reach lock derivation, "
+            f"got {result.returncode}\nstderr: {result.stderr}"
+        )
+        assert "resolution failed" in result.stderr, f"{label}: expected the uv stub's failure, got: {result.stderr}"
+    assert "s3cr3t" not in env_auth.stderr and "s3cr3t" not in netrc_auth.stderr, "no credential may reach stderr"
+
+
 def test_plan_maps_uv_nonzero_exit_to_data_error(mirror_binary: Path, stub_registry: str, tmp_path: Path) -> None:
     """A `uv pip compile` resolution failure is malformed lock content: PylockError, exit 65."""
-    releases = {"1.0.0": [{"filename": "acme-app-1.0.0-py3-none-any.whl", "yanked": False}]}
+    releases = {"1.0.0": [{"filename": "acme_app-1.0.0-py3-none-any.whl", "yanked": False}]}
     index, server = _start_fake_pypi(projects={"acme-app": _project_json(releases)}, wheels={})
     try:
         interpreter_package = "ocx.sh/python/cpython:3.13.1"
@@ -329,7 +446,7 @@ def test_plan_maps_uv_nonzero_exit_to_data_error(mirror_binary: Path, stub_regis
 
 def test_plan_maps_missing_uv_binary_to_execution_failed(mirror_binary: Path, stub_registry: str, tmp_path: Path) -> None:
     """A missing `uv` binary is a subprocess-execution failure: ExecutionFailed, exit 1."""
-    releases = {"1.0.0": [{"filename": "acme-app-1.0.0-py3-none-any.whl", "yanked": False}]}
+    releases = {"1.0.0": [{"filename": "acme_app-1.0.0-py3-none-any.whl", "yanked": False}]}
     index, server = _start_fake_pypi(projects={"acme-app": _project_json(releases)}, wheels={})
     try:
         interpreter_package = "ocx.sh/python/cpython:3.13.1"

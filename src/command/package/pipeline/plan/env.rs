@@ -353,7 +353,7 @@ pub async fn derive_one_pypi_lock(
     app_version: &str,
     output_path: &Path,
 ) -> Result<Pylock, MirrorError> {
-    let Source::Pypi { index, .. } = &spec.source else {
+    let Source::Pypi { .. } = &spec.source else {
         return Err(MirrorError::SpecInvalid(vec![
             "lock derivation is only defined for source.type 'pypi'".to_string(),
         ]));
@@ -362,6 +362,7 @@ pub async fn derive_one_pypi_lock(
         MirrorError::SpecInvalid(vec!["python config is required for source.type 'pypi'".to_string()])
     })?;
     let package = spec.source.pylock_app_name(&spec.name);
+    let indexes = spec.source.pypi_indexes();
     let lock_options = python.lock.clone().unwrap_or_else(default_lock_options);
     let generated_at = Utc::now().to_rfc3339();
 
@@ -369,7 +370,7 @@ pub async fn derive_one_pypi_lock(
         python: uv_python,
         package,
         version: app_version,
-        index: index.as_deref(),
+        indexes: &indexes,
         options: &lock_options,
         output_path,
         generated_at: &generated_at,
