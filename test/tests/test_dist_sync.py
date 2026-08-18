@@ -13,6 +13,7 @@ change that breaks every jq-free installer fails here rather than in the field.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.server
 import json
@@ -423,6 +424,60 @@ def test_a_digest_mismatch_fails_the_run_and_publishes_no_manifest(dist_mirror, 
     assert result.returncode != 0
     assert not (output / "dist.json").exists(), "a partial run must publish no manifest"
     assert not (output / "dist").exists(), "a partial run must publish no snapshot either"
+
+
+def test_a_credential_gated_source_is_read_with_host_keyed_credentials(dist_mirror, asset_server, tmp_path):
+    """`upload.identity` covers writes; a store that also gates *reads* is served here.
+
+    The credential is host-keyed (`OCX_AUTH_<slug>_*`, the slug being the host
+    with every non-alphanumeric byte replaced) and appears nowhere in the spec —
+    the same resolver the archive downloads use, so one variable covers the
+    manifest fetch and every byte it names.
+    """
+    publish_upstream(asset_server, [("0.5.8", "stable")])
+
+    class GatedHandler(http.server.SimpleHTTPRequestHandler):
+        def send_head(self):
+            expected = "Basic " + base64.b64encode(b"ci-mirror:s3cr3t").decode()
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="dist"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return None
+            return super().send_head()
+
+        def log_message(self, fmt, *args):
+            pass
+
+    gated = http.server.HTTPServer(
+        ("127.0.0.1", 0),
+        lambda *args: GatedHandler(*args, directory=str(asset_server.dir)),
+    )
+    threading.Thread(target=gated.serve_forever, daemon=True).start()
+    try:
+        source = f"http://127.0.0.1:{gated.server_address[1]}/dist.json"
+        output = tmp_path / "public"
+        spec = write_spec(tmp_path / "dist.yml", source, output)
+
+        # A developer's own ~/.netrc must not stand in for the credential.
+        dist_mirror.env["NETRC"] = str(tmp_path / "no-such-netrc")
+        anonymous = dist_mirror.run("dist", "sync", str(spec), check=False)
+        published_anonymously = (output / "dist.json").exists()
+
+        dist_mirror.env["OCX_AUTH_127_0_0_1_USER"] = "ci-mirror"
+        dist_mirror.env["OCX_AUTH_127_0_0_1_TOKEN"] = "s3cr3t"
+        authenticated = dist_mirror.run("dist", "sync", str(spec), check=False)
+    finally:
+        gated.shutdown()
+
+    assert anonymous.returncode != 0, "an unauthenticated read must fail the run"
+    assert not published_anonymously, "a refused source must publish nothing"
+    assert authenticated.returncode == 0, (
+        f"the credentialed read must succeed (rc={authenticated.returncode})\nstderr: {authenticated.stderr}"
+    )
+    assert (output / "dist.json").exists(), "the credentialed run publishes the manifest"
+    assert "s3cr3t" not in authenticated.stderr, "no credential may reach stderr"
 
 
 def test_a_manifest_row_that_would_escape_the_output_directory_is_refused(dist_mirror, asset_server, tmp_path):

@@ -148,7 +148,7 @@ async fn validate_index_base_host(
 /// connect phase never re-resolves, since both the pre-flight and reqwest would
 /// otherwise consult the same resolver and agree.
 fn index_client(pin: Option<(String, Vec<SocketAddr>)>) -> Result<reqwest::Client, MirrorError> {
-    let mut builder = reqwest::Client::builder()
+    let mut builder = crate::http::builder()
         // Not decoration: without it a validated host answers `302` and
         // relocates the fetch to a host the pre-flight never saw, which is the
         // whole SSRF window reopened (CWE-918) — and a redirect to `http://`

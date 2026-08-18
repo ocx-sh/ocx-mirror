@@ -8,8 +8,19 @@ use tokio::io::AsyncWriteExt;
 use url::Url;
 
 /// Download a file from a URL, buffering the body and writing it out.
+///
+/// Credentials are resolved per URL, not per client: one PEP 751 lock names
+/// wheels on several hosts — an internal index for the private packages and
+/// `files.pythonhosted.org` for the rest is the ordinary corporate shape — so a
+/// credential attached to the client would be sent to every one of them.
+/// `auth::resolve` keys on this request's own host, which is also what keeps a
+/// corporate token off pypi.org.
 pub async fn download(client: &reqwest::Client, url: &Url, output: &Path) -> Result<()> {
-    let response = client.get(url.as_str()).send().await?.error_for_status()?;
+    let mut request = client.get(url.as_str());
+    if let Some(credential) = crate::auth::resolve(url)? {
+        request = credential.apply(request);
+    }
+    let response = request.send().await?.error_for_status()?;
 
     let mut file = tokio::fs::File::create(output).await?;
     let bytes = response.bytes().await?;

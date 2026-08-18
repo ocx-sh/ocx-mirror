@@ -21,10 +21,12 @@
 //!   driven by `tests/spec_validation.rs`.
 
 mod annotations;
+mod auth;
 mod command;
 mod discord;
 pub mod error;
 mod filter;
+mod http;
 mod junit;
 mod normalizer;
 mod pipeline;

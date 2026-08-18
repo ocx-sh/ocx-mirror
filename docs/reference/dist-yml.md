@@ -27,7 +27,9 @@ They are read by the five shell installers on `setup.ocx.sh`, by `rules_ocx` (`o
 
 !!! warning "The mirror must allow anonymous reads"
 
-    None of those consumers can send credentials: `curl` in `install.sh` has no auth knob, `file(DOWNLOAD)` has none by default, and `ctx.download` needs netrc. A store that requires a token on `GET` will fail every bootstrap, and the failure looks like a network error. Authenticated *reads* are a planned follow-up; authenticated **writes** are supported today via [`upload`](#upload).
+    None of those consumers can send credentials: `curl` in `install.sh` has no auth knob, `file(DOWNLOAD)` has none by default, and `ctx.download` needs netrc. A store that requires a token on `GET` will fail every bootstrap, and the failure looks like a network error.
+
+    This is about the mirror **you publish**. Reading a credential-gated *upstream* is supported: `source:` and the archives it names authenticate from the environment, host-keyed, exactly like [`mirror.yml`'s index credentials](./mirror-yml.md#pypi-authentication) — `OCX_AUTH_<slug>_USER`/`_TOKEN`, else `netrc`. Authenticated **writes** to your own store are [`upload.identity`](#upload).
 
 ## Top-level keys {#top-level}
 

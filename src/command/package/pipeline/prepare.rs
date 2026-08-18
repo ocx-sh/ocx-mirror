@@ -95,7 +95,7 @@ impl Prepare {
             .await
             .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
 
-        let http_client = reqwest::Client::new();
+        let http_client = crate::http::client()?;
         let concurrency = ConcurrencyParams {
             max_downloads: spec.concurrency.max_downloads,
             max_bundles: spec.concurrency.max_bundles,
@@ -236,7 +236,7 @@ impl Prepare {
             .await
             .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
 
-        let http_client = reqwest::Client::new();
+        let http_client = crate::http::client()?;
         let concurrency = ConcurrencyParams {
             max_downloads: spec.concurrency.max_downloads,
             max_bundles: spec.concurrency.max_bundles,

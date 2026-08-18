@@ -398,8 +398,16 @@ async fn write_output(path: &Path, bytes: &[u8]) -> Result<(), MirrorError> {
 /// parsed, and [`MirrorError::DistSchemaUnsupported`] for a `schema` this
 /// binary cannot re-emit.
 async fn fetch_manifest(client: &reqwest::Client, spec: &DistSpec) -> Result<DistManifest, MirrorError> {
-    let mut response = client
-        .get(spec.source.clone())
+    // The source half of an authenticated store. `upload.identity` covers
+    // writes; a store that also gates reads used to be unreachable, which
+    // `docs/reference/dist-yml.md` recorded as a follow-up. Host-keyed like
+    // every other read leg, so the same variables serve the manifest fetch and
+    // the archive downloads `mirror_row` performs through `download`.
+    let mut request = client.get(spec.source.clone());
+    if let Some(credential) = crate::auth::resolve(&spec.source)? {
+        request = credential.apply(request);
+    }
+    let mut response = request
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
@@ -454,7 +462,7 @@ async fn fetch_manifest(client: &reqwest::Client, spec: &DistSpec) -> Result<Dis
 ///
 /// [`MirrorError::ExecutionFailed`] when the TLS backend cannot be built.
 fn build_client() -> Result<reqwest::Client, MirrorError> {
-    reqwest::Client::builder()
+    crate::http::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()
@@ -481,7 +489,7 @@ fn build_client() -> Result<reqwest::Client, MirrorError> {
 ///
 /// [`MirrorError::ExecutionFailed`] when the TLS backend cannot be built.
 fn build_upload_client() -> Result<reqwest::Client, MirrorError> {
-    reqwest::Client::builder()
+    crate::http::builder()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
