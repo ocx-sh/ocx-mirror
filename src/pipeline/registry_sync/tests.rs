@@ -647,6 +647,26 @@ fn the_blob_pool_is_run_scoped_and_packages_are_sequential() {
     );
 }
 
+#[test]
+fn the_source_client_is_seeded_for_the_host_the_pointer_names() {
+    // `build_source_client` can only seed the source's *logical* `registry:`
+    // (`ocx.sh`); every request the source client makes goes to the physical
+    // host the root's pointer names (`ghcr.io`), and the fork's token cache
+    // keys on that host. A miss is silent — the request goes out with no
+    // `Authorization` header at all, which GHCR answers 401, so before this
+    // call the public index was uncopyable from the first referrer query on.
+    let body = function_body("sync_package");
+    assert!(
+        body.contains("registry_copy::ensure_source_auth(&context.source_client, &source_registry).await;"),
+        "the physical host's credential is seeded"
+    );
+    assert_ordered(
+        &body,
+        "ensure_source_auth",
+        "for entry in registry_copy::tag_copy_plan(&source_root.tags) {",
+    );
+}
+
 // ── Behavioural cover for the structural guards above ───────────────────────
 //
 // `write_package` takes a store and byte slices and touches no network, so the

@@ -482,6 +482,11 @@ async fn sync_package(
         ))
     })?;
 
+    // Seed the source client for the host the pointer names, before the first
+    // request addressed to it. `build_source_client` seeded the *logical*
+    // `registry:`; everything below dials this one.
+    registry_copy::ensure_source_auth(&context.source_client, &source_registry).await;
+
     // The mirror image of the drift warning above, and mutually exclusive with
     // it: under a rewrite the published pointer is ours and drift is the risk,
     // under preserve it is upstream's and reachability is. Placed here rather
