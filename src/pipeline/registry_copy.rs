@@ -1307,6 +1307,66 @@ fn referrer_failure(manifests: &[ocx_lib::oci::ImageIndexEntry]) -> CopyError {
     }
 }
 
+/// How a copied manifest is addressed at the destination — `publish_tags:`,
+/// resolved once (C-011's shape, applied to a different key).
+///
+/// Reading the spec's bool at every call site would put the branch in three
+/// places; this puts it in [`TagPolicy::address`] and lets everything else ask
+/// for "the destination reference for this content".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagPolicy {
+    /// Create the upstream tag at the destination. The default, and what keeps
+    /// the content referenced against a registry that collects untagged
+    /// manifests.
+    Publish,
+    /// Push by digest and create no tag. The mirrored index still carries the
+    /// full tag set — it resolves tag → `content` digest itself.
+    DigestOnly,
+}
+
+impl TagPolicy {
+    /// The destination reference for one tag's content.
+    ///
+    /// The fork addresses a manifest `PUT` by digest whenever the reference
+    /// carries one, so this *is* the whole mechanism: a tag-carrying reference
+    /// creates the tag, a digest-carrying one does not.
+    pub fn address(self, registry: &str, repository: &str, tag: &str, content: &Digest) -> Reference {
+        match self {
+            TagPolicy::Publish => Reference::with_tag(registry.to_string(), repository.to_string(), tag.to_string()),
+            TagPolicy::DigestOnly => {
+                Reference::with_digest(registry.to_string(), repository.to_string(), content.to_string())
+            }
+        }
+    }
+}
+
+/// Point one more tag at content this run already copied into the same
+/// repository.
+///
+/// The second and later tags of a package routinely name a manifest an earlier
+/// tag already brought over — 21 tags over 9 distinct indexes is an ordinary
+/// ocx package, because every version carries its cascade tags. Walking the
+/// tree again would re-fetch and re-push every platform manifest to learn
+/// nothing; the tag itself is one `PUT` of bytes already in hand.
+///
+/// The media type is re-derived from those bytes rather than threaded through
+/// the caller: it is a field of the document, and a manifest that parsed once
+/// parses again.
+///
+/// # Errors
+///
+/// [`CopyError`] when the destination rejects the push or the cached bytes are
+/// not a manifest.
+pub async fn tag_manifest(
+    destination_reference: &Reference,
+    bytes: &[u8],
+    context: &CopyContext,
+) -> Result<(), CopyError> {
+    let manifest: Manifest = serde_json::from_slice(bytes)
+        .map_err(|error| CopyError::MalformedManifest(format!("cached manifest is unreadable: {error}")))?;
+    push_manifest(destination_reference, bytes, manifest.content_type(), context).await
+}
+
 /// Copy a package's `<repository>:__ocx.desc` tag (C-025).
 ///
 /// Copied explicitly, per package: ocx filters reserved tags at render, so it
@@ -1320,6 +1380,7 @@ fn referrer_failure(manifests: &[ocx_lib::oci::ImageIndexEntry]) -> CopyError {
 pub async fn copy_description(
     source_reference: &Reference,
     destination_reference: &Reference,
+    policy: TagPolicy,
     context: &CopyContext,
 ) -> Result<(), CopyError> {
     let identifier = source_identifier(source_reference).clone_with_tag(DESCRIPTION_TAG);
@@ -1335,10 +1396,11 @@ pub async fn copy_description(
     // Re-fetched by `copy_manifest_tree` rather than threaded through: a
     // description manifest is a few hundred bytes, and one shared ladder is
     // worth more than one saved request.
-    let destination = Reference::with_tag(
-        destination_reference.registry().to_string(),
-        destination_reference.repository().to_string(),
-        DESCRIPTION_TAG.to_string(),
+    let destination = policy.address(
+        destination_reference.registry(),
+        destination_reference.repository(),
+        DESCRIPTION_TAG,
+        &digest,
     );
     copy_manifest_tree(source_reference, &destination, &digest, context).await?;
     Ok(())
