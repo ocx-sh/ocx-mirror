@@ -49,6 +49,7 @@ pub mod upload;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::{StreamExt as _, TryStreamExt as _};
@@ -186,6 +187,11 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     let total = planned.len();
     let retain = spec.retain_archives_resolved();
     let upload_permits = Semaphore::new(spec.concurrency.max_uploads);
+    // Set by the first rejected write, read by every row before its own PUT.
+    // Plain `Relaxed`: `buffered` polls every row from one task, so the flag
+    // passes between futures that never run at the same instant — it is here
+    // for shared interior mutability, not to order anything.
+    let upload_failed = AtomicBool::new(false);
     let fetched: Vec<(PlannedRow, RowStep)> = if dry_run {
         // `--dry-run` promises a report of what *would* be mirrored, so the
         // plan above is the whole of the work.
@@ -206,18 +212,22 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
         // concurrently but yields in input order, which is the determinism the
         // report needs without an index sort afterwards.
         //
-        // `try_collect` stops polling at the first *abort-class* error, so a
-        // store answering `401` sees at most `max_uploads` rejected writes
-        // rather than one per archive. A row that merely failed to fetch is not
-        // in that class: it comes back as `RowStep::Failed` inside `Ok` and the
-        // pass runs on, so the operator sees every bad row in one report.
+        // `try_collect` stops polling at the first *abort-class* error, but not
+        // instantly: it only sees the error once that future returns, and
+        // `buffered` keeps polling the rest until then. `upload_failed` closes
+        // that window, so a store answering `401` sees at most the writes
+        // already in flight — never one per archive. A row that merely failed
+        // to fetch is not in that class: it comes back as `RowStep::Failed`
+        // inside `Ok` and the pass runs on, so the operator sees every bad row
+        // in one report.
         futures::stream::iter(planned.into_iter().enumerate().map(|(position, plan)| {
             let client = &client;
             let uploader = uploader.as_ref();
             let upload_permits = &upload_permits;
+            let upload_failed = &upload_failed;
             async move {
                 tracing::info!("[{}/{total}] {} → {}", position + 1, plan.name, plan.relative);
-                let step = mirror_row(client, spec, uploader, upload_permits, &plan, retain).await?;
+                let step = mirror_row(client, spec, uploader, upload_permits, upload_failed, &plan, retain).await?;
                 Ok::<_, MirrorError>((plan, step))
             }
         }))
@@ -461,6 +471,7 @@ async fn mirror_row(
     spec: &DistSpec,
     uploader: Option<&Uploader>,
     upload_permits: &Semaphore,
+    upload_failed: &AtomicBool,
     plan: &PlannedRow,
     retain: bool,
 ) -> Result<RowStep, MirrorError> {
@@ -520,12 +531,24 @@ async fn mirror_row(
         let _permit = upload_permits.acquire().await.map_err(|_| {
             MirrorError::ExecutionFailed(vec!["upload concurrency semaphore was closed mid-run".to_string()])
         })?;
+        // Checked here, holding the permit, so the decision is made as late as
+        // it can be: a write rejected while this row queued must not become a
+        // second attempt with the same bad credential. That is the account
+        // lockout `retry_delays` refuses to cause, and the run is over either
+        // way — the rejection below aborts it.
+        if upload_failed.load(Ordering::Relaxed) {
+            return Ok(RowStep::Failed(format!(
+                "upload of {} was not attempted: an earlier upload was rejected",
+                plan.relative
+            )));
+        }
         // `Unconditional`: the probe above already answered the question
         // `Precheck::HeadFirst` would ask, and it answered `Absent`.
         uploader
             .put_file(&plan.relative, &destination, Precheck::Unconditional)
             .await
             .map_err(|error| {
+                upload_failed.store(true, Ordering::Relaxed);
                 MirrorError::ExecutionFailed(vec![format!("upload of {} failed: {error:#}", plan.relative)])
             })?
     };
