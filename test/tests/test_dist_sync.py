@@ -400,7 +400,10 @@ def test_the_content_addressed_snapshot_matches_the_rolling_manifest(dist_mirror
     rolling = (output / "dist.json").read_bytes()
     digest = hashlib.sha256(rolling).hexdigest()
     assert (output / "dist" / f"{digest}.json").read_bytes() == rolling
-    assert (output / "dist.json.sha256").read_text() == f"{digest}  dist.json\n"
+    # No `dist.json.sha256`. Nothing ever read one — install.sh verifies each
+    # archive against the manifest's own inline sha256 — and a `*.sha256` path
+    # is not a file Artifactory will store, so it could not be served either.
+    assert not (output / "dist.json.sha256").exists()
 
 
 def test_an_unchanged_upstream_produces_the_same_snapshot_name(dist_mirror, asset_server, tmp_path):
@@ -595,15 +598,13 @@ def test_the_gitlab_layout_changes_both_the_tree_and_the_manifest_urls(dist_mirr
         )
 
 
-def test_upload_puts_the_manifest_after_every_archive_and_its_sidecar_last(
+def test_upload_puts_the_rolling_manifest_after_every_archive_it_names(
     dist_mirror, asset_server, upload_store, tmp_path
 ):
-    """Publish order, including the one Artifactory forces.
+    """The mid-run guarantee: a consumer resolves the old manifest or the new one.
 
-    `dist.json` after every archive is the mid-run guarantee. The sidecar after
-    `dist.json` is Artifactory's requirement: it reads a PUT to `*.sha256` as a
-    checksum declaration about the sibling artifact and answers 404 when that
-    sibling is absent, which is every first run against a fresh destination.
+    Also pins that no `*.sha256` path is uploaded at all — Artifactory does not
+    store one, and nothing reads one.
     """
     source = publish_upstream(asset_server, [("0.5.8", "stable")])
     output = tmp_path / "public"
@@ -614,10 +615,10 @@ def test_upload_puts_the_manifest_after_every_archive_and_its_sidecar_last(
     dist_mirror.run("dist", "sync", str(spec))
 
     puts = upload_store.paths("PUT")
-    assert puts[-1] == "/dist.json.sha256", f"the sidecar must follow the manifest it describes: {puts}"
+    assert puts[-1] == "/dist.json", f"the rolling manifest must be published last: {puts}"
+    assert not any(path.endswith(".sha256") for path in puts), f"no checksum sidecar is published: {puts}"
     assert any(path.startswith("/dist/") for path in puts), "the snapshot must be published"
     manifest_index = puts.index("/dist.json")
-    assert manifest_index < puts.index("/dist.json.sha256")
     archives = [path for path in puts if path.startswith("/v0.5.8/")]
     assert archives, "archives must be uploaded"
     for archive in archives:
@@ -661,16 +662,15 @@ def test_every_upload_announces_all_four_checksums_of_its_own_body(
             )
 
 
-def test_a_second_upload_skips_the_archives_but_republishes_the_rolling_pair(
+def test_a_second_upload_skips_the_archives_but_republishes_the_rolling_manifest(
     dist_mirror, asset_server, upload_store, tmp_path
 ):
     """HEAD-then-skip is right for content-addressed paths and wrong for rolling ones.
 
     An archive and the `dist/<sha256>.json` snapshot are pinned by their names,
-    so "already there" means "already correct". `dist.json` and its sidecar are
-    not: the path outlives its contents, and skipping them freezes the store's
-    manifest at whatever the first run wrote while fresh archives keep landing
-    beside it.
+    so "already there" means "already correct". `dist.json` is not: the path
+    outlives its contents, and skipping it freezes the store's manifest at
+    whatever the first run wrote while fresh archives keep landing beside it.
     """
     source = publish_upstream(asset_server, [("0.5.8", "stable")])
     output = tmp_path / "public"
@@ -684,19 +684,17 @@ def test_a_second_upload_skips_the_archives_but_republishes_the_rolling_pair(
 
     report = json.loads(result.stdout)
     second = upload_store.paths("PUT")[first:]
-    assert second == ["/dist.json", "/dist.json.sha256"], (
-        f"only the rolling pair may be re-uploaded, in publish order: {second}"
-    )
-    assert report["counters"]["uploaded"] == 2
-    assert report["counters"]["already_present"] == first - 2, "every content-addressed path is skipped"
+    assert second == ["/dist.json"], f"only the rolling manifest may be re-uploaded: {second}"
+    assert report["counters"]["uploaded"] == 1
+    assert report["counters"]["already_present"] == first - 1, "every content-addressed path is skipped"
 
 
-def test_a_new_upstream_release_republishes_the_rolling_pair_with_the_new_digest(
+def test_a_new_upstream_release_republishes_the_rolling_manifest(
     dist_mirror, asset_server, upload_store, tmp_path
 ):
     """The regression the rolling/immutable split exists to prevent.
 
-    With the pair skipped, the store keeps serving the first run's `dist.json`
+    With `dist.json` skipped, the store keeps serving the first run's manifest
     while the second run's archives land beside it — a manifest that names
     fewer releases than the store actually holds, and nothing in the report
     looks wrong.
@@ -720,10 +718,10 @@ def test_a_new_upstream_release_republishes_the_rolling_pair_with_the_new_digest
     )
 
     digest = hashlib.sha256(upload_store.stored["/dist.json"]).hexdigest()
-    assert upload_store.stored["/dist.json.sha256"].decode() == f"{digest}  dist.json\n", (
-        "the sidecar must describe the manifest the store is actually serving"
-    )
     assert f"/dist/{digest}.json" in upload_store.paths("PUT"), "the new snapshot must be published too"
+    assert upload_store.stored[f"/dist/{digest}.json"] == upload_store.stored["/dist.json"], (
+        "the snapshot an operator pins must be the manifest the store serves"
+    )
 
 
 def test_the_download_width_changes_nothing_about_the_result(dist_mirror, asset_server, tmp_path):

@@ -18,7 +18,7 @@ use crate::command::package::options::OutputFormat;
 pub struct DistSyncReport {
     pub archives: Vec<ArchiveReport>,
     /// The sha256 of the rendered manifest — the name of its content-addressed
-    /// snapshot, and what `dist.json.sha256` carries.
+    /// snapshot, and the value an operator pins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
     pub counters: RunCounters,
