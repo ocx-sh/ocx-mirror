@@ -90,6 +90,15 @@ pub const BLOB_SIZE_CEILING: u64 = 4 * 1024 * 1024 * 1024;
 /// the operator's own knob.
 const BLOB_FANOUT_CEILING: usize = 64;
 
+/// Child manifests of one image index copied at once, at the top level only.
+///
+/// 8: an index carries one manifest per platform, and every published OCX
+/// package is inside that — so this is "all of them, concurrently" for real
+/// input, with a bound in place for input that is not. Deliberately far below
+/// [`BLOB_FANOUT_CEILING`]: each child opens a fan-out of its own, and the
+/// product is what the destination sees.
+const CHILD_FANOUT_CEILING: usize = 8;
+
 /// Levels of nested image index either manifest walk descends before refusing
 /// (C-022).
 ///
@@ -848,19 +857,40 @@ async fn copy_manifest_tree_at(
 
     match child_references(&manifest)? {
         ChildReferences::Manifests(children) => {
-            // Sequential: concurrency lives inside a package at the blob level,
-            // and nesting it here would multiply the memory ceiling.
-            for (child_digest, _size) in children {
-                let child_source = addressed(source_reference, &child_digest);
-                let child_destination = addressed(destination_reference, &child_digest);
-                let (child_stats, _child_bytes) = Box::pin(copy_manifest_tree_at(
-                    &child_source,
-                    &child_destination,
-                    &child_digest,
-                    context,
-                    depth + 1,
-                ))
+            // An image index's children are the platform manifests, and copying
+            // them one after another made a package's cost the *sum* of nine
+            // round-trip-bound walks. They share nothing that has to be
+            // serialised: each fetches its own bytes, and the one resource with
+            // a ceiling — a blob body held in memory — is bounded by the
+            // run-scoped `blob_semaphore` whatever the width here.
+            //
+            // `buffered`, not `buffer_unordered`: the widths are small and
+            // in-order yielding makes *which* error `try_collect` returns a
+            // property of the index, not of the network.
+            //
+            // Width collapses to 1 below the top level, which is what keeps the
+            // bound flat: a hostile chain of nested indexes would otherwise
+            // multiply it by itself once per level, `MANIFEST_DEPTH_CEILING`
+            // times. Real indexes are one level deep.
+            let width = if depth == 0 { CHILD_FANOUT_CEILING } else { 1 };
+            let copied: Vec<CopyStats> =
+                futures::stream::iter(children.into_iter().map(|(child_digest, _size)| async move {
+                    let child_source = addressed(source_reference, &child_digest);
+                    let child_destination = addressed(destination_reference, &child_digest);
+                    let (child_stats, _child_bytes) = Box::pin(copy_manifest_tree_at(
+                        &child_source,
+                        &child_destination,
+                        &child_digest,
+                        context,
+                        depth + 1,
+                    ))
+                    .await?;
+                    Ok::<_, CopyError>(child_stats)
+                }))
+                .buffered(width)
+                .try_collect()
                 .await?;
+            for child_stats in copied {
                 stats.merge(child_stats);
             }
         }
@@ -955,6 +985,18 @@ pub async fn ensure_blob(
 ) -> Result<BlobOutcome, CopyError> {
     let digest_string = digest.to_string();
     let destination_repository = destination_reference.repository().to_string();
+
+    // A digest this run already confirmed in *this* repository needs no second
+    // question: the destination is append-only, so an answer of "present" does
+    // not expire mid-run. Every tag of a package re-declares the same config
+    // blob, so without this the query count is tags × blobs rather than
+    // distinct blobs — one real package spent 249 of its 431 probes re-asking
+    // about a single digest. `debug!`, not `info!`: the first probe for each
+    // digest still logs, and the repeats are the noise this removes.
+    if confirmed_here(context, digest, &destination_repository).await {
+        tracing::debug!("blob {digest} confirmed in {destination_repository} earlier this run");
+        return Ok(BlobOutcome::Skipped);
+    }
 
     let probe = context
         .destination_client
@@ -1404,6 +1446,22 @@ async fn missing_descriptors_at(
 }
 
 /// Record which destination repository now holds `digest`, for later mounts.
+/// Whether this run already put `digest` in `repository` — present, mounted or
+/// uploaded.
+///
+/// Reads the same map [`record_location`] writes, and answers `false` for a
+/// digest recorded against a *different* repository: that entry exists for
+/// `mount_blob`, and a blob in some other repository says nothing about this
+/// one.
+async fn confirmed_here(context: &CopyContext, digest: &Digest, repository: &str) -> bool {
+    context
+        .mounted_from
+        .lock()
+        .await
+        .get(digest)
+        .is_some_and(|recorded| recorded == repository)
+}
+
 async fn record_location(context: &CopyContext, digest: &Digest, repository: &str) {
     context
         .mounted_from
