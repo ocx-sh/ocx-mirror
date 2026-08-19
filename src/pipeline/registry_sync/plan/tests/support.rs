@@ -27,6 +27,7 @@ pub fn spec(destination: &str) -> RegistrySpec {
         output: std::path::PathBuf::from("./public"),
         destination: destination.to_string(),
         rewrite_pointers: true,
+        publish_tags: true,
         on_error: OnError::default(),
         sources: Vec::new(),
         concurrency: RegistryConcurrency::default(),

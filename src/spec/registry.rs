@@ -74,6 +74,28 @@ pub struct RegistrySpec {
     #[serde(default)]
     pub rewrite_pointers: bool,
 
+    /// Whether the copy creates the upstream tag set at the destination, or
+    /// pushes the content and leaves it untagged.
+    ///
+    /// **Default `true`.** A client resolving through the mirrored index never
+    /// reads a destination tag — the index root maps every tag to a `content`
+    /// digest and the pull is by digest — so the tags exist for the humans and
+    /// the tools that address the registry directly, and to keep the content
+    /// referenced.
+    ///
+    /// That second job is the reason this defaults on and is not merely a
+    /// performance knob. An untagged manifest is unreferenced, and a registry
+    /// is free to garbage-collect it: zot does by default, and an Artifactory
+    /// cleanup policy can be configured to. Turning this off on such a
+    /// destination publishes an index naming content the registry may delete
+    /// underneath it.
+    ///
+    /// Turn it off when the destination keeps untagged manifests and the tag
+    /// set is large: one tag is one `PUT`, and an ocx package routinely
+    /// carries two or three cascade tags per version.
+    #[serde(default = "default_publish_tags")]
+    pub publish_tags: bool,
+
     /// What a per-package failure does to the rest of the run. Governs
     /// per-package failures only; a non-authoritative destination read aborts
     /// the run under either value (C-040).
@@ -353,6 +375,10 @@ impl Default for RegistryConcurrency {
             max_retries: DEFAULT_MAX_RETRIES,
         }
     }
+}
+
+fn default_publish_tags() -> bool {
+    true
 }
 
 fn default_max_blobs() -> usize {

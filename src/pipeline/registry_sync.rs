@@ -505,16 +505,20 @@ async fn sync_package(
     let mut objects: BTreeMap<Digest, Vec<u8>> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
 
+    let policy = if spec.publish_tags {
+        registry_copy::TagPolicy::Publish
+    } else {
+        registry_copy::TagPolicy::DigestOnly
+    };
+
     for entry in registry_copy::tag_copy_plan(&source_root.tags) {
         let source_reference =
             Reference::with_tag(source_registry.clone(), source_repository.clone(), entry.tag.clone());
-        // Tag-only, never digest-carrying: the fork addresses a manifest `PUT`
-        // by digest whenever the reference has one, so a digest here would copy
-        // the content and create no tag.
-        let destination_reference = Reference::with_tag(
-            spec.target.registry.clone(),
-            package.physical_repository.clone(),
-            entry.tag.clone(),
+        let destination_reference = policy.address(
+            &spec.target.registry,
+            &package.physical_repository,
+            &entry.tag,
+            &entry.content,
         );
 
         if options.dry_run {
@@ -522,6 +526,31 @@ async fn sync_package(
                 .await
             {
                 Ok(descriptors) => missing.extend(descriptors),
+                Err(error) => failures.push(tag_failure(&entry.tag, error)?),
+            }
+            continue;
+        }
+
+        // `objects` holds one verified manifest body per distinct `content`
+        // digest, so a hit means an earlier tag of this package already brought
+        // every byte this one names over. All that is left is to point the tag
+        // at it — and under `DigestOnly` not even that.
+        if let Some(bytes) = objects.get(&entry.content) {
+            let tagged = match policy {
+                registry_copy::TagPolicy::Publish => {
+                    registry_copy::tag_manifest(&destination_reference, bytes, context).await
+                }
+                registry_copy::TagPolicy::DigestOnly => Ok(()),
+            };
+            match tagged {
+                Ok(()) => {
+                    tracing::info!(
+                        "copied {:?} tag {:?}: content already copied for an earlier tag",
+                        package.name,
+                        entry.tag
+                    );
+                    confirmed.insert(entry.tag.clone());
+                }
                 Err(error) => failures.push(tag_failure(&entry.tag, error)?),
             }
             continue;
@@ -552,6 +581,7 @@ async fn sync_package(
             package.physical_repository.clone(),
             DESCRIPTION_TAG.to_string(),
         ),
+        policy,
         context,
     )
     .await

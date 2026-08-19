@@ -540,6 +540,59 @@ def test_a_multi_tag_cascade_resolves_to_the_same_digests_as_the_source(
     assert problems == []
 
 
+def test_publish_tags_false_copies_the_content_and_creates_no_destination_tag(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """`publish_tags: false` pushes by digest only; the index still carries every tag.
+
+    A client resolving through the mirrored index never reads a destination
+    tag — the root maps tag to `content` digest and the pull is by digest — so
+    the whole tag set stays usable while the registry gains none of it. What
+    the destination must still hold is the content itself, addressable by the
+    digest the root names.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    older, older_body = seed_version(ocx_binary, registry, package, "3.31.2", tmp_path / "push-old", b"v3.31.2")
+    newer, newer_body = seed_version(ocx_binary, registry, package, "3.31.10", tmp_path / "push-new", b"v3.31.10")
+    cascade = {"3.31.2": older, "3.31.10": newer, "3.31": newer, "latest": newer}
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, cascade, {older: older_body, newer: newer_body})],
+    )
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+        extra={"publish_tags": False},
+    )
+
+    result = run_sync(sync, spec)
+    assert result.returncode == 0, outcome(result)
+
+    repository = destination_repository(package)
+    tree = output / SOURCE_AS
+    problems: list[str] = []
+    for tag, expected in cascade.items():
+        if not manifest_absent(mirror_registry, repository, tag):
+            problems.append(f"destination tag {tag!r} exists, but publish_tags is false")
+        # The content the root names is what a client actually fetches.
+        if fetch_manifest(mirror_registry, repository, expected)[0] != expected:
+            problems.append(f"content {expected} for tag {tag!r} is not readable by digest")
+        problems += verify_tag_content(tree, package, tag, expected)
+    assert problems == []
+
+
 # ---------------------------------------------------------------------------
 # S-024 / S-010 — the copy walk enumerates every descriptor
 # ---------------------------------------------------------------------------
