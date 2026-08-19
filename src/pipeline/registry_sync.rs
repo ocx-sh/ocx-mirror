@@ -97,8 +97,18 @@ pub async fn execute_registry_sync(
     repair_catalogs(spec, options, &store).await?;
 
     // ── Phase 1 — pre-flight, over ALL sources ──────────────────────────────
+    //
+    // Announced before each source, not after: this loop is several network
+    // round trips per source and writes nothing, so a silent one is
+    // indistinguishable from a hang.
     let mut sources = Vec::with_capacity(spec.sources.len());
-    for source in &spec.sources {
+    for (position, source) in spec.sources.iter().enumerate() {
+        tracing::info!(
+            "[{}/{}] pre-flight source '{}'",
+            position + 1,
+            spec.sources.len(),
+            source.as_name()
+        );
         sources.push(prepare_source(spec, source, &store, &cache_root).await?);
     }
 
@@ -345,7 +355,17 @@ async fn copy_sources(
         };
 
         let mut source_failed = false;
-        for package in &prepared.plan.work {
+        let package_count = prepared.plan.work.len();
+        for (position, package) in prepared.plan.work.iter().enumerate() {
+            // Before the copy, not after it: the existing per-tag line at
+            // `tag_failure` reports a package that already finished, and a
+            // multi-gigabyte one spends its whole transfer between the two.
+            tracing::info!(
+                "[{}/{package_count}] {}/{}",
+                position + 1,
+                prepared.plan.as_name,
+                package.name
+            );
             let step = sync_package(spec, options, prepared, package, store, &context, &mut missing).await?;
             let failed = matches!(step, PackageStep::Failed(_));
             source_failed |= failed;

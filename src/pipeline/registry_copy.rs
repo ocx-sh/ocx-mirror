@@ -929,7 +929,9 @@ pub async fn ensure_blob(
         .await;
     if probe_verdict(probe)?.is_some() {
         record_location(context, digest, &destination_repository).await;
-        tracing::debug!("blob {digest} already present in {destination_repository}");
+        // `info!`, not `debug!`: an all-present re-run takes this branch for
+        // every blob, and at `debug!` the whole run printed nothing at all.
+        tracing::info!("blob {digest} already present in {destination_repository}");
         return Ok(BlobOutcome::Skipped);
     }
 
@@ -1147,6 +1149,10 @@ async fn upload(
     context: &CopyContext,
 ) -> Result<(), CopyError> {
     let source = addressed(source_reference, digest);
+    // Before the pull, because everything after it reports a blob that already
+    // finished — and a 221 MB layer spends its entire transfer in this call
+    // with nothing on stderr to show for it.
+    tracing::info!("pulling blob {digest} ({size} bytes)");
     retry_while(context.max_retries, UploadFailure::retryable, || async {
         let mut body = Vec::with_capacity(capacity_hint(size));
         // Bounded by the descriptor's own claim, not just pre-sized by it —
