@@ -351,6 +351,7 @@ async fn copy_sources(
             destination_client: destination_client.clone(),
             blob_semaphore: Arc::clone(&blob_semaphore),
             max_retries: spec.concurrency.max_retries,
+            canonical_tags: spec.canonical_tags,
             mounted_from: Arc::clone(&mounted_from),
             mount_warnings: Arc::clone(&mount_warnings),
         };

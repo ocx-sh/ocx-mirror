@@ -295,6 +295,9 @@ pub struct CopyContext {
     pub blob_semaphore: Arc<Semaphore>,
     /// Reactive-retry budget from `concurrency.max_retries`.
     pub max_retries: u32,
+    /// Whether each copied manifest also gets its `sha256.<hex>` canonical
+    /// tag at the destination — `canonical_tags:`, resolved once.
+    pub canonical_tags: bool,
     /// Digest → the destination repository already holding it, for cross-repo
     /// `mount_blob`. Populated as blobs land.
     pub mounted_from: Arc<Mutex<HashMap<Digest, String>>>,
@@ -916,7 +919,45 @@ async fn copy_manifest_tree_at(
     }
 
     push_manifest(destination_reference, &bytes, manifest.content_type(), context).await?;
+    if context.canonical_tags {
+        push_canonical_tag(destination_reference, digest, &bytes, manifest.content_type(), context).await?;
+    }
     Ok((stats, bytes))
+}
+
+/// Tag one copied manifest with its own digest — `sha256.<hex>`, the form
+/// `ocx package push` writes.
+///
+/// **The deletion safety net, mirrored.** ocx tags every manifest it publishes
+/// after its own digest so that deleting a rolling or cascade tag can never
+/// orphan a digest a lock pins (`adr_index_indirection.md` Decision E). Those
+/// tags are *reserved*, so they are filtered out of the index root's `tags{}`
+/// and no `tags{}` walk reaches them — which is exactly why a mirror that
+/// copies the published tag set faithfully still ends up with none of them.
+/// `ghcr.io/ocx-sh/ocx/cli` carries 54 of them against 21 version tags.
+///
+/// Without this the destination holds every platform manifest untagged,
+/// reachable only through the index that names it, and a mirror is *less*
+/// protected than the upstream it copies — while being the fleet's only source
+/// under `rewrite_pointers: true`.
+///
+/// A `.` separator because an OCI tag cannot contain `:`. The bytes pushed are
+/// the same verified bytes, so the tag and the digest reference name one
+/// manifest, not two copies of it.
+async fn push_canonical_tag(
+    destination_reference: &Reference,
+    digest: &Digest,
+    bytes: &[u8],
+    content_type: &str,
+    context: &CopyContext,
+) -> Result<(), CopyError> {
+    let (algorithm, hex) = digest.parts();
+    let canonical = Reference::with_tag(
+        destination_reference.registry().to_string(),
+        destination_reference.repository().to_string(),
+        format!("{algorithm}.{hex}"),
+    );
+    push_manifest(&canonical, bytes, content_type, context).await
 }
 
 /// Push one manifest's bytes verbatim, retrying only a rate limit.

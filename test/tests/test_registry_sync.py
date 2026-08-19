@@ -175,6 +175,12 @@ def manifest_absent(registry: str, repository: str, reference: str) -> bool:
     return False
 
 
+def destination_tags(registry: str, repository: str) -> list[str]:
+    """Every tag the destination registry lists for `repository`."""
+    with urllib.request.urlopen(f"http://{registry}/v2/{repository}/tags/list") as response:
+        return json.loads(response.read()).get("tags") or []
+
+
 def catalog_of(tree: Path) -> dict[str, str]:
     """The produced tree's `c/index.json` package map."""
     return json.loads((tree / "c" / "index.json").read_text())["packages"]
@@ -716,6 +722,81 @@ def test_every_platform_of_a_multi_platform_index_is_copied(
     ]
     for descriptor in descriptors:
         assert fetch_manifest(mirror_registry, mirrored, descriptor["digest"])[0] == descriptor["digest"]
+
+
+def test_every_copied_manifest_carries_its_canonical_digest_tag(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """`sha256.<hex>` lands for the index and for every platform manifest under it.
+
+    These are ocx's registry-side deletion safety net: a manifest tagged after
+    its own digest cannot be orphaned by a stray delete of a rolling tag. They
+    are reserved, so they never appear in an index root's `tags{}` and no
+    walk of the published tag set reaches them — a mirror that copies tags
+    faithfully creates none of them unless it is told to.
+
+    Shown red as well as green: the same run under `canonical_tags: false`
+    must produce the version tag and nothing digest-named.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    descriptors = []
+    for index, content in enumerate((b"linux-amd64", b"darwin-arm64")):
+        _, body = seed_version(ocx_binary, registry, package, f"seed{index}", tmp_path / f"push{index}", content)
+        child = json.loads(body)["manifests"][0]
+        descriptors.append({key: child[key] for key in ("mediaType", "digest", "size")})
+    index_bytes = json.dumps({"schemaVersion": 2, "mediaType": INDEX_MEDIA_TYPE, "manifests": descriptors}).encode()
+    index_digest = put_manifest(registry, package, "multi", index_bytes, INDEX_MEDIA_TYPE)
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": index_digest}, {index_digest: index_bytes})],
+    )
+
+    def canonical(digest: str) -> str:
+        return digest.replace(":", ".")
+
+    expected = [canonical(index_digest)] + [canonical(descriptor["digest"]) for descriptor in descriptors]
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+    )
+    assert run_sync(sync, spec).returncode == 0
+
+    mirrored = destination_repository(package)
+    tags = destination_tags(mirror_registry, mirrored)
+    assert set(expected) <= set(tags), f"canonical tags missing: {sorted(set(expected) - set(tags))}"
+    for tag, digest in zip(expected, [index_digest] + [d["digest"] for d in descriptors], strict=True):
+        assert fetch_manifest(mirror_registry, mirrored, tag)[0] == digest, (
+            f"{tag} must resolve to the digest it names"
+        )
+
+    # Red half: the same source copied again with the knob off, into a
+    # destination of its own so the tags above cannot be mistaken for these.
+    off_spec = tmp_path / "registry-off.yml"
+    write_registry_spec(
+        off_spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=tmp_path / "public-off",
+        destination="off/{namespace}/{package}",
+        sources=[source_spec(registry, published_index_server.url())],
+        extra={"canonical_tags": False},
+    )
+    assert run_sync(sync, off_spec).returncode == 0
+
+    off_tags = destination_tags(mirror_registry, f"{TARGET_PREFIX}/off/{package}")
+    assert off_tags == ["1.0.0"], f"canonical_tags: false must write the version tag alone, got {off_tags}"
 
 
 # ---------------------------------------------------------------------------

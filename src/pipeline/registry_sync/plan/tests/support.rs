@@ -28,6 +28,7 @@ pub fn spec(destination: &str) -> RegistrySpec {
         destination: destination.to_string(),
         rewrite_pointers: true,
         publish_tags: true,
+        canonical_tags: true,
         on_error: OnError::default(),
         sources: Vec::new(),
         concurrency: RegistryConcurrency::default(),
