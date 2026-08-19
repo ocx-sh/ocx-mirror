@@ -78,13 +78,16 @@ The tree looks like this, for the default layout:
 ```text
 public/
 ├── dist.json                       # rolling manifest — what OCX_INSTALL_DIST_URL points at
-├── dist.json.sha256                # sha256sum-format sidecar for the rolling manifest
 ├── dist/
 │   └── <sha256>.json               # immutable, content-addressed snapshot
 └── v0.5.8/
     ├── ocx-x86_64-unknown-linux-gnu.tar.gz
     └── ocx-aarch64-apple-darwin.tar.gz
 ```
+
+!!! info "There is no `dist.json.sha256`"
+
+    Earlier builds wrote one. Nothing read it — `install.sh` verifies each archive against the manifest's own inline `sha256`, and pinning is `dist/<sha256>.json` — and it could not be served faithfully either: Artifactory reads a `PUT` to a `*.sha256` path as a checksum declaration about the *sibling* artifact rather than as a file to store, 404ing when the sibling does not exist yet and synthesising its own body when it does.
 
 The manifest file names are fixed and not configurable: `OCX_INSTALL_DIST_URL` is set once per consumer and must not move when [`layout`](#publish) changes.
 
@@ -224,17 +227,13 @@ Files fall into two classes, and only one of them is skippable:
 | Class | Files | Behaviour |
 |-------|-------|-----------|
 | **Immutable** | archives at the rendered layout, `dist/<sha256>.json` | `HEAD` first; a file the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
-| **Rolling** | `dist.json`, `dist.json.sha256` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
+| **Rolling** | `dist.json` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
 
 The destination is the authority for the immutable class: a file deleted from the store is re-uploaded by the next run instead of being skipped forever by stale local state.
 
 Every upload announces four checksums — `X-Checksum-Md5`, `X-Checksum-Sha1`, `X-Checksum-Sha256` and `X-Checksum-Sha512` — computed from the body being sent. Artifactory records a client checksum per algorithm and reports *"Client did not publish a checksum value"* for each header that was absent, so all four are sent rather than only the one the manifest happens to carry. (Artifactory consumes the first three; SHA-512 is there for stores that take it.)
 
-Uploads run in a fixed order — **archives, then the content-addressed snapshot, then `dist.json`, then `dist.json.sha256` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
-
-!!! note "Why the sidecar trails the manifest"
-
-    Artifactory reads a `PUT` to a `*.sha256` path as a checksum declaration *about the sibling artifact* rather than as a file to store, and answers `404` when that sibling does not exist yet — which, with the sidecar published first, is every first run against a fresh destination. Reordering costs the mid-run guarantee nothing: whichever of the two goes first, a consumer reading between them holds one new file and one old one, and both mismatches fail closed.
+Uploads run in a fixed order — **archives, then the content-addressed snapshot, then `dist.json` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
 
 !!! note "GitLab generic packages are immutable by default"
 

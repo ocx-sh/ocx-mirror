@@ -17,17 +17,22 @@
 //! working manifest with one naming no releases.
 //!
 //! **Publish order.** Archives first, then the content-addressed snapshot, then
-//! the rolling `dist.json`, and its `.sha256` sidecar last. A consumer reading
-//! mid-run therefore resolves either the old manifest or the new one, and both
-//! are fully backed by bytes already in the store. The sidecar trails the
-//! manifest because Artifactory reads a PUT to `*.sha256` as a checksum
-//! declaration about the sibling artifact and 404s when it is absent; see
-//! [`upload_tree`] for why that costs the guarantee nothing.
+//! the rolling `dist.json` last. A consumer reading mid-run therefore resolves
+//! either the old manifest or the new one, and both are fully backed by bytes
+//! already in the store.
 //!
-//! **Rolling versus immutable.** Only the first three are content-addressed by
-//! name and may be skipped when the store already holds them. `dist.json` and
-//! its sidecar are rolling — the path outlives its contents — and are
-//! republished every run ([`upload::Freshness`]).
+//! **Rolling versus immutable.** Archives and the snapshot are content-addressed
+//! by name and may be skipped when the store already holds them. `dist.json` is
+//! rolling — the path outlives its contents — and is republished every run
+//! ([`upload::Freshness`]).
+//!
+//! There is deliberately **no `dist.json.sha256` sidecar.** Nothing read it:
+//! `install.sh` verifies each archive against the manifest's own inline
+//! `sha256` and says so in as many words, and pinning is `dist/<sha256>.json`.
+//! It also could not be served faithfully — Artifactory reads a PUT to a
+//! `*.sha256` path as a checksum declaration about the sibling artifact rather
+//! than as a file, 404ing when the sibling does not exist yet and synthesising
+//! its own body when it does.
 
 pub mod layout;
 pub mod manifest;
@@ -54,8 +59,6 @@ use crate::spec::DistSpec;
 /// Fixed name of the rolling manifest, relative to `output:` and to
 /// `publish.base_url`.
 const MANIFEST_NAME: &str = "dist.json";
-/// Fixed name of the sidecar carrying the rolling manifest's sha256.
-const MANIFEST_SIDECAR: &str = "dist.json.sha256";
 /// Directory the content-addressed snapshots live in.
 const SNAPSHOT_DIR: &str = "dist";
 
@@ -242,10 +245,11 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     Ok(report)
 }
 
-/// Render the manifest and write the three documents it is served as.
+/// Render the manifest and write the two documents it is served as.
 ///
 /// Returns the manifest's sha256 and the snapshot's relative path, which the
-/// upload pass needs and the report carries.
+/// upload pass needs and the report carries. The digest is still returned and
+/// still reported — it names the snapshot, and it is what an operator pins.
 ///
 /// # Errors
 ///
@@ -259,11 +263,6 @@ async fn publish_manifest(spec: &DistSpec, manifest: &DistManifest) -> Result<(S
     let snapshot = format!("{SNAPSHOT_DIR}/{digest}.json");
 
     write_output(&spec.output.join(&snapshot), rendered.as_bytes()).await?;
-    write_output(
-        &spec.output.join(MANIFEST_SIDECAR),
-        format!("{digest}  {MANIFEST_NAME}\n").as_bytes(),
-    )
-    .await?;
     write_output(&spec.output.join(MANIFEST_NAME), rendered.as_bytes()).await?;
 
     Ok((digest, snapshot))
@@ -272,20 +271,9 @@ async fn publish_manifest(spec: &DistSpec, manifest: &DistManifest) -> Result<(S
 /// PUT the emitted tree in publish order.
 ///
 /// Archives first, then the content-addressed snapshot, then the rolling
-/// manifest, and its checksum sidecar last — so every byte a manifest names is
-/// in the store before any manifest naming it is, and a consumer reading
-/// mid-run resolves either the old manifest or the new one.
-///
-/// **The sidecar goes after `dist.json`, and that ordering is load-bearing.**
-/// Artifactory reads a PUT to `*.sha256` as a checksum declaration *about the
-/// sibling artifact* rather than as a file to store, and answers `404` when
-/// that sibling is absent — which, with the sidecar published first, is every
-/// first run against a fresh destination. The pair is deliberately not covered
-/// by the mid-run guarantee above: whichever of the two goes first, a consumer
-/// reading between them holds one new file and one old one. Both mismatches
-/// fail closed, so the ordering costs nothing to spend on the store's
-/// requirement. What the guarantee does protect — *every archive precedes the
-/// manifest naming it* — is untouched.
+/// manifest last — so every byte a manifest names is in the store before any
+/// manifest naming it is, and a consumer reading mid-run resolves either the
+/// old manifest or the new one.
 ///
 /// # Errors
 ///
@@ -323,13 +311,9 @@ async fn upload_tree(
         report.counters.record(outcome);
     }
 
-    // The snapshot is content-addressed, so a re-run may skip it; the manifest
-    // and its sidecar are rolling and are republished unconditionally.
-    for (relative, freshness) in [
-        (snapshot, Freshness::Immutable),
-        (MANIFEST_NAME, Freshness::Rolling),
-        (MANIFEST_SIDECAR, Freshness::Rolling),
-    ] {
+    // The snapshot is content-addressed, so a re-run may skip it; the rolling
+    // manifest is republished unconditionally.
+    for (relative, freshness) in [(snapshot, Freshness::Immutable), (MANIFEST_NAME, Freshness::Rolling)] {
         tracing::info!("PUT {relative}");
         report
             .counters

@@ -57,8 +57,8 @@ pub struct DistSpec {
     pub source: Url,
 
     /// Directory the mirror tree is written into — archives at the rendered
-    /// [`Publish::layout`], plus `dist.json`, `dist.json.sha256` and
-    /// `dist/<sha256>.json` at fixed paths.
+    /// [`Publish::layout`], plus `dist.json` and `dist/<sha256>.json` at fixed
+    /// paths.
     ///
     /// Always written, whether or not [`Self::upload`] is configured: the
     /// operator's own `aws s3 sync` / `rsync` / commit step is the path that

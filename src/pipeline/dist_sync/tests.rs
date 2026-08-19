@@ -43,6 +43,5 @@ fn the_manifest_file_names_are_the_ones_consumers_configure() {
     // These are fixed rather than templated: `OCX_INSTALL_DIST_URL` is set
     // once per consumer and must not move when `publish.layout` changes.
     assert_eq!(MANIFEST_NAME, "dist.json");
-    assert_eq!(MANIFEST_SIDECAR, "dist.json.sha256");
     assert_eq!(SNAPSHOT_DIR, "dist");
 }
