@@ -634,8 +634,11 @@ fn the_blob_pool_is_run_scoped_and_packages_are_sequential() {
         body.contains("blob_semaphore: Arc::clone(&blob_semaphore)"),
         "each source's context shares that one pool"
     );
+    // A plain `for` over the work list. `enumerate()` numbers the progress line
+    // and does not make the loop concurrent; the assertion below is what
+    // actually forbids that.
     assert!(
-        body.contains("for package in &prepared.plan.work {"),
+        body.contains("for (position, package) in prepared.plan.work.iter().enumerate() {"),
         "packages are processed sequentially"
     );
     assert!(
