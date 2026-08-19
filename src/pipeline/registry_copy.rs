@@ -234,6 +234,39 @@ async fn authenticated(config: native::ClientConfig, registry: &str) -> native::
     client
 }
 
+/// Seed the source client's credential for the **physical** host a root points
+/// at, before any request addressed to it.
+///
+/// [`build_source_client`] can only seed the source's *logical* `registry:`
+/// name — `ocx.sh`, the index's identity — because the physical host is not
+/// known until a root document has been fetched, and one source may name
+/// several. Every request the source client makes goes to that physical host
+/// instead, and the fork's `get_auth_token` keys its auth store by
+/// `Reference::resolve_registry()`. A miss is silent: the request goes out
+/// with **no `Authorization` header at all**, which a registry demanding a
+/// token challenge answers 401 — including for a public package, whose
+/// anonymous token still has to be fetched. The public `ocx.sh` index points
+/// every package at `ghcr.io`, so without this the first referrer query of the
+/// first tag fails and no real source is copyable.
+///
+/// Seeding is enough: `_auth` runs the `WWW-Authenticate` challenge itself
+/// from the stored `RegistryAuth`, anonymous included.
+///
+/// `registry` arrives in remote-controlled data, so this is a credential
+/// lookup keyed by a name the upstream index chose. That is the same exposure
+/// `ocx` itself carries when it dereferences the same pointer, and it is
+/// bounded to that host's own slug: a pointer naming `evil.example` can only
+/// reach `OCX_AUTH_evil_example_*` or a docker-store entry the operator wrote
+/// for `evil.example`. The SSRF guard on the root has already run by this
+/// point; this adds no new host to the set the run will dial.
+///
+/// Idempotent — `store_auth_if_needed` skips a host already stored, so the
+/// per-package call costs one read lock after the first.
+pub async fn ensure_source_auth(client: &native::Client, registry: &str) {
+    let auth = ocx_lib::auth::Auth::new().get_or_fallback(registry).await;
+    client.store_auth_if_needed(registry, &auth).await;
+}
+
 /// Everything one package's copy needs, threaded through the ladder below.
 ///
 /// WP-09 owns these fields. Two of them are load-bearing beyond their type:
