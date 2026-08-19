@@ -41,6 +41,8 @@ They are read by the five shell installers on `setup.ocx.sh`, by `rules_ocx` (`o
 | `select` | object | No | Which upstream releases to keep. See [`select`](#select). |
 | `publish` | object | Yes | Where the copy will be served from, and under what path shape. See [`publish`](#publish). |
 | `upload` | object | No | Optional native HTTP `PUT` of the emitted tree. See [`upload`](#upload). |
+| `retain_archives` | bool | No | Keep uploaded archives under `output:`. Auto when unset. See [`retain_archives`](#retain-archives). |
+| `concurrency` | object | No | How wide the transfer runs. See [`concurrency`](#concurrency). |
 | `trusted_hosts` | array | No | Hosts reachable over plaintext `http://`. See [`trusted_hosts`](#trusted-hosts). |
 
 `extends:` works the same way it does in the other two specs — a base file is shallow-merged and the child's keys win.
@@ -71,7 +73,9 @@ The body is capped at **8 MiB**, refused on a declared oversize `Content-Length`
 output: ./public
 ```
 
-Directory the mirror tree is written into. Always written, whether or not [`upload`](#upload) is configured — a tree plus the operator's own `aws s3 sync`, `rsync`, `jf rt upload` or commit step is the path that works against every store, including the ones that need request signing.
+Directory the mirror tree is written into. A tree plus the operator's own `aws s3 sync`, `rsync`, `jf rt upload` or commit step is the path that works against every store, including the ones that need request signing.
+
+The manifest documents are always written. Whether the *archives* stay once they have been uploaded is [`retain_archives`](#retain-archives) — by default they do when there is no `upload:` block and do not when there is, because in the second case the tree is a staging area and keeping a whole mirror in it is what fills a CI runner's disk.
 
 The tree looks like this, for the default layout:
 
@@ -222,18 +226,22 @@ A named variable that is unset or empty fails the run before the first byte move
 
 ### Idempotency and publish order {#ordering}
 
+**The destination is asked before anything is downloaded.** Each archive is `HEAD`ed first; if the store reports a `X-Checksum-Sha256` equal to the manifest's declared digest for that row, the archive costs neither a download nor an upload. On a CI runner — which starts with an empty `output:` — that is the difference between pulling the whole mirror on every run and pulling only what actually changed.
+
+The comparison is on the digest, not on mere occupancy. A store that reports no checksum (plain WebDAV, some S3-alikes) degrades to existence-only, which is the trust level those stores always had; a store that reports a *different* digest has the wrong object at that path and the row is re-fetched and re-uploaded.
+
 Files fall into two classes, and only one of them is skippable:
 
 | Class | Files | Behaviour |
 |-------|-------|-----------|
-| **Immutable** | archives at the rendered layout, `dist/<sha256>.json` | `HEAD` first; a file the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
+| **Immutable** | archives at the rendered layout, `dist/<sha256>.json` | Asked for first; one the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
 | **Rolling** | `dist.json` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
 
 The destination is the authority for the immutable class: a file deleted from the store is re-uploaded by the next run instead of being skipped forever by stale local state.
 
 Every upload announces four checksums — `X-Checksum-Md5`, `X-Checksum-Sha1`, `X-Checksum-Sha256` and `X-Checksum-Sha512` — computed from the body being sent. Artifactory records a client checksum per algorithm and reports *"Client did not publish a checksum value"* for each header that was absent, so all four are sent rather than only the one the manifest happens to carry. (Artifactory consumes the first three; SHA-512 is there for stores that take it.)
 
-Uploads run in a fixed order — **archives, then the content-addressed snapshot, then `dist.json` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
+Each archive is probed, downloaded, verified and uploaded as one unit, so one row's `PUT` overlaps another's `GET` — a link is full duplex, and the two-phase shape this replaced left one direction idle throughout each phase. The manifest documents still follow every archive: **archives, then the content-addressed snapshot, then `dist.json` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
 
 !!! note "GitLab generic packages are immutable by default"
 
@@ -247,13 +255,32 @@ concurrency:
   max_uploads: 4     # archives uploaded at once
 ```
 
-Both keys are optional and default as shown. `max_uploads` is lower on purpose: the source is usually a CDN, while the destination is one corporate store answering every request, and it is the side with a rate limit worth respecting.
+Both keys are optional and default as shown. `max_downloads` bounds how many rows are in flight; `max_uploads` bounds how many of those may be `PUT`ting at once. Two knobs because they bound two different resources — the source is usually a CDN, while the destination is one corporate store answering every request, and it is the side with a rate limit worth respecting.
 
-The knob is throughput only, never correctness. The emitted tree and the run report are identical at any width — archives are planned in manifest order before the first byte moves, and results are folded back in that same order whatever order the transfers finish in.
+The knobs are throughput only, never correctness. The emitted tree and the run report are identical at any width — archives are planned in manifest order before the first byte moves, and results are folded back in that same order whatever order the transfers finish in.
 
-Two things are deliberately **not** covered by `max_uploads`: the snapshot, `dist.json` and its sidecar are published strictly sequentially, because their order *is* the publish invariant. And a rejected upload stops the pass rather than letting the remaining archives run — a store answering `401` sees at most `max_uploads` attempts, not one per archive.
+The snapshot and `dist.json` are published strictly sequentially after every archive, because their order *is* the publish invariant. A rejected upload stops the pass rather than letting the remaining archives run — a store answering `401` sees at most `max_uploads` attempts, not one per archive. A *download* failure is the other error class and does not stop anything: it reds its own row and the run reports every bad row at once.
 
-Peak memory is `max_downloads × largest_archive`: each body is buffered whole before it is written and verified.
+Peak memory is `max_downloads × largest_archive`: each body is buffered whole before it is written and verified. Peak *disk* is bounded the same way rather than by the size of the mirror — see `retain_archives`.
+
+## `retain_archives` {#retain-archives}
+
+```yaml
+retain_archives: true   # or false; omit for auto
+```
+
+Whether a mirrored archive stays under `output:` after it has been uploaded. Three states, and **auto — leaving it unset — is what almost every spec should use**:
+
+| `upload:` | unset (auto) | effect |
+|---|---|---|
+| absent | retain | the tree *is* the deliverable and must be complete |
+| configured | discard | the store is the deliverable; the tree is a staging area |
+
+Discarding matters more than it sounds. A full ocx mirror is ~1.9 GB of archives, and the CI runners this is built for routinely have a few GB spare — staging the whole set before uploading any of it is what fills a runner's disk. With auto, each archive is removed as soon as its upload is confirmed, so peak disk is bounded by `concurrency.max_downloads × largest archive` rather than by the size of the mirror.
+
+Removal happens only *after* the store confirms the write; losing the local copy of something that did not land would turn a retryable run into a re-download.
+
+Set `true` to retain even when uploading — for an operator who ships the tree *and* the store. It governs archives only: `dist.json` and `dist/<sha256>.json` are a few KB, are what the report names, and are always written.
 
 ## `trusted_hosts` {#trusted-hosts}
 

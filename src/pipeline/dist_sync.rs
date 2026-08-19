@@ -21,10 +21,18 @@
 //! either the old manifest or the new one, and both are fully backed by bytes
 //! already in the store.
 //!
+//! **One pass, not two.** Each row is probed, fetched, uploaded and cleaned up
+//! on its own ([`mirror_row`]), so one archive's PUT overlaps another's GET —
+//! a link is full duplex, and the two-phase shape this replaced left one
+//! direction idle throughout each phase. The destination is asked *before*
+//! anything is fetched, so an archive the store already holds costs neither
+//! transfer; on a CI runner with an empty `output:` that is the difference
+//! between pulling the whole mirror and pulling nothing.
+//!
 //! **Rolling versus immutable.** Archives and the snapshot are content-addressed
 //! by name and may be skipped when the store already holds them. `dist.json` is
 //! rolling — the path outlives its contents — and is republished every run
-//! ([`upload::Freshness`]).
+//! ([`upload::Precheck`]).
 //!
 //! There is deliberately **no `dist.json.sha256` sidecar.** Nothing read it:
 //! `install.sh` verifies each archive against the manifest's own inline
@@ -45,12 +53,13 @@ use std::time::Duration;
 
 use futures::{StreamExt as _, TryStreamExt as _};
 use sha2::{Digest as _, Sha256};
+use tokio::sync::Semaphore;
 use url::Url;
 
 use self::layout::{LayoutTemplate, RowValues};
 use self::manifest::{DistManifest, ReleaseRow, SUPPORTED_SCHEMA};
 use self::report::{ArchiveOutcome, ArchiveReport, DistSyncReport, RunCounters};
-use self::upload::{Freshness, UploadOutcome, Uploader};
+use self::upload::{Precheck, Probe, UploadOutcome, Uploader};
 use crate::error::MirrorError;
 use crate::pipeline::download::download;
 use crate::pipeline::verify::verify_digest;
@@ -169,50 +178,72 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
         }
     }
 
-    // ── Pass 2 — fetch, concurrently ────────────────────────────────────────
+    // ── Pass 2 — probe, fetch and upload each row, concurrently ─────────────
+    //
+    // One pass, not two. Each row runs probe → download → verify → upload → and
+    // its own cleanup, so one archive's PUT overlaps another's GET instead of
+    // every download finishing before the first upload starts.
     let total = planned.len();
-    let fetched: Vec<(PlannedRow, Result<ArchiveOutcome, String>)> = if dry_run {
+    let retain = spec.retain_archives_resolved();
+    let upload_permits = Semaphore::new(spec.concurrency.max_uploads);
+    let fetched: Vec<(PlannedRow, RowStep)> = if dry_run {
         // `--dry-run` promises a report of what *would* be mirrored, so the
         // plan above is the whole of the work.
         planned
             .into_iter()
-            .map(|plan| (plan, Ok(ArchiveOutcome::Planned)))
+            .map(|plan| {
+                (
+                    plan,
+                    RowStep::Done(RowOutcome {
+                        archive: ArchiveOutcome::Planned,
+                        upload: None,
+                    }),
+                )
+            })
             .collect()
     } else {
         // `buffered`, not `buffer_unordered`: it runs the same number
         // concurrently but yields in input order, which is the determinism the
         // report needs without an index sort afterwards.
+        //
+        // `try_collect` stops polling at the first *abort-class* error, so a
+        // store answering `401` sees at most `max_uploads` rejected writes
+        // rather than one per archive. A row that merely failed to fetch is not
+        // in that class: it comes back as `RowStep::Failed` inside `Ok` and the
+        // pass runs on, so the operator sees every bad row in one report.
         futures::stream::iter(planned.into_iter().enumerate().map(|(position, plan)| {
             let client = &client;
+            let uploader = uploader.as_ref();
+            let upload_permits = &upload_permits;
             async move {
                 tracing::info!("[{}/{total}] {} → {}", position + 1, plan.name, plan.relative);
-                let outcome = fetch_row(client, spec, &plan).await;
-                (plan, outcome)
+                let step = mirror_row(client, spec, uploader, upload_permits, &plan, retain).await?;
+                Ok::<_, MirrorError>((plan, step))
             }
         }))
         .buffered(spec.concurrency.max_downloads)
-        .collect()
-        .await
+        .try_collect()
+        .await?
     };
 
-    // What the upload pass republishes, in publish order: the rendered path,
-    // and only that. The digest that used to travel alongside it is gone — the
-    // uploader hashes every body it reads four ways (`upload::Checksums`),
-    // because Artifactory records a client checksum per algorithm and the
-    // manifest's declared sha256 covers the archives alone.
-    let mut published: Vec<String> = Vec::with_capacity(total);
+    let mut uploaded = 0usize;
+    let mut already_present = 0usize;
 
-    for (plan, outcome) in fetched {
-        let report_entry = match outcome {
-            Ok(outcome) => {
-                published.push(plan.relative);
+    for (plan, step) in fetched {
+        let report_entry = match step {
+            RowStep::Done(RowOutcome { archive, upload }) => {
+                match upload {
+                    Some(UploadOutcome::Uploaded) => uploaded += 1,
+                    Some(UploadOutcome::Skipped) => already_present += 1,
+                    None => {}
+                }
                 ArchiveReport {
                     name: plan.name,
-                    outcome,
+                    outcome: archive,
                     detail: None,
                 }
             }
-            Err(detail) => ArchiveReport {
+            RowStep::Failed(detail) => ArchiveReport {
                 name: plan.name,
                 outcome: ArchiveOutcome::Failed,
                 detail: Some(detail),
@@ -221,7 +252,7 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
         reports[plan.index] = Some(report_entry);
     }
     report.archives = reports.into_iter().flatten().collect();
-    report.counters = RunCounters::from_archives(&report.archives, 0, 0);
+    report.counters = RunCounters::from_archives(&report.archives, uploaded, already_present);
 
     // Two reasons to stop here, both ending in "publish nothing".
     //
@@ -239,7 +270,7 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     report.manifest_sha256 = Some(digest);
 
     if let Some(uploader) = &uploader {
-        upload_tree(uploader, spec, &published, &snapshot, &mut report).await?;
+        upload_manifest(uploader, spec, &snapshot, &mut report).await?;
     }
 
     Ok(report)
@@ -268,63 +299,44 @@ async fn publish_manifest(spec: &DistSpec, manifest: &DistManifest) -> Result<(S
     Ok((digest, snapshot))
 }
 
-/// PUT the emitted tree in publish order.
+/// PUT the two manifest documents, in publish order.
 ///
-/// Archives first, then the content-addressed snapshot, then the rolling
-/// manifest last — so every byte a manifest names is in the store before any
-/// manifest naming it is, and a consumer reading mid-run resolves either the
-/// old manifest or the new one.
+/// Every archive is already in the store by the time this runs — each row
+/// uploaded its own in [`mirror_row`] — so this is only the tail: the
+/// content-addressed snapshot, then the rolling manifest **last**. A consumer
+/// reading mid-run therefore resolves either the old manifest or the new one,
+/// and both are fully backed by bytes already in the store.
+///
+/// Strictly sequential, and deliberately so: this ordering *is* the invariant,
+/// and there are two files, so there is nothing to gain by racing them.
 ///
 /// # Errors
 ///
-/// [`MirrorError::ExecutionFailed`] on the first rejected upload; the
-/// remaining files include the manifest, and continuing would publish one
-/// naming an archive that never landed.
-async fn upload_tree(
+/// [`MirrorError::ExecutionFailed`] on a rejected upload.
+async fn upload_manifest(
     uploader: &Uploader,
     spec: &DistSpec,
-    published: &[String],
     snapshot: &str,
     report: &mut DistSyncReport,
 ) -> Result<(), MirrorError> {
-    // Archives fan out; the four-file tail below does not. Their order *is* the
-    // publish invariant, and a concurrent tail would race it away.
-    //
-    // `try_collect`, not `collect`: it stops polling at the first rejection, so
-    // a store answering `401` sees at most `max_uploads` attempts instead of
-    // one per archive. Same reasoning as `with_retries` never retrying a 4xx —
-    // hammering a credential failure burns the backoff window and trips
-    // account-lockout policy on exactly the stores this targets. `buffered`
-    // still yields in input order, so the error reported is the first in
-    // manifest order rather than whichever lost the race.
-    let total = published.len();
-    let outcomes: Vec<UploadOutcome> =
-        futures::stream::iter(published.iter().enumerate().map(|(position, relative)| async move {
-            tracing::info!("[{}/{total}] PUT {relative}", position + 1);
-            put(uploader, relative, &spec.output.join(relative), Freshness::Immutable).await
-        }))
-        .buffered(spec.concurrency.max_uploads)
-        .try_collect()
-        .await?;
-
-    for outcome in outcomes {
-        report.counters.record(outcome);
-    }
-
-    // The snapshot is content-addressed, so a re-run may skip it; the rolling
-    // manifest is republished unconditionally.
-    for (relative, freshness) in [(snapshot, Freshness::Immutable), (MANIFEST_NAME, Freshness::Rolling)] {
+    for (relative, precheck) in [
+        // Content-addressed: a re-run whose manifest did not change writes the
+        // same name, and the store already holds it.
+        (snapshot, Precheck::HeadFirst),
+        // Rolling: "already there" says nothing about which version is there.
+        (MANIFEST_NAME, Precheck::Unconditional),
+    ] {
         tracing::info!("PUT {relative}");
         report
             .counters
-            .record(put(uploader, relative, &spec.output.join(relative), freshness).await?);
+            .record(put(uploader, relative, &spec.output.join(relative), precheck).await?);
     }
     Ok(())
 }
 
 /// One release row that survived the serial pre-pass and is ready to fetch.
 ///
-/// Carries its own `index` and `name` so [`fetch_row`]'s results can be folded
+/// Carries its own `index` and `name` so [`mirror_row`]'s results can be folded
 /// back into manifest order and reported without borrowing the row again — the
 /// row's `url` has already been rewritten by then, and the fetch pass runs
 /// several of these at once.
@@ -335,8 +347,12 @@ struct PlannedRow {
     name: String,
     /// Rendered path below `output:` and below `publish.base_url`.
     relative: String,
-    /// Upstream's assertion about the bytes, as an OCI digest string.
+    /// Upstream's assertion about the bytes, as an OCI digest string, for
+    /// [`verify_digest`].
     digest: String,
+    /// The same assertion as bare lowercase hex, for comparison against what a
+    /// destination reports about an object it already holds.
+    sha256_hex: String,
     /// Where the archive is fetched from.
     source: Url,
 }
@@ -388,20 +404,153 @@ fn plan_row(
         index,
         name,
         relative,
+        sha256_hex: row.sha256.to_ascii_lowercase(),
         digest,
         source,
     })
 }
 
-/// Place one planned archive under `output:`.
+/// What one row's pass did, both halves.
+struct RowOutcome {
+    archive: ArchiveOutcome,
+    /// `None` when the run has no uploader at all; otherwise what the
+    /// destination did, so the counters can be folded in row order.
+    upload: Option<UploadOutcome>,
+}
+
+/// One row's result, split by which of the two error classes it can be in.
+///
+/// The same split `registry_sync` makes for the same reason (C-040), and the
+/// reason the row pass cannot simply return `Result<_, String>`: a source that
+/// will not serve one archive is a fact about that archive, and the operator
+/// should see *every* such row in one report rather than fixing them one run at
+/// a time. A destination that refuses a write is a fact about the run — usually
+/// a credential — and continuing past it would attempt the same rejected write
+/// once per remaining archive, which is what trips account-lockout policy on
+/// the stores this targets.
+enum RowStep {
+    Done(RowOutcome),
+    /// Counted into the report; the run continues.
+    Failed(String),
+}
+
+/// Mirror one planned archive: destination probe, download, upload, cleanup.
 ///
 /// Borrows nothing mutable, which is what lets several of these run at once
-/// under `concurrency.max_downloads`. `Err` carries the per-row failure
-/// message; the caller counts it.
-async fn fetch_row(client: &reqwest::Client, spec: &DistSpec, plan: &PlannedRow) -> Result<ArchiveOutcome, String> {
+/// under `concurrency.max_downloads` — and, because the upload happens *here*
+/// rather than in a second pass, what lets one row's PUT overlap another's GET.
+/// A link is full duplex; the two-phase shape this replaces left one direction
+/// idle throughout each phase.
+///
+/// **The destination is asked before anything is fetched.** An archive the
+/// store already holds costs neither transfer. That is worth far more than it
+/// looks: a CI runner starts with an empty `output:`, so the previous shape
+/// pulled the entire mirror — ~1.9 GB — on every run only to discover it had
+/// nothing to upload.
+///
+/// The probe is also a **stronger** check than the upload-time one it replaces.
+/// A bare HEAD proves a path is occupied, not that it is occupied by the right
+/// bytes; comparing the store's reported sha256 against the manifest's turns a
+/// blind skip into a verified one. A store that reports no checksum degrades to
+/// the old existence-only trust rather than to a re-download, because that is
+/// exactly the behaviour it had before.
+///
+/// `Err` carries the per-row failure message; the caller counts it.
+async fn mirror_row(
+    client: &reqwest::Client,
+    spec: &DistSpec,
+    uploader: Option<&Uploader>,
+    upload_permits: &Semaphore,
+    plan: &PlannedRow,
+    retain: bool,
+) -> Result<RowStep, MirrorError> {
     let destination = spec.output.join(&plan.relative);
-    if tokio::fs::try_exists(&destination).await.unwrap_or(false)
-        && verify_digest(&destination, &plan.digest).await.is_ok()
+
+    if let Some(uploader) = uploader {
+        match uploader.probe(&plan.relative).await {
+            Ok(Probe::Present { sha256 }) => {
+                // `None` — a store that reports no checksum — is treated as
+                // present, matching what the upload pass already did on its own
+                // HEAD. Only a *reported and different* digest falls through to
+                // a re-transfer, which is the one case that was silently wrong
+                // before: a wrong object at the right path used to be trusted
+                // for ever.
+                if sha256.as_deref().is_none_or(|reported| reported == plan.sha256_hex) {
+                    // Nothing here is needed any more, including a local copy a
+                    // previous run staged.
+                    discard_staged(&destination, retain).await;
+                    return Ok(RowStep::Done(RowOutcome {
+                        archive: ArchiveOutcome::Skipped,
+                        upload: Some(UploadOutcome::Skipped),
+                    }));
+                }
+                tracing::warn!(
+                    "{} holds a different object than the manifest declares; re-uploading",
+                    plan.relative
+                );
+            }
+            Ok(Probe::Absent) => {}
+            // The destination did not answer. That is a fact about the run, not
+            // about this archive — every other probe is about to fail the same
+            // way — so it aborts rather than reddening one row.
+            Err(error) => {
+                return Err(MirrorError::ExecutionFailed(vec![format!(
+                    "cannot ask the destination about {}: {error:#}",
+                    plan.relative
+                )]));
+            }
+        }
+    }
+
+    let archive = match fetch_archive(client, &destination, plan).await {
+        Ok(archive) => archive,
+        // A source that will not serve this archive reds this row and no other.
+        Err(detail) => return Ok(RowStep::Failed(detail)),
+    };
+
+    let Some(uploader) = uploader else {
+        return Ok(RowStep::Done(RowOutcome { archive, upload: None }));
+    };
+
+    // The row pass is sized by `max_downloads`; this permit is what keeps
+    // `max_uploads` meaningful now that the PUT lives inside it. Two knobs
+    // because they bound two different resources — the source is usually a CDN,
+    // the destination one corporate store with a rate limit worth respecting.
+    let upload = {
+        let _permit = upload_permits.acquire().await.map_err(|_| {
+            MirrorError::ExecutionFailed(vec!["upload concurrency semaphore was closed mid-run".to_string()])
+        })?;
+        // `Unconditional`: the probe above already answered the question
+        // `Precheck::HeadFirst` would ask, and it answered `Absent`.
+        uploader
+            .put_file(&plan.relative, &destination, Precheck::Unconditional)
+            .await
+            .map_err(|error| {
+                MirrorError::ExecutionFailed(vec![format!("upload of {} failed: {error:#}", plan.relative)])
+            })?
+    };
+
+    // Only after the store has confirmed it. Losing the local copy of something
+    // that did not land would turn a retryable run into a re-download.
+    discard_staged(&destination, retain).await;
+
+    Ok(RowStep::Done(RowOutcome {
+        archive,
+        upload: Some(upload),
+    }))
+}
+
+/// Reuse a verified local copy, or fetch and verify one.
+///
+/// Split out so [`mirror_row`] reads as the two-error-class decision it is:
+/// every failure in here reds one row, never the run.
+async fn fetch_archive(
+    client: &reqwest::Client,
+    destination: &Path,
+    plan: &PlannedRow,
+) -> Result<ArchiveOutcome, String> {
+    if tokio::fs::try_exists(destination).await.unwrap_or(false)
+        && verify_digest(destination, &plan.digest).await.is_ok()
     {
         return Ok(ArchiveOutcome::Skipped);
     }
@@ -412,17 +561,33 @@ async fn fetch_row(client: &reqwest::Client, spec: &DistSpec, plan: &PlannedRow)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
     }
 
-    download(client, &plan.source, &destination)
+    download(client, &plan.source, destination)
         .await
         .map_err(|error| format!("download failed: {error:#}"))?;
 
     // Upstream's assertion about the bytes, never recomputed from what
     // arrived — re-deriving it here would verify the copy against itself.
-    verify_digest(&destination, &plan.digest)
+    verify_digest(destination, &plan.digest)
         .await
         .map_err(|error| format!("{error:#}"))?;
 
     Ok(ArchiveOutcome::Copied)
+}
+
+/// Remove a staged archive once the store holds it, unless `retain` says keep.
+///
+/// Best-effort and deliberately silent on failure: the bytes are already at the
+/// destination, so a file that will not delete is wasted disk rather than a
+/// broken run, and failing the row here would undo an upload that succeeded.
+async fn discard_staged(path: &Path, retain: bool) {
+    if retain {
+        return;
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => tracing::debug!("discarded staged {}", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => tracing::debug!("could not discard staged {}: {error}", path.display()),
+    }
 }
 
 /// `base_url` with `relative` appended as path segments, keeping any path the
@@ -467,13 +632,13 @@ async fn put(
     uploader: &Uploader,
     relative: &str,
     file: &Path,
-    freshness: Freshness,
+    precheck: Precheck,
 ) -> Result<UploadOutcome, MirrorError> {
-    // An upload failure aborts the run rather than being counted: the
-    // remaining files include the manifest, and continuing past a failed
-    // archive would publish a manifest naming it.
+    // An upload failure aborts the run rather than being counted: the manifest
+    // is the file after this one, and publishing it past a failed write would
+    // promise bytes the store does not hold.
     uploader
-        .put_file(relative, file, freshness)
+        .put_file(relative, file, precheck)
         .await
         .map_err(|error| MirrorError::ExecutionFailed(vec![format!("upload of {relative} failed: {error:#}")]))
 }
