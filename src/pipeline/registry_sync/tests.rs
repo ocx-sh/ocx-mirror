@@ -621,10 +621,11 @@ fn the_cache_digest_is_recorded_only_on_a_fully_successful_non_dry_run() {
 }
 
 #[test]
-fn the_blob_pool_is_run_scoped_and_packages_are_sequential() {
-    // C-026's ceiling is `max_blobs × largest_blob` and it holds only under
-    // both: one `Arc<Semaphore>` for the run, and a package loop that is not
-    // parallel.
+fn the_blob_pool_is_run_scoped_and_the_package_width_is_the_operators_knob() {
+    // C-026's ceiling is `max_blobs × largest_blob`, and it holds because ONE
+    // pool covers the whole run — which is also why packages may be copied
+    // concurrently without moving it. What must not appear is a second pool
+    // per source or per package.
     let body = function_body("copy_sources");
     assert!(
         body.contains("let blob_semaphore = Arc::new(Semaphore::new(spec.concurrency.max_blobs));"),
@@ -634,16 +635,20 @@ fn the_blob_pool_is_run_scoped_and_packages_are_sequential() {
         body.contains("blob_semaphore: Arc::clone(&blob_semaphore)"),
         "each source's context shares that one pool"
     );
-    // A plain `for` over the work list. `enumerate()` numbers the progress line
-    // and does not make the loop concurrent; the assertion below is what
-    // actually forbids that.
+    // The width is the operator's, and `fail_fast` overrides it: that flag
+    // promises nothing after the first failure is copied, which only a
+    // sequential path can keep.
     assert!(
-        body.contains("for (position, package) in prepared.plan.work.iter().enumerate() {"),
-        "packages are processed sequentially"
+        body.contains("let width = if fail_fast { 1 } else { spec.concurrency.max_packages };"),
+        "fail_fast forces width 1"
     );
     assert!(
-        !body.contains("JoinSet") && !body.contains("try_join_all") && !body.contains("tokio::spawn"),
-        "parallelising the package loop multiplies the memory ceiling by its width"
+        body.contains(".buffered(width)"),
+        "the concurrent path yields in catalog order"
+    );
+    assert!(
+        !body.contains("JoinSet") && !body.contains("tokio::spawn"),
+        "the packages stay on one task: the copy's shared state is guarded for concurrent futures, not for a spawned one"
     );
 }
 

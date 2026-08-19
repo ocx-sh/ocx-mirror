@@ -27,6 +27,13 @@ use crate::pipeline::registry_sync::glob::Glob;
 
 /// Default in-flight blob count for one package's copy (C-003).
 const DEFAULT_MAX_BLOBS: usize = 4;
+/// Default packages copied at once within one source.
+///
+/// 4: a package's cost is dominated by round trips against two registries, and
+/// four in flight covers that latency without turning a catalog sweep into
+/// something a destination answers with `429`. Raise it on a link where the
+/// mirror is idle waiting; the memory ceiling does not move with it.
+const DEFAULT_MAX_PACKAGES: usize = 4;
 /// Default reactive-retry budget per blob or manifest transfer (C-003).
 const DEFAULT_MAX_RETRIES: u32 = 3;
 
@@ -127,6 +134,17 @@ impl RegistrySpec {
 
         if self.sources.is_empty() {
             errors.push("sources: at least one source is required".to_string());
+        }
+
+        // Zero is not "unlimited" for either: one would size a permit pool
+        // nothing can ever acquire, the other a stream width that polls
+        // nothing. Both hang rather than fail, which is the worst way for a
+        // typo to present.
+        if self.concurrency.max_blobs == 0 {
+            errors.push("concurrency.max_blobs: must be at least 1".to_string());
+        }
+        if self.concurrency.max_packages == 0 {
+            errors.push("concurrency.max_packages: must be at least 1".to_string());
         }
 
         self.validate_target(&mut errors);
@@ -362,6 +380,18 @@ pub struct RegistryConcurrency {
     #[serde(default = "default_max_blobs")]
     pub max_blobs: usize,
 
+    /// Packages copied at once within one source.
+    ///
+    /// Does **not** move the memory ceiling: the blob pool is run-scoped, so
+    /// `max_blobs × largest_blob` holds whatever this is. What it multiplies
+    /// is round trips in flight, which is the point — most of a package's
+    /// wall-clock is latency against the two registries, not bandwidth.
+    ///
+    /// Forced to 1 under `fail_fast`, which promises that nothing after the
+    /// first failure is copied; that promise and a fan-out cannot both hold.
+    #[serde(default = "default_max_packages")]
+    pub max_packages: usize,
+
     /// Extra attempts after a reactive 429 / `Retry-After`. No proactive rate
     /// limiting.
     #[serde(default = "default_max_retries")]
@@ -372,6 +402,7 @@ impl Default for RegistryConcurrency {
     fn default() -> Self {
         Self {
             max_blobs: DEFAULT_MAX_BLOBS,
+            max_packages: DEFAULT_MAX_PACKAGES,
             max_retries: DEFAULT_MAX_RETRIES,
         }
     }
@@ -379,6 +410,10 @@ impl Default for RegistryConcurrency {
 
 fn default_publish_tags() -> bool {
     true
+}
+
+fn default_max_packages() -> usize {
+    DEFAULT_MAX_PACKAGES
 }
 
 fn default_max_blobs() -> usize {
