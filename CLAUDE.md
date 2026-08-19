@@ -52,12 +52,15 @@ document the four-line job, let them own the pipeline.
   exists to sync against. `rustls` is mirror-owned too: ocx only pulls it as a
   feature of its own `reqwest` dependency, never as a bare top-level
   dependency, so there is nothing to copy. **Since v0.5.8** `reqwest` is back
-  in ocx's `[workspace.dependencies]` (`ocx_lib` depends on it directly) — but
-  at a different major version and feature set (`0.13`, `rustls`-only, plus a
-  separate `webpki-root-certs` dep) than ocx-mirror's own `0.12` pin. The two
-  versions coexist as separate crates in the lockfile; do not force them to
-  match — bump ocx-mirror's `reqwest` only when a build error demands it, not
-  to mirror ocx's choice.
+  in ocx's `[workspace.dependencies]` (`ocx_lib` depends on it directly), and
+  ocx-mirror **tracks its major** — `0.13`, `rustls`, plus `json` which is
+  mirror-owned. Keep them on one major: a split major linked two copies of the
+  crate and made `ocx_lib`'s reqwest types unnameable here, which is how the
+  mirror ended up with its own TLS-root handling and a corporate CA that no leg
+  trusted. `src/http.rs` now calls `ocx_lib::utility::tls::seed_embedded_roots`
+  directly. Deliberately **not** `system-proxy` — that feature reads Windows
+  and macOS system proxy *settings*; the `HTTP_PROXY` family is honoured
+  without it.
 - Clone/checkout always `--recurse-submodules`.
 
 ## Build & Development

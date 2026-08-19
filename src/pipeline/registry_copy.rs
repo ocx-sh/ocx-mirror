@@ -189,10 +189,6 @@ fn client_config() -> native::ClientConfig {
 /// exposes no raw push and its `native_transport` is `pub(crate)`.
 pub async fn build_source_client(source: &RegistrySource) -> native::Client {
     let mut config = client_config();
-    // The resolver is assigned rather than named: the field's type is
-    // reqwest 0.13's `dyn Resolve` and this crate's own reqwest is 0.12, so the
-    // unsizing coercion at the assignment is what keeps ocx-mirror from ever
-    // naming the second major.
     config.dns_resolver = Some(Arc::new(ocx_lib::oci::ssrf::GuardedResolver::new(Arc::new(
         source.trusted_hosts.clone(),
     ))));

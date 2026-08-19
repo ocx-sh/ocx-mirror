@@ -72,14 +72,15 @@ octocrab = { version = "0.51", default-features = false, features = [
     "tracing",
 ] }
 quick-junit = "0.6"
-reqwest = { version = "0.12", default-features = false, features = [
-    # Both root sets: bundled roots keep the binary self-contained on a host
-    # with no trust store, platform roots (and SSL_CERT_FILE/SSL_CERT_DIR)
-    # carry an operator's corporate CA. Enabled per client in `src/http.rs`.
-    "rustls-tls-webpki-roots-no-provider",
-    "rustls-tls-native-roots-no-provider",
-    "json",
-] }
+# Same major as ocx's (`external/ocx/Cargo.toml`), so `ocx_lib`'s own reqwest
+# types cross the path dependency and one copy of the crate is linked. `rustls`
+# resolves to the platform verifier, which reads the host trust store and
+# therefore `SSL_CERT_FILE` / `SSL_CERT_DIR`; `src/http.rs` seeds the bundled
+# Mozilla roots on top so an empty store is still usable. `json` is ours —
+# `ocx_lib` does not need it. Deliberately not `system-proxy`: that feature is
+# the Windows/macOS system *settings* reader, and the `HTTP_PROXY` family is
+# honoured without it.
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
 sha2 = "0.11.0"
 hex = "0.4.3"
