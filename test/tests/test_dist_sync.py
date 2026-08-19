@@ -58,6 +58,19 @@ class UploadCapture:
     def headers_seen(self) -> list[dict[str, str]]:
         return self._headers
 
+    def requests_with_headers(self, method: str) -> list[tuple[str, dict[str, str]]]:
+        """Every `(path, headers)` for one verb, in wire order.
+
+        The two recording lists append together on every request, so they zip
+        positionally — which is what lets a test assert a header *against the
+        body that carried it* rather than merely that some request had one.
+        """
+        return [
+            (path, headers)
+            for (verb, path), headers in zip(self.requests, self._headers, strict=True)
+            if verb == method
+        ]
+
     def url(self, suffix: str = "") -> str:
         return f"{self.base_url}{suffix}"
 
@@ -191,6 +204,8 @@ def write_spec(
     min_version: str | None = None,
     upload: bool = False,
     retry_delays: list[int] | None = None,
+    max_downloads: int | None = None,
+    max_uploads: int | None = None,
 ) -> Path:
     body = [
         "kind: dist",
@@ -214,6 +229,12 @@ def write_spec(
             "    password_env: DIST_PASSWORD",
             f"  retry_delays: {retry_delays if retry_delays is not None else []}",
         ]
+    if max_downloads is not None or max_uploads is not None:
+        body.append("concurrency:")
+        if max_downloads is not None:
+            body.append(f"  max_downloads: {max_downloads}")
+        if max_uploads is not None:
+            body.append(f"  max_uploads: {max_uploads}")
     path.write_text("\n".join(body) + "\n")
     return path
 
@@ -574,7 +595,16 @@ def test_the_gitlab_layout_changes_both_the_tree_and_the_manifest_urls(dist_mirr
         )
 
 
-def test_upload_puts_every_file_with_the_manifest_last(dist_mirror, asset_server, upload_store, tmp_path):
+def test_upload_puts_the_manifest_after_every_archive_and_its_sidecar_last(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """Publish order, including the one Artifactory forces.
+
+    `dist.json` after every archive is the mid-run guarantee. The sidecar after
+    `dist.json` is Artifactory's requirement: it reads a PUT to `*.sha256` as a
+    checksum declaration about the sibling artifact and answers 404 when that
+    sibling is absent, which is every first run against a fresh destination.
+    """
     source = publish_upstream(asset_server, [("0.5.8", "stable")])
     output = tmp_path / "public"
     spec = write_spec(tmp_path / "dist.yml", source, output, base_url=upload_store.url(), upload=True)
@@ -584,17 +614,26 @@ def test_upload_puts_every_file_with_the_manifest_last(dist_mirror, asset_server
     dist_mirror.run("dist", "sync", str(spec))
 
     puts = upload_store.paths("PUT")
-    assert puts[-1] == "/dist.json", f"the rolling manifest must be published last: {puts}"
-    assert "/dist.json.sha256" in puts
+    assert puts[-1] == "/dist.json.sha256", f"the sidecar must follow the manifest it describes: {puts}"
     assert any(path.startswith("/dist/") for path in puts), "the snapshot must be published"
     manifest_index = puts.index("/dist.json")
+    assert manifest_index < puts.index("/dist.json.sha256")
     archives = [path for path in puts if path.startswith("/v0.5.8/")]
     assert archives, "archives must be uploaded"
     for archive in archives:
         assert puts.index(archive) < manifest_index, "every archive precedes the manifest naming it"
 
 
-def test_upload_sends_basic_credentials_and_the_checksum_header(dist_mirror, asset_server, upload_store, tmp_path):
+def test_every_upload_announces_all_four_checksums_of_its_own_body(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """Artifactory records a client checksum per algorithm.
+
+    A header that is merely *present on some request* is not enough: the panel
+    shows "Client did not publish a checksum value" for every algorithm whose
+    header was absent, so each PUT must carry all four — and each value must
+    hash the body that request actually sent, not a neighbouring row's.
+    """
     source = publish_upstream(asset_server, [("0.5.8", "stable")])
     output = tmp_path / "public"
     spec = write_spec(tmp_path / "dist.yml", source, output, base_url=upload_store.url(), upload=True)
@@ -603,14 +642,36 @@ def test_upload_sends_basic_credentials_and_the_checksum_header(dist_mirror, ass
 
     dist_mirror.run("dist", "sync", str(spec))
 
-    seen = upload_store.headers_seen()
-    assert any(headers.get("authorization", "").startswith("Basic ") for headers in seen)
-    assert any("x-checksum-sha256" in headers for headers in seen), (
-        "Artifactory links an already-stored blob when the checksum is sent"
-    )
+    puts = upload_store.requests_with_headers("PUT")
+    assert puts, "the run must have uploaded something"
+    assert all(headers.get("authorization", "").startswith("Basic ") for _, headers in puts)
+
+    algorithms = {
+        "x-checksum-md5": hashlib.md5,
+        "x-checksum-sha1": hashlib.sha1,
+        "x-checksum-sha256": hashlib.sha256,
+        "x-checksum-sha512": hashlib.sha512,
+    }
+    for path, headers in puts:
+        body = upload_store.stored[path]
+        for header, algorithm in algorithms.items():
+            assert header in headers, f"{path} was uploaded without {header}"
+            assert headers[header] == algorithm(body).hexdigest(), (
+                f"{path}'s {header} does not hash the body it was sent with"
+            )
 
 
-def test_a_second_upload_head_skips_what_the_store_already_holds(dist_mirror, asset_server, upload_store, tmp_path):
+def test_a_second_upload_skips_the_archives_but_republishes_the_rolling_pair(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """HEAD-then-skip is right for content-addressed paths and wrong for rolling ones.
+
+    An archive and the `dist/<sha256>.json` snapshot are pinned by their names,
+    so "already there" means "already correct". `dist.json` and its sidecar are
+    not: the path outlives its contents, and skipping them freezes the store's
+    manifest at whatever the first run wrote while fresh archives keep landing
+    beside it.
+    """
     source = publish_upstream(asset_server, [("0.5.8", "stable")])
     output = tmp_path / "public"
     spec = write_spec(tmp_path / "dist.yml", source, output, base_url=upload_store.url(), upload=True)
@@ -622,9 +683,75 @@ def test_a_second_upload_head_skips_what_the_store_already_holds(dist_mirror, as
     result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
 
     report = json.loads(result.stdout)
-    assert len(upload_store.paths("PUT")) == first, "a second run must re-upload nothing"
-    assert report["counters"]["already_present"] == first
-    assert report["counters"]["uploaded"] == 0
+    second = upload_store.paths("PUT")[first:]
+    assert second == ["/dist.json", "/dist.json.sha256"], (
+        f"only the rolling pair may be re-uploaded, in publish order: {second}"
+    )
+    assert report["counters"]["uploaded"] == 2
+    assert report["counters"]["already_present"] == first - 2, "every content-addressed path is skipped"
+
+
+def test_a_new_upstream_release_republishes_the_rolling_pair_with_the_new_digest(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """The regression the rolling/immutable split exists to prevent.
+
+    With the pair skipped, the store keeps serving the first run's `dist.json`
+    while the second run's archives land beside it — a manifest that names
+    fewer releases than the store actually holds, and nothing in the report
+    looks wrong.
+    """
+    publish_upstream(asset_server, [("0.5.8", "stable")])
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml", asset_server.url("dist.json"), output, base_url=upload_store.url(), upload=True
+    )
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+    dist_mirror.run("dist", "sync", str(spec))
+
+    # Upstream gains a release; the rolling manifest must follow it.
+    publish_upstream(asset_server, [("0.5.9", "stable"), ("0.5.8", "stable")])
+    dist_mirror.run("dist", "sync", str(spec))
+
+    served = json.loads(upload_store.stored["/dist.json"])
+    assert {row["version"] for row in served["releases"]} == {"0.5.8", "0.5.9"}, (
+        "the store must serve the manifest naming every archive it now holds"
+    )
+
+    digest = hashlib.sha256(upload_store.stored["/dist.json"]).hexdigest()
+    assert upload_store.stored["/dist.json.sha256"].decode() == f"{digest}  dist.json\n", (
+        "the sidecar must describe the manifest the store is actually serving"
+    )
+    assert f"/dist/{digest}.json" in upload_store.paths("PUT"), "the new snapshot must be published too"
+
+
+def test_the_download_width_changes_nothing_about_the_result(dist_mirror, asset_server, tmp_path):
+    """`concurrency:` is a throughput knob, never a correctness one.
+
+    `buffered` yields in input order precisely so the report does not depend on
+    which archive finishes first; a serial run and a wide one must be
+    byte-identical in both the tree and the report.
+    """
+    source = publish_upstream(asset_server, [("0.5.9", "stable"), ("0.5.8", "stable")])
+
+    def run(name: str, **concurrency) -> tuple[dict, dict[str, bytes]]:
+        output = tmp_path / name
+        spec = write_spec(tmp_path / f"{name}.yml", source, output, **concurrency)
+        result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
+        tree = {
+            str(path.relative_to(output)): path.read_bytes() for path in sorted(output.rglob("*")) if path.is_file()
+        }
+        return json.loads(result.stdout), tree
+
+    serial_report, serial_tree = run("serial", max_downloads=1)
+    wide_report, wide_tree = run("wide", max_downloads=8)
+
+    assert serial_tree == wide_tree, "the emitted tree must not depend on download width"
+    assert [entry["name"] for entry in serial_report["archives"]] == [
+        entry["name"] for entry in wide_report["archives"]
+    ], "the report must stay in manifest order whatever order the fetches finish in"
+    assert serial_report["counters"] == wide_report["counters"]
 
 
 def test_a_missing_credential_variable_fails_before_the_first_byte_moves(
@@ -685,6 +812,11 @@ def test_an_unauthorized_upload_is_never_retried(dist_mirror, asset_server, uplo
 
     Hammering one burns the backoff window and trips account-lockout policy on
     exactly the stores this targets.
+
+    `max_uploads: 1` so the count isolates *retries* from fan-out width: the
+    upload pass stops polling at the first rejection, but whatever was already
+    in flight has already been sent, so a wider run legitimately shows one
+    attempt per concurrent slot.
     """
     source = publish_upstream(asset_server, [("0.5.8", "stable")])
     output = tmp_path / "public"
@@ -695,6 +827,7 @@ def test_an_unauthorized_upload_is_never_retried(dist_mirror, asset_server, uplo
         base_url=upload_store.url(),
         upload=True,
         retry_delays=[1, 1, 1, 1, 1],
+        max_uploads=1,
     )
     dist_mirror.env["DIST_USER"] = "ci"
     dist_mirror.env["DIST_PASSWORD"] = "wrong"

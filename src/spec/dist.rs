@@ -87,6 +87,57 @@ pub struct DistSpec {
     /// harness lists its loopback address here.
     #[serde(default)]
     pub trusted_hosts: Vec<String>,
+
+    /// How wide the archive download and upload passes run.
+    #[serde(default)]
+    pub concurrency: DistConcurrency,
+}
+
+/// How many archives this run moves at once.
+///
+/// Two knobs, not [`ConcurrencyConfig`](crate::spec::ConcurrencyConfig)'s five:
+/// `dist sync` neither bundles nor compresses, so `max_bundles` and
+/// `compression_threads` would govern nothing. Modelled on
+/// [`RegistryConcurrency`](crate::spec::RegistryConcurrency) instead, which
+/// made the same cut for the same reason.
+///
+/// Downloads and uploads are separate because they are separate resources: a
+/// run pulls from GitHub's object host and pushes into a corporate store, and
+/// the store is usually the one with a rate limit worth respecting.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DistConcurrency {
+    /// Archives fetched at once. Peak resident memory is
+    /// `max_downloads × largest_archive`, because each body is buffered whole
+    /// before it is written and verified.
+    #[serde(default = "default_max_downloads")]
+    pub max_downloads: usize,
+
+    /// Archives uploaded at once. The rolling manifest, its sidecar and the
+    /// snapshot are **never** included — their ordering is the publish
+    /// invariant (`pipeline::dist_sync::upload_tree`).
+    #[serde(default = "default_max_uploads")]
+    pub max_uploads: usize,
+}
+
+impl Default for DistConcurrency {
+    fn default() -> Self {
+        Self {
+            max_downloads: default_max_downloads(),
+            max_uploads: default_max_uploads(),
+        }
+    }
+}
+
+fn default_max_downloads() -> usize {
+    8
+}
+
+/// Lower than the download default: the destination is one corporate store
+/// answering every request, where the source is a CDN.
+fn default_max_uploads() -> usize {
+    4
 }
 
 fn default_source() -> Url {
@@ -227,6 +278,19 @@ impl DistSpec {
                     );
                 }
             }
+        }
+
+        // Refused rather than clamped to 1: zero transfers nothing, and a run
+        // that silently did nothing would still write a manifest.
+        if self.concurrency.max_downloads == 0 {
+            errors.push(
+                "concurrency.max_downloads: must be at least 1 — zero archives in flight mirrors nothing".to_string(),
+            );
+        }
+        if self.concurrency.max_uploads == 0 {
+            errors.push(
+                "concurrency.max_uploads: must be at least 1 — zero files in flight publishes nothing".to_string(),
+            );
         }
 
         errors

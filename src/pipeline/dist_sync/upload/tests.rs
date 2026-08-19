@@ -192,3 +192,43 @@ fn a_configured_header_is_carried_verbatim() {
         Some("BlockBlob")
     );
 }
+
+/// Known vectors for the empty input, from each algorithm's own spec. Locks the
+/// four hex encodings against a silent swap of one hasher for another — the
+/// failure mode is a header Artifactory rejects, or worse, silently records
+/// against the wrong algorithm.
+#[test]
+fn the_four_checksums_match_their_published_vectors() {
+    let sums = Checksums::of(b"");
+
+    assert_eq!(sums.md5, "d41d8cd98f00b204e9800998ecf8427e");
+    assert_eq!(sums.sha1, "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+    assert_eq!(
+        sums.sha256,
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(
+        sums.sha512,
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+         47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+    );
+}
+
+/// Lowercase hex without an algorithm prefix — the `X-Checksum-*` grammar. A
+/// `sha256:`-prefixed value is what the manifest carries, and sending that
+/// shape would be rejected.
+#[test]
+fn checksums_are_bare_lowercase_hex() {
+    let sums = Checksums::of(b"ocx");
+
+    for value in [&sums.md5, &sums.sha1, &sums.sha256, &sums.sha512] {
+        assert!(
+            value.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "not bare lowercase hex: {value}"
+        );
+    }
+    assert_eq!(sums.md5.len(), 32);
+    assert_eq!(sums.sha1.len(), 40);
+    assert_eq!(sums.sha256.len(), 64);
+    assert_eq!(sums.sha512.len(), 128);
+}

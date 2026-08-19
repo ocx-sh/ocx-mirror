@@ -393,6 +393,57 @@ fn the_generated_schema_renders_identity_as_a_tagged_choice() {
     );
 }
 
+#[test]
+fn the_concurrency_defaults_apply_when_the_block_is_absent() {
+    let spec = valid(MINIMAL);
+
+    assert_eq!(spec.concurrency.max_downloads, 8);
+    // Lower than downloads on purpose: one corporate store answers every PUT.
+    assert_eq!(spec.concurrency.max_uploads, 4);
+}
+
+#[test]
+fn either_concurrency_knob_may_be_set_alone() {
+    let spec = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+concurrency:
+  max_uploads: 1
+",
+    );
+
+    assert_eq!(spec.concurrency.max_downloads, 8, "the unset knob keeps its default");
+    assert_eq!(spec.concurrency.max_uploads, 1);
+    assert!(spec.validate(Path::new(SPEC_PATH)).is_empty());
+}
+
+/// Refused, not clamped to 1: a run with nothing in flight mirrors nothing and
+/// would still publish a manifest.
+#[test]
+fn a_zero_concurrency_knob_is_refused() {
+    let spec = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+concurrency:
+  max_downloads: 0
+  max_uploads: 0
+",
+    );
+
+    let errors = spec.validate(Path::new(SPEC_PATH));
+    assert_eq!(errors.len(), 2, "each knob reports independently: {errors:?}");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.starts_with("concurrency.max_downloads:"))
+    );
+    assert!(errors.iter().any(|error| error.starts_with("concurrency.max_uploads:")));
+}
+
 /// Every rule reports rather than short-circuiting, so an operator fixes one
 /// spec once.
 #[test]
