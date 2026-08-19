@@ -45,6 +45,67 @@ pub enum UploadOutcome {
     Uploaded,
 }
 
+/// Whether a path's bytes are pinned by its name.
+///
+/// A property of the *file*, not of the caller, which is why this is an enum on
+/// the call rather than a bool the two upload loops each decide for themselves.
+/// Getting it wrong in the [`Rolling`](Self::Rolling) direction is invisible:
+/// the run reports success, uploads nothing, and the store keeps serving a
+/// manifest from the first run it ever saw while fresh archives land beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Content-addressed by name — an archive at its layout path, a
+    /// `dist/<sha256>.json` snapshot. The bytes cannot change without the path
+    /// changing, so a file the store already holds *is* the file this run would
+    /// write, and the HEAD is allowed to skip it.
+    Immutable,
+    /// The path outlives its contents — `dist.json` and its sidecar. Republished
+    /// every run, because "already there" says nothing about *which* version is
+    /// there.
+    Rolling,
+}
+
+/// The four checksums announced on every PUT.
+///
+/// Artifactory records a "Client Checksum" per algorithm and shows *"Client did
+/// not publish a checksum value"* for each header that was absent, so sending
+/// only one still reads as unannounced on the other rows. It consumes MD5,
+/// SHA-1 and SHA-256; SHA-512 is sent for stores that take it and is ignored
+/// where it is not.
+///
+/// Computed from the body this uploader already read rather than passed in by
+/// the caller: the manifest's declared sha256 covers only the archives, and
+/// every file needs all four. There is no I/O to save either way — the read has
+/// already happened by the time this runs.
+struct Checksums {
+    md5: String,
+    sha1: String,
+    sha256: String,
+    sha512: String,
+}
+
+impl Checksums {
+    /// Hash `body` four ways.
+    ///
+    // ponytail: four sequential passes over an in-memory buffer. The algorithms
+    // share no compression work, so "one pass" could only interleave the
+    // updates — same CPU, better cache locality. Worth doing only if archives
+    // reach GB scale; at ocx dist sizes this is sub-second and the network PUT
+    // that follows dominates.
+    fn of(body: &[u8]) -> Checksums {
+        use md5::Md5;
+        use sha1::Sha1;
+        use sha2::{Digest, Sha256, Sha512};
+
+        Checksums {
+            md5: hex::encode(Md5::digest(body)),
+            sha1: hex::encode(Sha1::digest(body)),
+            sha256: hex::encode(Sha256::digest(body)),
+            sha512: hex::encode(Sha512::digest(body)),
+        }
+    }
+}
+
 /// Credentials, already resolved from the environment.
 ///
 /// Resolution happens once at construction so a missing variable fails before
@@ -108,28 +169,29 @@ impl Uploader {
         })
     }
 
-    /// HEAD, then PUT when absent.
+    /// HEAD, then PUT when absent — unless [`Freshness::Rolling`] says the
+    /// path outlives its contents, in which case the PUT is unconditional.
     ///
     /// HEAD-before-PUT rather than a cached record of what a previous run
     /// wrote: the destination is the authority, so a file deleted from the
     /// store is re-uploaded by the next run instead of being skipped forever
-    /// by stale local state.
+    /// by stale local state. That reasoning holds only for a path whose bytes
+    /// are pinned by its name — see [`Freshness`].
     ///
-    /// `sha256` is sent as `X-Checksum-Sha256` when present — Artifactory
-    /// verifies it server-side and links an already-stored blob instead of
-    /// re-reading the body.
+    /// Every PUT announces all four checksums; see [`checksums`] for why they
+    /// are computed here rather than passed in.
     ///
     /// # Errors
     ///
     /// Any non-retryable response, or the last failure after the retry
     /// schedule is exhausted.
-    pub async fn put_file(&self, relative: &str, file: &Path, sha256: Option<&str>) -> Result<UploadOutcome> {
+    pub async fn put_file(&self, relative: &str, file: &Path, freshness: Freshness) -> Result<UploadOutcome> {
         // The same composition the manifest row was stamped with, so the PUT
         // target and the URL consumers resolve are the same object by
         // construction rather than by two functions agreeing.
         let target = super::mirrored_url(&self.base, relative).map_err(|error| anyhow::anyhow!(error))?;
 
-        if self.exists(&target).await? {
+        if freshness == Freshness::Immutable && self.exists(&target).await? {
             return Ok(UploadOutcome::Skipped);
         }
 
@@ -137,11 +199,26 @@ impl Uploader {
             .await
             .with_context(|| format!("failed to read {} for upload", file.display()))?;
 
+        // Off the reactor: four synchronous passes over a body that can be tens
+        // of megabytes would otherwise park a worker thread, and
+        // `concurrency.max_uploads` puts several of these in flight at once.
+        // The body is moved through rather than cloned — it is the PUT payload.
+        let (body, sums) = tokio::task::spawn_blocking(move || {
+            let sums = Checksums::of(&body);
+            (body, sums)
+        })
+        .await
+        .with_context(|| format!("checksum task panicked for {}", file.display()))?;
+
         self.with_retries(&target, || {
-            let mut request = self.client.put(target.clone()).headers(self.headers.clone());
-            if let Some(sha256) = sha256 {
-                request = request.header("X-Checksum-Sha256", sha256);
-            }
+            let request = self
+                .client
+                .put(target.clone())
+                .headers(self.headers.clone())
+                .header("X-Checksum-Md5", &sums.md5)
+                .header("X-Checksum-Sha1", &sums.sha1)
+                .header("X-Checksum-Sha256", &sums.sha256)
+                .header("X-Checksum-Sha512", &sums.sha512);
             self.authenticate(request).body(body.clone())
         })
         .await?;

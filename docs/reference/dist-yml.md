@@ -219,13 +219,42 @@ A named variable that is unset or empty fails the run before the first byte move
 
 ### Idempotency and publish order {#ordering}
 
-Every file is `HEAD`ed before it is `PUT`. The destination is the authority, so a file deleted from the store is re-uploaded by the next run instead of being skipped forever by stale local state. `X-Checksum-Sha256` rides along on archive uploads, which lets Artifactory link an already-stored blob instead of re-reading the body.
+Files fall into two classes, and only one of them is skippable:
 
-Uploads run in a fixed order — **archives, then the content-addressed snapshot, then the sidecar, then `dist.json` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
+| Class | Files | Behaviour |
+|-------|-------|-----------|
+| **Immutable** | archives at the rendered layout, `dist/<sha256>.json` | `HEAD` first; a file the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
+| **Rolling** | `dist.json`, `dist.json.sha256` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
+
+The destination is the authority for the immutable class: a file deleted from the store is re-uploaded by the next run instead of being skipped forever by stale local state.
+
+Every upload announces four checksums — `X-Checksum-Md5`, `X-Checksum-Sha1`, `X-Checksum-Sha256` and `X-Checksum-Sha512` — computed from the body being sent. Artifactory records a client checksum per algorithm and reports *"Client did not publish a checksum value"* for each header that was absent, so all four are sent rather than only the one the manifest happens to carry. (Artifactory consumes the first three; SHA-512 is there for stores that take it.)
+
+Uploads run in a fixed order — **archives, then the content-addressed snapshot, then `dist.json`, then `dist.json.sha256` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
+
+!!! note "Why the sidecar trails the manifest"
+
+    Artifactory reads a `PUT` to a `*.sha256` path as a checksum declaration *about the sibling artifact* rather than as a file to store, and answers `404` when that sibling does not exist yet — which, with the sidecar published first, is every first run against a fresh destination. Reordering costs the mid-run guarantee nothing: whichever of the two goes first, a consumer reading between them holds one new file and one old one, and both mismatches fail closed.
 
 !!! note "GitLab generic packages are immutable by default"
 
     Re-publishing the rolling `dist.json` needs duplicate publishing enabled for generic packages on the project. Content-addressed snapshots never collide, so they work either way.
+
+## `concurrency` {#concurrency}
+
+```yaml
+concurrency:
+  max_downloads: 8   # archives fetched at once
+  max_uploads: 4     # archives uploaded at once
+```
+
+Both keys are optional and default as shown. `max_uploads` is lower on purpose: the source is usually a CDN, while the destination is one corporate store answering every request, and it is the side with a rate limit worth respecting.
+
+The knob is throughput only, never correctness. The emitted tree and the run report are identical at any width — archives are planned in manifest order before the first byte moves, and results are folded back in that same order whatever order the transfers finish in.
+
+Two things are deliberately **not** covered by `max_uploads`: the snapshot, `dist.json` and its sidecar are published strictly sequentially, because their order *is* the publish invariant. And a rejected upload stops the pass rather than letting the remaining archives run — a store answering `401` sees at most `max_uploads` attempts, not one per archive.
+
+Peak memory is `max_downloads × largest_archive`: each body is buffered whole before it is written and verified.
 
 ## `trusted_hosts` {#trusted-hosts}
 

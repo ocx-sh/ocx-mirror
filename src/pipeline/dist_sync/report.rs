@@ -10,6 +10,7 @@
 use ocx_lib::cli::{Cell, DataInterface};
 use serde::Serialize;
 
+use super::upload::UploadOutcome;
 use crate::command::package::options::OutputFormat;
 
 /// What the run did, at per-archive granularity.
@@ -75,6 +76,20 @@ pub struct RunCounters {
     pub uploaded: usize,
     /// Files the destination store already held — the HEAD answered 2xx.
     pub already_present: usize,
+}
+
+impl RunCounters {
+    /// Fold one upload outcome into the counters.
+    ///
+    /// A method rather than two `+= 1` sites, because the upload pass counts
+    /// from two places now — a concurrent archive fan-out and the sequential
+    /// publish-order tail — and the two must not drift.
+    pub fn record(&mut self, outcome: UploadOutcome) {
+        match outcome {
+            UploadOutcome::Uploaded => self.uploaded += 1,
+            UploadOutcome::Skipped => self.already_present += 1,
+        }
+    }
 }
 
 impl DistSyncReport {

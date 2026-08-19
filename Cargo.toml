@@ -83,6 +83,12 @@ quick-junit = "0.6"
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
 sha2 = "0.11.0"
+# `dist sync` announces four checksums on every upload, because Artifactory's
+# per-artifact "Client Checksum" is recorded per algorithm and an absent header
+# reads as "client did not publish a checksum value". Both are on the same
+# RustCrypto `digest` 0.11 line as `sha2`, so the four hashers share one trait.
+sha1 = "0.11.0"
+md-5 = "0.11.0"
 hex = "0.4.3"
 tracing = "0.1.44"
 tempfile = "3.27.0"
