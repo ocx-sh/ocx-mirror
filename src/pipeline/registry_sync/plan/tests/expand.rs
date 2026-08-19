@@ -25,7 +25,7 @@ fn every_selected_key_expands_to_a_contained_repository() {
         ]
     );
     assert_eq!(
-        work[0].pointer.as_deref(),
+        work[0].resolved().expect("a plan-time destination").pointer.as_deref(),
         Some("oci://registry.test/mirror/ocx.sh/kitware/cmake")
     );
 }
@@ -44,7 +44,8 @@ fn preserving_resolves_no_pointer_while_the_destination_is_unchanged() {
     let work = expand_source(&spec, &source(&[], &[]), "ocx.sh", &catalog).expect("expand");
 
     assert!(
-        work.iter().all(|package| package.pointer.is_none()),
+        work.iter()
+            .all(|package| package.resolved().expect("a plan-time destination").pointer.is_none()),
         "preserve must resolve no pointer for any package"
     );
     // The landing path is the switch's blind spot on purpose: it is still the
@@ -100,8 +101,88 @@ fn the_source_as_name_is_what_expands_registry() {
     let first = expand_source(&spec, &source(&[], &[]), "ocx.sh", &catalog).expect("expand");
     let renamed = expand_source(&spec, &source(&[], &[]), "internal", &catalog).expect("expand");
 
-    assert_eq!(first[0].physical_repository, "mirror/ocx.sh/kitware/cmake");
-    assert_eq!(renamed[0].physical_repository, "mirror/internal/kitware/cmake");
+    assert_eq!(
+        first[0]
+            .resolved()
+            .expect("a plan-time destination")
+            .physical_repository,
+        "mirror/ocx.sh/kitware/cmake"
+    );
+    assert_eq!(
+        renamed[0]
+            .resolved()
+            .expect("a plan-time destination")
+            .physical_repository,
+        "mirror/internal/kitware/cmake"
+    );
+}
+
+/// A template naming the upstream reference defers: the plan phase holds a
+/// catalog key and the catalog carries no pointers.
+///
+/// A deferred package is deliberately absent from the collision set — its
+/// destination is keyed by upstream identity, so two keys meeting there named
+/// one upstream package rather than two different ones.
+#[test]
+fn an_upstream_keyed_template_defers_expansion_and_joins_no_collision_check() {
+    let spec = preserving("{upstream_host}/{upstream_repository}");
+    let catalog = catalog(&["kitware/cmake", "ninja-build/ninja"]);
+
+    let work = expand_source(&spec, &source(&[], &[]), "ocx.sh", &catalog).expect("expand");
+
+    assert_eq!(names(&work), vec!["kitware/cmake", "ninja-build/ninja"]);
+    assert!(
+        work.iter().all(|package| package.resolved().is_none()),
+        "no package can have a plan-time destination"
+    );
+    assert!(
+        expansions("ocx.sh", &work).is_empty(),
+        "a deferred destination cannot be collision-checked before it exists"
+    );
+}
+
+/// Phase 2's half, against the reference the root turned out to name.
+///
+/// Containment still applies: the composed path is `target.repository` +
+/// the expansion, and this is the value the copy addresses.
+#[test]
+fn the_deferred_half_expands_against_the_upstream_reference() {
+    let spec = preserving("{upstream_host}/{upstream_repository}");
+
+    let resolved = resolve_upstream(
+        &spec,
+        "ocx.sh",
+        "charmbracelet/gum",
+        Upstream {
+            host: "ghcr.io",
+            repository: "ocx-contrib/charmbracelet/gum",
+        },
+    )
+    .expect("a legal upstream reference");
+
+    assert_eq!(
+        resolved.physical_repository,
+        "mirror/ghcr.io/ocx-contrib/charmbracelet/gum"
+    );
+    assert_eq!(
+        resolved.pointer, None,
+        "preserve is what this template exists for: the root keeps the upstream pointer"
+    );
+}
+
+/// A malformed catalog key is still refused at plan time under a deferred
+/// template, rather than surviving to phase 2 as one package failure per key.
+#[test]
+fn a_deferred_template_still_refuses_a_malformed_catalog_key_at_plan_time() {
+    let spec = preserving("{upstream_host}/{upstream_repository}");
+    let catalog = catalog(&["kitware/cmake/extra"]);
+
+    let error = expand_source(&spec, &source(&[], &[]), "ocx.sh", &catalog).expect_err("the key is malformed");
+
+    assert!(
+        format!("{error}").contains("kitware/cmake/extra"),
+        "the refusal must name the key: {error}"
+    );
 }
 
 #[test]

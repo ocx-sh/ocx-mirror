@@ -76,7 +76,16 @@ pub fn digest(seed: &str) -> ocx_lib::oci::Digest {
 /// expansion assertion is actually about.
 pub fn destinations(work: &[PackageWork]) -> Vec<(String, String)> {
     work.iter()
-        .map(|package| (package.name.clone(), package.physical_repository.clone()))
+        .map(|package| {
+            (
+                package.name.clone(),
+                package
+                    .resolved()
+                    .expect("these specs all expand at plan time")
+                    .physical_repository
+                    .clone(),
+            )
+        })
         .collect()
 }
 

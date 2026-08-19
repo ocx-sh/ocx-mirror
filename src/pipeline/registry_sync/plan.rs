@@ -44,7 +44,7 @@ use ocx_lib::oci::Digest;
 use ocx_lib::oci::index::CatalogIndex;
 use sha2::{Digest as _, Sha256};
 
-use super::destination::{DestinationTemplate, Expansion, physical_repository, wire_pointer};
+use super::destination::{DestinationTemplate, Expansion, Upstream, physical_repository, wire_pointer};
 use super::glob::{Glob, package_selected};
 use crate::error::MirrorError;
 use crate::spec::{RegistrySource, RegistrySpec};
@@ -55,6 +55,41 @@ pub struct PackageWork {
     /// The catalog key — the **logical** `<ns>/<pkg>` name, never the physical
     /// repository.
     pub name: String,
+    /// Where its content lands, resolved now or deferred to phase 2.
+    pub destination: PlannedDestination,
+}
+
+impl PackageWork {
+    /// The plan-time destination, or `None` when the template deferred it to
+    /// phase 2.
+    pub fn resolved(&self) -> Option<&ResolvedDestination> {
+        match &self.destination {
+            PlannedDestination::Resolved(resolved) => Some(resolved),
+            PlannedDestination::FromUpstream => None,
+        }
+    }
+}
+
+/// Where one package lands — the plan phase's answer, or its admission that
+/// only phase 2 can give one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlannedDestination {
+    /// Expanded from the catalog key alone, validated and contained.
+    Resolved(ResolvedDestination),
+    /// The template names `{upstream_host}`/`{upstream_repository}`, which live
+    /// in the package's root document. [`resolve_upstream`] expands it in phase
+    /// 2, once that root has been fetched.
+    ///
+    /// Such a package takes **no part in C-015's collision check**: its
+    /// destination is keyed by upstream identity, so two keys that collide
+    /// named one upstream package and the second copy is a duplicate of the
+    /// first, not an overwrite of something else.
+    FromUpstream,
+}
+
+/// A destination the copy can address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDestination {
     /// Where its content lands: `target.repository` + the expanded template,
     /// validated and contained.
     pub physical_repository: String,
@@ -62,7 +97,7 @@ pub struct PackageWork {
     /// republish the source's own pointer verbatim.
     ///
     /// **The whole of `rewrite_pointers`, resolved once.** The mode is read in
-    /// [`expand_source`] and nowhere else; every consumer downstream branches
+    /// [`compose`] and nowhere else; every consumer downstream branches
     /// on this `Option` rather than re-reading the spec, so there is exactly
     /// one place the two deployments diverge.
     pub pointer: Option<String>,
@@ -177,24 +212,88 @@ pub fn expand_source(
         if !package_selected(name, &include, &exclude) {
             continue;
         }
-        let expanded = template.expand(as_name, name).map_err(spec_invalid)?;
-        let repository = physical_repository(&spec.target, &expanded)?;
-        // Not called at all under preserve, rather than called and discarded:
-        // `wire_pointer` validates the `oci://` composition, and validating a
-        // string this run will never publish would fail specs that are
-        // perfectly serviceable. The path the copy *does* use is already
-        // validated by `physical_repository` above.
-        let pointer = spec
-            .rewrite_pointers
-            .then(|| wire_pointer(&spec.target, &repository))
-            .transpose()?;
+        let destination = if template.needs_upstream() {
+            // The key's own shape is still checked, so a malformed catalog key
+            // is refused here rather than surviving to phase 2 as one package
+            // failure per bad key.
+            template
+                .expand(as_name, name, Some(UNKNOWN_UPSTREAM))
+                .map_err(spec_invalid)?;
+            PlannedDestination::FromUpstream
+        } else {
+            PlannedDestination::Resolved(compose(spec, &template, as_name, name, None)?)
+        };
         work.push(PackageWork {
             name: name.clone(),
-            physical_repository: repository,
-            pointer,
+            destination,
         });
     }
     Ok(work)
+}
+
+/// A stand-in that makes the plan-phase key check above independent of the
+/// upstream values it cannot know. Never composed into a path: the branch
+/// discards the expansion.
+const UNKNOWN_UPSTREAM: Upstream<'static> = Upstream {
+    host: "upstream",
+    repository: "upstream",
+};
+
+/// Expand one key, contain it under `target.repository`, and compose the
+/// pointer the mode calls for.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecInvalid`] (exit 65) for a key that fails the OCI
+/// repository grammar, escapes the configured prefix, or is not
+/// `<namespace>/<package>`.
+fn compose(
+    spec: &RegistrySpec,
+    template: &DestinationTemplate,
+    as_name: &str,
+    name: &str,
+    upstream: Option<Upstream<'_>>,
+) -> Result<ResolvedDestination, MirrorError> {
+    let expanded = template.expand(as_name, name, upstream).map_err(spec_invalid)?;
+    let repository = physical_repository(&spec.target, &expanded)?;
+    // Not called at all under preserve, rather than called and discarded:
+    // `wire_pointer` validates the `oci://` composition, and validating a
+    // string this run will never publish would fail specs that are
+    // perfectly serviceable. The path the copy *does* use is already
+    // validated by `physical_repository` above.
+    let pointer = spec
+        .rewrite_pointers
+        .then(|| wire_pointer(&spec.target, &repository))
+        .transpose()?;
+    Ok(ResolvedDestination {
+        physical_repository: repository,
+        pointer,
+    })
+}
+
+/// Phase 2's half of [`expand_source`]: expand a deferred template against the
+/// upstream reference the package's root turned out to name (C-011).
+///
+/// Re-parses `destination:` rather than carrying the parsed template through
+/// the plan — the string was already parsed at spec load, so a failure here is
+/// impossible in practice, and one string scan per package is cheaper than a
+/// field every unrelated consumer of [`SourcePlan`] would have to thread.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecInvalid`] (exit 65) when the composed repository is not a
+/// legal OCI path or escapes `target.repository` — which for this template
+/// means the *upstream* pointer is unusable as a path, e.g. a host carrying a
+/// port. The caller aggregates it as one package's failure (C-040) rather than
+/// aborting the run over one bad upstream root.
+pub fn resolve_upstream(
+    spec: &RegistrySpec,
+    as_name: &str,
+    name: &str,
+    upstream: Upstream<'_>,
+) -> Result<ResolvedDestination, MirrorError> {
+    let template = DestinationTemplate::parse(&spec.destination).map_err(spec_invalid)?;
+    compose(spec, &template, as_name, name, Some(upstream))
 }
 
 /// One [`Expansion`] per unit of package work, for whole-run collision
@@ -207,10 +306,12 @@ pub fn expand_source(
 /// second source silently overwrites the first.
 pub fn expansions(as_name: &str, work: &[PackageWork]) -> Vec<Expansion> {
     work.iter()
-        .map(|package| Expansion {
-            source: as_name.to_string(),
-            catalog_key: package.name.clone(),
-            repository: package.physical_repository.clone(),
+        .filter_map(|package| {
+            Some(Expansion {
+                source: as_name.to_string(),
+                catalog_key: package.name.clone(),
+                repository: package.resolved()?.physical_repository.clone(),
+            })
         })
         .collect()
 }

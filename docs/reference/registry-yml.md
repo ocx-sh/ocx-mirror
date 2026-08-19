@@ -153,17 +153,39 @@ The same list is also the exemption for `index`'s own `https`-only rule above �
 destination: "{registry}/{namespace}/{package}"
 ```
 
-Plain text substitution — no expressions, no conditionals, no functions. Three placeholders are defined:
+Plain text substitution — no expressions, no conditionals, no functions. Five placeholders are defined:
 
 | Placeholder | Expands to |
 |---|---|
 | `{registry}` | the source's [`as`](#as) value |
 | `{namespace}` | the first segment of the package name |
 | `{package}` | the second segment |
+| `{upstream_host}` | the registry host the package's index root points at, e.g. `ghcr.io` |
+| `{upstream_repository}` | the repository path under that host, e.g. `ocx-contrib/charmbracelet/gum` |
 
 Anything else in braces is an error at load time. The result is appended to `target.repository`, so a package `kubernetes/kubectl` from a source with `as: ocx.sh` lands at `artifactory.corp.example/ocx-mirror/ocx.sh/kubernetes/kubectl`.
 
-`{registry}` is **required when more than one source is configured** — without it, two sources publishing the same package name would collide. A single-source spec may omit it. Adding a second source to a spec that omits it turns that spec invalid, which is the point.
+`{registry}` is **required when more than one source is configured** — without it, two sources publishing the same package name would collide. A single-source spec may omit it. Adding a second source to a spec that omits it turns that spec invalid, which is the point. `{upstream_repository}` satisfies the same requirement: the destination is then keyed by upstream identity, so two sources meeting on one repository named the *same upstream package* and the second copy is a duplicate rather than an overwrite.
+
+### The upstream placeholders {#upstream-placeholders}
+
+The catalog key and the upstream repository are **not the same string**. `ocx.sh` publishes `charmbracelet/gum` whose root points at `ghcr.io/ocx-contrib/charmbracelet/gum` — a different namespace, and one segment longer.
+
+That difference decides whether a [preserve-pointer](#rewrite-pointers) mirror is reachable at all. A client resolving a preserved root asks ocx's `[mirrors]` map, which rewrites the reference to `<path_prefix>/<upstream repository>` and nothing else. So the landing path must **end in the upstream repository**, or no `path_prefix` an operator could write resolves to it:
+
+```yaml
+destination: "{upstream_host}/{upstream_repository}"
+```
+
+```title="artifactory.corp.example/ocx-mirror/ghcr.io/ocx-contrib/charmbracelet/gum"
+```
+
+The `{upstream_host}` segment is what makes one prefix hold several upstream registries side by side, each with its own `[mirrors]` entry pointing one level deeper. Mirroring a single upstream host needs only `{upstream_repository}`.
+
+These two are read from each package's **root document**, which the catalog does not carry — so unlike the other three they are expanded per package during the copy, not in the pre-flight. Two consequences:
+
+- A destination collision between two such packages is not reported up front. It cannot be a silent overwrite either: two keys landing on one repository named one upstream package.
+- An upstream host carrying a **port** (`registry.internal:5000`) is not a legal OCI path component. The composition is refused for that package, with the offending path in the message. It is not slugged into one — a `:` → `_` mapping would be an identity every consumer of the mirror would then have to know.
 
 Two packages that would expand to the same destination are refused before anything is copied, with both package names in the error.
 
@@ -191,9 +213,12 @@ There are two ways to point a fleet at a mirror, and this key chooses between th
     [registries."ocx.sh"]
     index = "https://pages.corp.example/ocx.sh"
 
-    [mirrors."ocx.sh"]
-    registry = "https://artifactory.corp.example/ocx-mirror"
+    # Keyed by the host the package roots name — NOT by the index name above.
+    [mirrors."ghcr.io"]
+    registry = "https://artifactory.corp.example/ocx-mirror/ghcr.io"
     ```
+
+    That `registry` value has to resolve to where the copy actually landed, which is what [`{upstream_host}`/`{upstream_repository}`](#upstream-placeholders) in `destination` is for. A template over `{namespace}`/`{package}` lands the copy under the *catalog* key, which no `[mirrors]` prefix reaches; the mirror warns per package when it notices.
 
     Package identity, digests and cache paths stay keyed to `ocx.sh`. A machine that later loses the mirror entry falls back to upstream and finds the same content under the same names, and a package pinned by digest resolves identically either way. This is the shape an Artifactory or Nexus remote repository already implements, which is why it is the default.
 

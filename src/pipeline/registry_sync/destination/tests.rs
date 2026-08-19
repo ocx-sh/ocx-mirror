@@ -29,7 +29,7 @@ fn target(repository: &str) -> Target {
 fn destination(template: &str, registry_as: &str, prefix: &str, catalog_key: &str) -> Result<String, String> {
     let template = DestinationTemplate::parse(template).map_err(|error| error.to_string())?;
     let expanded = template
-        .expand(registry_as, catalog_key)
+        .expand(registry_as, catalog_key, None)
         .map_err(|error| error.to_string())?;
     physical_repository(&target(prefix), &expanded).map_err(|error| error.to_string())
 }
@@ -41,7 +41,9 @@ fn parse_accepts_the_three_placeholders_and_the_literals_between_them() {
     let template = DestinationTemplate::parse("{registry}/{namespace}/{package}").expect("the canonical template");
 
     assert_eq!(
-        template.expand("ocx.sh", "kitware/cmake").expect("a well-formed key"),
+        template
+            .expand("ocx.sh", "kitware/cmake", None)
+            .expect("a well-formed key"),
         "ocx.sh/kitware/cmake"
     );
     assert!(template.uses_registry());
@@ -111,6 +113,98 @@ fn uses_registry_is_false_when_the_placeholder_is_absent() {
     }
 }
 
+// ── C-011 — the upstream placeholders ───────────────────────────────────────
+
+/// `{upstream_host}`/`{upstream_repository}` substitute the reference the
+/// package's root points at, not its catalog key.
+///
+/// This is the shape that makes a preserved-pointer mirror reachable: ocx's
+/// `[mirrors]` map asks the mirror for `<path_prefix>/<upstream repository>`,
+/// so the landing path has to end in exactly that.
+#[test]
+fn the_upstream_placeholders_substitute_the_reference_the_root_points_at() {
+    let template =
+        DestinationTemplate::parse("{upstream_host}/{upstream_repository}").expect("the upstream-keyed template");
+
+    let expanded = template
+        .expand(
+            "ocx.sh",
+            "charmbracelet/gum",
+            Some(Upstream {
+                host: "ghcr.io",
+                repository: "ocx-contrib/charmbracelet/gum",
+            }),
+        )
+        .expect("a well-formed key");
+
+    assert_eq!(expanded, "ghcr.io/ocx-contrib/charmbracelet/gum");
+    assert!(template.needs_upstream(), "the template cannot expand at plan time");
+    assert!(template.uses_upstream_repository());
+}
+
+/// `needs_upstream` covers `{upstream_host}` alone, but
+/// `uses_upstream_repository` does not — the two predicates answer different
+/// questions and the host-only template is where they diverge.
+#[test]
+fn the_host_alone_defers_expansion_without_keying_the_destination_upstream() {
+    let template = DestinationTemplate::parse("{upstream_host}/{namespace}/{package}").expect("a host-keyed template");
+
+    assert!(
+        template.needs_upstream(),
+        "the host is only known once the root is read"
+    );
+    assert!(
+        !template.uses_upstream_repository(),
+        "the path still ends in the catalog key, so two sources can still collide"
+    );
+}
+
+/// Expanding an upstream template without an [`Upstream`] is refused, never
+/// silently rendered as an empty segment.
+///
+/// The plan phase gates on `needs_upstream`, so this is the guard that keeps
+/// that gate from being load-bearing: a caller that forgets it gets an error
+/// naming the template, not a destination missing a path segment.
+#[test]
+fn expanding_an_upstream_template_without_the_reference_is_refused() {
+    let error = DestinationTemplate::parse("{upstream_repository}")
+        .expect("the template parses")
+        .expand("ocx.sh", "kitware/cmake", None)
+        .expect_err("no upstream was supplied");
+
+    assert!(
+        matches!(error, TemplateError::UpstreamUnavailable { .. }),
+        "the refusal must name the cause: {error:?}"
+    );
+}
+
+/// An upstream host carrying a port is refused by the OCI grammar rather than
+/// slugged into one.
+///
+/// The composition is what refuses it, so the message an operator sees names
+/// the whole composed path. Documented behaviour, not an oversight: a `:` →
+/// `_` mapping would be an identity every consumer of the mirror would then
+/// have to know.
+#[test]
+fn an_upstream_host_with_a_port_is_refused_rather_than_slugged() {
+    let expanded = DestinationTemplate::parse("{upstream_host}/{upstream_repository}")
+        .expect("the template parses")
+        .expand(
+            "ocx.sh",
+            "kitware/cmake",
+            Some(Upstream {
+                host: "registry.internal:5000",
+                repository: "kitware/cmake",
+            }),
+        )
+        .expect("expansion itself substitutes verbatim");
+
+    assert!(
+        physical_repository(&target("mirror"), &expanded).is_err(),
+        "a port is not a legal OCI path component"
+    );
+}
+
 // ── C-012 — expansion ───────────────────────────────────────────────────────
 
 #[test]
@@ -119,7 +213,9 @@ fn expand_substitutes_plainly_and_keeps_literal_text_verbatim() {
         DestinationTemplate::parse("tools/{registry}-{namespace}/{package}").expect("a literal-rich template");
 
     assert_eq!(
-        template.expand("ocx.sh", "kitware/cmake").expect("a well-formed key"),
+        template
+            .expand("ocx.sh", "kitware/cmake", None)
+            .expect("a well-formed key"),
         "tools/ocx.sh-kitware/cmake"
     );
 }
@@ -138,7 +234,7 @@ fn expand_refuses_a_key_that_is_not_namespace_slash_package() {
     ] {
         let Err(error) = DestinationTemplate::parse("{namespace}/{package}")
             .expect("the template parses")
-            .expand("ocx.sh", key)
+            .expand("ocx.sh", key, None)
         else {
             panic!("`{key}` ({shape}) is not '<namespace>/<package>' and must be refused");
         };
@@ -158,11 +254,13 @@ fn expand_checks_the_key_even_when_the_template_ignores_it() {
     let template = DestinationTemplate::parse("mirror/{registry}").expect("a key-free template");
 
     assert!(
-        template.expand("ocx.sh", "a/b/c").is_err(),
+        template.expand("ocx.sh", "a/b/c", None).is_err(),
         "a malformed key must be refused even when nothing substitutes it"
     );
     assert_eq!(
-        template.expand("ocx.sh", "kitware/cmake").expect("a well-formed key"),
+        template
+            .expand("ocx.sh", "kitware/cmake", None)
+            .expect("a well-formed key"),
         "mirror/ocx.sh"
     );
 }
@@ -177,7 +275,7 @@ fn expand_repairs_nothing_it_substitutes() {
 
     assert_eq!(
         template
-            .expand("ocx.sh", "Foo/Bar")
+            .expand("ocx.sh", "Foo/Bar", None)
             .expect("expansion does not judge charset"),
         "Foo/Bar",
         "uppercase must survive expansion verbatim so the grammar guard can refuse it"
@@ -275,7 +373,7 @@ fn the_registry_expansion_is_validated_on_the_composed_value_too() {
 fn an_empty_expansion_cannot_land_on_the_prefix_itself() {
     let expanded = DestinationTemplate::parse("")
         .expect("an empty template parses")
-        .expand("ocx.sh", "kitware/cmake")
+        .expand("ocx.sh", "kitware/cmake", None)
         .expect("a well-formed key");
     assert_eq!(expanded, "");
 
@@ -556,7 +654,7 @@ fn a_refused_key_is_escaped_into_every_message_that_names_it() {
 
     // C-012 — the malformed-key refusal, the earliest site of all.
     let malformed = template
-        .expand("ocx.sh", forged)
+        .expand("ocx.sh", forged, None)
         .expect_err("a single-segment key is refused")
         .to_string();
     assert!(
@@ -565,7 +663,7 @@ fn a_refused_key_is_escaped_into_every_message_that_names_it() {
     );
 
     let spoofed = template
-        .expand("ocx.sh", "cmake\u{202e}")
+        .expand("ocx.sh", "cmake\u{202e}", None)
         .expect_err("still a single-segment key")
         .to_string();
     assert!(
