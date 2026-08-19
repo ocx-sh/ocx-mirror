@@ -419,6 +419,64 @@ def test_the_destination_is_derived_from_the_catalog_key_not_the_physical_reposi
     assert verify_root_repository(output / SOURCE_AS, package, destination_pointer(mirror_registry, package)) == []
 
 
+def test_an_upstream_keyed_destination_lands_the_copy_where_the_mirror_map_looks(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """C-011: `{upstream_repository}` lands the copy under the *upstream* path, not the catalog key.
+
+    The inverse of the test above, and the shape a preserve-pointer mirror
+    needs. A preserved root names the upstream reference, so a client resolves
+    it through ocx's `[mirrors]` map — which asks the mirror for
+    `<path_prefix>/<upstream repository>` and nothing else. Under the default
+    template the copy lands under the catalog key instead, where no prefix
+    reaches it.
+
+    Expanding it needs the package's root document, which the catalog does not
+    carry, so this also covers the deferred half of the plan phase.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    physical_path = f"ocx-contrib/{package}"
+    digest, body = seed_version(ocx_binary, registry, physical_path, "3.31.0", tmp_path / "push")
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"3.31.0": digest}, {digest: body}, physical_path=physical_path)],
+    )
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        destination="{upstream_repository}",
+        rewrite_pointers=False,
+        sources=[source_spec(registry, published_index_server.url())],
+    )
+
+    result = run_sync(sync, spec)
+    assert result.returncode == 0, outcome(result)
+
+    landed = f"{TARGET_PREFIX}/{physical_path}"
+    assert not manifest_absent(mirror_registry, landed, "3.31.0"), (
+        f"nothing landed at {landed}, where `[mirrors]` rewrites the preserved pointer to"
+    )
+    assert fetch_manifest(mirror_registry, landed, "3.31.0")[0] == digest
+    assert manifest_absent(mirror_registry, destination_repository(package), "3.31.0"), (
+        "the catalog-key path is what this template exists to avoid"
+    )
+    assert verify_root_repository(output / SOURCE_AS, package, f"oci://{registry}/{physical_path}") == [], (
+        "preserve must republish the upstream pointer the mirror map is keyed on"
+    )
+
+
 # ---------------------------------------------------------------------------
 # S-008 / S-009 — the tag lane: verbatim, and never classified
 # ---------------------------------------------------------------------------

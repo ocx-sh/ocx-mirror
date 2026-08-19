@@ -37,13 +37,22 @@ const AS_NAME: &str = "ocx.sh";
 /// The **logical** catalog key the tree is keyed on at both ends —
 /// deliberately not the physical repository below.
 const PACKAGE: &str = "kitware/cmake";
-/// Where the copied content actually lands.
-const PHYSICAL: &str = "mirror/ocx.sh/kitware/cmake";
-/// The rewritten `oci://` pointer the mirrored root must carry.
+/// The rewritten `oci://` pointer the mirrored root must carry — over
+/// `mirror/ocx.sh/kitware/cmake`, where the copied content actually lands.
 const POINTER: &str = "oci://registry.test/mirror/ocx.sh/kitware/cmake";
 /// The physical repository the *source* root points at, which the rewrite
 /// replaces.
 const UPSTREAM: &str = "oci://ghcr.io/ocx-contrib/kitware/cmake";
+
+/// The publish identity every test here writes under: the one subtree, the one
+/// catalog key, and whichever pointer the mode under test calls for.
+fn publish_target(pointer: Option<&str>) -> PublishTarget<'_> {
+    PublishTarget {
+        as_name: AS_NAME,
+        name: PACKAGE,
+        pointer,
+    }
+}
 
 /// A store over `<dir>/public`, locks redirected to `<dir>/locks` — outside the
 /// served tree, which is what C-027 exists to guarantee.
@@ -56,25 +65,6 @@ async fn store_at(directory: &Path) -> (IndexStore, std::path::PathBuf) {
         index_write::build_index_store(&output, &directory.join("locks")),
         output,
     )
-}
-
-/// The work item for [`PACKAGE`], as the plan phase resolves it under
-/// `rewrite_pointers: true`.
-fn package_work() -> plan::PackageWork {
-    plan::PackageWork {
-        name: PACKAGE.to_string(),
-        physical_repository: PHYSICAL.to_string(),
-        pointer: Some(POINTER.to_string()),
-    }
-}
-
-/// [`package_work`] as the plan phase resolves it under the default
-/// (`rewrite_pointers: false`): no pointer, so the source's own is republished.
-fn preserving_work() -> plan::PackageWork {
-    plan::PackageWork {
-        pointer: None,
-        ..package_work()
-    }
 }
 
 /// A minimal, valid OCI image index and the digest of its own bytes, so
@@ -209,8 +199,7 @@ async fn preserving_republishes_the_upstream_pointer_byte_for_byte() {
     let source = root_document(&[("3.28.1", &release)]);
     write_package(
         &store,
-        AS_NAME,
-        &preserving_work(),
+        publish_target(None),
         &source,
         None,
         &confirmed(&["3.28.1"]),
@@ -242,8 +231,7 @@ async fn rewriting_replaces_the_upstream_pointer_with_the_destination() {
     let (release, bytes) = image_index("3.28.1");
     write_package(
         &store,
-        AS_NAME,
-        &package_work(),
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &release)]),
         None,
         &confirmed(&["3.28.1"]),
@@ -272,14 +260,12 @@ async fn rewriting_replaces_the_upstream_pointer_with_the_destination() {
 async fn a_tag_whose_copy_failed_keeps_the_digest_the_last_good_run_published() {
     let directory = tempfile::TempDir::new().expect("temp dir");
     let (store, _output) = store_at(directory.path()).await;
-    let package = package_work();
 
     let (first_release, first_bytes) = image_index("3.28.1");
     let (second_release, second_bytes) = image_index("3.29.0");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &first_release), ("3.29.0", &second_release)]),
         None,
         &confirmed(&["3.28.1", "3.29.0"]),
@@ -305,8 +291,7 @@ async fn a_tag_whose_copy_failed_keeps_the_digest_the_last_good_run_published() 
     let (second_moved, _never_copied) = image_index("3.29.0-rebuilt");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &first_moved), ("3.29.0", &second_moved)]),
         Some(&after_first),
         &confirmed(&["3.28.1"]),
@@ -338,13 +323,11 @@ async fn a_tag_whose_copy_failed_keeps_the_digest_the_last_good_run_published() 
 async fn a_refused_dispatch_object_leaves_no_root_document_behind() {
     let directory = tempfile::TempDir::new().expect("temp dir");
     let (store, _output) = store_at(directory.path()).await;
-    let package = package_work();
 
     let (bare, bare_bytes) = image_manifest();
     let error = write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &bare)]),
         None,
         &confirmed(&["3.28.1"]),
@@ -371,8 +354,7 @@ async fn a_refused_dispatch_object_leaves_no_root_document_behind() {
     let (index, index_bytes) = image_index("3.28.1");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &index)]),
         None,
         &confirmed(&["3.28.1"]),
@@ -397,13 +379,11 @@ async fn a_refused_dispatch_object_leaves_no_root_document_behind() {
 async fn a_published_package_lands_its_object_root_catalog_entry_and_config() {
     let directory = tempfile::TempDir::new().expect("temp dir");
     let (store, output) = store_at(directory.path()).await;
-    let package = package_work();
 
     let (release, release_bytes) = image_index("3.28.1");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &release)]),
         None,
         &confirmed(&["3.28.1"]),
@@ -466,13 +446,11 @@ async fn a_published_package_lands_its_object_root_catalog_entry_and_config() {
 async fn an_unreadable_destination_root_fails_the_package_without_truncating_it() {
     let directory = tempfile::TempDir::new().expect("temp dir");
     let (store, _output) = store_at(directory.path()).await;
-    let package = package_work();
 
     let (release, release_bytes) = image_index("3.28.1");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &release)]),
         None,
         &confirmed(&["3.28.1"]),
@@ -485,8 +463,7 @@ async fn an_unreadable_destination_root_fails_the_package_without_truncating_it(
     let (moved, moved_bytes) = image_index("3.28.1-rebuilt");
     let error = write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &moved)]),
         Some(b"{ this is not a root document"),
         &confirmed(&["3.28.1"]),
@@ -509,13 +486,11 @@ async fn an_unreadable_destination_root_fails_the_package_without_truncating_it(
 async fn nothing_confirmed_republishes_the_destinations_own_tags() {
     let directory = tempfile::TempDir::new().expect("temp dir");
     let (store, _output) = store_at(directory.path()).await;
-    let package = package_work();
 
     let (release, release_bytes) = image_index("3.28.1");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &release)]),
         None,
         &confirmed(&["3.28.1"]),
@@ -528,8 +503,7 @@ async fn nothing_confirmed_republishes_the_destinations_own_tags() {
     let (moved, _never_copied) = image_index("3.28.1-rebuilt");
     write_package(
         &store,
-        AS_NAME,
-        &package,
+        publish_target(Some(POINTER)),
         &root_document(&[("3.28.1", &moved)]),
         Some(&after_first),
         &confirmed(&[]),

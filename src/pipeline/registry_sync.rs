@@ -63,7 +63,7 @@ use ocx_lib::oci::index::{CatalogIndex, OciIndex, OciIndexConfig, parse_physical
 use ocx_lib::oci::{Algorithm, ClientBuilder, Digest, Index, Reference};
 use tokio::sync::Semaphore;
 
-use self::plan::{PackageWork, SourcePlan};
+use self::plan::{PackageWork, PlannedDestination, SourcePlan};
 use self::report::{PackageOutcome, PackageReport, RegistrySyncReport, RunCounters, SourceReport};
 use crate::command::registry::options::RegistrySyncOptions;
 use crate::error::MirrorError;
@@ -554,9 +554,6 @@ async fn sync_package(
     }
 
     let destination_root = local_root.as_ref().map(|read| read.bytes.as_slice());
-    if let Some(pointer) = package.pointer.as_deref() {
-        index_write::warn_on_pointer_drift(destination_root, &package.name, pointer);
-    }
 
     // Re-parsed rather than threaded out of `validate_root_host`, so that
     // function stays the single SSRF guard on this path instead of doubling as
@@ -568,6 +565,31 @@ async fn sync_package(
         ))
     })?;
 
+    // A `{upstream_host}`/`{upstream_repository}` template expands here and
+    // nowhere else — the plan phase holds the catalog key alone, and this is
+    // the first line at which the upstream reference exists. Its refusal is one
+    // package's failure (C-040): an upstream pointer that cannot be composed
+    // into a path is that upstream's fault, not the spec's, and aborting would
+    // let any source end a whole run.
+    let destination = match &package.destination {
+        PlannedDestination::Resolved(resolved) => resolved.clone(),
+        PlannedDestination::FromUpstream => {
+            let upstream = destination::Upstream {
+                host: &source_registry,
+                repository: &source_repository,
+            };
+            match plan::resolve_upstream(spec, as_name, &package.name, upstream) {
+                Ok(resolved) => resolved,
+                Err(MirrorError::SpecInvalid(messages)) => return Ok(PackageStep::Failed(messages.join("; "))),
+                Err(other) => return Err(other),
+            }
+        }
+    };
+
+    if let Some(pointer) = destination.pointer.as_deref() {
+        index_write::warn_on_pointer_drift(destination_root, &package.name, pointer);
+    }
+
     // Seed the source client for the host the pointer names, before the first
     // request addressed to it. `build_source_client` seeded the *logical*
     // `registry:`; everything below dials this one.
@@ -578,12 +600,12 @@ async fn sync_package(
     // under preserve it is upstream's and reachability is. Placed here rather
     // than in the plan phase because the upstream repository only exists once
     // the root has been fetched — plan time sees the catalog key alone.
-    if package.pointer.is_none() {
+    if destination.pointer.is_none() {
         destination::warn_on_mirror_path_mismatch(
             &package.name,
             &source_registry,
             &source_repository,
-            &package.physical_repository,
+            &destination.physical_repository,
         );
     }
 
@@ -602,7 +624,7 @@ async fn sync_package(
             Reference::with_tag(source_registry.clone(), source_repository.clone(), entry.tag.clone());
         let destination_reference = policy.address(
             &spec.target.registry,
-            &package.physical_repository,
+            &destination.physical_repository,
             &entry.tag,
             &entry.content,
         );
@@ -664,7 +686,7 @@ async fn sync_package(
         &Reference::with_tag(source_registry, source_repository, DESCRIPTION_TAG.to_string()),
         &Reference::with_tag(
             spec.target.registry.clone(),
-            package.physical_repository.clone(),
+            destination.physical_repository.clone(),
             DESCRIPTION_TAG.to_string(),
         ),
         policy,
@@ -685,8 +707,11 @@ async fn sync_package(
 
     if let Err(error) = write_package(
         store,
-        as_name,
-        package,
+        PublishTarget {
+            as_name,
+            name: &package.name,
+            pointer: destination.pointer.as_deref(),
+        },
         &root_bytes,
         destination_root,
         &confirmed,
@@ -749,6 +774,20 @@ fn record_tag(
     Ok(())
 }
 
+/// Which subtree, which package, and the pointer its root must carry — the
+/// identity half of one publish.
+///
+/// A struct rather than three parameters: [`write_package`] already carries
+/// four byte-level arguments, and these three travel together everywhere.
+struct PublishTarget<'a> {
+    /// The source's `as:` value — its output subtree.
+    as_name: &'a str,
+    /// The catalog key.
+    name: &'a str,
+    /// The `oci://` pointer to write, or `None` to republish the source's own.
+    pointer: Option<&'a str>,
+}
+
 /// The index-tree writes for one package, in C-030's order.
 ///
 /// # Errors
@@ -758,8 +797,7 @@ fn record_tag(
 /// failure (whole-run abort) — [`write_failure`] is what tells them apart.
 async fn write_package(
     store: &IndexStore,
-    as_name: &str,
-    package: &PackageWork,
+    target: PublishTarget<'_>,
     root_bytes: &[u8],
     destination_root: Option<&[u8]>,
     confirmed: &BTreeSet<String>,
@@ -773,7 +811,8 @@ async fn write_package(
     // package, and copying it to change container shape would double the one
     // buffer that sits outside C-026's `max_blobs × largest_blob` ceiling —
     // for a callee that only iterates it.
-    index_write::write_dispatch_objects(store, as_name, &package.name, objects).await?;
+    let as_name = target.as_name;
+    index_write::write_dispatch_objects(store, as_name, target.name, objects).await?;
 
     // `Value` end to end so forward-compat fields ride through both sides
     // (C-047), then one key mutated (C-028).
@@ -786,7 +825,7 @@ async fn write_package(
     // alongside every forward-compat field. Preserving is the absence of the
     // mutation, never a second mutation writing the upstream value back.
     let serialized = serialize_root(&merged);
-    let rewritten = match package.pointer.as_deref() {
+    let rewritten = match target.pointer {
         Some(pointer) => index_write::rewrite_root(&serialized, pointer)?,
         None => serialized,
     };
@@ -797,7 +836,7 @@ async fn write_package(
     let mut transaction = store.begin_catalog_transaction(as_name).await.map_err(|error| {
         MirrorError::IndexWriteError(format!("cannot open the catalog transaction for '{as_name}': {error}"))
     })?;
-    index_write::write_root(&mut transaction, &package.name, &rewritten).await?;
+    index_write::write_root(&mut transaction, target.name, &rewritten).await?;
     transaction.commit().await.map_err(|error| {
         MirrorError::IndexWriteError(format!("cannot commit the catalog for source '{as_name}': {error}"))
     })?;

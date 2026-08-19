@@ -153,6 +153,51 @@ sources:
     );
 }
 
+/// `{upstream_repository}` satisfies the multi-source rule that `{registry}`
+/// otherwise carries.
+///
+/// The destination is then keyed by upstream identity: two sources meeting on
+/// one repository named the same upstream package, so the second copy is a
+/// duplicate rather than the overwrite the rule exists to prevent.
+/// `{upstream_host}` alone does **not** qualify — two sources over one host
+/// still collide on a shared catalog key — and that half is what makes this a
+/// rule about the repository rather than about deferral.
+#[test]
+fn upstream_repository_answers_the_multi_source_rule_but_upstream_host_does_not() {
+    let two_sources = |destination: &str| {
+        format!(
+            r#"
+target:
+  registry: localhost:5002
+  repository: mirror
+output: public
+destination: "{destination}"
+sources:
+  - registry: localhost:5001
+    index: https://index.example/
+    as: upstream
+  - registry: localhost:5003
+    index: https://other.example/
+    as: other
+"#
+        )
+    };
+
+    assert_eq!(
+        validate(&two_sources("{upstream_host}/{upstream_repository}")),
+        Vec::<String>::new(),
+        "an upstream-keyed destination cannot have two sources overwrite one another"
+    );
+
+    let errors = validate(&two_sources("{upstream_host}/{namespace}/{package}"));
+    assert_eq!(errors.len(), 1, "only the placeholder rule may fire: {errors:?}");
+    assert!(
+        errors[0].contains("{upstream_repository}"),
+        "the message must offer the placeholder that would fix it: {}",
+        errors[0]
+    );
+}
+
 // ── Reporting shape ─────────────────────────────────────────────────────────
 
 /// One run, one report: an operator fixing a spec should not have to re-run to

@@ -54,8 +54,16 @@ pub struct RegistrySpec {
     /// its own `<output>/<as>/` subtree (`config.json`, `c/`, `p/`).
     pub output: PathBuf,
 
-    /// Destination repository template over `{registry}`, `{namespace}` and
-    /// `{package}` — plain substitution, no template engine (C-011).
+    /// Destination repository template over `{registry}`, `{namespace}`,
+    /// `{package}`, `{upstream_host}` and `{upstream_repository}` — plain
+    /// substitution, no template engine (C-011).
+    ///
+    /// The last two name the upstream reference the package's root points at,
+    /// and exist for [`Self::rewrite_pointers`]`: false`: a client then reaches
+    /// the copy through ocx's `[mirrors]` map, which asks the mirror for
+    /// `<path_prefix>/<upstream repository>` and nothing else. A destination
+    /// that does not end in the upstream repository is unreachable through
+    /// every prefix an operator could configure.
     pub destination: String,
 
     /// Whether the mirrored index points at [`Self::target`], or keeps the
@@ -234,10 +242,14 @@ impl RegistrySpec {
         // sources' same-named packages apart — without it every such pair
         // reaches C-015 as a collision instead of being impossible by
         // construction.
-        if self.sources.len() > 1 && !template.uses_registry() {
+        // `{upstream_repository}` answers the same requirement differently:
+        // the destination is then keyed by upstream identity, so two sources
+        // meeting on one repository named the same upstream package and the
+        // second copy is a duplicate rather than an overwrite.
+        if self.sources.len() > 1 && !template.uses_registry() && !template.uses_upstream_repository() {
             errors.push(format!(
-                "destination: '{}' must contain {{registry}} when the spec lists more than one source, \
-                 or two sources publishing the same package name land on one repository",
+                "destination: '{}' must contain {{registry}} or {{upstream_repository}} when the spec lists \
+                 more than one source, or two sources publishing the same package name land on one repository",
                 self.destination
             ));
         }

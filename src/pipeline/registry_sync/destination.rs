@@ -24,10 +24,17 @@ use crate::spec::Target;
 
 /// A parsed `destination:` template (C-011).
 ///
-/// Plain substitution over exactly three placeholders — `{registry}`,
-/// `{namespace}`, `{package}`. No template engine: three names do not justify
-/// a dependency, and a closed set is what lets an unknown placeholder be an
-/// error instead of an empty string.
+/// Plain substitution over exactly five placeholders — `{registry}`,
+/// `{namespace}`, `{package}`, `{upstream_host}` and `{upstream_repository}`.
+/// No template engine: five names do not justify a dependency, and a closed
+/// set is what lets an unknown placeholder be an error instead of an empty
+/// string.
+///
+/// The first three are known from the catalog alone, so a template over them
+/// expands in the plan phase and every destination is collision-checked before
+/// a byte moves. The last two come out of the package's **root document** and
+/// are therefore only knowable once that root has been fetched — see
+/// [`Self::needs_upstream`].
 #[derive(Debug, Clone)]
 pub struct DestinationTemplate {
     /// The template as written — the value's identity in a `Debug` line, and
@@ -44,6 +51,28 @@ enum TemplateSegment {
     Registry,
     Namespace,
     Package,
+    UpstreamHost,
+    UpstreamRepository,
+}
+
+/// The upstream reference a package's root points at, as
+/// `parse_physical_repository` split it.
+///
+/// The two halves `{upstream_host}` and `{upstream_repository}` substitute —
+/// and the pair every `[mirrors]` rewrite is expressed over, which is why they
+/// travel together rather than as two loose `&str` arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct Upstream<'a> {
+    /// The registry host, e.g. `ghcr.io`.
+    ///
+    /// Substituted **verbatim**, never slugged: a host carrying a port
+    /// (`registry:5000`) is not a legal OCI path component and
+    /// [`physical_repository`] refuses the composition, which is a better
+    /// answer than inventing a `:` → `_` mapping every consumer would then
+    /// have to know.
+    pub host: &'a str,
+    /// The repository path under it, e.g. `ocx-contrib/charmbracelet/gum`.
+    pub repository: &'a str,
 }
 
 /// Why a `destination:` template or a catalog key was refused (C-011, C-012).
@@ -57,6 +86,11 @@ pub enum TemplateError {
     /// A catalog key that is not `<namespace>/<package>`: no `/`, an empty
     /// segment, or more than two segments. Refused, never repaired.
     MalformedCatalogKey { key: String },
+    /// [`DestinationTemplate::expand`] was called without an [`Upstream`] for a
+    /// template that names one. Callers gate on
+    /// [`DestinationTemplate::needs_upstream`]; this keeps `expand` total
+    /// rather than making that gate load-bearing for memory safety.
+    UpstreamUnavailable { template: String },
 }
 
 impl std::fmt::Display for TemplateError {
@@ -65,7 +99,7 @@ impl std::fmt::Display for TemplateError {
             Self::UnknownPlaceholder { name } => write!(
                 f,
                 "unknown placeholder '{{{name}}}' in destination template; the known placeholders are \
-                 {{registry}}, {{namespace}} and {{package}}"
+                 {{registry}}, {{namespace}}, {{package}}, {{upstream_host}} and {{upstream_repository}}"
             ),
             Self::UnterminatedPlaceholder { template } => {
                 write!(f, "unterminated '{{' in destination template '{template}'")
@@ -73,6 +107,11 @@ impl std::fmt::Display for TemplateError {
             Self::MalformedCatalogKey { key } => {
                 write!(f, "catalog key {key:?} is not '<namespace>/<package>'")
             }
+            Self::UpstreamUnavailable { template } => write!(
+                f,
+                "destination template '{template}' names the upstream reference, which is only known \
+                 once the package's root document has been read"
+            ),
         }
     }
 }
@@ -102,6 +141,8 @@ impl DestinationTemplate {
                 "registry" => TemplateSegment::Registry,
                 "namespace" => TemplateSegment::Namespace,
                 "package" => TemplateSegment::Package,
+                "upstream_host" => TemplateSegment::UpstreamHost,
+                "upstream_repository" => TemplateSegment::UpstreamRepository,
                 unknown => {
                     return Err(TemplateError::UnknownPlaceholder {
                         name: unknown.to_string(),
@@ -132,6 +173,34 @@ impl DestinationTemplate {
         self.segments.contains(&TemplateSegment::Registry)
     }
 
+    /// Whether `{upstream_repository}` appears — the other way C-006's
+    /// multi-source rule can be satisfied.
+    ///
+    /// A destination ending in the upstream repository is keyed by upstream
+    /// identity, not by catalog key, so two sources landing on one repository
+    /// means they named the *same upstream package* — the copy is then a
+    /// duplicate, not the silent overwrite `{registry}` exists to prevent.
+    /// `{upstream_host}` alone does not qualify: it disambiguates hosts, and
+    /// two sources over one host still collide on a shared catalog key.
+    pub fn uses_upstream_repository(&self) -> bool {
+        self.segments.contains(&TemplateSegment::UpstreamRepository)
+    }
+
+    /// Whether expansion needs the package's root document.
+    ///
+    /// True for `{upstream_host}` and `{upstream_repository}`. A template that
+    /// returns true cannot be expanded in the plan phase — the catalog carries
+    /// keys and digests, never pointers — so the work list defers it and phase
+    /// 2 expands it per package once the root is in hand.
+    pub fn needs_upstream(&self) -> bool {
+        self.segments.iter().any(|segment| {
+            matches!(
+                segment,
+                TemplateSegment::UpstreamHost | TemplateSegment::UpstreamRepository
+            )
+        })
+    }
+
     /// Expand for one package (C-012).
     ///
     /// `catalog_key` is the **package name** (the catalog key, `<ns>/<pkg>`),
@@ -147,9 +216,19 @@ impl DestinationTemplate {
     /// # Errors
     ///
     /// [`TemplateError::MalformedCatalogKey`] for a key with no `/`, an empty
-    /// segment, or more than two segments.
-    pub fn expand(&self, registry_as: &str, catalog_key: &str) -> Result<String, TemplateError> {
+    /// segment, or more than two segments, and
+    /// [`TemplateError::UpstreamUnavailable`] when `upstream` is `None` for a
+    /// template that names it.
+    pub fn expand(
+        &self,
+        registry_as: &str,
+        catalog_key: &str,
+        upstream: Option<Upstream<'_>>,
+    ) -> Result<String, TemplateError> {
         let (namespace, package) = split_catalog_key(catalog_key)?;
+        let unavailable = || TemplateError::UpstreamUnavailable {
+            template: self.source.clone(),
+        };
 
         let mut expanded = String::with_capacity(self.source.len() + registry_as.len() + catalog_key.len());
         for segment in &self.segments {
@@ -158,6 +237,10 @@ impl DestinationTemplate {
                 TemplateSegment::Registry => expanded.push_str(registry_as),
                 TemplateSegment::Namespace => expanded.push_str(namespace),
                 TemplateSegment::Package => expanded.push_str(package),
+                TemplateSegment::UpstreamHost => expanded.push_str(upstream.ok_or_else(unavailable)?.host),
+                TemplateSegment::UpstreamRepository => {
+                    expanded.push_str(upstream.ok_or_else(unavailable)?.repository);
+                }
             }
         }
         Ok(expanded)
@@ -272,7 +355,8 @@ pub fn warn_on_mirror_path_mismatch(name: &str, registry: &str, repository: &str
     if mirror_path_mismatch(physical, repository) {
         log::warn!(
             "{name:?} keeps its upstream pointer {registry:?}/{repository:?} but lands at {physical:?} — \
-             no `[mirrors]` path prefix resolves one to the other, so clients will not find this copy"
+             no `[mirrors]` path prefix resolves one to the other, so clients will not find this copy; \
+             a `destination:` of '{{upstream_host}}/{{upstream_repository}}' is the shape that does"
         );
     }
 }
