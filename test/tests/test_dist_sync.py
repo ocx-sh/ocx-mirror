@@ -87,6 +87,10 @@ def upload_store(request: pytest.FixtureRequest):
     options = marker.kwargs if marker else {}
     remaining_failures = {"count": options.get("fail_puts", 0)}
     failure_status = options.get("status", 503)
+    # `omit_checksum=True` stands in for a plain WebDAV or S3-alike that answers
+    # a HEAD with no digest at all — the store the probe must degrade against
+    # rather than break on.
+    omit_checksum = options.get("omit_checksum", False)
 
     stored: dict[str, bytes] = {}
     requests: list[tuple[str, str]] = []
@@ -99,7 +103,15 @@ def upload_store(request: pytest.FixtureRequest):
             # wire, and a plain dict() of the parsed message loses the
             # case-insensitive lookup `email.message.Message` provides.
             headers.append({name.lower(): value for name, value in self.headers.items()})
-            self.send_response(200 if self.path in stored else 404)
+            body = stored.get(self.path)
+            self.send_response(404 if body is None else 200)
+            # Artifactory, Nexus and GitLab all answer a HEAD with the digest
+            # they hold. That is what lets the run skip an archive without
+            # downloading it, and skip it *verified* rather than on the mere
+            # existence of a path — so the harness has to answer like a real
+            # store or the probe path is never exercised.
+            if body is not None and not omit_checksum:
+                self.send_header("X-Checksum-Sha256", hashlib.sha256(body).hexdigest())
             self.end_headers()
 
         def do_PUT(self):  # noqa: N802
@@ -855,3 +867,138 @@ def test_two_releases_rendering_to_one_path_are_refused(dist_mirror, asset_serve
     assert result.returncode != 0
     assert "already claimed" in result.stdout + result.stderr
     assert not (output / "dist.json").exists(), "a collision must publish no manifest"
+
+
+# ---------------------------------------------------------------------------
+# Destination probe + staging cleanup
+# ---------------------------------------------------------------------------
+
+
+def _upload_spec(tmp_path, source, output, **kw):
+    spec = write_spec(tmp_path / "dist.yml", source, output, base_url=kw.pop("base_url"), upload=True, **kw)
+    return spec
+
+
+def test_an_archive_the_store_already_holds_is_never_downloaded(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """The whole point of probing before fetching.
+
+    A CI runner starts with an empty `output:`. Without the probe the second run
+    re-downloads every archive from upstream only to discover the store already
+    has it — for the real mirror that is ~1.9 GB pulled to upload nothing.
+    """
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    first = _upload_spec(tmp_path, source, tmp_path / "run1", base_url=upload_store.url())
+    dist_mirror.run("dist", "sync", str(first))
+
+    # A fresh output directory: nothing local to reuse, so any skip must have
+    # come from asking the destination.
+    asset_server.requests.clear()
+    second = write_spec(
+        tmp_path / "dist2.yml", source, tmp_path / "run2", base_url=upload_store.url(), upload=True
+    )
+    result = dist_mirror.run("dist", "sync", str(second), "--format", "json")
+
+    archive_gets = [r for r in asset_server.requests if r.startswith("GET /v0.5.8/")]
+    assert archive_gets == [], f"no archive may be fetched when the store already holds it: {archive_gets}"
+    report = json.loads(result.stdout)
+    assert report["counters"]["skipped"] == report["counters"]["total"]
+    assert report["counters"]["uploaded"] == 1, "only the rolling manifest is rewritten"
+
+
+def test_a_destination_holding_different_bytes_is_re_uploaded(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """The probe compares digests, not mere occupancy.
+
+    A bare HEAD proves a path is taken, not that the right object is there. The
+    old existence-only skip would have trusted a corrupted object for ever.
+    """
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+    spec = _upload_spec(tmp_path, source, tmp_path / "run1", base_url=upload_store.url())
+    dist_mirror.run("dist", "sync", str(spec))
+
+    corrupted = "/v0.5.8/ocx-x86_64-unknown-linux-gnu.tar.gz"
+    upload_store.stored[corrupted] = b"not the archive anyone asked for"
+
+    second = write_spec(
+        tmp_path / "dist2.yml", source, tmp_path / "run2", base_url=upload_store.url(), upload=True
+    )
+    result = dist_mirror.run("dist", "sync", str(second), "--format", "json")
+
+    assert upload_store.stored[corrupted] != b"not the archive anyone asked for", "the wrong object must be replaced"
+    report = json.loads(result.stdout)
+    assert report["counters"]["copied"] == 1, "exactly the corrupted row is re-fetched"
+
+
+@pytest.mark.upload_store(omit_checksum=True)
+def test_a_store_that_reports_no_checksum_still_skips_on_existence(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """Plain WebDAV and S3-alikes answer a HEAD with no digest.
+
+    The probe must degrade to the existence-only trust those stores always had,
+    never to re-transferring the whole mirror on every run.
+    """
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+    spec = _upload_spec(tmp_path, source, tmp_path / "run1", base_url=upload_store.url())
+    dist_mirror.run("dist", "sync", str(spec))
+
+    asset_server.requests.clear()
+    second = write_spec(
+        tmp_path / "dist2.yml", source, tmp_path / "run2", base_url=upload_store.url(), upload=True
+    )
+    result = dist_mirror.run("dist", "sync", str(second), "--format", "json")
+
+    assert [r for r in asset_server.requests if r.startswith("GET /v0.5.8/")] == []
+    assert json.loads(result.stdout)["counters"]["failed"] == 0
+
+
+def test_uploading_discards_each_staged_archive_but_emitting_keeps_them(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """`retain_archives` auto, both halves.
+
+    Without `upload:` the tree IS the deliverable. With it the store is, and the
+    tree is staging — a full mirror is ~1.9 GB of archives, which is what fills
+    a small runner's disk when every one of them is kept until the end.
+    """
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+
+    emitted = tmp_path / "emitted"
+    dist_mirror.run("dist", "sync", str(write_spec(tmp_path / "emit.yml", source, emitted)))
+    assert list(emitted.glob("v0.5.8/*")), "with no uploader the archives are the deliverable"
+
+    staged = tmp_path / "staged"
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+    dist_mirror.run("dist", "sync", str(_upload_spec(tmp_path, source, staged, base_url=upload_store.url())))
+
+    assert list(staged.glob("v0.5.8/*")) == [], "an uploaded archive must not stay on disk"
+    assert (staged / "dist.json").is_file(), "the manifest is always kept — it is what the report names"
+    assert list(staged.glob("dist/*.json")), "so is the snapshot"
+
+
+def test_retain_archives_true_keeps_them_even_when_uploading(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """The escape hatch for an operator who ships the tree *and* the store."""
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    output = tmp_path / "public"
+    spec = tmp_path / "dist.yml"
+    write_spec(spec, source, output, base_url=upload_store.url(), upload=True)
+    spec.write_text(spec.read_text() + "retain_archives: true\n")
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    dist_mirror.run("dist", "sync", str(spec))
+
+    assert list(output.glob("v0.5.8/*")), "retain_archives: true must survive a successful upload"

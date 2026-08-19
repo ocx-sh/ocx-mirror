@@ -79,6 +79,33 @@ pub struct DistSpec {
     /// Optional native HTTP PUT of the emitted tree. Omit to emit only.
     pub upload: Option<Upload>,
 
+    /// Whether a mirrored archive stays under [`Self::output`] after it has
+    /// been uploaded.
+    ///
+    /// Three states. Unset is **auto** and is what almost every spec should
+    /// use: retain when [`Self::upload`] is absent, discard when it is
+    /// configured. The two modes want opposite things and the spec already
+    /// says which one it is in — without an uploader the tree *is* the
+    /// deliverable and must be complete; with one the store is the deliverable
+    /// and the tree is a staging area.
+    ///
+    /// Discarding matters more than it sounds. A full ocx mirror is ~1.9 GB of
+    /// archives, and the CI runners this is built for routinely have a few GB
+    /// spare — staging the whole set before uploading any of it is what fills
+    /// a runner's disk. With this off each archive is removed as soon as its
+    /// upload is confirmed, so peak usage is bounded by
+    /// `concurrency.max_downloads × largest_archive` rather than by the size
+    /// of the whole mirror.
+    ///
+    /// `true` forces retention even when uploading, for an operator who ships
+    /// the tree *and* the store. Governs archives only: `dist.json` and
+    /// `dist/<sha256>.json` are a few KB, are what the report names, and are
+    /// always written.
+    ///
+    /// [`Self::retain_archives_resolved`] applies the auto rule.
+    #[serde(default)]
+    pub retain_archives: Option<bool>,
+
     /// Hosts allowed to be reached over plaintext `http://`.
     ///
     /// Same doctrine as `RegistrySpec`: the manifest is the control plane
@@ -243,6 +270,18 @@ pub enum Identity {
 }
 
 impl DistSpec {
+    /// [`Self::retain_archives`] with the auto rule applied.
+    ///
+    /// Auto is derived from `upload:` rather than defaulting to a constant
+    /// because the two modes genuinely want opposite answers, and the spec has
+    /// already declared which mode it is in. A plain `#[serde(default)]` bool
+    /// would have to pick one of them and be wrong for the other half of
+    /// every fleet.
+    #[must_use]
+    pub fn retain_archives_resolved(&self) -> bool {
+        self.retain_archives.unwrap_or(self.upload.is_none())
+    }
+
     /// Every validation rule, one message per violation.
     ///
     /// Returns an empty vector for a valid spec; the caller maps a non-empty

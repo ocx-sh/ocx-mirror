@@ -45,24 +45,59 @@ pub enum UploadOutcome {
     Uploaded,
 }
 
-/// Whether a path's bytes are pinned by its name.
+/// What the destination said about a path, from a HEAD alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// Nothing there — 404 or 410.
+    Absent,
+    /// The store holds the path.
+    ///
+    /// `sha256` is the digest the store reports for it (bare lowercase hex),
+    /// when it reports one at all. Artifactory, Nexus and GitLab answer a HEAD
+    /// with `X-Checksum-Sha256`; a plain WebDAV or S3-alike does not, which is
+    /// why this is an `Option` and never an assumption. `None` means "present,
+    /// contents unverifiable from here" — a caller that needs certainty must
+    /// fetch the bytes.
+    Present { sha256: Option<String> },
+}
+
+/// The sha256 a store reports for an object, if it reports one.
 ///
-/// A property of the *file*, not of the caller, which is why this is an enum on
-/// the call rather than a bool the two upload loops each decide for themselves.
-/// Getting it wrong in the [`Rolling`](Self::Rolling) direction is invisible:
-/// the run reports success, uploads nothing, and the store keeps serving a
-/// manifest from the first run it ever saw while fresh archives land beside it.
+/// Normalised to lowercase because the comparison is against a manifest digest
+/// that is itself lowercase hex, and a store answering in upper case would
+/// otherwise read as a mismatch and re-transfer the whole archive forever.
+/// Anything that is not 64 hex characters is discarded rather than trusted —
+/// a truncated or prefixed value must degrade to "unverifiable", never to a
+/// false match.
+fn reported_sha256(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get("x-checksum-sha256")?.to_str().ok()?.trim();
+    let normalised = raw.to_ascii_lowercase();
+    (normalised.len() == 64 && normalised.chars().all(|c| c.is_ascii_hexdigit())).then_some(normalised)
+}
+
+/// Whether [`Uploader::put_file`] asks the destination before it writes.
+///
+/// Not a bare bool at the call site: the two answers are reached for two
+/// different reasons and getting either wrong is silent, so the reason travels
+/// with the value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Freshness {
-    /// Content-addressed by name — an archive at its layout path, a
-    /// `dist/<sha256>.json` snapshot. The bytes cannot change without the path
-    /// changing, so a file the store already holds *is* the file this run would
-    /// write, and the HEAD is allowed to skip it.
-    Immutable,
-    /// The path outlives its contents — `dist.json` and its sidecar. Republished
-    /// every run, because "already there" says nothing about *which* version is
-    /// there.
-    Rolling,
+pub enum Precheck {
+    /// HEAD first and leave an existing object alone.
+    ///
+    /// Correct only where the path pins the bytes — the content-addressed
+    /// `dist/<sha256>.json` snapshot. "Already there" then means "already
+    /// correct".
+    HeadFirst,
+    /// PUT unconditionally.
+    ///
+    /// Two callers need this and neither is a mistake. `dist.json` is rolling:
+    /// the path outlives its contents, so "already there" says nothing about
+    /// *which* version is there, and skipping it freezes the store's manifest
+    /// at whatever the first run wrote while fresh archives land beside it.
+    /// An archive reaches here having *already* been probed by the caller —
+    /// see [`Uploader::probe`] — so a second HEAD would only re-ask a question
+    /// just answered.
+    Unconditional,
 }
 
 /// The four checksums announced on every PUT.
@@ -169,14 +204,12 @@ impl Uploader {
         })
     }
 
-    /// HEAD, then PUT when absent — unless [`Freshness::Rolling`] says the
-    /// path outlives its contents, in which case the PUT is unconditional.
+    /// PUT the file, optionally asking the destination first — see [`Precheck`].
     ///
-    /// HEAD-before-PUT rather than a cached record of what a previous run
-    /// wrote: the destination is the authority, so a file deleted from the
-    /// store is re-uploaded by the next run instead of being skipped forever
-    /// by stale local state. That reasoning holds only for a path whose bytes
-    /// are pinned by its name — see [`Freshness`].
+    /// Where a HEAD does happen it is asked of the destination rather than of a
+    /// cached record of what a previous run wrote: the store is the authority,
+    /// so a file deleted from it is re-uploaded by the next run instead of
+    /// being skipped forever by stale local state.
     ///
     /// Every PUT announces all four checksums; see [`checksums`] for why they
     /// are computed here rather than passed in.
@@ -185,13 +218,13 @@ impl Uploader {
     ///
     /// Any non-retryable response, or the last failure after the retry
     /// schedule is exhausted.
-    pub async fn put_file(&self, relative: &str, file: &Path, freshness: Freshness) -> Result<UploadOutcome> {
+    pub async fn put_file(&self, relative: &str, file: &Path, precheck: Precheck) -> Result<UploadOutcome> {
         // The same composition the manifest row was stamped with, so the PUT
         // target and the URL consumers resolve are the same object by
         // construction rather than by two functions agreeing.
         let target = super::mirrored_url(&self.base, relative).map_err(|error| anyhow::anyhow!(error))?;
 
-        if freshness == Freshness::Immutable && self.exists(&target).await? {
+        if precheck == Precheck::HeadFirst && matches!(self.probe_url(&target).await?, Probe::Present { .. }) {
             return Ok(UploadOutcome::Skipped);
         }
 
@@ -226,18 +259,30 @@ impl Uploader {
         Ok(UploadOutcome::Uploaded)
     }
 
-    /// Whether the destination already holds this path.
+    /// Ask the destination about one path, without transferring its body.
     ///
-    /// A `404` or `410` is the answer "no", not a failure — every other
-    /// non-success status is propagated, so a `401` on the probe fails the run
-    /// rather than being read as "absent" and answered with an upload that
-    /// fails again.
+    /// Public because the caller probes **before deciding to download**, not
+    /// only before deciding to upload: an archive the store already holds
+    /// should cost neither transfer, and on a cold runner with a warm
+    /// destination that is the difference between pulling the whole mirror and
+    /// pulling nothing.
     ///
     /// # Errors
     ///
     /// Any non-success status other than `404`/`410`, or a transport failure
     /// that outlives the retry schedule.
-    async fn exists(&self, target: &Url) -> Result<bool> {
+    pub async fn probe(&self, relative: &str) -> Result<Probe> {
+        let target = super::mirrored_url(&self.base, relative).map_err(|error| anyhow::anyhow!(error))?;
+        self.probe_url(&target).await
+    }
+
+    /// [`Self::probe`] against an already-composed URL.
+    ///
+    /// A `404` or `410` is the answer "no", not a failure — every other
+    /// non-success status is propagated, so a `401` on the probe fails the run
+    /// rather than being read as "absent" and answered with an upload that
+    /// fails again.
+    async fn probe_url(&self, target: &Url) -> Result<Probe> {
         let response = self
             .with_retries(target, || {
                 self.authenticate(self.client.head(target.clone()).headers(self.headers.clone()))
@@ -245,12 +290,14 @@ impl Uploader {
             .await;
 
         match response {
-            Ok(_) => Ok(true),
+            Ok(response) => Ok(Probe::Present {
+                sha256: reported_sha256(response.headers()),
+            }),
             Err(error) => match error.downcast_ref::<StatusError>() {
                 // A store that has never seen the path answers 404; some
                 // answer 410 for a tombstone. Both mean "upload it".
                 Some(StatusError { status, .. }) if *status == StatusCode::NOT_FOUND || *status == StatusCode::GONE => {
-                    Ok(false)
+                    Ok(Probe::Absent)
                 }
                 _ => Err(error),
             },
