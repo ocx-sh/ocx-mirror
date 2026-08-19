@@ -179,7 +179,7 @@ The URL is the index base exactly as you would give it to `pip` or `uv` — noth
 **No credentials belong in `mirror.yml`.** A URL carrying userinfo (`https://user:token@host/…`) is refused when the spec loads. Credentials are resolved from the **host being requested**, in this order:
 
 1. `OCX_AUTH_<slug>_TYPE`, `OCX_AUTH_<slug>_USER`, `OCX_AUTH_<slug>_TOKEN` — `<slug>` is the host with every non-alphanumeric character replaced by `_`, so `nexus.corp.example` reads `OCX_AUTH_nexus_corp_example_TOKEN`. This is the same mechanism [`registry.yml`](./registry-yml.md#authentication) and `ocx` itself use.
-2. `netrc` — `$NETRC` if set, else `~/.netrc`, matched on `machine <host>`. This is the file `uv` already reads, so the mirror's own downloads and the resolver it shells out to agree by construction.
+2. `netrc` — `$NETRC` if set, else `~/.netrc`, matched on an exact `machine <host>` line. This is the file `uv` already reads, so the mirror's own downloads and the resolver it shells out to agree on the hosts you named. One entry is deliberately ignored: a `default` line answers for *every* host, and every URL this ladder sees was named by an index or a lock — honouring it would send your credential to whatever host a hostile upstream chose. `uv` honours `default`; `ocx-mirror` does not, so an index whose credential came only from `default` now needs a `machine <host>` line or the `OCX_AUTH_<slug>_*` variables above.
 3. Anonymous.
 
 One credential covers the whole run for that host: index discovery, `uv pip compile`, and the wheel downloads. Credentials are passed to `uv` through the environment, never on its command line. A lock naming wheels on several hosts resolves each host's credential separately, so a corporate token is never sent to `pypi.org`.

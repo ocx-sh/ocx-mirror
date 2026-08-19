@@ -39,19 +39,62 @@ fn does_not_match_a_host_by_suffix() {
     assert_eq!(lookup_netrc(text, "sub.corp.example"), None);
 }
 
-/// `default` answers only when no `machine` entry matched, wherever it sits.
+/// `default` matches every host, so a `default` entry answering here is the
+/// operator's credential leaving for whatever host a hostile lock or index
+/// named. It never answers.
 #[test]
-fn default_is_the_last_resort_not_the_first() {
+fn default_never_answers() {
     let text = "default login fallback password fallback-secret\n\
                 machine nexus.corp.example login ci password s3cr3t\n";
     assert_eq!(
         lookup_netrc(text, "nexus.corp.example"),
         Some(("ci".to_string(), "s3cr3t".to_string())),
-        "a specific entry wins over a `default` written before it"
+        "a `machine` entry still answers for its own host"
     );
     assert_eq!(
-        lookup_netrc(text, "pypi.org"),
-        Some(("fallback".to_string(), "fallback-secret".to_string()))
+        lookup_netrc(text, "evil.example"),
+        None,
+        "a `default` entry must never answer for a host the operator did not name"
+    );
+}
+
+/// A `default` block closes the `machine` block before it. Without that, its
+/// own `login`/`password` tokens would be attributed to the preceding host —
+/// the same leak wearing a different shape.
+#[test]
+fn a_default_block_does_not_bleed_into_the_preceding_machine() {
+    let text = "machine nexus.corp.example login ci\n\
+                default password evil\n";
+    assert_eq!(lookup_netrc(text, "nexus.corp.example"), None);
+}
+
+/// The whole ladder, on the path the attacker actually takes: `$NETRC` carries
+/// a `default` entry and a hostile lock names a wheel on a host the operator
+/// never configured. Anonymous, not the operator's credential.
+#[test]
+fn resolve_sends_no_default_credential_to_an_unconfigured_host() {
+    let _guard = crate::test_support::ocx_env_lock();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let netrc = dir.path().join("netrc");
+    std::fs::write(&netrc, "default login fallback password fallback-secret\n").expect("write netrc");
+
+    // SAFETY: serialised by the crate-wide env lock held above.
+    unsafe {
+        std::env::set_var("NETRC", &netrc);
+    }
+
+    let resolved = resolve(&url("https://evil.example/pkg.whl"));
+
+    // SAFETY: same lock.
+    unsafe {
+        std::env::remove_var("NETRC");
+    }
+
+    assert_eq!(
+        resolved.expect("resolves"),
+        None,
+        "a netrc `default` entry must not reach a host no spec named"
     );
 }
 

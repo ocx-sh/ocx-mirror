@@ -24,9 +24,15 @@
 //! 1. `OCX_AUTH_<slug>_{TYPE,USER,TOKEN}` — the same variables, the same slug
 //!    rule and the same precedence `ocx` itself uses for registries, so a
 //!    machine already able to pull from a host can already fetch from it.
-//! 2. `netrc` — `$NETRC`, else `~/.netrc`. This is what `uv` reads for the
-//!    lock-derivation leg, so our own downloads and `uv` agree by construction
-//!    rather than by two mechanisms happening to be configured alike.
+//! 2. `netrc` — `$NETRC`, else `~/.netrc`, on an exact `machine <host>` line.
+//!    This is the file `uv` reads for the lock-derivation leg, so our own
+//!    downloads and `uv` agree on the hosts an operator named, rather than by
+//!    two mechanisms happening to be configured alike. They diverge on one
+//!    entry deliberately: a `default` line answers for **every** host, and
+//!    every URL this ladder sees came from a lock or an index — foreign data.
+//!    `uv` honours `default`; we refuse it. The cost is a 401 an operator can
+//!    read and fix with a `machine` line; the alternative is their credential
+//!    leaving for whatever host a hostile index named.
 //! 3. Anonymous — the common case, and the only one a public index needs.
 //!
 //! The OCI legs are **not** served from here: `ocx_lib::auth` owns that ladder
@@ -150,8 +156,8 @@ fn from_env(host: &str) -> Result<Option<Credential>, MirrorError> {
     }
 }
 
-/// Rung 2: the first `machine <host>` entry whose name matches exactly,
-/// falling back to a `default` entry.
+/// Rung 2: the first `machine <host>` entry whose name matches exactly, and
+/// nothing else.
 ///
 /// Read on every call rather than cached: a run is short, the file is small,
 /// and a cache keyed on nothing would have to be invalidated by a `$NETRC`
@@ -192,25 +198,18 @@ fn netrc_path() -> Option<PathBuf> {
 ///
 /// - **Exact host match.** No suffix or wildcard matching, so a `machine
 ///   corp.example` line cannot answer for `evil-corp.example`.
-/// - **`default` is last resort**, consulted only after every `machine` entry
-///   has been read, so a `default` written for one tool cannot shadow a
-///   specific entry that appears later in the file.
+/// - **`default` never answers.** A `default` entry matches every host, and
+///   the host asked about here is one a lock or an index named — so honouring
+///   it would hand an operator's credential to whatever host a hostile
+///   upstream chose. It is parsed only so its own `login`/`password` do not
+///   bleed into the `machine` block above it.
 ///
 /// `macdef` bodies are skipped to the next blank line — an unterminated one
 /// would otherwise swallow the entries after it, which in a credential lookup
 /// reads as "no credentials" rather than as a parse error.
 fn lookup_netrc(text: &str, host: &str) -> Option<(String, String)> {
-    #[derive(PartialEq)]
-    enum Scope {
-        None,
-        Match,
-        Other,
-        Default,
-    }
-
-    let mut scope = Scope::None;
+    let mut in_match = false;
     let (mut login, mut password) = (None, None);
-    let (mut default_login, mut default_password) = (None, None);
     let mut tokens = Vec::new();
     let mut in_macdef = false;
 
@@ -235,17 +234,18 @@ fn lookup_netrc(text: &str, host: &str) -> Option<(String, String)> {
         match token {
             "machine" => {
                 let Some(name) = tokens.next() else { break };
-                scope = if name == host { Scope::Match } else { Scope::Other };
+                in_match = name == host;
             }
-            "default" => scope = Scope::Default,
+            // Kept as an arm rather than dropped: `default` closes the
+            // `machine` block before it, so its own `login`/`password` are
+            // never attributed to that host. It answers for nothing itself.
+            "default" => in_match = false,
             "login" | "password" | "account" => {
                 let Some(value) = tokens.next() else { break };
                 let value = value.trim_matches('"').to_string();
-                match (&scope, token) {
-                    (Scope::Match, "login") => login = Some(value),
-                    (Scope::Match, "password") => password = Some(value),
-                    (Scope::Default, "login") => default_login = Some(value),
-                    (Scope::Default, "password") => default_password = Some(value),
+                match (in_match, token) {
+                    (true, "login") => login = Some(value),
+                    (true, "password") => password = Some(value),
                     _ => {}
                 }
             }
@@ -258,10 +258,7 @@ fn lookup_netrc(text: &str, host: &str) -> Option<(String, String)> {
         }
     }
 
-    match (default_login, default_password) {
-        (Some(user), Some(secret)) => Some((user, secret)),
-        _ => None,
-    }
+    None
 }
 
 #[cfg(test)]
