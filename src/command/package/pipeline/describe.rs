@@ -115,7 +115,8 @@ async fn synthesize_env_catalog(
     let work_dir = tempfile::tempdir()
         .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create catalog work dir: {e}")]))?;
     let wheel_path = work_dir.path().join("catalog-root.whl");
-    let client = reqwest::Client::new();
+    // Same trust roots as every other mirror-owned leg (`crate::http`).
+    let client = crate::http::client()?;
     crate::pipeline::download::download(&client, &parsed_url, &wheel_path)
         .await
         .map_err(|e| {

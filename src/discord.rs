@@ -156,7 +156,10 @@ const MAX_RETRY_BODY_BYTES: usize = 8 * 1024;
 pub async fn post(webhook_url: &str, payload: &DiscordWebhookPayload) -> Result<(), MirrorError> {
     // Build the client once; reuse across all retry attempts to benefit from
     // connection pooling and to avoid re-initialising TLS on every send.
-    let client = reqwest::Client::builder()
+    // Layered on `crate::http::builder`, not `reqwest::Client::builder`: the
+    // factory carries the platform trust roots a corporate proxy needs, and
+    // starting over is exactly how a leg loses them again.
+    let client = crate::http::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| MirrorError::WebhookUnavailable(format!("failed to build HTTP client: {e}")))?;

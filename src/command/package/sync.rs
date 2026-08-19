@@ -237,7 +237,10 @@ impl Sync {
             .await
             .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create work dir: {e}")]))?;
 
-        let http_client = reqwest::Client::new();
+        // Through the factory, never `Client::new()`: the default trusts the
+        // bundled Mozilla roots only, so behind a TLS-intercepting proxy every
+        // asset download fails verification with no way to fix it from config.
+        let http_client = crate::http::client()?;
 
         let compression_threads = crate::spec::resolve_compression_threads(
             spec.concurrency.compression_threads,

@@ -80,4 +80,60 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         client().expect("the mirror HTTP client must build");
     }
+
+    /// No production leg constructs its own `reqwest::Client`.
+    ///
+    /// The factory is only worth having if every caller goes through it, and
+    /// that is precisely what does not hold on its own: the commit introducing
+    /// this module converted the legs it was written for and left `package
+    /// sync`, `pipeline describe` and the Discord webhook on
+    /// `reqwest::Client::new()` — three paths that kept failing behind a
+    /// corporate proxy after the bug was declared fixed. Nothing about a bare
+    /// constructor looks wrong at the call site, so the guard is a scan rather
+    /// than a review note.
+    ///
+    /// Test corpora are exempt: a test client talks to a loopback listener and
+    /// wants no roots at all.
+    #[test]
+    fn every_production_client_is_built_through_the_factory() {
+        fn scan(dir: &std::path::Path, offenders: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("src/ must be readable") {
+                let path = entry.expect("a readable directory entry").path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|name| name == "tests") {
+                        continue;
+                    }
+                    scan(&path, offenders);
+                    continue;
+                }
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if path.extension().is_none_or(|ext| ext != "rs")
+                    || name == "http.rs"
+                    || name == "tests.rs"
+                    || name == "test_support.rs"
+                {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("a readable Rust source file");
+                // Inline `#[cfg(test)]` modules sit at the end of a file, so
+                // everything from the first one on is test code.
+                let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+                for (offset, line) in production.lines().enumerate() {
+                    if line.contains("reqwest::Client::new()") || line.contains("reqwest::Client::builder()") {
+                        offenders.push(format!("{}:{}", path.display(), offset + 1));
+                    }
+                }
+            }
+        }
+
+        let mut offenders = Vec::new();
+        scan(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+            &mut offenders,
+        );
+        assert!(
+            offenders.is_empty(),
+            "these legs bypass `crate::http` and so drop the platform trust roots a corporate CA needs: {offenders:#?}"
+        );
+    }
 }
