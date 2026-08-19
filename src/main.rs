@@ -43,7 +43,14 @@ async fn main() -> ExitCode {
         Err(e) => e.exit(),
     };
 
-    let level = cli.log_level.or(Some(LogLevel::Info));
+    // `None`, not `Some(Info)`: `LogSettings::build_env_filter` consults the
+    // `OCX_LOG_CONSOLE` → `OCX_LOG` → `RUST_LOG` cascade only when no console
+    // level was set, and falls back to INFO on its own when none is exported.
+    // Defaulting here instead pinned the filter to INFO and made every one of
+    // those variables a no-op — the state an operator hits the moment a fetch
+    // fails and they reach for `RUST_LOG=debug`. `--log-level` still wins,
+    // which is the precedence an explicit flag should have.
+    let level = cli.log_level;
     // Span-free progress manager (ADR adr_progress_architecture), created
     // before the subscriber so its MultiProgress backs the fmt log writer.
     let progress = if ProgressMode::detect().stderr {

@@ -9,6 +9,10 @@
 | `--log-level <LEVEL>` | `trace`, `debug`, `info`, `warn`, `error` | Log verbosity (default: `info`) |
 | `--color <WHEN>` | `auto`, `always`, `never` | When to use ANSI colors in output (default: `auto`) |
 
+When `--log-level` is omitted, verbosity comes from the first of `OCX_LOG_CONSOLE`, `OCX_LOG`, `RUST_LOG` that is set, and from `info` when none is. Those accept full [`tracing` filter directives][tracing-filter], so `RUST_LOG=info,ocx_mirror=debug,reqwest=trace` narrows the noise to the legs you are debugging — which is what to reach for when a fetch fails and the error alone does not say why. Passing `--log-level` explicitly overrides all three.
+
+[tracing-filter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
+
 ## `package sync` {#sync}
 
 Mirror packages from a spec file to an OCI registry: list upstream versions, resolve assets per platform, filter against tags already published, then download, verify, bundle (concurrent), and push (sequential by version, oldest first).

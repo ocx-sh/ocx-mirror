@@ -411,7 +411,14 @@ async fn fetch_manifest(client: &reqwest::Client, spec: &DistSpec) -> Result<Dis
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| MirrorError::SourceError(format!("cannot fetch {}: {error}", spec.source)))?;
+        // `{:#}` over an `anyhow` wrapper, not reqwest's own `Display`: that
+        // one prints "error sending request for url (...)" and stops, leaving
+        // the cause — an untrusted proxy CA, a refused connect, a DNS failure —
+        // reachable only through `Error::source`. On a restricted network that
+        // is the entire content of the message.
+        .map_err(|error| {
+            MirrorError::SourceError(format!("cannot fetch {}: {:#}", spec.source, anyhow::Error::new(error)))
+        })?;
 
     // Refuse a declared oversize body before reading a byte of it.
     if let Some(declared) = response.content_length()

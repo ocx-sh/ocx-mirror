@@ -426,7 +426,12 @@ async fn fetch_index_document_capped(
     // userinfo in a `sources[].index` is refused outright at spec load
     // (`spec/prescan.rs`), and this does not stand in for that guard.
     let fetch_failed = |error: reqwest::Error| {
-        MirrorError::SourceError(format!("index fetch failed for {document}: {}", error.without_url()))
+        // Chain-walked (`{:#}`), for the reason `dist_sync::fetch_manifest`
+        // records: reqwest's `Display` names the request, never why it failed.
+        MirrorError::SourceError(format!(
+            "index fetch failed for {document}: {:#}",
+            anyhow::Error::new(error.without_url())
+        ))
     };
 
     let mut response = client.get(&url).send().await.map_err(fetch_failed)?;
