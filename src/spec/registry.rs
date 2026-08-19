@@ -103,6 +103,25 @@ pub struct RegistrySpec {
     #[serde(default = "default_publish_tags")]
     pub publish_tags: bool,
 
+    /// Whether every copied manifest also gets its own `sha256.<hex>` tag at
+    /// the destination — the tag `ocx package push` writes for exactly this
+    /// purpose.
+    ///
+    /// **Default `true`.** These are ocx's registry-side deletion safety net:
+    /// a manifest tagged after its own digest cannot be orphaned by a stray
+    /// delete of a rolling or cascade tag, so a digest a lock pins stays
+    /// reachable. They are *reserved* tags, filtered out of an index root's
+    /// `tags{}`, so nothing in the published tag set names them and a mirror
+    /// copying that set faithfully would create none of them —
+    /// `ghcr.io/ocx-sh/ocx/cli` carries 54 against 21 version tags.
+    ///
+    /// Turning it off costs one `PUT` per distinct manifest and leaves every
+    /// platform manifest at the destination reachable only through the index
+    /// naming it. Pair `false` with [`Self::publish_tags`] `false` only on a
+    /// destination you know keeps untagged manifests.
+    #[serde(default = "default_canonical_tags")]
+    pub canonical_tags: bool,
+
     /// What a per-package failure does to the rest of the run. Governs
     /// per-package failures only; a non-authoritative destination read aborts
     /// the run under either value (C-040).
@@ -409,6 +428,10 @@ impl Default for RegistryConcurrency {
 }
 
 fn default_publish_tags() -> bool {
+    true
+}
+
+fn default_canonical_tags() -> bool {
     true
 }
 
