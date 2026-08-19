@@ -57,6 +57,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::{StreamExt as _, TryStreamExt as _};
 use ocx_lib::file_structure::IndexStore;
 use ocx_lib::oci::index::{CatalogIndex, OciIndex, OciIndexConfig, parse_physical_repository, serialize_root};
 use ocx_lib::oci::{Algorithm, ClientBuilder, Digest, Index, Reference};
@@ -356,25 +357,71 @@ async fn copy_sources(
 
         let mut source_failed = false;
         let package_count = prepared.plan.work.len();
-        for (position, package) in prepared.plan.work.iter().enumerate() {
-            // Before the copy, not after it: the existing per-tag line at
-            // `tag_failure` reports a package that already finished, and a
-            // multi-gigabyte one spends its whole transfer between the two.
-            tracing::info!(
-                "[{}/{package_count}] {}/{}",
-                position + 1,
-                prepared.plan.as_name,
-                package.name
-            );
-            let step = sync_package(spec, options, prepared, package, store, &context, &mut missing).await?;
-            let failed = matches!(step, PackageStep::Failed(_));
-            source_failed |= failed;
-            source_report.packages.push(package_report(&package.name, step));
+        // `fail_fast` promises that nothing after the first failure is copied,
+        // and no fan-out can keep that promise: whatever is in flight has
+        // already been sent. Width 1 *is* the promise, so the flag chooses the
+        // sequential path rather than being checked inside a concurrent one.
+        let width = if fail_fast { 1 } else { spec.concurrency.max_packages };
 
-            if failed && fail_fast {
-                report.sources.push(source_report);
-                break 'sources;
+        let mut outcomes: Vec<PackageOutcomeRow> = Vec::new();
+        let mut stopped_early = false;
+        if width == 1 {
+            for (position, package) in prepared.plan.work.iter().enumerate() {
+                let row = copy_one_package(
+                    spec,
+                    options,
+                    prepared,
+                    package,
+                    store,
+                    &context,
+                    position,
+                    package_count,
+                )
+                .await?;
+                let failed = matches!(row.1, PackageStep::Failed(_));
+                outcomes.push(row);
+                if failed && fail_fast {
+                    stopped_early = true;
+                    break;
+                }
             }
+        } else {
+            // `buffered`, not `buffer_unordered`: the report lists packages in
+            // catalog order, and yielding in input order is what keeps that
+            // true without a sort. A package's cost is round trips against two
+            // registries, so this is the knob that matters on a catalog of
+            // hundreds — and it moves no memory ceiling, because the blob pool
+            // above is run-scoped.
+            outcomes = futures::stream::iter(prepared.plan.work.iter().enumerate().map(|(position, package)| {
+                let context = &context;
+                async move {
+                    copy_one_package(
+                        spec,
+                        options,
+                        prepared,
+                        package,
+                        store,
+                        context,
+                        position,
+                        package_count,
+                    )
+                    .await
+                }
+            }))
+            .buffered(width)
+            .try_collect()
+            .await?;
+        }
+
+        for (name, step, package_missing) in outcomes {
+            source_failed |= matches!(step, PackageStep::Failed(_));
+            missing.extend(package_missing);
+            source_report.packages.push(package_report(&name, step));
+        }
+
+        if stopped_early {
+            report.sources.push(source_report);
+            break 'sources;
         }
 
         // C-039: the recorded digest means "a fully successful run mirrored
@@ -395,6 +442,44 @@ async fn copy_sources(
         report.estimated_bytes = Some(plan::dry_run_byte_estimate(&missing));
     }
     Ok(report)
+}
+
+/// One package's result as the fold above consumes it: its catalog key, what
+/// its pass did, and the descriptors a `--dry-run` measured.
+///
+/// The dry-run list is carried per package rather than written into one shared
+/// `Vec`: with packages in flight together there is no shared `&mut` to write
+/// into, and merging in yield order keeps the estimate independent of which
+/// package finished first.
+type PackageOutcomeRow = (String, PackageStep, Vec<(Digest, u64)>);
+
+/// One package's copy, with the progress line that announces it.
+///
+/// Extracted from the loop so the sequential and concurrent paths run the
+/// same body — the only difference between them is how many are in flight.
+#[allow(clippy::too_many_arguments)]
+async fn copy_one_package(
+    spec: &RegistrySpec,
+    options: &RegistrySyncOptions,
+    prepared: &PreparedSource<'_>,
+    package: &PackageWork,
+    store: &IndexStore,
+    context: &CopyContext,
+    position: usize,
+    package_count: usize,
+) -> Result<PackageOutcomeRow, MirrorError> {
+    // Before the copy, not after it: the existing per-tag line at
+    // `tag_failure` reports a package that already finished, and a
+    // multi-gigabyte one spends its whole transfer between the two.
+    tracing::info!(
+        "[{}/{package_count}] {}/{}",
+        position + 1,
+        prepared.plan.as_name,
+        package.name
+    );
+    let mut missing = Vec::new();
+    let step = sync_package(spec, options, prepared, package, store, context, &mut missing).await?;
+    Ok((package.name.clone(), step, missing))
 }
 
 /// What one package's pass did.
