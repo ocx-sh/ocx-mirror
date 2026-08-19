@@ -5,12 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-08-19
+
+### Added
+
+- Host-keyed credentials and platform TLS roots for HTTP legs *(auth)*
+- Discover through the Simple Repository API, indexes list *(pypi)*
+
+### Fixed
+
+- Never answer a netrc `default` entry *(auth)*
+- Honour RUST_LOG and surface why a fetch failed *(cli)*
+- Route every production client through the trust-root factory *(http)*
+
 ## [0.5.5] - 2026-08-18
 
 ### Added
 
 - Preserve upstream pointers by default *(registry)*
 - Mirror the OCX distribution into a generic store *(dist)*
+
+### Release
+
+- V0.5.5
 
 ## [0.5.4] - 2026-08-14
 
@@ -247,6 +264,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.5.6]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.5..v0.5.6
 [0.5.5]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.4..v0.5.5
 [0.5.4]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.3..v0.5.4
 [0.5.3]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.2..v0.5.3
