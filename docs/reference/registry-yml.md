@@ -15,6 +15,8 @@ The two files describe different jobs. `mirror.yml` packages an upstream tool's 
 | `output` | path | Yes | Directory the index tree is written into — one subtree per source. See [`output`](#output). |
 | `destination` | string | Yes | Template deciding each package's destination repository. See [`destination`](#destination). |
 | `rewrite_pointers` | boolean | No | `false` (default) keeps the upstream address in the published index; `true` re-homes it onto `target`. See [`rewrite_pointers`](#rewrite-pointers). |
+| `publish_tags` | boolean | No | `true` (default) creates the upstream tag set at the destination; `false` pushes by digest only. See [`publish_tags`](#publish-tags). |
+| `canonical_tags` | boolean | No | `true` (default) tags every copied manifest after its own digest, as `ocx package push` does. See [`canonical_tags`](#canonical-tags). |
 | `sources` | array | Yes | Upstream indexes to mirror, at least one. See [`sources`](#sources). |
 | `on_error` | string | No | `continue` (default) or `fail_fast`. See [`on_error`](#on-error). |
 | `concurrency` | object | No | Blob copy limits and retry count. See [`concurrency`](#concurrency). |
@@ -257,20 +259,58 @@ Governs what happens when **one package** fails — a manifest that will not pul
 
 **It does not govern everything.** If the destination registry answers a query with something that is not a definite yes or no — a 503, a timeout, an authentication failure — the whole run aborts immediately under either setting. The mirror decides whether to upload a blob by asking the destination whether it already has it; an answer it cannot trust must never be read as "absent", or a flaky link would re-upload the entire catalog. The same applies to an unreachable source index.
 
+## `publish_tags` {#publish-tags}
+
+```yaml
+publish_tags: true   # the default
+```
+
+Whether the copy creates the upstream tag set at the destination, or pushes the content and leaves it addressable by digest alone.
+
+A client resolving through the mirrored index never reads a destination tag — the index root maps every tag to a `content` digest and the pull is by digest — so the tags exist for humans, for tools that address the registry directly, and **to keep the content referenced**.
+
+!!! danger "An untagged manifest is garbage-collectable"
+
+    That last job is why this defaults on and is not merely a performance knob. An untagged manifest is unreferenced, and a registry is free to collect it: zot does by default, and an Artifactory cleanup policy can be configured to. `publish_tags: false` on such a destination publishes an index naming content the registry may delete underneath it. Turn it off only when the destination keeps untagged manifests — or leave [`canonical_tags`](#canonical-tags) on, which keeps every manifest referenced by its own digest tag.
+
+Turn it off when the destination keeps untagged manifests and the tag set is large: one tag is one `PUT`, and an ocx package routinely carries two or three cascade tags per version.
+
+Flipping `true` → `false` on an existing mirror deletes nothing: tags previous runs created stay at whatever they last pointed to and are never updated again, which is its own kind of stale. Treat the value as fixed once published, like `destination`.
+
+## `canonical_tags` {#canonical-tags}
+
+```yaml
+canonical_tags: true   # the default
+```
+
+Whether every copied manifest also gets its own `sha256.<hex>` tag at the destination — the tag `ocx package push` writes for exactly this purpose (a `.` where the digest has `:`, because an OCI tag cannot contain `:`).
+
+These are ocx's registry-side deletion safety net: a manifest tagged after its own digest cannot be orphaned by a stray delete of a rolling or cascade tag, so a digest a lock pins stays reachable. They are *reserved* tags, filtered out of an index root's `tags{}`, so nothing in the published tag set names them — a mirror copying that set faithfully would create none of them. `ghcr.io/ocx-sh/ocx/cli` carries 54 of them against 21 version tags.
+
+Turning it off saves one `PUT` per distinct manifest and leaves every platform manifest at the destination reachable only through the index naming it. Pair `false` with `publish_tags: false` only on a destination you know keeps untagged manifests.
+
+!!! warning "No backfill"
+
+    A package already fully mirrored is skipped whole, so turning this on later adds nothing to it. To backfill one package, delete its root from the output tree (`rm <output>/<as>/p/<namespace>/<package>.json`) and re-run — the content is already at the destination, so the re-copy costs the manifest `PUT`s alone.
+
 ## `concurrency` {#concurrency}
 
 ```yaml
 concurrency:
   max_blobs: 4
+  max_packages: 4
   max_retries: 3
 ```
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `max_blobs` | integer | 4 | How many blobs are copied at once |
+| `max_blobs` | integer | 4 | How many blobs are copied at once, across the whole run |
+| `max_packages` | integer | 4 | How many packages are copied at once within one source |
 | `max_retries` | integer | 3 | Extra attempts after a rate-limit response |
 
 `max_blobs` defaults to 4 because each in-flight blob is held in memory while it is verified. Some published assets exceed 200 MB, so raising this raises peak memory roughly in proportion. Lower it on a small runner; raise it only if you know your largest blob.
+
+`max_packages` does **not** move that memory ceiling: the blob pool is shared by the whole run, so `max_blobs × largest blob` holds at any package width. What it multiplies is round trips in flight — most of a package's wall-clock is latency against the two registries, not bandwidth, which makes this the knob that matters on a catalog of hundreds. The report stays in catalog order at any width. `--fail-fast` forces it to 1: that flag promises nothing is copied after the first failure, and only a sequential pass can keep that promise.
 
 Retries are reactive: they fire only on an HTTP 429 from a pull or a push, backing off from one second and doubling on each attempt up to a thirty-second cap — deterministic, no jitter. The registry's `Retry-After` header is not read; the doubling ladder stands in for it. There is no proactive throttle.
 
