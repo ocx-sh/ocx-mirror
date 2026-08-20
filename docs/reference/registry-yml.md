@@ -149,6 +149,8 @@ This guard is **source-side only**. Your own [`target`](#target) registry is not
 
 The same list is also the exemption for `index`'s own `https`-only rule above — one list, one decision for both concerns. It is what lets the acceptance harness point `index:` at `http://localhost:5001`.
 
+It is one decision more: a source-pull credential is attached only to the source's own `registry` host and to the hosts listed here. When a root's pointer names some other physical host, the mirror pulls from it **anonymously** rather than sending a credential resolved for a lookalike name — so a compromised index that redirects a package's bytes to an attacker-controlled host it spelled to collide with one of yours never receives your token. List a host here to both reach it and pull from it authenticated.
+
 ## `destination` {#destination}
 
 ```yaml
@@ -186,16 +188,20 @@ The `{upstream_host}` segment is what makes one prefix hold several upstream reg
 
 These two are read from each package's **root document**, which the catalog does not carry — so unlike the other three they are expanded per package during the copy, not in the pre-flight. Two consequences:
 
-- A destination collision between two such packages is not reported up front. It cannot be a silent overwrite either: two keys landing on one repository named one upstream package.
+- A destination collision between two such packages is not reported in the pre-flight, because the landing path is not known until each root is fetched. It cannot become a silent overwrite: a destination ending in `{upstream_repository}` is keyed by upstream identity, so two keys reaching one repository named the *same* upstream package (a duplicate copy, not two packages fighting over one path). `{upstream_host}` used without `{upstream_repository}` is only accepted as a single-source disambiguator — with more than one source the template must carry `{registry}` or `{upstream_repository}` (see below) — and within one source the catalog keys are already distinct.
 - An upstream host carrying a **port** (`registry.internal:5000`) is not a legal OCI path component. The composition is refused for that package, with the offending path in the message. It is not slugged into one — a `:` → `_` mapping would be an identity every consumer of the mirror would then have to know.
 
-Two packages that would expand to the same destination are refused before anything is copied, with both package names in the error.
+For the three placeholders resolved in the pre-flight (`{registry}`, `{namespace}`, `{package}`), two packages that would expand to the same destination are refused before anything is copied, with both package names in the error.
 
 **Expansion is refused, never repaired.** A package name that does not fit the OCI grammar — uppercase letters, a `..` segment, whitespace, a colon — fails the run instead of being lowercased, slugified or path-cleaned. Silently normalising would let two distinct upstream names collide at one destination, and a `..` segment would write outside the prefix you configured. You get an error naming the offending name.
 
 !!! danger "Editing `destination` after the first publish re-homes everything"
 
     Same one-way door as [`as`](#as), for the same reason. The next run copies every package again under the new paths and leaves the old repositories behind forever. Under [`rewrite_pointers: true`](#rewrite-pointers) the mirror warns when it notices that a package's recorded destination no longer matches what the current template produces — but the warning arrives after the template already changed, so treat the template as fixed once you have published.
+
+!!! danger "`{upstream_repository}` inherits the upstream's moves too"
+
+    With `{upstream_repository}` in the template you do not own the whole landing path — the tail is whatever repository the upstream's root document names. If the upstream **relocates** a package (its root starts pointing at a different repository), the mirror lands it at a *new* destination and leaves the old one behind, exactly as an edit to your own template would — except you did not change anything. Under [`rewrite_pointers: true`](#rewrite-pointers) the destination-drift warning still fires; under preserve (the default) it does not, because the recorded pointer *is* the upstream one and there is nothing to compare it against. If a stable landing path matters more than following the upstream's layout, key on `{registry}`/`{namespace}`/`{package}` instead.
 
 ## `rewrite_pointers` {#rewrite-pointers}
 
@@ -325,6 +331,8 @@ Credentials come from the environment, resolved in this order:
 3. anonymous
 
 `<slug>` is derived from the registry host. This is the same mechanism `ocx` itself uses, so a machine already able to pull from a registry can already push to it.
+
+For a **source pull**, the host whose slug is looked up is the *physical* registry a package's index root points at, not the source's `registry`/`as` name — the bytes live where the pointer says. A credential is resolved only when that physical host is the source's own `registry` or one of its [`trusted_hosts`](#trusted-hosts); any other host is pulled anonymously (see [`trusted_hosts`](#trusted-hosts)).
 
 ## A corporate mirror, end to end {#example}
 

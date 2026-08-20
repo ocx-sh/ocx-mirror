@@ -261,19 +261,53 @@ async fn authenticated(config: native::ClientConfig, registry: &str) -> native::
 /// Seeding is enough: `_auth` runs the `WWW-Authenticate` challenge itself
 /// from the stored `RegistryAuth`, anonymous included.
 ///
-/// `registry` arrives in remote-controlled data, so this is a credential
-/// lookup keyed by a name the upstream index chose. That is the same exposure
-/// `ocx` itself carries when it dereferences the same pointer, and it is
-/// bounded to that host's own slug: a pointer naming `evil.example` can only
-/// reach `OCX_AUTH_evil_example_*` or a docker-store entry the operator wrote
-/// for `evil.example`. The SSRF guard on the root has already run by this
-/// point; this adds no new host to the set the run will dial.
+/// **A real credential is resolved only for a host the operator named.**
+/// `registry` is the *physical* host, and it arrives in the upstream root's
+/// pointer — remote-controlled data. The env-credential ladder keys on
+/// `registry.to_slug()`, and `to_slug` replaces every non-alphanumeric byte
+/// with `_`, so `registry.corp.example.com` and an attacker-registrable
+/// `registry-corp-example.com` produce **one** slug: a hostile source pointing
+/// a package at the lookalike host would otherwise have the mirror resolve the
+/// operator's real `OCX_AUTH_registry_corp_example_com_*` and send it there.
+/// So a physical host is credentialed only when it is the source's own
+/// `registry:` or one of its `trusted_hosts` — the same list that already
+/// vouches for a host against the SSRF floor. Everything else is seeded
+/// `Anonymous`, which is all the public case ever needed: the 401 this fixes
+/// is a token-store **miss** (`get_auth_token` returns `None` and no
+/// `Authorization` header goes out at all), and an `Anonymous` entry turns the
+/// miss into a hit whose `WWW-Authenticate` challenge fetches the anonymous
+/// bearer token. The public `ocx.sh` index points every package at `ghcr.io`,
+/// which no operator names, so it takes the anonymous path and copies.
 ///
+/// A private *indirected* mirror — index on `ocx.sh`, content on a private
+/// `ghcr.io` repo — lists `ghcr.io` in that source's `trusted_hosts` to opt it
+/// back into credential resolution.
+///
+/// The resolver is `context.source_auth`, held once per run so its cache is
+/// shared across every package; an unnamed host never touches it, so the
+/// common path makes no env read and no credential-helper subprocess call.
 /// Idempotent — `store_auth_if_needed` skips a host already stored, so the
 /// per-package call costs one read lock after the first.
-pub async fn ensure_source_auth(client: &native::Client, registry: &str) {
-    let auth = ocx_lib::auth::Auth::new().get_or_fallback(registry).await;
-    client.store_auth_if_needed(registry, &auth).await;
+pub async fn ensure_source_auth(context: &CopyContext, registry: &str, allowed: &[&str]) {
+    let auth = if host_is_credentialed(registry, allowed) {
+        context.source_auth.get_or_fallback(registry).await
+    } else {
+        native::Auth::Anonymous
+    };
+    context.source_client.store_auth_if_needed(registry, &auth).await;
+}
+
+/// Whether a physical host may receive a *resolved* credential — the security
+/// boundary of [`ensure_source_auth`], as a pure function so the allow-list
+/// decision is unit-testable without a live registry.
+///
+/// `allowed` is the source's own `registry:` plus its `trusted_hosts`. Exact
+/// string match, never a slug or a suffix: the whole point is that a lookalike
+/// physical host from a hostile root — which `to_slug` would collapse onto the
+/// same env-var key as a real one — is **not** in this list and so takes the
+/// `Anonymous` path.
+fn host_is_credentialed(registry: &str, allowed: &[&str]) -> bool {
+    allowed.contains(&registry)
 }
 
 /// Everything one package's copy needs, threaded through the ladder below.
@@ -289,6 +323,11 @@ pub struct CopyContext {
     pub source_index: Index,
     /// Source-side fork client — blob pulls and referrer queries (C-046).
     pub source_client: native::Client,
+    /// Credential resolver for source physical hosts, held once per run so its
+    /// cache is shared across packages. Consulted by [`ensure_source_auth`]
+    /// only for a host the operator named; an unnamed host is seeded
+    /// `Anonymous` without touching it.
+    pub source_auth: ocx_lib::auth::Auth,
     /// Destination-side fork client — every probe and push (C-046).
     pub destination_client: native::Client,
     /// Run-scoped blob permit pool sized by `concurrency.max_blobs`.
@@ -655,12 +694,40 @@ fn probe_verdict(probe: Result<Option<u64>, OciDistributionError>) -> Result<Opt
     })
 }
 
+/// Presence-probe a destination blob, **retrying a rate limit** rather than
+/// aborting the whole run on a transient 429.
+///
+/// A copy fans presence probes out `CHILD_FANOUT_CEILING × BLOB_FANOUT_CEILING`
+/// wide per package, and `max_packages` of those run at once, so a busy
+/// destination is likelier to throttle a HEAD than the transfers beside it —
+/// while [`probe_verdict`] turns any non-404 answer, 429 included, into a
+/// whole-run [`MirrorError::TargetError`]. Routing the probe through the same
+/// [`retry_while`]/[`is_rate_limited`] ladder the pull and push paths already
+/// use is what keeps one throttled probe from ending the run; a 429 that
+/// survives the budget still aborts, which is correct — the destination is
+/// saturated.
+async fn probe_blob_present(
+    context: &CopyContext,
+    reference: &Reference,
+    digest_string: &str,
+) -> Result<Option<u64>, CopyError> {
+    let probe = retry_while(context.max_retries, is_rate_limited, || {
+        context.destination_client.fetch_blob_size(reference, digest_string)
+    })
+    .await;
+    probe_verdict(probe)
+}
+
 /// Whether a registry error is a rate limit worth retrying.
 ///
-/// Two shapes, because the fork maps 429 two ways: `extract_location_header`
-/// (every push path) produces `ServerError { code: 429 }`, while
+/// Three shapes, because the fork maps 429 three ways: `extract_location_header`
+/// (every push path) produces `ServerError { code: 429 }`;
 /// `validate_registry_response` turns a 4xx carrying an OCI error envelope into
-/// `RegistryError`, which has no status code of its own.
+/// `RegistryError`, which has no status code of its own; and `head_blob_response`
+/// — the destination presence probe ([`probe_blob_present`]) — turns a non-404
+/// HEAD into `Err(error_for_status_ref().into())`, i.e. a `reqwest`-wrapped
+/// `RequestError` carrying the status. Omitting the third arm left the probe's
+/// retry ladder inert, so a single throttled HEAD aborted the whole run.
 ///
 /// `Retry-After` is deliberately not honoured: the fork consumes the response
 /// before building the error, so the header is not reachable from here. The
@@ -672,6 +739,7 @@ fn is_rate_limited(error: &OciDistributionError) -> bool {
             .errors
             .iter()
             .any(|entry| matches!(entry.code, OciErrorCode::Toomanyrequests)),
+        OciDistributionError::RequestError(source) => source.status() == Some(reqwest::StatusCode::TOO_MANY_REQUESTS),
         _ => false,
     }
 }
@@ -1003,9 +1071,10 @@ async fn push_manifest(
 /// went to destination D, and the root would then be written over a tree that
 /// resolves nowhere.
 ///
-/// Order: destination `fetch_blob_size` → hit ⇒ [`BlobOutcome::Skipped`]; an
-/// authoritative 404 ⇒ continue; **any other outcome (401, 503, timeout,
-/// connection reset) ⇒ [`MirrorError::TargetError`] aborting the whole run**.
+/// Order: destination probe (via [`probe_blob_present`], which retries a 429)
+/// → hit ⇒ [`BlobOutcome::Skipped`]; an authoritative 404 ⇒ continue; **any
+/// other outcome (401, 503, timeout, connection reset, or a 429 that outlasts
+/// the retry budget) ⇒ [`MirrorError::TargetError`] aborting the whole run**.
 /// On a miss: consult the in-run digest → repository map and attempt
 /// `mount_blob`; `BlobMountResponse::UploadSessionOpened(_)` — or any `Err` —
 /// falls through to pull → verify → push. A mount that fails although the
@@ -1039,11 +1108,10 @@ pub async fn ensure_blob(
         return Ok(BlobOutcome::Skipped);
     }
 
-    let probe = context
-        .destination_client
-        .fetch_blob_size(destination_reference, &digest_string)
-        .await;
-    if probe_verdict(probe)?.is_some() {
+    if probe_blob_present(context, destination_reference, &digest_string)
+        .await?
+        .is_some()
+    {
         record_location(context, digest, &destination_repository).await;
         // `info!`, not `debug!`: an all-present re-run takes this branch for
         // every blob, and at `debug!` the whole run printed nothing at all.
@@ -1535,11 +1603,10 @@ async fn missing_descriptors_at(
         }
         ChildReferences::Blobs(blobs) => {
             for (blob_digest, size) in blobs {
-                let probe = context
-                    .destination_client
-                    .fetch_blob_size(destination_reference, &blob_digest.to_string())
-                    .await;
-                if probe_verdict(probe)?.is_none() {
+                if probe_blob_present(context, destination_reference, &blob_digest.to_string())
+                    .await?
+                    .is_none()
+                {
                     missing.push((blob_digest, size));
                 }
             }
@@ -1548,7 +1615,6 @@ async fn missing_descriptors_at(
     Ok(missing)
 }
 
-/// Record which destination repository now holds `digest`, for later mounts.
 /// Whether this run already put `digest` in `repository` — present, mounted or
 /// uploaded.
 ///
@@ -1565,6 +1631,7 @@ async fn confirmed_here(context: &CopyContext, digest: &Digest, repository: &str
         .is_some_and(|recorded| recorded == repository)
 }
 
+/// Record which destination repository now holds `digest`, for later mounts.
 async fn record_location(context: &CopyContext, digest: &Digest, repository: &str) {
     context
         .mounted_from

@@ -22,10 +22,13 @@
 //! makes C-018's [`MirrorError::IndexFormatUnsupported`] a whole-run gate,
 //! matching its own "writes nothing" contract.
 //!
-//! **Phase 2** copies, per source in spec order, **packages sequentially**.
-//! C-026's memory ceiling is `max_blobs × largest_blob` and it holds only
-//! because of two things this file owns: one run-scoped `Arc<Semaphore>`, and
-//! this loop not being parallel.
+//! **Phase 2** copies, per source in spec order, with up to
+//! `concurrency.max_packages` packages in flight (`buffer_unordered`, then the
+//! outcomes are re-sorted into spec order for the report). C-026's memory
+//! ceiling is `max_blobs × largest_blob` and it holds *regardless* of that
+//! package fan-out, because the one run-scoped `Arc<Semaphore>` this file owns
+//! gates every blob pull across every package and source — concurrent packages
+//! contend for the same permits rather than each getting their own.
 //!
 //! # The two error classes (C-040)
 //!
@@ -307,7 +310,9 @@ async fn prepare_source<'spec>(
     })
 }
 
-/// Phase 2 (C-044): every source in spec order, every package sequentially.
+/// Phase 2 (C-044): every source in spec order; within a source, up to
+/// `concurrency.max_packages` packages at once (`fail_fast` forces one), with
+/// the outcomes re-sorted into catalog order for the report.
 async fn copy_sources(
     spec: &RegistrySpec,
     options: &RegistrySyncOptions,
@@ -322,6 +327,10 @@ async fn copy_sources(
     let blob_semaphore = Arc::new(Semaphore::new(spec.concurrency.max_blobs));
     let mounted_from = Arc::default();
     let mount_warnings = Arc::default();
+    // One credential resolver for the run: clones share the `Arc<RwLock>` cache
+    // (`ensure_source_auth`), so a physical host resolved once is not resolved
+    // again by a later package naming the same host.
+    let source_auth = ocx_lib::auth::Auth::new();
     // One destination client for the run: `native::Client` clones share the
     // token cache, so per-source clones re-use the destination's bearer token
     // instead of re-running the challenge per source.
@@ -348,6 +357,7 @@ async fn copy_sources(
         let context = CopyContext {
             source_index: source_read_seam(&prepared.source.trusted_hosts),
             source_client: registry_copy::build_source_client(prepared.source).await,
+            source_auth: source_auth.clone(),
             destination_client: destination_client.clone(),
             blob_semaphore: Arc::clone(&blob_semaphore),
             max_retries: spec.concurrency.max_retries,
@@ -375,11 +385,13 @@ async fn copy_sources(
                     package,
                     store,
                     &context,
-                    position,
-                    package_count,
+                    Progress {
+                        position,
+                        count: package_count,
+                    },
                 )
                 .await?;
-                let failed = matches!(row.1, PackageStep::Failed(_));
+                let failed = matches!(row.step, PackageStep::Failed(_));
                 outcomes.push(row);
                 if failed && fail_fast {
                     stopped_early = true;
@@ -387,12 +399,15 @@ async fn copy_sources(
                 }
             }
         } else {
-            // `buffered`, not `buffer_unordered`: the report lists packages in
-            // catalog order, and yielding in input order is what keeps that
-            // true without a sort. A package's cost is round trips against two
-            // registries, so this is the knob that matters on a catalog of
-            // hundreds — and it moves no memory ceiling, because the blob pool
-            // above is run-scoped.
+            // `buffer_unordered`, not `buffered`: `buffered` holds a slot for a
+            // package that finished but has not been yielded, so on the ordinary
+            // incremental sweep — where most packages short-circuit in one root
+            // fetch and a few copy for minutes — the finished skips pin the head
+            // slots and the effective width collapses toward 1, which is the one
+            // workload `max_packages` exists to speed up. Completion-order
+            // yielding is fine because the fold sorts on `position` below; a
+            // package's cost is round trips against two registries, and this
+            // moves no memory ceiling, because the blob pool above is run-scoped.
             outcomes = futures::stream::iter(prepared.plan.work.iter().enumerate().map(|(position, package)| {
                 let context = &context;
                 async move {
@@ -403,21 +418,26 @@ async fn copy_sources(
                         package,
                         store,
                         context,
-                        position,
-                        package_count,
+                        Progress {
+                            position,
+                            count: package_count,
+                        },
                     )
                     .await
                 }
             }))
-            .buffered(width)
+            .buffer_unordered(width)
             .try_collect()
             .await?;
+            // Completion order → catalog order, so the report reads the way the
+            // catalog does regardless of which package finished first.
+            outcomes.sort_by_key(|row| row.position);
         }
 
-        for (name, step, package_missing) in outcomes {
-            source_failed |= matches!(step, PackageStep::Failed(_));
-            missing.extend(package_missing);
-            source_report.packages.push(package_report(&name, step));
+        for row in outcomes {
+            source_failed |= matches!(row.step, PackageStep::Failed(_));
+            missing.extend(row.missing);
+            source_report.packages.push(package_report(&row.name, row.step));
         }
 
         if stopped_early {
@@ -445,20 +465,38 @@ async fn copy_sources(
     Ok(report)
 }
 
-/// One package's result as the fold above consumes it: its catalog key, what
-/// its pass did, and the descriptors a `--dry-run` measured.
+/// One package's result as the fold below consumes it.
 ///
-/// The dry-run list is carried per package rather than written into one shared
-/// `Vec`: with packages in flight together there is no shared `&mut` to write
-/// into, and merging in yield order keeps the estimate independent of which
-/// package finished first.
-type PackageOutcomeRow = (String, PackageStep, Vec<(Digest, u64)>);
+/// Carries its catalog `position` because the concurrent path yields in
+/// completion order (`buffer_unordered`), and the report must read back in
+/// catalog order — the fold sorts on this. The dry-run `missing` list is per
+/// package rather than one shared `Vec`: with packages in flight together there
+/// is no shared `&mut` to write into, and folding after the sort keeps the
+/// estimate independent of which package finished first.
+struct PackageOutcomeRow {
+    /// Index into `prepared.plan.work` — the catalog order to restore.
+    position: usize,
+    /// The catalog key.
+    name: String,
+    /// What the pass did.
+    step: PackageStep,
+    /// Descriptors a `--dry-run` measured for this package.
+    missing: Vec<(Digest, u64)>,
+}
 
 /// One package's copy, with the progress line that announces it.
 ///
 /// Extracted from the loop so the sequential and concurrent paths run the
 /// same body — the only difference between them is how many are in flight.
-#[allow(clippy::too_many_arguments)]
+/// Where a package sits in its source's work list — `position` of `count`,
+/// zero-based — carried as one value because the two are always passed and read
+/// together (the progress line, and the report re-sort key).
+#[derive(Clone, Copy)]
+struct Progress {
+    position: usize,
+    count: usize,
+}
+
 async fn copy_one_package(
     spec: &RegistrySpec,
     options: &RegistrySyncOptions,
@@ -466,21 +504,30 @@ async fn copy_one_package(
     package: &PackageWork,
     store: &IndexStore,
     context: &CopyContext,
-    position: usize,
-    package_count: usize,
+    progress: Progress,
 ) -> Result<PackageOutcomeRow, MirrorError> {
     // Before the copy, not after it: the existing per-tag line at
     // `tag_failure` reports a package that already finished, and a
     // multi-gigabyte one spends its whole transfer between the two.
+    // `package.name` is `{:?}`: it is a catalog key straight off the source's
+    // index, and under a `{upstream_*}` template it never reaches the OCI
+    // grammar guard, so a key carrying a newline or an escape would otherwise
+    // forge lines in the CI log an operator reads (CWE-117).
     tracing::info!(
-        "[{}/{package_count}] {}/{}",
-        position + 1,
+        "[{}/{}] {}/{:?}",
+        progress.position + 1,
+        progress.count,
         prepared.plan.as_name,
         package.name
     );
     let mut missing = Vec::new();
     let step = sync_package(spec, options, prepared, package, store, context, &mut missing).await?;
-    Ok((package.name.clone(), step, missing))
+    Ok(PackageOutcomeRow {
+        position: progress.position,
+        name: package.name.clone(),
+        step,
+        missing,
+    })
 }
 
 /// What one package's pass did.
@@ -580,8 +627,14 @@ async fn sync_package(
             };
             match plan::resolve_upstream(spec, as_name, &package.name, upstream) {
                 Ok(resolved) => resolved,
+                // `resolve_upstream` composes the upstream reference into a path
+                // and reaches no registry or disk, so every failure it can
+                // return is that one pointer's fault — a per-package failure
+                // (C-040), never a run abort. Classified by the call rather than
+                // the variant so a future change to its error type cannot
+                // silently promote one bad root into a whole-run abort.
                 Err(MirrorError::SpecInvalid(messages)) => return Ok(PackageStep::Failed(messages.join("; "))),
-                Err(other) => return Err(other),
+                Err(other) => return Ok(PackageStep::Failed(other.to_string())),
             }
         }
     };
@@ -592,8 +645,15 @@ async fn sync_package(
 
     // Seed the source client for the host the pointer names, before the first
     // request addressed to it. `build_source_client` seeded the *logical*
-    // `registry:`; everything below dials this one.
-    registry_copy::ensure_source_auth(&context.source_client, &source_registry).await;
+    // `registry:`; everything below dials this one. A real credential is
+    // resolved only for a host the operator named — the source's `registry:`
+    // or a `trusted_hosts` entry — because the physical host comes from the
+    // upstream root and a lookalike could otherwise slug-collide onto the
+    // operator's credential (see `ensure_source_auth`).
+    let credentialed_hosts: Vec<&str> = std::iter::once(source.registry.as_str())
+        .chain(source.trusted_hosts.iter().map(String::as_str))
+        .collect();
+    registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await;
 
     // The mirror image of the drift warning above, and mutually exclusive with
     // it: under a rewrite the published pointer is ours and drift is the risk,

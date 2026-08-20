@@ -2313,10 +2313,12 @@ name = "ocx_mirror"
 version = "0.5.6"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
  "clap",
  "futures",
  "hex",
+ "http",
  "md-5",
  "octocrab",
  "ocx_lib",

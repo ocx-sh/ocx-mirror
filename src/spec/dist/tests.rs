@@ -444,6 +444,64 @@ concurrency:
     assert!(errors.iter().any(|error| error.starts_with("concurrency.max_uploads:")));
 }
 
+/// The auto rule: unset follows the uploader (no upload ⇒ the tree is the
+/// deliverable, keep; upload ⇒ the store is, discard), and an explicit value
+/// wins over it in both directions.
+#[test]
+fn retain_archives_resolves_against_the_uploader_unless_set() {
+    let unset_no_upload = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+",
+    );
+    assert!(
+        unset_no_upload.retain_archives_resolved(),
+        "no uploader ⇒ the tree is the deliverable, so keep the archives"
+    );
+
+    let unset_with_upload = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+upload: {}
+",
+    );
+    assert!(
+        !unset_with_upload.retain_archives_resolved(),
+        "an uploader ⇒ the store is the deliverable, so discard the staged archives"
+    );
+
+    let forced_on_with_upload = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+upload: {}
+retain_archives: true
+",
+    );
+    assert!(
+        forced_on_with_upload.retain_archives_resolved(),
+        "explicit true overrides the auto-discard even when uploading"
+    );
+
+    let forced_off_no_upload = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+retain_archives: false
+",
+    );
+    assert!(
+        !forced_off_no_upload.retain_archives_resolved(),
+        "explicit false overrides the auto-keep even with no uploader"
+    );
+}
+
 /// Every rule reports rather than short-circuiting, so an operator fixes one
 /// spec once.
 #[test]

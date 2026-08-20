@@ -135,9 +135,13 @@ pub struct DistSpec {
 #[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DistConcurrency {
-    /// Archives fetched at once. Peak resident memory is
-    /// `max_downloads × largest_archive`, because each body is buffered whole
-    /// before it is written and verified.
+    /// Archives fetched at once. Each body is buffered whole before it is
+    /// written and verified, so downloads alone hold up to
+    /// `max_downloads × largest_archive`. A row then uploads inside the same
+    /// pass, and the PUT buffers the body again to checksum it, so an uploading
+    /// row can be resident at the same time as a downloading one: peak memory is
+    /// bounded by `(max_downloads + max_uploads) × largest_archive`, not by
+    /// `max_downloads` alone.
     #[serde(default = "default_max_downloads")]
     pub max_downloads: usize,
 

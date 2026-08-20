@@ -46,6 +46,10 @@ ocx_python = { path = "crates/ocx_python" }
 tokio = { version = "1.52", features = ["full"] }
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
 anyhow = "1.0.102"
+# `bytes` matches ocx's pin. The dist uploader holds one archive body per
+# in-flight PUT and reqwest consumes it per attempt, so the payload is a
+# refcount-cloned `Bytes` rather than a `Vec<u8>` copied on every retry.
+bytes = "1.11.1"
 futures = "0.3.32"
 serde = { version = "1.0.228", features = ["derive"] }
 # `preserve_order` is necessary, not belt-and-braces: `ocx_lib`'s
@@ -95,6 +99,11 @@ tempfile = "3.27.0"
 
 [dev-dependencies]
 tokio = { version = "1.52", features = ["full", "test-util"] }
+# Already in the graph transitively via reqwest; taken as a direct dev-dep so a
+# unit test can synthesize the `reqwest`-wrapped 429 the HEAD presence probe
+# emits (`is_rate_limited`) — reqwest exposes no other constructor for an
+# `Error` carrying a status.
+http = "1.4.2"
 
 # ocx_lib is developed against the ocx-sh forks of oci-client and
 # docker_credential via [patch.crates-io] in the ocx workspace. Patch tables

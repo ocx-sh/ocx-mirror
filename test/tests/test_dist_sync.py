@@ -17,6 +17,7 @@ import base64
 import hashlib
 import http.server
 import json
+import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -1002,3 +1003,40 @@ def test_retain_archives_true_keeps_them_even_when_uploading(
     dist_mirror.run("dist", "sync", str(spec))
 
     assert list(output.glob("v0.5.8/*")), "retain_archives: true must survive a successful upload"
+
+
+def test_retain_archives_true_repopulates_the_tree_when_the_store_is_already_warm(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """A store hit must still fill a retained tree — the tree is a deliverable.
+
+    With `retain_archives: true` the local `output:` tree is served alongside
+    the store, so it must be complete. When the store already holds an archive
+    (a warm store against an empty runner), the probe skips the *upload* — but
+    the archive must still be fetched into the local tree, or the published
+    `dist.json` names a file the served tree does not contain.
+    """
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    output = tmp_path / "public"
+    spec = tmp_path / "dist.yml"
+    write_spec(spec, source, output, base_url=upload_store.url(), upload=True)
+    spec.write_text(spec.read_text() + "retain_archives: true\n")
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    # Run 1 warms the store and stages the tree.
+    dist_mirror.run("dist", "sync", str(spec))
+    assert list(output.glob("v0.5.8/*")), "the first run must stage the archives"
+
+    # A fresh runner: the store stays warm, the local tree is gone.
+    shutil.rmtree(output)
+    puts_before = len(upload_store.paths("PUT"))
+
+    result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
+
+    assert list(output.glob("v0.5.8/*")), (
+        "a warm-store skip must still fetch each archive into a retained tree"
+    )
+    archive_puts = [path for path in upload_store.paths("PUT")[puts_before:] if path.startswith("/v0.5.8/")]
+    assert archive_puts == [], "the store already holds the archives, so their PUT stays skipped"
+    assert json.loads(result.stdout)["counters"]["failed"] == 0

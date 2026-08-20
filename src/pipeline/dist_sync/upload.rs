@@ -211,7 +211,7 @@ impl Uploader {
     /// so a file deleted from it is re-uploaded by the next run instead of
     /// being skipped forever by stale local state.
     ///
-    /// Every PUT announces all four checksums; see [`checksums`] for why they
+    /// Every PUT announces all four checksums; see [`Checksums`] for why they
     /// are computed here rather than passed in.
     ///
     /// # Errors
@@ -235,10 +235,13 @@ impl Uploader {
         // Off the reactor: four synchronous passes over a body that can be tens
         // of megabytes would otherwise park a worker thread, and
         // `concurrency.max_uploads` puts several of these in flight at once.
-        // The body is moved through rather than cloned — it is the PUT payload.
+        // The body comes back as `Bytes` so the per-attempt `.body(body.clone())`
+        // below is an `Arc` refcount bump, not a fresh copy of the whole archive
+        // on every retry — which keeps the upload term of the memory ceiling at
+        // one body per in-flight PUT, as `DistConcurrency` documents.
         let (body, sums) = tokio::task::spawn_blocking(move || {
             let sums = Checksums::of(&body);
-            (body, sums)
+            (bytes::Bytes::from(body), sums)
         })
         .await
         .with_context(|| format!("checksum task panicked for {}", file.display()))?;
