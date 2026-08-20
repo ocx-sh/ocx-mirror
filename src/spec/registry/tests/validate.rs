@@ -240,6 +240,14 @@ sources:
             "no message mentions `{needle}`: {errors:?}"
         );
     }
+
+    // Each violated rule fires exactly once — a duplicated arm would report the
+    // same fault twice and read as two problems to an operator.
+    assert_eq!(
+        errors.iter().filter(|error| error.contains("max_blobs")).count(),
+        1,
+        "max_blobs must be reported once, not by two arms: {errors:?}"
+    );
 }
 
 /// The empty spec still reports the one thing an operator can act on, rather

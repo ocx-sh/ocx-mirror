@@ -130,6 +130,21 @@ fn registry_error(code: OciErrorCode) -> OciDistributionError {
     }
 }
 
+/// A `RequestError` carrying `status`, the exact shape the destination presence
+/// probe emits: the fork's `head_blob_response` turns a non-404 HEAD into
+/// `Err(error_for_status_ref().into())`. `reqwest` builds an `Error` carrying a
+/// status only from a `Response`, so synthesize a minimal one.
+fn request_error(status: u16) -> OciDistributionError {
+    let response = http::Response::builder()
+        .status(status)
+        .body(Vec::new())
+        .expect("a well-formed HTTP response");
+    let source = reqwest::Response::from(response)
+        .error_for_status()
+        .expect_err("a >= 400 status is an error");
+    OciDistributionError::RequestError(source)
+}
+
 // ── C-021 — the tag copy plan classifies nothing ────────────────────────────
 
 /// The whole contract in one test: every key in, every key out, with its own
@@ -504,11 +519,17 @@ fn only_an_authoritative_answer_decides_whether_a_blob_is_present() {
 fn only_a_rate_limit_is_retryable() {
     assert!(is_rate_limited(&server_error(429)));
     assert!(is_rate_limited(&registry_error(OciErrorCode::Toomanyrequests)));
+    // The HEAD presence probe emits its 429 as a `reqwest`-wrapped `RequestError`,
+    // not one of the two shapes above; without its arm the probe's retry ladder
+    // is inert and one throttle aborts the run.
+    assert!(is_rate_limited(&request_error(429)));
 
     for other in [
         server_error(500),
         server_error(503),
         server_error(404),
+        request_error(503),
+        request_error(500),
         registry_error(OciErrorCode::BlobUnknown),
         registry_error(OciErrorCode::Denied),
         OciDistributionError::RegistryNoLocationError,
@@ -1083,5 +1104,36 @@ fn both_manifest_walks_descend_the_depth_counter() {
     assert!(
         body.contains("async fn copy_manifest_tree_at") && body.contains("async fn missing_descriptors_at"),
         "both depth-aware walks must exist under these names, or this guard tests nothing"
+    );
+}
+
+/// The security boundary of `ensure_source_auth` (the slug-collision leak): a
+/// physical host the operator did not name gets no resolved credential, so a
+/// hostile root pointing at a lookalike of a real registry cannot exfiltrate
+/// the operator's token to it.
+#[test]
+fn only_an_operator_named_host_is_credentialed() {
+    // The source's own `registry:` plus its `trusted_hosts` — the exact
+    // allow-list `sync_package` builds.
+    let allowed = ["ocx.sh", "registry.corp.example.com"];
+
+    assert!(
+        host_is_credentialed("registry.corp.example.com", &allowed),
+        "a host the operator named is credentialed"
+    );
+    assert!(
+        host_is_credentialed("ocx.sh", &allowed),
+        "the source's own registry is credentialed"
+    );
+    // `to_slug` collapses both of these onto `registry_corp_example_com`; the
+    // lookalike is a different string and is not in the list, so it must not be
+    // credentialed even though its slug collides with the named host's.
+    assert!(
+        !host_is_credentialed("registry-corp-example.com", &allowed),
+        "a slug-colliding lookalike host gets the anonymous path, never the operator's credential"
+    );
+    assert!(
+        !host_is_credentialed("ghcr.io", &allowed),
+        "an unnamed host — the public ocx.sh → ghcr.io case — takes the anonymous path"
     );
 }

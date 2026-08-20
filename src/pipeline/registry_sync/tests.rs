@@ -642,9 +642,17 @@ fn the_blob_pool_is_run_scoped_and_the_package_width_is_the_operators_knob() {
         body.contains("let width = if fail_fast { 1 } else { spec.concurrency.max_packages };"),
         "fail_fast forces width 1"
     );
+    // `buffer_unordered`, not `buffered`: a finished-but-unyielded skip must not
+    // pin a head slot and collapse the effective width (the incremental-sweep
+    // workload `max_packages` exists to speed up). The catalog order the report
+    // depends on is restored by the sort, not by the stream combinator.
     assert!(
-        body.contains(".buffered(width)"),
-        "the concurrent path yields in catalog order"
+        body.contains(".buffer_unordered(width)"),
+        "the concurrent path yields in completion order under buffer_unordered"
+    );
+    assert!(
+        body.contains("outcomes.sort_by_key(|row| row.position);"),
+        "completion order is re-sorted into catalog order before the report is built"
     );
     assert!(
         !body.contains("JoinSet") && !body.contains("tokio::spawn"),
@@ -662,8 +670,20 @@ fn the_source_client_is_seeded_for_the_host_the_pointer_names() {
     // call the public index was uncopyable from the first referrer query on.
     let body = function_body("sync_package");
     assert!(
-        body.contains("registry_copy::ensure_source_auth(&context.source_client, &source_registry).await;"),
+        body.contains("registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await;"),
         "the physical host's credential is seeded"
+    );
+    // The host seeded must be the one `parse_physical_repository` read off the
+    // root, not the source's logical `registry:` — rebinding it to the latter
+    // is exactly the bug this fixed, and it would leave the needle above
+    // matching, so pin the provenance too.
+    assert_ordered(&body, "parse_physical_repository", "ensure_source_auth");
+    // The credential is resolved only for a host the operator named — the
+    // source's `registry:` plus its `trusted_hosts` — so a lookalike physical
+    // host from a hostile root cannot slug-collide onto a real credential.
+    assert!(
+        body.contains("source.registry.as_str()") && body.contains("source.trusted_hosts.iter()"),
+        "the credentialed-host allow-list is the source's own registry and trusted_hosts"
     );
     assert_ordered(
         &body,

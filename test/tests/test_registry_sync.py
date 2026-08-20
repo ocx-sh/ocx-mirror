@@ -615,11 +615,17 @@ def test_publish_tags_false_copies_the_content_and_creates_no_destination_tag(
 ) -> None:
     """`publish_tags: false` pushes by digest only; the index still carries every tag.
 
-    A client resolving through the mirrored index never reads a destination
-    tag — the root maps tag to `content` digest and the pull is by digest — so
-    the whole tag set stays usable while the registry gains none of it. What
-    the destination must still hold is the content itself, addressable by the
-    digest the root names.
+    A client resolving through the mirrored index never reads a version or
+    cascade tag — the root maps tag to `content` digest and the pull is by
+    digest — so the whole tag set stays usable while the registry gains none of
+    those named tags. What the destination must still hold is the content
+    itself, addressable by the digest the root names.
+
+    `publish_tags` and `canonical_tags` are independent knobs: turning off the
+    former does not turn off the latter, so the reserved `sha256.<hex>` tags
+    still land here (default `canonical_tags: true`). The both-off case is
+    covered separately by
+    `test_publish_tags_and_canonical_tags_both_false_writes_no_destination_tag`.
     """
     package = f"testns/{unique_mirror_repo}"
     older, older_body = seed_version(ocx_binary, registry, package, "3.31.2", tmp_path / "push-old", b"v3.31.2")
@@ -654,6 +660,74 @@ def test_publish_tags_false_copies_the_content_and_creates_no_destination_tag(
         if fetch_manifest(mirror_registry, repository, expected)[0] != expected:
             problems.append(f"content {expected} for tag {tag!r} is not readable by digest")
         problems += verify_tag_content(tree, package, tag, expected)
+
+    # `canonical_tags` defaults true and is independent of `publish_tags`, so
+    # the reserved `sha256.<hex>` tags still land: every tag the destination
+    # carries is digest-named, and there is at least one (the copy is not tagless).
+    tags = destination_tags(mirror_registry, repository)
+    non_canonical = [tag for tag in tags if not tag.startswith("sha256.")]
+    if non_canonical:
+        problems.append(f"publish_tags is false but non-canonical tags exist: {non_canonical}")
+    if not tags:
+        problems.append("canonical_tags defaults true, so the destination must carry sha256.<hex> tags")
+    assert problems == []
+
+
+def test_publish_tags_and_canonical_tags_both_false_writes_no_destination_tag(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """Both knobs off is the only way to a genuinely tagless destination.
+
+    `publish_tags: false` alone still writes the reserved `sha256.<hex>` tags
+    (`canonical_tags` defaults true). Turning both off writes the content by
+    digest and tags nothing — for a store whose own retention keeps untagged
+    manifests reachable.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    older, older_body = seed_version(ocx_binary, registry, package, "3.31.2", tmp_path / "push-old", b"v3.31.2")
+    newer, newer_body = seed_version(ocx_binary, registry, package, "3.31.10", tmp_path / "push-new", b"v3.31.10")
+    cascade = {"3.31.2": older, "3.31.10": newer, "3.31": newer, "latest": newer}
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, cascade, {older: older_body, newer: newer_body})],
+    )
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+        extra={"publish_tags": False, "canonical_tags": False},
+    )
+
+    assert run_sync(sync, spec).returncode == 0
+
+    repository = destination_repository(package)
+    problems: list[str] = []
+    # No version/cascade tag, and — the both-off point — no canonical
+    # `sha256.<hex>` tag either. Probed by specific reference rather than
+    # `tags/list`, because a registry answers 404 for the tag listing of a repo
+    # that only ever received digest-addressed pushes.
+    for digest in (older, newer):
+        for reference in (digest.replace("sha256:", "").replace(":", "."), digest.replace(":", ".")):
+            if not manifest_absent(mirror_registry, repository, reference):
+                problems.append(f"tag {reference!r} exists, but both tag knobs are false")
+    for tag in ("3.31.2", "3.31.10", "3.31", "latest"):
+        if not manifest_absent(mirror_registry, repository, tag):
+            problems.append(f"version tag {tag!r} exists, but publish_tags is false")
+    # The content is still there, reachable by the digest the root names.
+    for digest in {older, newer}:
+        if fetch_manifest(mirror_registry, repository, digest)[0] != digest:
+            problems.append(f"content {digest} must remain readable by digest")
     assert problems == []
 
 
@@ -668,11 +742,11 @@ def test_the_package_width_changes_nothing_about_the_result(
 ) -> None:
     """`concurrency.max_packages` is a throughput knob, never a correctness one.
 
-    The concurrent path yields in catalog order (`buffered`, not
-    `buffer_unordered`), so a serial run and a wide one must produce a
-    byte-identical index tree and an identically ordered report. Preserve mode,
-    so the roots carry the upstream pointer and the two runs' trees differ in
-    nothing but what the knob could corrupt.
+    The concurrent path yields in completion order (`buffer_unordered`) and
+    re-sorts the outcomes into catalog order before the report, so a serial run
+    and a wide one must produce a byte-identical index tree and an identically
+    ordered report. Preserve mode, so the roots carry the upstream pointer and
+    the two runs' trees differ in nothing but what the knob could corrupt.
     """
     packages = [f"testns/{unique_mirror_repo}_{suffix}" for suffix in ("alpha", "beta", "gamma")]
     tree = []

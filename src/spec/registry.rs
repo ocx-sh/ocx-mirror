@@ -123,10 +123,12 @@ pub struct RegistrySpec {
     /// copying that set faithfully would create none of them —
     /// `ghcr.io/ocx-sh/ocx/cli` carries 54 against 21 version tags.
     ///
-    /// Turning it off costs one `PUT` per distinct manifest and leaves every
+    /// Turning it off saves one `PUT` per distinct manifest but leaves every
     /// platform manifest at the destination reachable only through the index
-    /// naming it. Pair `false` with [`Self::publish_tags`] `false` only on a
-    /// destination you know keeps untagged manifests.
+    /// naming it — so a registry garbage collector that sweeps untagged
+    /// manifests can reclaim one a lock still pins. Pair `false` with
+    /// [`Self::publish_tags`] `false` only on a destination you know keeps
+    /// untagged manifests.
     #[serde(default = "default_canonical_tags")]
     pub canonical_tags: bool,
 
@@ -180,10 +182,6 @@ impl RegistrySpec {
 
         if self.output.as_os_str().is_empty() {
             errors.push("output: a directory to write the index tree into is required".to_string());
-        }
-
-        if self.concurrency.max_blobs == 0 {
-            errors.push("concurrency.max_blobs: must be at least 1 — zero blobs in flight copies nothing".to_string());
         }
 
         errors

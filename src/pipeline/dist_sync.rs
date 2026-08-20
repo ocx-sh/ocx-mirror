@@ -208,30 +208,34 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
             })
             .collect()
     } else {
-        // `buffered`, not `buffer_unordered`: it runs the same number
-        // concurrently but yields in input order, which is the determinism the
-        // report needs without an index sort afterwards.
+        // `buffer_unordered`, not `buffered`: `buffered` holds a slot for a
+        // future that finished but has not been yielded, so one slow row — a
+        // large download, or one queued on the upload permit — freezes
+        // admission of every later row, including ones the probe would skip in
+        // milliseconds. On the incremental sweep this feature targets, a
+        // mostly-already-present set, that collapses the effective width toward
+        // 1. Yield order does not matter here because the fold below is keyed by
+        // `plan.index`, and the counters are order-free sums.
         //
         // `try_collect` stops polling at the first *abort-class* error, but not
-        // instantly: it only sees the error once that future returns, and
-        // `buffered` keeps polling the rest until then. `upload_failed` closes
-        // that window, so a store answering `401` sees at most the writes
-        // already in flight — never one per archive. A row that merely failed
-        // to fetch is not in that class: it comes back as `RowStep::Failed`
-        // inside `Ok` and the pass runs on, so the operator sees every bad row
-        // in one report.
+        // instantly: it only sees the error once that future returns, and the
+        // stream keeps polling the rest until then. `upload_failed` closes that
+        // window, so a store answering `401` sees at most the writes already in
+        // flight — never one per archive. A row that merely failed to fetch is
+        // not in that class: it comes back as `RowStep::Failed` inside `Ok` and
+        // the pass runs on, so the operator sees every bad row in one report.
         futures::stream::iter(planned.into_iter().enumerate().map(|(position, plan)| {
             let client = &client;
             let uploader = uploader.as_ref();
             let upload_permits = &upload_permits;
             let upload_failed = &upload_failed;
             async move {
-                tracing::info!("[{}/{total}] {} → {}", position + 1, plan.name, plan.relative);
+                tracing::info!("[{}/{total}] {:?} → {:?}", position + 1, plan.name, plan.relative);
                 let step = mirror_row(client, spec, uploader, upload_permits, upload_failed, &plan, retain).await?;
                 Ok::<_, MirrorError>((plan, step))
             }
         }))
-        .buffered(spec.concurrency.max_downloads)
+        .buffer_unordered(spec.concurrency.max_downloads)
         .try_collect()
         .await?
     };
@@ -465,7 +469,14 @@ enum RowStep {
 /// the old existence-only trust rather than to a re-download, because that is
 /// exactly the behaviour it had before.
 ///
-/// `Err` carries the per-row failure message; the caller counts it.
+/// # Errors
+///
+/// The two error classes are split across the return, not folded into one:
+/// [`RowStep::Failed`] is the per-row failure the caller counts and the run
+/// survives (a source that will not serve this archive); `Err` is a whole-run
+/// abort (the destination did not answer a probe, or rejected a write) — every
+/// other row would hit the same wall, so the pass stops rather than retrying it
+/// N times.
 async fn mirror_row(
     client: &reqwest::Client,
     spec: &DistSpec,
@@ -487,16 +498,33 @@ async fn mirror_row(
                 // before: a wrong object at the right path used to be trusted
                 // for ever.
                 if sha256.as_deref().is_none_or(|reported| reported == plan.sha256_hex) {
-                    // Nothing here is needed any more, including a local copy a
-                    // previous run staged.
-                    discard_staged(&destination, retain).await;
+                    // The store already holds the right bytes, so the PUT is
+                    // skipped either way. What differs is the local tree: under
+                    // `retain` it is a deliverable that must be complete, so the
+                    // archive is still fetched (fetch_archive itself skips a
+                    // verified local copy) — a store hit must not leave a
+                    // retained tree naming an archive it does not contain. Only
+                    // when the tree is throwaway staging is the row a pure skip.
+                    if !retain {
+                        // Nothing here is needed any more, including a local copy
+                        // a previous run staged.
+                        discard_staged(&destination, retain).await;
+                        return Ok(RowStep::Done(RowOutcome {
+                            archive: ArchiveOutcome::Skipped,
+                            upload: Some(UploadOutcome::Skipped),
+                        }));
+                    }
+                    let archive = match fetch_archive(client, &destination, plan).await {
+                        Ok(archive) => archive,
+                        Err(detail) => return Ok(RowStep::Failed(detail)),
+                    };
                     return Ok(RowStep::Done(RowOutcome {
-                        archive: ArchiveOutcome::Skipped,
+                        archive,
                         upload: Some(UploadOutcome::Skipped),
                     }));
                 }
                 tracing::warn!(
-                    "{} holds a different object than the manifest declares; re-uploading",
+                    "{:?} holds a different object than the manifest declares; re-uploading",
                     plan.relative
                 );
             }
@@ -506,7 +534,7 @@ async fn mirror_row(
             // way — so it aborts rather than reddening one row.
             Err(error) => {
                 return Err(MirrorError::ExecutionFailed(vec![format!(
-                    "cannot ask the destination about {}: {error:#}",
+                    "cannot ask the destination about {:?}: {error:#}",
                     plan.relative
                 )]));
             }
@@ -538,7 +566,7 @@ async fn mirror_row(
         // way — the rejection below aborts it.
         if upload_failed.load(Ordering::Relaxed) {
             return Ok(RowStep::Failed(format!(
-                "upload of {} was not attempted: an earlier upload was rejected",
+                "upload of {:?} was not attempted: an earlier upload was rejected",
                 plan.relative
             )));
         }
@@ -549,7 +577,7 @@ async fn mirror_row(
             .await
             .map_err(|error| {
                 upload_failed.store(true, Ordering::Relaxed);
-                MirrorError::ExecutionFailed(vec![format!("upload of {} failed: {error:#}", plan.relative)])
+                MirrorError::ExecutionFailed(vec![format!("upload of {:?} failed: {error:#}", plan.relative)])
             })?
     };
 
