@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-08-20
+
+### Added
+
+- Announce each slow registry step before it runs *(log)*
+- Publish_tags, and copy a repeated manifest once *(registry)*
+- Mirror ocx's canonical sha256.&lt;hex&gt; tags *(registry)*
+- Key the destination on the upstream reference *(registry)*
+
+### Changed
+
+- Drop the dist.json.sha256 sidecar *(dist)*
+- Probe the destination first and pipeline each row *(dist)*
+- Copy an index's platforms at once and stop re-probing blobs *(registry)*
+- Copy packages concurrently under concurrency.max_packages *(registry)*
+
+### Documentation
+
+- Reference docs for publish_tags, canonical_tags and max_packages *(registry)*
+
+### Fixed
+
+- Unblock Artifactory uploads and keep the rolling manifest current *(dist)*
+- Stop uploading once a write has been rejected *(dist)*
+- Authenticate the source client to the host the pointer names *(registry)*
+- Harden dist and registry sync after adversarial review *(sync)*
+
 ## [0.5.6] - 2026-08-19
 
 ### Added
@@ -17,6 +44,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Never answer a netrc `default` entry *(auth)*
 - Honour RUST_LOG and surface why a fetch failed *(cli)*
 - Route every production client through the trust-root factory *(http)*
+
+### Release
+
+- V0.5.6
 
 ## [0.5.5] - 2026-08-18
 
@@ -264,6 +295,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.5.7]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.6..v0.5.7
 [0.5.6]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.5..v0.5.6
 [0.5.5]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.4..v0.5.5
 [0.5.4]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.3..v0.5.4

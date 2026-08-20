@@ -2310,7 +2310,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2341,7 +2341,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_python"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "ocx_lib",
  "serde",
