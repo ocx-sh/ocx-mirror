@@ -141,9 +141,10 @@ pub struct DistConcurrency {
     #[serde(default = "default_max_downloads")]
     pub max_downloads: usize,
 
-    /// Archives uploaded at once. The rolling manifest, its sidecar and the
-    /// snapshot are **never** included — their ordering is the publish
-    /// invariant (`pipeline::dist_sync::upload_tree`).
+    /// Archives uploaded at once — effectively capped by [`Self::max_downloads`]
+    /// too, because each upload runs inside its own row's pass. The rolling
+    /// manifest and the snapshot are **never** included: their ordering is the
+    /// publish invariant (`pipeline::dist_sync::upload_manifest`).
     #[serde(default = "default_max_uploads")]
     pub max_uploads: usize,
 }

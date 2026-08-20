@@ -657,6 +657,64 @@ def test_publish_tags_false_copies_the_content_and_creates_no_destination_tag(
     assert problems == []
 
 
+def test_the_package_width_changes_nothing_about_the_result(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """`concurrency.max_packages` is a throughput knob, never a correctness one.
+
+    The concurrent path yields in catalog order (`buffered`, not
+    `buffer_unordered`), so a serial run and a wide one must produce a
+    byte-identical index tree and an identically ordered report. Preserve mode,
+    so the roots carry the upstream pointer and the two runs' trees differ in
+    nothing but what the knob could corrupt.
+    """
+    packages = [f"testns/{unique_mirror_repo}_{suffix}" for suffix in ("alpha", "beta", "gamma")]
+    tree = []
+    for position, package in enumerate(packages):
+        digest, body = seed_version(
+            ocx_binary, registry, package, "1.0.0", tmp_path / f"push-{position}", str(position).encode()
+        )
+        tree.append(tree_package(registry, package, {"1.0.0": digest}, {digest: body}))
+    write_published_index_tree(published_index_server.dir, tree)
+
+    def run(name: str, width: int) -> tuple[dict, dict[str, bytes]]:
+        output = tmp_path / name
+        spec = tmp_path / f"{name}.yml"
+        write_registry_spec(
+            spec,
+            target_registry=mirror_registry,
+            target_repository=TARGET_PREFIX,
+            output=output,
+            # Distinct landing prefixes so the second run cannot skip on what
+            # the first already pushed registry-side.
+            destination=name + "/{namespace}/{package}",
+            rewrite_pointers=False,
+            sources=[source_spec(registry, published_index_server.url())],
+            extra={"concurrency": {"max_packages": width}},
+        )
+        result = run_sync(sync, spec, "--format", "json")
+        assert result.returncode == 0, outcome(result)
+        files = {
+            str(path.relative_to(output)): path.read_bytes() for path in sorted(output.rglob("*")) if path.is_file()
+        }
+        return report_json(result), files
+
+    serial_report, serial_tree = run("serial", 1)
+    wide_report, wide_tree = run("wide", 8)
+
+    assert serial_tree == wide_tree, "the emitted index tree must not depend on package width"
+    serial_rows = [row["name"] for source in serial_report["sources"] for row in source["packages"]]
+    wide_rows = [row["name"] for source in wide_report["sources"] for row in source["packages"]]
+    assert serial_rows == wide_rows, "the report must stay in catalog order whatever finishes first"
+    assert serial_report["counters"] == wide_report["counters"]
+
+
 # ---------------------------------------------------------------------------
 # S-024 / S-010 — the copy walk enumerates every descriptor
 # ---------------------------------------------------------------------------

@@ -213,6 +213,7 @@ output: ""
 destination: "{namespace}/{package}"
 concurrency:
   max_blobs: 0
+  max_packages: 0
 sources:
   - registry: localhost:5001
     index: https://index.example/
@@ -230,6 +231,7 @@ sources:
         "output",
         "{registry}",
         "max_blobs",
+        "max_packages",
         "kitware/**",
         "already used by",
     ] {
