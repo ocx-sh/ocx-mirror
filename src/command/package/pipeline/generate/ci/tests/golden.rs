@@ -100,9 +100,40 @@ fn render_all_masked(fixture: &str) -> String {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let content = std::fs::read_to_string(&path).unwrap();
         blob.push_str(&format!("===== {name} =====\n"));
-        blob.push_str(&content.replace(VERSION, "{VERSION}").replace(GIT_SHA_SHORT, "{REV}"));
+        // Anchored on the header, NOT on the bare version string. The crate
+        // version and `OCX_CONTAINER_CLI_TAG` are independent values that can
+        // coincide — they both read 0.6.0 today — and a bare
+        // `content.replace(VERSION, ..)` then masks the setup-ocx `version:`
+        // pin as well, so the goldens silently stop asserting it. That is a
+        // fake green the release bump walks straight into: it appears as a
+        // spurious 92-line golden diff on the release commit and invites a
+        // regeneration that bakes the masking in.
+        blob.push_str(
+            &content
+                .replace(&format!("ocx-mirror v{VERSION}"), "ocx-mirror v{VERSION}")
+                .replace(GIT_SHA_SHORT, "{REV}"),
+        );
     }
     blob
+}
+
+#[test]
+fn masking_the_build_stamp_leaves_the_setup_ocx_pin_asserted() {
+    // The guard on the mask. `render_all_masked` blanks the build stamp so the
+    // goldens survive a release bump — but the crate version and the pinned ocx
+    // CLI version are independent values that can coincide, and a mask keyed on
+    // the bare version string then blanks the pin too. The goldens would still
+    // match, and would no longer be asserting the one value a downstream repo
+    // bootstraps from.
+    let masked = render_all_masked("mirror-minimal.yml");
+    assert!(
+        masked.contains("ocx-mirror v{VERSION}"),
+        "the build stamp must be masked, or every release bump reds the goldens"
+    );
+    assert!(
+        masked.contains(&format!("version: \"{}\"", super::super::matrix::ocx_cli_version())),
+        "the setup-ocx pin must survive masking — it is what a generated workflow bootstraps"
+    );
 }
 
 #[test]
