@@ -1,6 +1,12 @@
-inlineHeader = """
+# hawkeye 7 schema. The pre-7 spelling (top-level `inlineHeader` / `includes` /
+# `excludes`) is rejected outright — `hawkeye check` exits 2 with
+# "unknown field `excludes`" rather than degrading, so the migration is not
+# optional once the pinned tool moves. Same shape the sibling ocx repo uses.
+[header]
+text = """
 SPDX-License-Identifier: Apache-2.0
 Copyright 2026 The OCX Authors"""
 
+[files]
 includes = ["src/**/*.rs", "tests/**/*.rs", "crates/*/src/**/*.rs", "crates/*/tests/**/*.rs"]
 excludes = ["external/**"]
