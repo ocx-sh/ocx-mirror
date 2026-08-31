@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
-use ocx_lib::oci::{ClientBuilder, Descriptor, Identifier};
+use ocx_lib::oci::{Descriptor, Identifier};
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::{ArchiveMediaType, Publisher};
 
@@ -104,7 +104,7 @@ impl Patch {
         let spec = spec::load_spec(&self.spec).await?;
         let spec_dir = self.spec.parent().unwrap_or(Path::new("."));
 
-        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
         let identifier = Identifier::new_registry(&spec.target.repository, &spec.target.registry);
 

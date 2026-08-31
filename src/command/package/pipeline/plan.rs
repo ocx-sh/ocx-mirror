@@ -22,7 +22,7 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
-use ocx_lib::oci::{Algorithm, Architecture, ClientBuilder, Identifier, OperatingSystem, Platform};
+use ocx_lib::oci::{Algorithm, Architecture, Identifier, OperatingSystem, Platform};
 use ocx_lib::package::metadata::Metadata;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
@@ -249,7 +249,7 @@ async fn build_plan_report(
     locks_dir: &Path,
 ) -> Result<PlanReport, MirrorError> {
     // Build target identifier for registry queries.
-    let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+    let client = crate::command::package::registry_client()?;
     let publisher = Publisher::new(client);
     let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
 

@@ -39,8 +39,9 @@ use crate::spec::MirrorSpec;
 /// to that module and the two push legs (archive bundle vs. env layers)
 /// evolve independently (Two Hats: no shared refactor across the split).
 ///
-/// The report also carries `canonical_tags_written` (the digest-named
-/// `sha256.<hex>` safety-net tags). It is deliberately NOT captured: the one
+/// The report also carries the digest-named keep tags (`keep_tags_written` as
+/// of ocx 0.6.0, `canonical_tags_written` before it). Neither name is captured
+/// here, so the rename is inert — deliberately: the one
 /// consumer of this struct's tag list is the announce union, which curates
 /// human-meaningful version tags into the index — a canonical tag belongs in
 /// neither the index entry nor a Discord release line.
@@ -138,8 +139,8 @@ fn ensure_contained(path: &Path, manifest_path: &Path, field: &str) -> Result<()
     Ok(())
 }
 
-/// Build the `ocx package push` argv for one env-package leg: `--cascade
-/// --new` with the composed `metadata.json` via `-m` and the ordered wheel
+/// Build the `ocx package push` argv for one env-package leg: `--cascade`
+/// with the composed `metadata.json` via `-m` and the ordered wheel
 /// layers as positional args, each carrying a `:from=<wheel_repository>` tail
 /// so the push attempts a cross-repository blob mount against the wheel's
 /// standalone registration (see [`register_wheel_layers`]) before falling
@@ -171,12 +172,9 @@ pub(crate) fn build_env_push_args(
     ];
 
     // `--cascade` requires an ocx-parseable X.Y.Z version to derive rolling
-    // tags; the caller drops it for versions ocx cannot parse. `--new` only
-    // matters alongside cascade (it treats the first-publish tag-list 404 as an
-    // empty set), so the two travel together.
+    // tags; the caller drops it for versions ocx cannot parse.
     if cascade {
         args.push("--cascade".to_string());
-        args.push("--new".to_string());
     }
 
     args.extend([
@@ -461,9 +459,8 @@ mod tests {
             .expect("valid UTF-8 paths build cleanly");
 
         assert!(args.contains(&"--cascade".to_string()));
-        assert!(args.contains(&"--new".to_string()));
 
-        // cascade=false (a version ocx cannot parse) drops both flags but keeps
+        // cascade=false (a version ocx cannot parse) drops the flag but keeps
         // the identifier, metadata, and ordered layers.
         let no_cascade = build_env_push_args(
             "linux/amd64",
@@ -475,7 +472,6 @@ mod tests {
         )
         .expect("valid UTF-8 paths build cleanly");
         assert!(!no_cascade.contains(&"--cascade".to_string()));
-        assert!(!no_cascade.contains(&"--new".to_string()));
         assert!(no_cascade.contains(&"pycowsay:0.0.0.2".to_string()));
         assert_eq!(
             no_cascade.iter().filter(|a| a.contains(".tar.zst:from=")).count(),

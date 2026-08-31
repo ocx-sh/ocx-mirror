@@ -133,8 +133,7 @@ impl Prepare {
         spec_dir: &std::path::Path,
         work_dir: &std::path::Path,
     ) -> Result<(), MirrorError> {
-        let client =
-            ocx_lib::oci::ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let client = crate::command::package::registry_client()?;
         let python = spec.python.as_ref().ok_or_else(|| {
             MirrorError::SpecInvalid(vec![
                 "python config is required for source.type 'pylock'/'pypi'".to_string(),

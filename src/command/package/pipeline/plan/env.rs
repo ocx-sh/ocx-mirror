@@ -274,7 +274,7 @@ pub fn select_pypi_candidates<'a>(
 /// missing/spawn failure, timeout, interpreter materialization, lock-file
 /// I/O — is a subprocess execution failure ([`MirrorError::ExecutionFailed`],
 /// exit 1), the same convention `describe.rs::invoke_describe` uses for
-/// `ocx package describe` subprocess failures.
+/// `ocx package description push` subprocess failures.
 ///
 /// ponytail: string-sniffs the two data-error markers rather than a
 /// structured `lock_derive::Error` enum — promote to a real error type if
@@ -493,14 +493,33 @@ pub fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPl
             "platform key '{key}' must be a concrete os/arch pair for pylock sources"
         )));
     };
+    // Enumerated, never `_ =>`: ocx_lib owns both enums, so a variant added
+    // upstream must land here as a compile error rather than as a wasm key
+    // silently mapping onto a native target.
     let operating_system = match os {
         OperatingSystem::Linux => TargetOperatingSystem::Linux,
         OperatingSystem::Darwin => TargetOperatingSystem::Darwin,
         OperatingSystem::Windows => TargetOperatingSystem::Windows,
+        // ocx gained `wasip1`/`wasip2` in v0.6.0. This mirror publishes native
+        // tool binaries and `ocx_python`'s `TargetOperatingSystem` has no wasm
+        // member, so there is nothing honest to map them onto.
+        OperatingSystem::Wasip1 | OperatingSystem::Wasip2 => {
+            return Err(MirrorError::PylockError(format!(
+                "platform key '{key}': operating system '{os}' is not supported (this mirror publishes native binaries)"
+            )));
+        }
     };
     let architecture = match arch {
         Architecture::Amd64 => TargetArchitecture::Amd64,
         Architecture::Arm64 => TargetArchitecture::Arm64,
+        // Paired only with a `wasip*` OS upstream, so the arm above normally
+        // fires first; kept explicit so the refusal does not depend on which
+        // half of the key was inspected first.
+        Architecture::Wasm => {
+            return Err(MirrorError::PylockError(format!(
+                "platform key '{key}': architecture '{arch}' is not supported (this mirror publishes native binaries)"
+            )));
+        }
     };
     Ok(TargetPlatform {
         operating_system,

@@ -1,6 +1,6 @@
 # Mirror spec: minimal single-platform fixture for golden renderer tests (§3.3).
 # Native-only (no containers) — the renderer rejects container legs after the
-# setup-ocx + `ocx run --` migration. One platform (linux/amd64), one test.
+# setup-ocx + `ocx exec --` migration. One platform (linux/amd64), one test.
 # No poll_interval — schedule trigger omitted in rendered workflow.
 name: shfmt
 target:

@@ -231,7 +231,7 @@ fn a_red_platform_stops_the_run_from_moving_any_rolling_alias_in_the_registry() 
     // `latest`, `1`, `1.20` and `1.20.0`. Tonight's run publishes 1.21.0
     // with darwin/arm64 red.
     //
-    // `ocx package announce --tags-from-file` is additive AND re-observes every
+    // `ocx package announce --tags-file` is additive AND re-observes every
     // tag the entry already carries — so withholding `latest` and `1` from
     // this run's union buys nothing: the announce re-fetches them from the
     // registry and re-commits whatever they point at now. The only place

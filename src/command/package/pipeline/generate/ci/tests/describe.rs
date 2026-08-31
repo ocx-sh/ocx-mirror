@@ -49,7 +49,7 @@ fn render_describe_uses_setup_ocx_action() {
         );
         assert!(
             content.contains("ocx-mirror package pipeline describe"),
-            "describe workflow must invoke pipeline describe directly (no `ocx run --`)"
+            "describe workflow must invoke pipeline describe directly (no `ocx exec --`)"
         );
         assert!(
             !content.contains("cargo install --path ocx/crates/ocx_mirror"),
@@ -105,7 +105,7 @@ fn render_emits_verify_generated_drift_guard() {
         );
         assert!(
             content.contains("ocx-mirror package pipeline generate ci --check"),
-            "drift guard must run `generate ci --check` directly (no `ocx run --`)"
+            "drift guard must run `generate ci --check` directly (no `ocx exec --`)"
         );
         assert!(
             content.contains("pull_request:"),

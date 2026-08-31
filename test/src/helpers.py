@@ -166,7 +166,8 @@ def push_ocx_description(
         [
             str(ocx_binary),
             "package",
-            "describe",
+            "description",
+            "push",
             f"{registry}/{repository}",
             "--readme",
             str(readme_path),

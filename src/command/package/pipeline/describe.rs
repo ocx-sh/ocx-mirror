@@ -6,7 +6,7 @@
 //!
 //! Loads `mirror.yml`, resolves the optional `catalog:` block (defaults to
 //! `CATALOG.md` + probed `logo.{svg,png}`), then shells out to
-//! `ocx package describe` to publish the data under the `__ocx.desc` tag.
+//! `ocx package description push` to publish the data under the `__ocx.desc` tag.
 //!
 //! When no `CATALOG.md` is present and the source is an env source
 //! (`source.type: pylock`), a catalog description is synthesized from the
@@ -19,7 +19,7 @@
 //!
 //! - [`MirrorError::SpecNotFound`] / [`MirrorError::SpecInvalid`] from
 //!   `load_spec`.
-//! - [`MirrorError::ExecutionFailed`] when the `ocx package describe`
+//! - [`MirrorError::ExecutionFailed`] when the `ocx package description push`
 //!   subprocess returns non-zero, or when downloading/reading the root
 //!   wheel for catalog autogen fails.
 
@@ -230,17 +230,35 @@ fn render_catalog_markdown(name: &str, description: &ocx_python::WheelDescriptio
     markdown
 }
 
-/// Spawn `ocx package describe <identifier> --readme <path> [--logo <path>]`.
+/// Build the `ocx package description push <identifier> --readme <path>
+/// [--logo <path>]` argv.
+///
+/// Split out so the unit tests assert on the argv [`invoke_describe`] actually
+/// spawns. A second copy of this assembly living in the test module would go
+/// green against any production spelling, which is how the pre-0.6 `package
+/// describe` verb survived here unnoticed.
+fn build_describe_args(identifier: &str, readme: &Path, logo: Option<&Path>) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "package".into(),
+        "description".into(),
+        "push".into(),
+        identifier.into(),
+        "--readme".into(),
+        readme.display().to_string(),
+    ];
+    if let Some(logo_path) = logo {
+        args.push("--logo".into());
+        args.push(logo_path.display().to_string());
+    }
+    args
+}
+
+/// Spawn `ocx package description push <identifier> --readme <path> [--logo <path>]`.
 async fn invoke_describe(identifier: &str, readme: &Path, logo: Option<&Path>) -> Result<(), MirrorError> {
     let ocx_binary = resolve_ocx_binary().map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
 
     let mut cmd = tokio::process::Command::new(&ocx_binary);
-    cmd.args(["package", "describe", identifier, "--readme"]);
-    cmd.arg(readme);
-    if let Some(logo_path) = logo {
-        cmd.arg("--logo");
-        cmd.arg(logo_path);
-    }
+    cmd.args(build_describe_args(identifier, readme, logo));
     forward_ocx_env(&mut cmd);
 
     let status = cmd
@@ -250,7 +268,7 @@ async fn invoke_describe(identifier: &str, readme: &Path, logo: Option<&Path>) -
 
     if !status.success() {
         return Err(MirrorError::ExecutionFailed(vec![format!(
-            "ocx package describe exited {status} for {identifier}"
+            "ocx package description push exited {status} for {identifier}"
         )]));
     }
     Ok(())
@@ -265,35 +283,25 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    /// Mirror of [`invoke_describe`] arg assembly — keeps the assertion target
-    /// independent of the subprocess spawn.
-    fn assemble_args<'a>(identifier: &'a str, readme: &'a Path, logo: Option<&'a Path>) -> Vec<String> {
-        let mut args: Vec<String> = vec![
-            "package".into(),
-            "describe".into(),
-            identifier.into(),
-            "--readme".into(),
-            readme.display().to_string(),
-        ];
-        if let Some(p) = logo {
-            args.push("--logo".into());
-            args.push(p.display().to_string());
-        }
-        args
-    }
-
     #[test]
     fn describe_assembles_args_with_readme_only() {
-        let args = assemble_args("ocx.sh/shfmt", Path::new("/spec/CATALOG.md"), None);
+        let args = build_describe_args("ocx.sh/shfmt", Path::new("/spec/CATALOG.md"), None);
         assert_eq!(
             args,
-            vec!["package", "describe", "ocx.sh/shfmt", "--readme", "/spec/CATALOG.md"]
+            vec![
+                "package",
+                "description",
+                "push",
+                "ocx.sh/shfmt",
+                "--readme",
+                "/spec/CATALOG.md"
+            ]
         );
     }
 
     #[test]
     fn describe_assembles_args_with_readme_and_logo() {
-        let args = assemble_args(
+        let args = build_describe_args(
             "ocx.sh/shfmt",
             Path::new("/spec/CATALOG.md"),
             Some(Path::new("/spec/logo.png")),
@@ -302,7 +310,8 @@ mod tests {
             args,
             vec![
                 "package",
-                "describe",
+                "description",
+                "push",
                 "ocx.sh/shfmt",
                 "--readme",
                 "/spec/CATALOG.md",

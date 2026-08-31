@@ -81,6 +81,17 @@ impl WheelPatterns {
                     "wheels.{platform}: the OCI variant segment is not supported in wheels keys"
                 ));
             }
+            // ocx gained `wasip1`/`wasip2` in v0.6.0, so a spec can now name
+            // one. This mirror publishes native binaries — `ocx_python`'s
+            // `TargetOperatingSystem` has no wasm member — so the key is
+            // refused here, where an operator gets a diagnostic, rather than
+            // deeper in `pylock_target_platform` where it reads as an
+            // interpreter failure.
+            if matches!(os, OperatingSystem::Wasip1 | OperatingSystem::Wasip2) {
+                errors.push(format!(
+                    "wheels.{platform}: operating system '{os}' is not supported (this mirror publishes native binaries)"
+                ));
+            }
             if os_features.len() > 1 {
                 errors.push(format!(
                     "wheels.{platform}: at most one libc feature per key (declare two keys instead)"
@@ -156,6 +167,14 @@ impl WheelPatterns {
                 (OperatingSystem::Linux, _) => &["any"],
                 (OperatingSystem::Darwin, _) => &["macosx", "any"],
                 (OperatingSystem::Windows, _) => &["win", "any"],
+                // Unreachable for a validated spec — `validate` refuses a
+                // wasm key, and `pylock_target_platform` errors before this
+                // runs at both production call sites. Enumerated rather than
+                // wildcarded so an OS added upstream is a compile error, and
+                // `["wasi"]` rather than `[]`: an empty list is *no* filter in
+                // `ocx_python::select`, which would admit every native wheel.
+                // No native wheel carries a `wasi` tag, so this admits none.
+                (OperatingSystem::Wasip1 | OperatingSystem::Wasip2, _) => &["wasi"],
             },
             Platform::Any => &["any"],
         };
@@ -198,6 +217,20 @@ mod tests {
             }
             other => panic!("expected specific platform, got {other:?}"),
         }
+    }
+
+    /// ocx v0.6.0 added `wasip1`/`wasip2` to `OperatingSystem`, so a spec can
+    /// now spell a key this mirror has no target for. The refusal belongs at
+    /// validation, where the operator sees it.
+    #[test]
+    fn a_wasm_key_is_refused_at_validation() {
+        let errors = validate("\"wasip1/wasm\": ~\n");
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("wasip1") && error.contains("not supported")),
+            "a wasm wheels key must be refused by name, got {errors:?}"
+        );
     }
 
     #[test]

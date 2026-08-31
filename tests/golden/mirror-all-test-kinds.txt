@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       # Detect whether registry credentials are configured.
       # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
       # step level via env-var injection (secret value never echoed to logs).
@@ -105,7 +105,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       # Detect whether registry credentials are configured.
       # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
       # step level via env-var injection (secret value never echoed to logs).
@@ -168,7 +168,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       - id: plan
         name: Plan versions
         # `GITHUB_TOKEN` is forwarded to the in-process octocrab client so
@@ -213,7 +213,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: plan
@@ -281,7 +281,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: bundle-*
@@ -404,7 +404,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           pattern: bundle-*
@@ -458,10 +458,10 @@ jobs:
             --jq '.jobs[] | select(.name == "push") | .html_url' \
             | head -n1 || true)
           export OCX_MIRROR_JOB_URL
-          # Call ocx-mirror directly — NOT via `ocx run --`. setup-ocx has
+          # Call ocx-mirror directly — NOT via `ocx exec --`. setup-ocx has
           # already activated the project toolchain (`ocx --project env`), so the
           # dev ocx + ocx-mirror are on PATH for this step. Wrapping in
-          # `ocx run` would set OCX_BINARY_PIN to the bootstrap ocx, and the
+          # `ocx exec` would set OCX_BINARY_PIN to the bootstrap ocx, and the
           # nested `ocx package push --format json` would then resolve that
           # (older) binary, emit no JSON report, and be misrecorded as a red.
           ocx-mirror package pipeline push \
@@ -499,7 +499,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: run-summary
-          # The announce tags file is the exact `--tags-from-file` the index call
+          # The announce tags file is the exact `--tags-file` the index call
           # received. Uploading it beside the summary is what makes an announce
           # reconstructable after the fact; without it the only record of what
           # was curated is the summary's tag list.
@@ -525,7 +525,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: run-summary
@@ -566,7 +566,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       # Detect whether registry credentials are configured.
       # GitHub does not allow `secrets.*` in job-level `if:`, so we probe at
       # step level via env-var injection (secret value never echoed to logs).
@@ -664,7 +664,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
-          version: "0.5.8"
+          version: "0.6.0"
       - name: Check generated workflows are up to date
         # Exits 65 (DataError) on drift; the path-only hint names the stale file.
         run: |

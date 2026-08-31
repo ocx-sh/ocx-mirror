@@ -88,9 +88,19 @@ It is deliberately **not** the workflow's own `GITHUB_TOKEN`: the pull request t
 
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
-`ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package describe`). The child binary is resolved in order: `OCX_BINARY_PIN`, an `ocx` co-located with the `ocx-mirror` executable, then `ocx` on `PATH`.
+`ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package description push`). The child binary is resolved in **two** rungs (`src/pipeline/ocx_cli.rs`, `resolve_ocx_binary`): `OCX_BINARY_PIN` if it is set and non-empty — `ocx` sets it itself when the mirror runs under `ocx exec` — otherwise `ocx` on `PATH`. There is deliberately no co-located lookup, so in a generated workflow, where the mirror is invoked directly rather than through `ocx exec`, the child `ocx` is whichever one the project toolchain put on `PATH`.
 
 Whichever of those three wins must be **ocx 0.5.5 or newer**: an older binary rejects the metadata sidecar `pipeline prepare` writes and fails every push with exit 65. See [Push retry][spec-push-retry] for the full contract.
+
+Since the 0.6 CLI rename **three** legs raise that to **ocx 0.6.0 or newer**, each rejected by a 0.5.x binary with exit 64:
+
+| Leg | Spawns | Why 0.5.x refuses it |
+|---|---|---|
+| `pipeline announce` | `ocx package announce --tags-file` | the flag that replaced `--tags-from-file` |
+| `pipeline describe` | `ocx package description push` | `description` did not exist as a subcommand |
+| `pipeline cascade` | `ocx package announce --tags-file` (its closing announce) | same flag as the announce leg |
+
+The 0.6.0 floor is therefore the effective floor for any mirror repository that describes, announces, or cascades — which is all of them. Only a plan/prepare/push-only run stays on the older 0.5.5 floor.
 
 Resolution-affecting `OCX_*` variables present in the environment are forwarded to that subprocess, so offline mode, registry config, and index paths behave identically inside the child:
 

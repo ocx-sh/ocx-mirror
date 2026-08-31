@@ -23,7 +23,7 @@ use std::path::PathBuf;
 /// Resolve the path to the `ocx` binary.
 ///
 /// Preference order:
-/// 1. `OCX_BINARY_PIN` env var (set by ocx itself when running under `ocx run`).
+/// 1. `OCX_BINARY_PIN` env var (set by ocx itself when running under `ocx exec`).
 /// 2. `"ocx"` on `PATH`.
 pub(crate) fn resolve_ocx_binary() -> Result<PathBuf, String> {
     if let Ok(pin) = std::env::var("OCX_BINARY_PIN")

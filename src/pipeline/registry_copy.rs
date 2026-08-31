@@ -39,11 +39,14 @@ use crate::spec::{RegistrySource, Target};
 /// bare `res.bytes()`, so bounding the allocation needs a capped read on the
 /// transport itself and neither layer has one.
 ///
-/// It reaches a referrers response even less far, whatever an older revision
-/// of this line claimed: `Client::pull_referrers` does the same bare
-/// `res.bytes()` and exposes no capped variant, so [`detect_referrers`] has
-/// nothing to apply a bound *with* — not post-hoc, not at all. Said here
-/// rather than left as a promise, because a comment claiming a cap that does
+/// [`detect_referrers`]'s two legs are bounded differently, and neither by
+/// this constant alone. The native leg is bounded *before* the read: ocx
+/// v0.6.0's `Client::pull_referrers_native` streams through a 4 MiB counted
+/// read and additionally refuses past 4096 descriptors, which is the pre-read
+/// cap `Client::pull_referrers` never had. The tag-schema fallback leg is
+/// bounded post-hoc by this constant, because it reads through
+/// `Index::fetch_manifest_raw_bytes` like every other manifest here. Said
+/// exactly rather than rounded off, because a comment claiming a cap that does
 /// not exist is worse than no cap: it is what stops the next reader looking.
 pub const MANIFEST_FETCH_CEILING: usize = 32 * 1024 * 1024;
 
@@ -993,8 +996,19 @@ async fn copy_manifest_tree_at(
     Ok((stats, bytes))
 }
 
-/// Tag one copied manifest with its own digest — `sha256.<hex>`, the form
-/// `ocx package push` writes.
+/// Tag one copied manifest with its own digest — `sha256.<hex>`, the **frozen
+/// legacy keep-tag form**.
+///
+/// ocx 0.6.0 renamed the concept to "keep tag" and moved its own writes to
+/// `__ocx.keep.<alg>-<hex>`; it no longer writes this spelling. The mirror
+/// keeps writing it deliberately. `ocx_lib`'s `Tag::LegacyKeep` is a permanent
+/// read arm — "the arm stays because already-published repositories carry these
+/// tags" — so `Tag::is_reserved` classifies both spellings as reserved and both
+/// are filtered out of index roots and version listings identically. The tag's
+/// only job is to keep a manifest referenced against a registry GC, which
+/// either spelling does. Switching would add a *second* tag to every manifest
+/// on every already-mirrored destination (nothing here deletes the old one) for
+/// no behavioural gain, so the spelling stays put.
 ///
 /// **The deletion safety net, mirrored.** ocx tags every manifest it publishes
 /// after its own digest so that deleting a rolling or cascade tag can never
@@ -1367,11 +1381,14 @@ async fn upload(
 /// Detect referrers on a copied manifest and fail the package if any exist
 /// (C-024).
 ///
-/// Goes through the fork's `Client::pull_referrers`, **never raw HTTP**: that
-/// call falls back to the referrers **tag schema** when a registry 404s
-/// `/v2/<name>/referrers/<digest>`, and a hand-rolled endpoint call would read
-/// such a registry as "no referrers" and ship the exact silent drop this
-/// contract exists to prevent.
+/// Goes through the fork's `Client::pull_referrers_native`, **never raw
+/// HTTP** — and then owns the referrers **tag-schema** fallback itself. ocx
+/// v0.6.0 dropped `Client::pull_referrers`, which bundled the two: the native
+/// call now answers `None` for "this registry has no Referrers API" instead of
+/// degrading it to an empty index, and the consumer applies its own bounds and
+/// error policy to the fallback index. Reading `None` as "no referrers" would
+/// ship the exact silent drop this contract exists to prevent, so it is
+/// [`fallback_referrers`] that decides, not this call.
 ///
 /// Depth **1**, no recursion — a referrer's own referrers are never queried,
 /// so there is no graph and no cycle. This is the referrers **API** surface;
@@ -1388,16 +1405,73 @@ pub async fn detect_referrers(
     context: &CopyContext,
 ) -> Result<(), CopyError> {
     let subject = addressed(source_reference, digest);
-    let referrers = context
+    let native = context
         .source_client
-        .pull_referrers(&subject, None)
+        .pull_referrers_native(&subject, None)
         .await
         .map_err(|error| CopyError::SourceUnavailable(format!("referrers for {digest}: {error}")))?;
 
-    if referrers.manifests.is_empty() {
+    let manifests = match native {
+        Some(index) => index.manifests,
+        // `None` is the capability verdict — the registry answered 404 on the
+        // native endpoint — never "this subject has no referrers".
+        None => fallback_referrers(source_reference, digest, context).await?,
+    };
+
+    if manifests.is_empty() {
         return Ok(());
     }
-    Err(referrer_failure(&referrers.manifests))
+    Err(referrer_failure(&manifests))
+}
+
+/// The OCI referrers tag-schema fallback, for a source registry with no
+/// Referrers API.
+///
+/// Reads the index parked at `<algorithm>-<encoded truncated to 64>` in the
+/// subject's own repository. Spec step 3 — an absent tag *is* an empty index,
+/// and that is the only path here that yields one: every other refusal is an
+/// error, because "there is nothing there" and "I could not read what is
+/// there" are the two answers this gate must never confuse.
+///
+/// Read through `Index::fetch_manifest_raw_bytes`, the same SSRF-guarded seam
+/// the manifest walk uses, so the fallback cannot reach a host the pre-flight
+/// did not approve — and so [`MANIFEST_FETCH_CEILING`] applies to it exactly
+/// as it applies to a copied manifest.
+///
+/// # Errors
+///
+/// [`CopyError::SourceUnavailable`] when the tag cannot be read;
+/// [`CopyError::MalformedManifest`] when it is past the ceiling, or holds
+/// something that is not an image index (spec step 2).
+async fn fallback_referrers(
+    source_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+) -> Result<Vec<ocx_lib::oci::ImageIndexEntry>, CopyError> {
+    let tag = ocx_lib::package::tag::referrer_fallback_tag(digest);
+    let identifier = source_identifier(source_reference).clone_with_tag(tag.clone());
+    let fetched = context
+        .source_index
+        .fetch_manifest_raw_bytes(&identifier)
+        .await
+        .map_err(|error| CopyError::SourceUnavailable(format!("referrers fallback {identifier}: {error}")))?;
+    let Some((bytes, _reported, manifest)) = fetched else {
+        return Ok(Vec::new());
+    };
+
+    if bytes.len() > MANIFEST_FETCH_CEILING {
+        return Err(CopyError::MalformedManifest(format!(
+            "referrers fallback index {tag} is {} bytes, past the {MANIFEST_FETCH_CEILING}-byte ceiling",
+            bytes.len()
+        )));
+    }
+
+    match manifest {
+        Manifest::ImageIndex(index) => Ok(index.manifests),
+        Manifest::Image(_) => Err(CopyError::MalformedManifest(format!(
+            "referrers fallback tag {tag} holds an image manifest, not an image index"
+        ))),
+    }
 }
 
 /// The bounded refusal for a manifest that carries referrers.

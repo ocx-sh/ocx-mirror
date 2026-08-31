@@ -22,7 +22,6 @@ use std::path::{Path, PathBuf};
 
 use ocx_lib::cli::DataInterface;
 use ocx_lib::log;
-use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 
@@ -133,7 +132,7 @@ impl Push {
         // Read-only registry access for the backfill cascade repair below, and
         // the one annotation set that repair republishes under — the same map
         // `invoke_push` builds per leg.
-        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
         let annotations = crate::annotations::build_annotations(&spec.annotations);
 
@@ -491,7 +490,7 @@ impl Push {
         // check (Decision D, shared wheel layers). `registered_wheels` dedupes
         // `wheel_repository:wheel_sha256` pairs across the whole run so a
         // wheel shared by multiple legs is checked/pushed at most once.
-        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
         let mut registered_wheels: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -811,7 +810,7 @@ fn compute_logo_url() -> Option<String> {
 /// part of which failed, so a
 /// `Partial` version's `cascade_tags_written` only ever holds its exact
 /// `X.Y.Z`. Filtering aliases *here* was a protection that could not work —
-/// `--tags-from-file` is additive, and `ocx package announce` re-observes every tag
+/// `--tags-file` is additive, and `ocx package announce` re-observes every tag
 /// already curated on the entry, so an alias an earlier run committed is
 /// re-fetched from the registry and re-committed against whatever it points at
 /// now. Withholding an alias only ever blocks its first addition, and every

@@ -160,7 +160,7 @@ ocx-mirror package pipeline notify --run-summary <PATH>
 
 ### `package pipeline describe` {#pipeline-describe}
 
-Publish catalog metadata (README + logo) to the registry by spawning `ocx package describe`. Reads the `catalog:` spec section; when the resolved README (default `CATALOG.md`) does not exist, the command logs and exits 0.
+Publish catalog metadata (README + logo) to the registry by spawning `ocx package description push`. Reads the `catalog:` spec section; when the resolved README (default `CATALOG.md`) does not exist, the command logs and exits 0.
 
 ```sh
 ocx-mirror package pipeline describe [OPTIONS]
@@ -210,8 +210,8 @@ ocx-mirror package pipeline cascade [OPTIONS]
 | `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
 | `--dry-run` | off | Print the repair plan without writing a tag or touching the index |
 
-!!! warning "Requires ocx 0.5.4 or newer"
-    `ocx package cascade` does not exist before 0.5.4, and an older binary rejects the verb as an unknown argument. Until the mirror repository's pinned `ocx` reaches 0.5.4, a dispatch fails with exit 1 and a message naming the requirement.
+!!! warning "Requires ocx 0.6.0 or newer"
+    Two separate floors stack here. `ocx package cascade` does not exist before **0.5.4**, and an older binary rejects the verb as an unknown argument; until the mirror repository's pinned `ocx` reaches 0.5.4, a dispatch fails with exit 1 and a message naming the requirement. Since the 0.6 CLI rename the command's closing announce spawns `ocx package announce --tags-file`, which a 0.5.x binary rejects with exit **64** — so the real floor for a cascade that completes is **0.6.0**. A 0.5.4-to-0.5.8 binary gets further than an older one and still fails, which is the worse failure of the two.
 
 **Exit 65 means findings remain, not that the tool broke.** A `--dry-run` whose plan is non-empty exits 65, and so does a real repair that could not re-point everything it found — both are audit results a maintainer acts on. Every other non-zero outcome (`ocx` missing the verb, a registry refusal, a failed announce) is exit 1.
 

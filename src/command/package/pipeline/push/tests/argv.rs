@@ -35,7 +35,6 @@ fn build_push_args_orders_flags_then_bundle_then_annotations() {
             "package",
             "push",
             "--cascade",
-            "--new",
             "-p",
             "linux/amd64",
             "-i",

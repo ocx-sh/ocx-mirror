@@ -78,12 +78,12 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          # Floor is 0.5.0: 0.3.7 predates `package announce`,
-          # `push --announce-file` and `push --annotation`, so the old pin could
-          # not announce at all and would reject the annotation flag with exit
-          # 64. Kept level with the `external/ocx` submodule pin so the CLI that
-          # publishes a release is the one the release was built against.
-          version: "0.5.8"
+          # Floor is 0.6.0, and it is a hard floor, not a preference: this
+          # workflow spells `package description push` and `--tags-file`, which
+          # 0.5.x rejects with exit 64. Kept level with the `external/ocx`
+          # submodule pin so the CLI that publishes a release is the one the
+          # release was built against.
+          version: "0.6.0"
 
       - name: Publish to registry
         env:
@@ -136,19 +136,6 @@ jobs:
           # Every target leg appends the tags it published (plus the cascade
           # tags it moved) here; the announce at the end curates them in one call.
           announce_tags="$(mktemp)"
-          # `package announce` and `push --announce-file` shipped together, so one
-          # probe answers for both. It has to gate the PUSH flag too: an older ocx
-          # rejects an unknown flag with exit 64, which would fail the publish
-          # itself rather than just skipping the announce. The setup-ocx pin is
-          # deliberately conservative and currently predates both.
-          announce_flag=()
-          if ocx package announce --help >/dev/null 2>&1; then
-            announce_supported=1
-            announce_flag=(--announce-file "$announce_tags")
-          else
-            announce_supported=0
-          fi
-
           for target in "${!PLATFORM_MAP[@]}"; do
             platform="${PLATFORM_MAP[$target]}"
             ext=""
@@ -183,9 +170,8 @@ jobs:
               --identifier "${identifier}" \
               --platform "${platform}" \
               --cascade \
-              --new \
               --annotation "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
-              "${announce_flag[@]}" \
+              --tags-file "$announce_tags" \
               "$ARCHIVE"
 
             rm -rf "$WORK"
@@ -195,14 +181,14 @@ jobs:
           # CATALOG.md (frontmatter supplies title/description/keywords) plus
           # the project logo. Version-independent; refreshed on every publish.
           echo "==> Pushing catalog description for ${REGISTRY}/${physical_prefix}ocx/mirror"
-          ocx package describe \
+          ocx package description push \
             --readme CATALOG.md \
             --logo assets/logo.svg \
             "${REGISTRY}/${physical_prefix}ocx/mirror"
 
           # Publish the just-pushed tags into the ocx-sh/index entry for
-          # ocx/mirror. Runs AFTER `describe` so the announce observes the fresh
-          # `__ocx.desc` tag and carries the catalog readme/logo into the index.
+          # ocx/mirror. Runs AFTER `description push` so the announce observes the
+          # fresh `__ocx.desc` tag and carries the catalog readme/logo into the index.
           #
           # No `--fork`: this repository lives in the organization that owns the
           # index, and GitHub refuses to fork a repository into its own owning
@@ -215,9 +201,7 @@ jobs:
           # simply does not exist there. The caller declares which publish that
           # is; deriving it from the registry hostname went stale the moment the
           # prod registry moved to GHCR.
-          if (( ! announce_supported )); then
-            announce_skip="the installed ocx has no 'package announce'"
-          elif [[ "$ANNOUNCE" != "true" ]]; then
+          if [[ "$ANNOUNCE" != "true" ]]; then
             announce_skip="this publish does not announce"
           elif [[ -z "${OCX_ANNOUNCE_TOKEN:-}" ]]; then
             announce_skip="OCX_ANNOUNCE_TOKEN is unavailable"
@@ -231,7 +215,7 @@ jobs:
             echo "==> Announcing ocx/mirror into ocx-sh/index"
             ocx package announce \
               --package ocx/mirror \
-              --tags-from-file "$announce_tags" \
+              --tags-file "$announce_tags" \
               --index-repo ocx-sh/index
           fi
           rm -f "$announce_tags"

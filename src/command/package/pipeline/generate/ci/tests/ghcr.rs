@@ -289,7 +289,7 @@ fn a_cross_owner_ghcr_target_is_warned_about_at_generate_time() {
 
 #[test]
 fn the_run_summary_artifact_carries_the_announce_tags_file() {
-    // The tags file is the exact `--tags-from-file` the index call received.
+    // The tags file is the exact `--tags-file` the index call received.
     // Uploading only run-summary.json leaves nothing to reconstruct a
     // failed announce from.
     let workflow = workflow_of(GHCR_SPEC);

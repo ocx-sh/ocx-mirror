@@ -1,6 +1,6 @@
 # Mirror spec: all 6 declared platforms (linux/{amd64,arm64} + darwin/{amd64,arm64}
 # + windows/{amd64,arm64}), all native — container legs were dropped after the
-# setup-ocx + `ocx run --` migration. Per-platform tests on windows.
+# setup-ocx + `ocx exec --` migration. Per-platform tests on windows.
 name: cmake
 target:
   registry: ocx.sh

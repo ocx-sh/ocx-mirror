@@ -82,7 +82,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/download.rs` | Single GET buffered to a file — no retry, no resume; an empty body is an error |
 | `pipeline/lock_derive.rs` | `pipeline plan`'s per-candidate PEP 751 lock derivation for `source.type: pypi`: shells `uv pip compile` (indexes map onto `--index`/`--default-index` — uv treats the default as *lowest* priority, so the last entry is it — with `--index-strategy first-index` pinned, and credentials injected as `UV_INDEX_<NAME>_*` env, never argv) — universal locks (the default) via `--python-version X.Y`, no interpreter on disk; only `universal: false` materializes the pinned interpreter via `ocx package pull` (`--python <path>`) — relaxes the `requires-python` floor (uv#15995), stamps a provenance header, fail-closed re-parses via `ocx_python::parse_pylock` |
 | `pipeline/python_prepare.rs` | pylock/pypi env-prepare path (parallel to the archive `orchestrator::prepare_version`): per (version, wheels key) download wheels → verify(sha256==lock) → repack → collide → `compose_env` → write `metadata.json` + N `tar.zst` layers + `env-manifest.json`; entry `platform` = full wheels key (push `-p` verbatim), `platform_slug` = base slug (JUnit naming) |
-| `pipeline/python_push.rs` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade --new -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
+| `pipeline/python_push.rs` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
 | `pipeline/ocx_cli.rs` | The `ocx` subprocess boundary: binary resolution and `OCX_*` env forwarding |
 | `pipeline/ocx_cli/push.rs` | `ocx package push` — argv assembly, one attempt, the retry ladder (`PUSH_TIMEOUT`, `push_once`, `push_with_retry`) |
 | `pipeline/ocx_cli/announce.rs` | `ocx package announce` — token, `TagSource`, argv, one bounded invocation |
@@ -175,6 +175,14 @@ demands the key and exits **65** — not a retried code — on every push leg.
 `ocx.toml` pins `ocx` itself for exactly this reason, so a local `task verify`
 and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` step carries the
 same floor and moves with the submodule pointer.
+
+**Three legs raise that floor to ocx ≥ 0.6.0**, each rejected by a 0.5.x binary
+with exit **64**: `pipeline announce` (`pipeline/ocx_cli/announce.rs` spawns
+`--tags-file`, the 0.6 replacement for `--tags-from-file`), `pipeline describe`
+(`pipeline/describe.rs` spawns `package description push`, which did not exist
+as a subcommand), and `pipeline cascade` (`pipeline/cascade.rs` reuses
+`invoke_announce`, so it inherits the same flag). Both `setup-ocx` pins and
+`ocx.toml` are on 0.6.0.
 
 ## Spec Format (YAML)
 

@@ -103,7 +103,6 @@ fn the_re_cascade_argv_carries_cascade_and_the_published_layer_digests() {
             "package",
             "push",
             "--cascade",
-            "--new",
             "-p",
             "linux/amd64+libc.glibc",
             "-i",
@@ -127,7 +126,7 @@ fn build_push_args_without_annotations_matches_the_bare_invocation() {
     )
     .expect("utf-8 bundle path");
 
-    assert_eq!(args.len(), 11);
+    assert_eq!(args.len(), 10);
     assert!(!args.iter().any(|arg| arg == "--annotation"));
 }
 
@@ -155,7 +154,6 @@ fn build_push_args_omits_cascade_so_a_platform_can_land_without_moving_an_alias(
             "json",
             "package",
             "push",
-            "--new",
             "-p",
             "linux/amd64",
             "-i",

@@ -134,7 +134,7 @@ pub enum AnnounceOutcome {
     Announced {
         /// Logical index package (`<namespace>/<package>`).
         package: String,
-        /// Tags handed to `--tags-from-file`, in run order.
+        /// Tags handed to `--tags-file`, in run order.
         tags: Vec<String>,
         /// The index pull request carrying them. `None` only when the announce
         /// reported neither — the claim is checkable or it is not made.

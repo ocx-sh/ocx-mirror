@@ -61,12 +61,10 @@ pub(crate) struct PushReport {
 /// advertised once it is whole. Who gets it is decided by the caller, once per
 /// version; see the phase-2 loop in [`Push::execute`].
 ///
-/// `--new` makes the FIRST push of a brand-new mirror succeed: a cascade push
-/// lists existing tags to compute the rolling tags, but a not-yet-published
-/// repository answers `tags/list` with 404 ("repository name not known").
-/// `--new` tells `ocx package push` to treat that failure as an empty tag set
-/// instead of aborting. It is a no-op once the repository exists (the tag
-/// list then succeeds and is used), so the mirror always passes it.
+/// A cascade push against a brand-new mirror is ocx's own problem: it treats a
+/// tag listing that answers `RepositoryNotFound` (registry 404) as the empty
+/// list and cascades from there, while every other listing failure — auth,
+/// 5xx — still aborts the push rather than re-pointing `latest` backwards.
 pub(crate) fn build_push_args(
     platform: &str,
     target_ref: &str,
@@ -82,11 +80,7 @@ pub(crate) fn build_push_args(
     if cascade {
         args.push("--cascade".to_string());
     }
-    args.extend(
-        ["--new", "-p", platform, "-i", target_ref]
-            .iter()
-            .map(|s| (*s).to_string()),
-    );
+    args.extend(["-p", platform, "-i", target_ref].iter().map(|s| (*s).to_string()));
     if let Some(path) = metadata {
         let sidecar = path
             .to_str()

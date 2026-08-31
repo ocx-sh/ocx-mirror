@@ -95,7 +95,7 @@ assets:
 `libc.glibc` and `libc.musl` are the recognized flavors. The two keys are distinct platforms — each needs its own regex list, and each publishes as its own image-index entry. A key with no `+libc.` tag carries no libc requirement and resolves for any host (the pre-libc behavior). Quote keys containing `+` so YAML parses them as strings.
 ## Python apps (`source.type: pylock` / `pypi`) {#pylock}
 
-A `pylock` or `pypi` source mirrors a Python **application** into a runnable OCX **environment package** — the union of every resolved wheel plus a private interpreter, composed so it runs via `ocx run` on a clean machine with **no pip, uv, or venv at runtime**. This replaces the `assets`/`asset_type` archive model (both source types ignore both fields). The two types differ only in where the [PEP 751](https://peps.python.org/pep-0751/) lock comes from:
+A `pylock` or `pypi` source mirrors a Python **application** into a runnable OCX **environment package** — the union of every resolved wheel plus a private interpreter, composed so it runs via `ocx exec` on a clean machine with **no pip, uv, or venv at runtime**. This replaces the `assets`/`asset_type` archive model (both source types ignore both fields). The two types differ only in where the [PEP 751](https://peps.python.org/pep-0751/) lock comes from:
 
 - **`pylock`** — a lock file committed to the mirror repository; resolves exactly one version (the one recorded in the lock).
 - **`pypi`** — versions are discovered from a PyPI-compatible index, and a lock is derived in-pipeline per version (see [`source.type: pypi`](#pypi-source)).
@@ -518,6 +518,8 @@ A push can fail transiently — a registry connect timeout, a blip mid-upload �
 
 **The co-located `ocx` must be 0.5.5 or newer**, and that is a hard floor, not a degradation like the retry split above. From 0.5.5 the metadata sidecar no longer carries a top-level `platform` key — the platform travels on the `--platform` flag instead. Only `ocx package create` rejects a sidecar that still carries the key; `ocx package push` and `ocx package test` parse the sidecar's published form directly and simply ignore an unknown field, so the key's presence or absence makes no difference to either. An older binary reads it the other way round: it demands the recorded key and fails with `metadata sidecar has no recorded platform` and exit **65** on *every* push leg, which is not a retried code, so the run ends with nothing published. The same floor applies to the [`setup-ocx`](#ocx-mirror) pin in a generated downstream workflow — bumping the pinned `ocx-mirror` without regenerating CI leaves that repository failing every push.
 
+**Since ocx-mirror 0.6.0 the effective floor is ocx ≥ 0.6.0**, and 0.5.5 survives only as the reason *this* paragraph exists. The describe, announce and cascade legs each spawn a verb or flag the 0.6 CLI rename introduced (`package description push`, `announce --tags-file`), and a 0.5.x binary rejects each with exit **64**. See [Forwarded `OCX_*` variables][spec-ocx-forwarding] for the per-leg table. The bump-without-regenerate warning above applies with more force at this floor, not less: a downstream repository still rendering `version: "0.5.8"` fails its describe and announce steps outright.
+
 **Backoff.** The first retry waits 1 second; each further attempt doubles the wait, capped at 30 seconds, with ±10% jitter layered on top of the cap — so a capped delay actually lands in the 27–33 second range, not exactly 30.
 
 **Per-attempt timeout.** Each push attempt is bounded at 3600 seconds. This is a backstop against a wedged child process, not a throughput budget — `ocx` itself already bounds a registry request (30 seconds to connect, 120 seconds without a byte read), so a healthy upload never needs the full hour. The worst case for one tile at the default `max_retries: 3` is four attempts, close to four hours, which fits inside GitHub Actions' default 360-minute job limit — but a run pushing **two** such tiles does not. The job timeout, not this per-attempt bound, is the real outer limit on a run.
@@ -896,7 +898,7 @@ announce:
 
 The push job makes **one** `ocx package announce` call per run, after every version has been pushed — never one per version or per platform. It carries the union of every cascade tag the run wrote, deduplicated: each platform's push report re-lists the same cascade hierarchy, and consecutive versions share the rolling `X.Y` / `X` / `latest` tags. Versions that only failed, or that were already present in the registry, contribute nothing.
 
-Tags are handed over with `--tags-from-file`, which **adds** to the already-curated index entry and never removes a committed tag. The alternative, `--tags`, replaces the curated set — for a mirror that would delete every previously announced version the moment one run published a new one.
+Tags are handed over with `--tags-file`, which **adds** to the already-curated index entry and never removes a committed tag. The alternative, `--tags`, replaces the curated set — for a mirror that would delete every previously announced version the moment one run published a new one.
 
 A run that published nothing makes no call at all.
 
@@ -970,7 +972,7 @@ Green is not proof an announce ran, though: on a target other than `ghcr.io` —
 
 The workflow keeps a `concurrency` group of its own rather than joining the push workflow's the way [`cascade.yml`](#cascade) does: it writes index pull requests only, never registry tags, so concurrent announce writers contend on a per-package index branch rather than on tags — the fast-forward path is compare-and-swap with a retry, and the spent-branch reset path can drop a racing branch commit, which the next full from-registry run re-adds. Joining the publish group would instead let a queued push cancel the pending catch-up. Give `announce.schedule` a cron of its own all the same: sharing one with [`versions.poll_interval`](#top-level) schedules the catch-up against the push job's own closing announce.
 
-The catch-up is **additive**, on the same footing as the push job's `--tags-from-file`: it cannot drop a tag the index already commits, and yank markers survive. Running it against a mirror that is already current is a no-op, so it is safe to dispatch on suspicion.
+The catch-up is **additive**, on the same footing as the push job's `--tags-file`: it cannot drop a tag the index already commits, and yank markers survive. Running it against a mirror that is already current is a no-op, so it is safe to dispatch on suspicion.
 
 Its `ocx-mirror` entry point is [`pipeline announce`][cli-announce]; the same command runs locally against a checkout.
 
@@ -1188,6 +1190,8 @@ notify:
     webhook_secret: DISCORD_WEBHOOK_URL
     user_id: "123456789012345678"
 ```
+
+[spec-ocx-forwarding]: ./environment.md#ocx-forwarding
 
 <!-- external -->
 [github-releases]: https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases

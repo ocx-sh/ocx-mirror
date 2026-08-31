@@ -11,7 +11,7 @@
 //!
 //! This command closes that gap by listing the physical repository's tags and
 //! unioning them onto the committed index root. It is additive — like
-//! `--tags-from-file` it can never drop a committed tag, and yank markers
+//! `--tags-file` it can never drop a committed tag, and yank markers
 //! survive — so it is safe to dispatch against a mirror that is already
 //! current.
 //!

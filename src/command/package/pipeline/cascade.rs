@@ -255,7 +255,7 @@ async fn recorded_tags(path: &Path) -> Result<Vec<String>, String> {
 
 /// One tag per line, blanks dropped.
 ///
-/// `ocx package announce --tags-from-file` splits on newlines and would take a
+/// `ocx package announce --tags-file` splits on newlines and would take a
 /// trailing blank line as a tag of its own.
 fn parse_announce_tags(body: &str) -> Vec<String> {
     body.lines()
@@ -323,7 +323,7 @@ mod tests {
         );
     }
 
-    /// A blank line reaching `--tags-from-file` is announced as a tag, so the
+    /// A blank line reaching `--tags-file` is announced as a tag, so the
     /// trailing newline every line-oriented writer emits has to be dropped here.
     #[test]
     fn blank_lines_never_become_tags() {

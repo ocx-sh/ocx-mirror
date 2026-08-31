@@ -146,16 +146,19 @@ pub static LATEST_TAGS_OVERRIDE: std::sync::Mutex<Option<Vec<String>>> = std::sy
 /// The first published tag that is strictly newer than `version` under
 /// [`pep440_sort_key`], if any.
 ///
-/// Rolling and canonical tags are not versions and are skipped: `latest` is
-/// the very tag being decided, and `sha256.<hex>` is `ocx package push`'s
-/// digest-named safety net. An unparseable version on either side leaves the
-/// two unordered, which counts as "newer" — the caller then declines to move
-/// the alias, which is the safe direction.
+/// Rolling and reserved tags are not versions and are skipped: `latest` is the
+/// very tag being decided, and the reserved set is the digest-named keep-tag
+/// safety net plus the OCI referrers/cosign sidecars. `Tag::is_reserved_str` is
+/// ocx's own classifier rather than a prefix test of ours, so the two cannot
+/// drift: ocx 0.6.0 writes `__ocx.keep.<alg>-<hex>` and still reads the frozen
+/// legacy `<alg>.<hex>` form, and one call covers both. An unparseable version
+/// on either side leaves the two unordered, which counts as "newer" — the
+/// caller then declines to move the alias, which is the safe direction.
 pub fn registry_tag_newer_than<'a>(tags: &'a [String], version: &str) -> Option<&'a str> {
     let own_key = pep440_sort_key(version);
     tags.iter()
         .map(String::as_str)
-        .filter(|tag| *tag != "latest" && !tag.starts_with("sha256."))
+        .filter(|tag| *tag != "latest" && !ocx_lib::package::tag::Tag::is_reserved_str(tag))
         .find(|tag| {
             let key = pep440_sort_key(tag);
             key.0.is_some() && key > own_key

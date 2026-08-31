@@ -33,15 +33,19 @@ fn render_minimal_spec_writes_workflow() {
             // already activated the project toolchain onto PATH for the step.
             assert!(
                 content.contains("ocx-mirror package pipeline plan"),
-                "Generated workflow must invoke ocx-mirror directly (no `ocx run --` wrapper)"
+                "Generated workflow must invoke ocx-mirror directly (no `ocx exec --` wrapper)"
             );
             // Lock the toolchain-sourcing model: no step wraps a tool in
-            // `ocx run --` (that would pin the bootstrap ocx, breaking the
-            // nested `ocx package push` resolution).
-            assert!(
-                !content.contains("ocx run -- "),
-                "Generated workflow must not wrap tools in `ocx run --`; content:\n{content}"
-            );
+            // `ocx exec --` (that would pin the bootstrap ocx, breaking the
+            // nested `ocx package push` resolution). Both spellings are barred:
+            // `run` is the pre-0.6 name and is deleted in 0.7, so a wrapper
+            // could come back under either.
+            for wrapper in ["ocx exec -- ", "ocx run -- "] {
+                assert!(
+                    !content.contains(wrapper),
+                    "Generated workflow must not wrap tools in `{wrapper}`; content:\n{content}"
+                );
+            }
         }
         Err(MirrorError::SpecUsageError(_)) => {
             panic!("mirror-minimal.yml should be a valid spec, got SpecUsageError");

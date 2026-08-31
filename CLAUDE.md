@@ -35,7 +35,7 @@ document the four-line job, let them own the pipeline.
 | `test/` | pytest acceptance harness (Docker registry on :5001) |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
-| `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package describe` in `oci-publish.yml` (frontmatter = title/description/keywords) |
+| `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package description push` in `oci-publish.yml` (frontmatter = title/description/keywords) |
 | `src/command/package/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
 
 ## Dependency model (read before touching Cargo.toml)
@@ -48,8 +48,11 @@ document the four-line job, let them own the pipeline.
   releases. CI asserts the fork source via `cargo tree -i oci-client`.
 - Dependency feature lists for deps shared with `ocx_lib`/`ocx_cli` are copied
   exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
-  bumps. `octocrab` and `url` are mirror-owned outright — no ocx equivalent
-  exists to sync against. `rustls` is mirror-owned too: ocx only pulls it as a
+  bumps. `octocrab` is mirror-owned outright — no ocx equivalent exists to sync
+  against. `url` **was** mirror-owned; **since v0.6.0** ocx declares it too
+  (`url = { version = "2.5.8", features = ["serde"] }`), the mirror already
+  matches it byte-for-byte, and it now belongs in the copy-exactly set.
+  `rustls` is mirror-owned too: ocx only pulls it as a
   feature of its own `reqwest` dependency, never as a bare top-level
   dependency, so there is nothing to copy. **Since v0.5.8** `reqwest` is back
   in ocx's `[workspace.dependencies]` (`ocx_lib` depends on it directly), and

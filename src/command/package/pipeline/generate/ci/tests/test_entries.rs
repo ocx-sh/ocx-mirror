@@ -152,12 +152,15 @@ platforms:
     // setup-ocx activates the project toolchain onto PATH for the step.
     assert!(
         shell_block.contains("ocx package test"),
-        "every ocx package test invocation must be called directly (no `ocx run --`); block:\n{shell_block}"
+        "every ocx package test invocation must be called directly (no `ocx exec --`); block:\n{shell_block}"
     );
-    assert!(
-        !shell_block.contains("ocx run"),
-        "test loop must not wrap `ocx package test` in `ocx run`; block:\n{shell_block}"
-    );
+    // Both spellings: `ocx run` is the pre-0.6 name, deleted in 0.7.
+    for wrapper in ["ocx exec", "ocx run"] {
+        assert!(
+            !shell_block.contains(wrapper),
+            "test loop must not wrap `ocx package test` in `{wrapper}`; block:\n{shell_block}"
+        );
+    }
     // No leftover docker injection from the previous container shape.
     assert!(
         !shell_block.contains("docker run"),

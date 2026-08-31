@@ -12,7 +12,7 @@ use tempfile::tempdir;
 // ── Index announce (E-P4) ─────────────────────────────────────────────
 //
 // One announce per run, carrying the union of every cascade tag the run
-// wrote. `--tags-from-file` (additive) never `--tags` (replacing), because a
+// wrote. `--tags-file` (additive) never `--tags` (replacing), because a
 // mirror announcing a replacing tag set would delete every previously
 // announced version the moment one run published a new one.
 
@@ -144,7 +144,7 @@ fn build_announce_args_uses_additive_tags_file_never_replacing_tags() {
             "announce",
             "--package",
             "bazelbuild/bazelisk",
-            "--tags-from-file",
+            "--tags-file",
             "/tmp/tags.txt",
             "--fork",
             "ocx-contrib/index",
@@ -272,7 +272,7 @@ fn announce_runs_exactly_once_per_run_with_the_union_of_tags() {
         1,
         "announce must run once per pipeline run, got: {invocations}",
     );
-    assert!(invocations.contains("--tags-from-file"), "got: {invocations}");
+    assert!(invocations.contains("--tags-file"), "got: {invocations}");
 
     // The tag set travels in the file, so the whole union lands even when
     // it outgrows anything comfortable on a command line.

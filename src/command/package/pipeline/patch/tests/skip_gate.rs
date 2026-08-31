@@ -24,7 +24,7 @@ fn image_recording(config_digest: &str) -> PublishedImage {
 }
 
 fn offline_publisher() -> Publisher {
-    Publisher::new(ClientBuilder::from_env().expect("client builds"))
+    Publisher::new(crate::command::package::registry_client().expect("client builds"))
 }
 
 /// Patch must refuse when the layer layout changed under it.

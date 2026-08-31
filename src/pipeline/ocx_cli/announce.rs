@@ -70,7 +70,7 @@ pub(crate) fn build_announce_args(
             let file = path
                 .to_str()
                 .ok_or_else(|| format!("announce tags file path is not valid UTF-8: {}", path.display()))?;
-            args.push("--tags-from-file".to_string());
+            args.push("--tags-file".to_string());
             args.push(file.to_string());
         }
         TagSource::FromRegistry => args.push("--tags-from-registry".to_string()),

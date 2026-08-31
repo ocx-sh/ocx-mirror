@@ -84,7 +84,7 @@ quick-junit = "0.6"
 # `ocx_lib` does not need it. Deliberately not `system-proxy`: that feature is
 # the Windows/macOS system *settings* reader, and the `HTTP_PROXY` family is
 # honoured without it.
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
 sha2 = "0.11.0"
 # `dist sync` announces four checksums on every upload, because Artifactory's

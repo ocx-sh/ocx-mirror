@@ -25,7 +25,6 @@ fn a_published_layer_becomes_a_digest_reference_with_its_media_type_extension() 
             "package",
             "push",
             "--cascade",
-            "--new",
             "-p",
             "linux/amd64",
             "-i",

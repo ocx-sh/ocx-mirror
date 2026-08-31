@@ -20,7 +20,6 @@ use crate::resolver::asset_resolution::AssetResolution;
 use crate::source;
 use crate::spec::{self, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
-use ocx_lib::oci::ClientBuilder;
 use ocx_lib::package::version::Version;
 use ocx_lib::publisher::Publisher;
 
@@ -49,7 +48,7 @@ impl Sync {
         // A malformed or insecure forwarded `OCX_MIRRORS` aborts here rather
         // than degrading to an identity map (which would route reads to the
         // firewall-blocked origin — the anti-goal replace semantics prevent).
-        let client = ClientBuilder::from_env().map_err(|e| MirrorError::ExecutionFailed(vec![e.to_string()]))?;
+        let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
         let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
         log::debug!("[{}] Fetching existing tags from {}", spec.name, identifier);

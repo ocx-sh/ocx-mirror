@@ -53,3 +53,41 @@ impl PackageCommand {
         }
     }
 }
+
+/// The registry client every `package` verb reads and publishes through.
+///
+/// Replaces `ClientBuilder::from_env`, deleted in ocx v0.6.0 when the
+/// plain-HTTP allowance became `[registries.<name>].insecure` and the client
+/// stopped reading the environment for itself. The mirror parses no ocx
+/// `Config`, so an empty one is the honest input: `insecure_hosts` over a
+/// default `Config` is exactly `OCX_INSECURE_REGISTRIES`, which is what
+/// `from_env` read — and it goes through the same
+/// [`resolve_mirror_map`](ocx_lib::resolve_mirror_map) the CLI's
+/// `Context::try_init` uses, so there is one `Config`→mirror-map transform
+/// with one precedence rule and one plain-HTTP gate, not two.
+///
+/// Registry role only: an index-only `OCX_MIRRORS` entry must never rewrite
+/// OCI traffic.
+///
+/// Deliberately not used by `pipeline::registry_sync::source_read_seam`, which
+/// builds a bare client on purpose — a client-side mirror rewrite there would
+/// dial a host other than the one its SSRF pre-flight approved.
+///
+/// # Errors
+///
+/// [`MirrorError::ExecutionFailed`] when the forwarded `OCX_MIRRORS` is
+/// malformed, carries a non-string value, or names an `http://` mirror whose
+/// host is not also in `OCX_INSECURE_REGISTRIES`. A failure aborts client
+/// construction rather than degrading to an identity map — a silent degrade
+/// would route reads to the firewall-blocked origin, the exact anti-goal
+/// replace semantics exist to prevent.
+pub(crate) fn registry_client() -> Result<ocx_lib::oci::Client, MirrorError> {
+    let insecure = ocx_lib::env::insecure_registries();
+    let env_mirrors = ocx_lib::env::mirrors().map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
+    let resolved = ocx_lib::resolve_mirror_map(&ocx_lib::Config::default(), env_mirrors, &insecure)
+        .map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
+    Ok(ocx_lib::oci::ClientBuilder::new()
+        .plain_http_registries(insecure)
+        .mirrors(ocx_lib::oci::MirrorMap::new(resolved.registry))
+        .build())
+}

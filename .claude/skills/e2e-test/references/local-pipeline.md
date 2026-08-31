@@ -129,7 +129,7 @@ $BIN package pipeline push --spec spec/pipx/mirror.yml \
 Assert: `run-summary.json` `layer_reuse.mounted == <wheel count>` (wheel
 layers cross-repo-mounted, not re-uploaded); tags on `it/pipx`; one
 `pip-packages/files.pythonhosted.org/<name>` repo per wheel, tagged by the
-wheel's sha256. Runtime proof: pull the package, `ocx run -- pipx
+wheel's sha256. Runtime proof: pull the package, `ocx exec -- pipx
 --version`, and `pipx environment --value PIPX_DEFAULT_PYTHON` must point
 inside the private interpreter package, not the host.
 

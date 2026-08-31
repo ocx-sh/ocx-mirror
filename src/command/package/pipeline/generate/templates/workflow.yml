@@ -205,10 +205,10 @@ jobs:
             --jq '.jobs[] | select(.name == "push") | .html_url' \
             | head -n1 || true)
           export OCX_MIRROR_JOB_URL
-          # Call ocx-mirror directly — NOT via `ocx run --`. setup-ocx has
+          # Call ocx-mirror directly — NOT via `ocx exec --`. setup-ocx has
           # already activated the project toolchain (`ocx --project env`), so the
           # dev ocx + ocx-mirror are on PATH for this step. Wrapping in
-          # `ocx run` would set OCX_BINARY_PIN to the bootstrap ocx, and the
+          # `ocx exec` would set OCX_BINARY_PIN to the bootstrap ocx, and the
           # nested `ocx package push --format json` would then resolve that
           # (older) binary, emit no JSON report, and be misrecorded as a red.
           ocx-mirror package pipeline push{SPEC_ARG} \
@@ -246,7 +246,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: run-summary
-          # The announce tags file is the exact `--tags-from-file` the index call
+          # The announce tags file is the exact `--tags-file` the index call
           # received. Uploading it beside the summary is what makes an announce
           # reconstructable after the fact; without it the only record of what
           # was curated is the summary's tag list.
