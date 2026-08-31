@@ -910,10 +910,13 @@ async fn write_package(
 
 /// The ocx read seam for one source's registry (C-022's manifest fetches).
 ///
-/// Built with a bare [`ClientBuilder`] rather than `from_env`, because
-/// `from_env` installs the `OCX_MIRRORS` map: a client-side mirror rewrite
+/// Built with a bare [`ClientBuilder`] rather than through `registry_client`,
+/// because `registry_client` installs the `OCX_MIRRORS` map via `.mirrors(…)`:
+/// a client-side mirror rewrite
 /// would dial a host other than the one [`catalog::validate_root_host`] just
-/// approved, which is the SSRF check defeated by configuration. The guard
+/// approved, which is the SSRF check defeated by configuration. (Before ocx
+/// v0.6.0 the same map arrived via `ClientBuilder::from_env`, now deleted —
+/// the hazard moved call sites, it did not go away.) The guard
 /// itself is `ssrf_guard` — resolve → validate → **pin** — so the approved
 /// address cannot rebind before the socket opens either.
 fn source_read_seam(trusted_hosts: &[String]) -> Index {

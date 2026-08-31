@@ -601,9 +601,39 @@ fn the_source_read_seam_is_ssrf_guarded_and_never_mirror_rewritten() {
         body.contains(".ssrf_guard("),
         "the source registry is dialled at a host that came off a foreign index"
     );
+    // ocx v0.6.0 deleted `ClientBuilder::from_env`, so the old needle here
+    // could no longer match anything — a denylist that cannot fire reads as a
+    // passing guard forever (TEST-11). The hazard moved call sites rather than
+    // going away: the OCX_MIRRORS map now arrives through `registry_client`,
+    // which installs it with `.mirrors(MirrorMap::new(…))`. Deny all three
+    // spellings, because the realistic regression is additive — someone adds
+    // `.mirrors(…)` beside the surviving `.ssrf_guard(…)`, and the positive
+    // assertion above stays green.
+    for forbidden in [".mirrors(", "MirrorMap", "registry_client"] {
+        assert!(
+            !body.contains(forbidden),
+            "`{forbidden}` installs the OCX_MIRRORS map, which would dial a host validate_root_host never approved"
+        );
+    }
+}
+
+#[test]
+fn the_mirror_rewrite_denylist_names_a_call_that_still_exists() {
+    // The guard on the guard above. Its needles are denials, so they pass
+    // vacuously once the spelling they name is gone — which is exactly what
+    // happened to `from_env` at the ocx v0.6.0 bump. Pin them to a call that
+    // is real *today*: `registry_client` must still be the mirror-installing
+    // constructor, and it must still install the map with `.mirrors(`.
+    let client_source = include_str!("../../command/package/mod.rs");
     assert!(
-        !body.contains("from_env"),
-        "`from_env` installs the OCX_MIRRORS map, which would dial a host validate_root_host never approved"
+        client_source.contains("fn registry_client("),
+        "registry_client has been renamed or removed — re-point the denylist in \
+         the_source_read_seam_is_ssrf_guarded_and_never_mirror_rewritten"
+    );
+    assert!(
+        client_source.contains(".mirrors("),
+        "registry_client no longer installs the OCX_MIRRORS map with `.mirrors(` — \
+         find where it moved and re-point the denylist"
     );
 }
 
