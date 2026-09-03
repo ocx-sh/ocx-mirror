@@ -209,9 +209,13 @@ pub struct PlanCmd {
 impl PlanCmd {
     pub async fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
         let spec_path = &self.spec;
-        let spec = spec::load_spec(spec_path)
-            .await
-            .map_err(|e| MirrorError::SourceError(format!("failed to load spec: {e}")))?;
+        // Propagated, not re-wrapped: `load_spec` already classifies its own
+        // failures — 79 for a missing spec, 65 for a malformed one, 64 for a
+        // policy refusal such as a `sign:` block naming a scrubbed variable —
+        // and every sibling pipeline command `?`s it straight through. Folding
+        // all three into `SourceError` (69) here made `plan` the one step where
+        // a refusal reported the wrong exit code and lost its cause chain.
+        let spec = spec::load_spec(spec_path).await?;
         let spec_dir = spec_path.parent().unwrap_or(std::path::Path::new("."));
         let locks_dir = self
             .locks_dir

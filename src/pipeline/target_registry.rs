@@ -267,9 +267,123 @@ fn merge_manifest_result(
     }
 }
 
+/// Fetches what a signature would be attached to, for every tag.
+///
+/// [`fetch_published_images`]'s sibling for the backfill, and deliberately not
+/// a reuse of it: that walk drops every tag `Version::parse` refuses — which is
+/// every rolling alias, `latest` included — and never reports the *index*
+/// digest, which is the subject the index-level signature attaches to. Both
+/// omissions are correct there and fatal here.
+///
+/// One manifest fetch per tag, and none per child: an image index already
+/// names its children's digests, and the backfill signs a child by narrowing
+/// its parent with `-p` rather than by addressing it.
+///
+/// Fail-safe on the same asymmetry the module doctrine sets (issue #157): an
+/// authoritative "manifest not found" for a listed tag skips it, because
+/// absence there is a fact the registry asserted. Every other failure aborts —
+/// reading a failed manifest read as "this tag has no subjects" would report a
+/// green run over content nothing signed.
+pub(crate) async fn fetch_signing_subjects(
+    publisher: &Publisher,
+    identifier: &Identifier,
+    tags: &[&str],
+) -> Result<Vec<crate::pipeline::sign_backfill::PublishedTag>, MirrorError> {
+    let mut published = Vec::new();
+    for tag in signing_tags(tags) {
+        let tag_identifier = identifier.clone_with_tag(tag.to_string());
+        let result = publisher.client().fetch_manifest(&tag_identifier).await;
+        if let Some(entry) = signing_subject(tag, result)? {
+            published.push(entry);
+        }
+    }
+    Ok(published)
+}
+
+/// The tags a backfill may address, with `ocx`'s reserved namespace removed.
+///
+/// Three kinds of tag in a listing are not published content and must never be
+/// signed through:
+///
+/// - `__ocx.keep.<algorithm>-<hex>` pins a *platform manifest* against GC. It
+///   resolves to a bare manifest, so signing through it files a second
+///   signature against a subject the platform pass already covers — and does
+///   it with no `-p`, through a reference no operator ever names.
+/// - `__ocx.desc` and `__ocx.patch` address description and patch artifacts,
+///   not a package.
+/// - A bare `sha256-<hex>` tag **is the referrers fallback index** on a
+///   registry without the Referrers API — which is to say, the signatures this
+///   command just wrote. Signing those would grow without bound.
+///
+/// `Tag::is_reserved_str` is `ocx`'s own classifier for all three; a prefix
+/// check here would be a fourth spelling of a rule that already exists.
+fn signing_tags<'a>(tags: &[&'a str]) -> Vec<&'a str> {
+    tags.iter()
+        .copied()
+        .filter(|tag| !ocx_lib::package::tag::Tag::is_reserved_str(tag))
+        .collect()
+}
+
+/// Classifies one tag's manifest fetch into its signing subjects — the pure
+/// half of [`fetch_signing_subjects`], so the fail-safe split is unit-testable
+/// without a registry.
+///
+/// A child entry whose platform or digest this build cannot read is dropped
+/// rather than aborting, matching [`index_children`]: the pair goes unsigned,
+/// which is the safe direction — a re-run signs it once the build understands
+/// it. A bare manifest yields no children and is itself the only subject.
+fn signing_subject(
+    tag: &str,
+    result: ocx_lib::Result<(Digest, ocx_lib::oci::Manifest)>,
+) -> Result<Option<crate::pipeline::sign_backfill::PublishedTag>, MirrorError> {
+    let (digest, manifest) = match result {
+        Ok(fetched) => fetched,
+        Err(ocx_lib::Error::OciClient(ClientError::ManifestNotFound(_))) => return Ok(None),
+        Err(error) => {
+            return Err(MirrorError::TargetError(format!(
+                "failed to fetch manifest for tag '{tag}': {error}"
+            )));
+        }
+    };
+
+    let children = match &manifest {
+        ocx_lib::oci::Manifest::ImageIndex(index) => index
+            .manifests
+            .iter()
+            .filter_map(|entry| {
+                let platform = Platform::try_from(entry.platform.clone()?).ok()?;
+                let child = Digest::try_from(&entry.digest).ok()?;
+                Some((platform, child))
+            })
+            .collect(),
+        ocx_lib::oci::Manifest::Image(_) => Vec::new(),
+    };
+
+    Ok(Some(crate::pipeline::sign_backfill::PublishedTag {
+        tag: tag.to_string(),
+        digest,
+        children,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ocx`'s reserved namespace is not publishable content (WP 4).
+    ///
+    /// Found by the acceptance tier: a live repository carries a
+    /// `__ocx.keep.sha256-<hex>` tag pinning its platform manifest, and a
+    /// backfill that addressed it signed that manifest a second time — once
+    /// through the keep tag with no `-p`, once through the platform pass.
+    #[test]
+    fn reserved_tags_are_not_signing_subjects() {
+        let keep = format!("__ocx.keep.sha256-{}", "a".repeat(64));
+        let fallback = format!("sha256-{}", "b".repeat(64));
+        let tags = ["3.7.0", &keep, "__ocx.desc", "__ocx.patch", &fallback, "latest"];
+
+        assert_eq!(signing_tags(&tags), vec!["3.7.0", "latest"]);
+    }
 
     // ── Regression tests for issue #157 — fail-safe, not fail-open ────────
     //
