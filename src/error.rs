@@ -82,6 +82,25 @@ pub enum MirrorError {
     /// writes nothing.
     IndexFormatUnsupported(u64),
 
+    // ── Signing variants ───────────────────────────────────────────────────
+    /// An `ocx package push --sign` or `ocx package sign` child failed.
+    ///
+    /// Carries the child's own exit code rather than a message so
+    /// [`Self::kind_exit_code`] can hand it straight back (C-056): the sign
+    /// taxonomy is `ocx`'s, and collapsing 83 (Rekor down, retryable) onto 85
+    /// (key backend not built) would tell an operator to fix the wrong thing.
+    /// `target` names the reference — never a secret, which by construction
+    /// never reaches an argv word or a message.
+    SignFailed { target: String, code: i32 },
+    /// A `sign:` ref names material that cannot be reached: an unset
+    /// environment variable, or a file that is missing, unreadable, oversized
+    /// or not UTF-8.
+    ///
+    /// `field` is the dotted spec field (`sign.key.passphrase`) and `source`
+    /// the variable name or path — never the value (C-054), which is why this
+    /// is a struct variant rather than a formatted `String`.
+    SignMaterialMissing { field: String, source: String },
+
     // ── `dist sync` variants ────────────────────────────────────────────────
     /// The upstream `dist.json` declared a `schema` this binary cannot
     /// re-emit; carries the version the manifest declared.
@@ -125,9 +144,39 @@ impl MirrorError {
             // `registry sync` variants
             Self::IndexWriteError(_) => ExitCode::IoError,
             Self::IndexFormatUnsupported(_) => ExitCode::DataError,
+            // Signing variants
+            Self::SignFailed { code, .. } => sign_exit_code(*code),
+            Self::SignMaterialMissing { .. } => ExitCode::ConfigError,
             // `dist sync` variants
             Self::DistSchemaUnsupported(_) => ExitCode::DataError,
         }
+    }
+}
+
+/// An `ocx` child's exit code, classified through `ocx`'s own taxonomy (C-056).
+///
+/// Written out rather than derived: `ExitCode` has no `TryFrom<u8>`, and a
+/// blanket transmute would invent variants for the codes it deliberately leaves
+/// unclaimed. Anything unrecognised — including 0, which a failing child cannot
+/// have produced — falls through to `Failure`, so a newer `ocx` allocating a
+/// code this binary predates degrades to 1 rather than to a wrong meaning.
+pub(crate) fn sign_exit_code(code: i32) -> ExitCode {
+    match code {
+        c if c == ExitCode::UsageError as i32 => ExitCode::UsageError,
+        c if c == ExitCode::DataError as i32 => ExitCode::DataError,
+        c if c == ExitCode::Unavailable as i32 => ExitCode::Unavailable,
+        c if c == ExitCode::IoError as i32 => ExitCode::IoError,
+        c if c == ExitCode::TempFail as i32 => ExitCode::TempFail,
+        c if c == ExitCode::PermissionDenied as i32 => ExitCode::PermissionDenied,
+        c if c == ExitCode::ConfigError as i32 => ExitCode::ConfigError,
+        c if c == ExitCode::NotFound as i32 => ExitCode::NotFound,
+        c if c == ExitCode::AuthError as i32 => ExitCode::AuthError,
+        c if c == ExitCode::PolicyBlocked as i32 => ExitCode::PolicyBlocked,
+        c if c == ExitCode::DirtyRcBlock as i32 => ExitCode::DirtyRcBlock,
+        c if c == ExitCode::TransparencyLogUnavailable as i32 => ExitCode::TransparencyLogUnavailable,
+        c if c == ExitCode::ReferrersUnsupported as i32 => ExitCode::ReferrersUnsupported,
+        c if c == ExitCode::UnsupportedKeyBackend as i32 => ExitCode::UnsupportedKeyBackend,
+        _ => ExitCode::Failure,
     }
 }
 
@@ -173,6 +222,11 @@ impl std::fmt::Display for MirrorError {
             Self::IndexWriteError(msg) => write!(f, "index write error: {msg}"),
             Self::IndexFormatUnsupported(version) => {
                 write!(f, "unsupported source index format_version: {version}")
+            }
+            // Signing variants
+            Self::SignFailed { target, code } => write!(f, "signing {target} failed with exit code {code}"),
+            Self::SignMaterialMissing { field, source } => {
+                write!(f, "signing material for {field} is unreachable: {source}")
             }
             // `dist sync` variants
             Self::DistSchemaUnsupported(schema) => {
@@ -271,6 +325,69 @@ mod tests {
         // and would have CI retry forever on something retry cannot fix.
         let err = MirrorError::IndexFormatUnsupported(2);
         assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    /// C-056: the child's own sign taxonomy is carried through unchanged.
+    ///
+    /// Table rather than one assertion per code, because the failure this
+    /// stops is a *collapse* — every arm answering `Failure` passes any
+    /// single-code test written for a code that happens to be unmapped, and
+    /// the operator then reads "the tool failed" for a Rekor outage, a
+    /// registry with no Referrers API, and a key backend that was never built.
+    #[test]
+    fn a_failed_sign_carries_the_child_exit_code() {
+        let cases = [
+            (83, ExitCode::TransparencyLogUnavailable),
+            (84, ExitCode::ReferrersUnsupported),
+            (85, ExitCode::UnsupportedKeyBackend),
+            (80, ExitCode::AuthError),
+            (77, ExitCode::PermissionDenied),
+            (78, ExitCode::ConfigError),
+            (75, ExitCode::TempFail),
+            (65, ExitCode::DataError),
+            (64, ExitCode::UsageError),
+            // Unrecognised — including a code a newer `ocx` may allocate —
+            // degrades to 1 rather than to a wrong meaning.
+            (0xFF, ExitCode::Failure),
+            // 0 cannot come from a failing child; it must not read as success.
+            (0, ExitCode::Failure),
+        ];
+
+        for (code, expected) in cases {
+            let error = MirrorError::SignFailed {
+                target: "ghcr.io/ocx-sh/shfmt:3.8.0".into(),
+                code,
+            };
+            assert_eq!(error.kind_exit_code(), expected, "exit code {code}");
+        }
+    }
+
+    /// The reference is named and nothing else is: the two secret-class values
+    /// never reach this variant, so there is nothing here to redact.
+    #[test]
+    fn a_failed_sign_names_the_reference_and_the_code() {
+        let rendered = MirrorError::SignFailed {
+            target: "ghcr.io/ocx-sh/shfmt:3.8.0".into(),
+            code: 83,
+        }
+        .to_string();
+        assert!(rendered.contains("ghcr.io/ocx-sh/shfmt:3.8.0"), "got: {rendered}");
+        assert!(rendered.contains("83"), "got: {rendered}");
+    }
+
+    /// C-054/C-055: the message names the field and the variable, and 78 sends
+    /// the operator to the runner's configuration rather than to the spec's
+    /// syntax (65) or to a generic failure (1).
+    #[test]
+    fn missing_sign_material_maps_to_config_error() {
+        let error = MirrorError::SignMaterialMissing {
+            field: "sign.keyless.identity_token".into(),
+            source: "environment variable SIGSTORE_ID_TOKEN is not set".into(),
+        };
+        assert_eq!(error.kind_exit_code(), ExitCode::ConfigError);
+        let rendered = error.to_string();
+        assert!(rendered.contains("sign.keyless.identity_token"), "got: {rendered}");
+        assert!(rendered.contains("SIGSTORE_ID_TOKEN"), "got: {rendered}");
     }
 
     #[test]

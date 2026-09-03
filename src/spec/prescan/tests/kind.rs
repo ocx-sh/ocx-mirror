@@ -55,7 +55,7 @@ fn a_mirror_spec_handed_to_registry_sync_is_refused_for_its_kind() {
 
 #[test]
 fn the_registry_kind_is_accepted() {
-    assert!(pre_scan(&merged("kind: registry\n"), Path::new(SPEC_PATH), REGISTRY_KIND).is_ok());
+    assert!(pre_scan(&merged("kind: registry\n"), Path::new(SPEC_PATH), Some(REGISTRY_KIND)).is_ok());
 }
 
 /// The discriminator is per-spec-type: the same document that satisfies
@@ -63,7 +63,7 @@ fn the_registry_kind_is_accepted() {
 /// parameterising the check rather than hardcoding one kind.
 #[test]
 fn a_registry_document_is_refused_as_a_dist_spec() {
-    let error = pre_scan(&merged("kind: registry\n"), Path::new(SPEC_PATH), DIST_KIND)
+    let error = pre_scan(&merged("kind: registry\n"), Path::new(SPEC_PATH), Some(DIST_KIND))
         .expect_err("a registry document must not load as a dist spec");
 
     assert!(

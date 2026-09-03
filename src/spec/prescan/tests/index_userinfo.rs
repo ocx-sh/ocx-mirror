@@ -73,5 +73,5 @@ fn the_offending_source_is_reported_by_index() {
 fn a_credential_free_index_url_is_accepted() {
     let yaml = "kind: registry\nsources:\n  - index: https://index.ocx.sh/\n";
 
-    assert!(pre_scan(&merged(yaml), Path::new(SPEC_PATH), REGISTRY_KIND).is_ok());
+    assert!(pre_scan(&merged(yaml), Path::new(SPEC_PATH), Some(REGISTRY_KIND)).is_ok());
 }

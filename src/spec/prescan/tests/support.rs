@@ -24,7 +24,7 @@ pub fn merged(yaml: &str) -> Value {
 /// got silence has found the bug, and should say so at the assertion, not by
 /// unwrapping nothing.
 pub fn rejection(yaml: &str) -> MirrorError {
-    super::super::pre_scan(&merged(yaml), Path::new(SPEC_PATH), super::super::REGISTRY_KIND)
+    super::super::pre_scan(&merged(yaml), Path::new(SPEC_PATH), Some(super::super::REGISTRY_KIND))
         .expect_err("document must be rejected by the pre-scan")
 }
 

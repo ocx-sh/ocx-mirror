@@ -15,3 +15,5 @@ mod credentials;
 mod index_userinfo;
 #[path = "tests/kind.rs"]
 mod kind;
+#[path = "tests/mirror.rs"]
+mod mirror;

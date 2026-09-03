@@ -18,6 +18,7 @@ mod platforms_config;
 mod prescan;
 mod python_config;
 mod registry;
+mod sign_config;
 mod source;
 mod strip_components_config;
 mod target;
@@ -60,6 +61,9 @@ pub use python_config::{LockOptions, PythonConfig};
 // what makes `tests/registry_spec_validation.rs` reachable without touching
 // `lib.rs` (C-008). Its children ride along so the pipeline can name them.
 pub use registry::{OnError, RegistryConcurrency, RegistrySource, RegistrySpec};
+// `sign:` — the mirror's own signing identity (D1). `validate_sign_config`
+// rides along through the existing `pub(crate) use validate::*;` glob below.
+pub use sign_config::{KeyConfig, KeyFullConfig, KeylessConfig, Ref, SignConfig};
 pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
@@ -221,6 +225,14 @@ pub struct MirrorSpec {
     /// When omitted, defaults apply: `readme: CATALOG.md`, logo probed.
     #[serde(default)]
     pub catalog: Option<CatalogConfig>,
+
+    /// Sign what the mirror produces, with the mirror's own identity
+    /// (keyless by default, `key:` as the fallback). Absent means the
+    /// mirror publishes unsigned — every push leg's current default. See
+    /// [`SignConfig`] for the shape and `validate_sign_config` (in
+    /// `spec/validate.rs`) for the refusals it enforces.
+    #[serde(default)]
+    pub sign: Option<SignConfig>,
 
     /// OCI annotations written onto the image index of every published tag,
     /// on top of the ones auto-detected from the CI environment

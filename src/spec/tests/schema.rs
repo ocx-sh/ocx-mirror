@@ -370,3 +370,49 @@ assets:
     let result: Result<MirrorSpec, _> = serde_yaml_ng::from_str(yaml);
     assert!(result.is_err());
 }
+
+// ── C-050: the `sign:` block reaches `MirrorSpec.sign` ───────────────────
+
+/// The block is optional and reaches the spec in both tag forms. The shape
+/// corpus lives beside `sign_config.rs`; what this asserts is only the field
+/// wiring — that a `sign:` in a real document is not silently dropped.
+#[test]
+fn parse_sign_block_in_both_tag_forms() {
+    let base = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+"#;
+
+    let keyless: MirrorSpec = serde_yaml_ng::from_str(&format!("{base}sign:\n  keyless: {{}}\n"))
+        .expect("a keyless `sign:` block must parse");
+    assert!(matches!(
+        keyless.sign,
+        Some(SignConfig {
+            keyless: Some(_),
+            key: None
+        })
+    ));
+
+    let key: MirrorSpec = serde_yaml_ng::from_str(&format!("{base}sign:\n  key: env://MIRROR_SIGNING_KEY\n"))
+        .expect("a key-mode `sign:` block must parse");
+    assert!(matches!(
+        key.sign,
+        Some(SignConfig {
+            keyless: None,
+            key: Some(KeyConfig::Reference(Ref::Env(_)))
+        })
+    ));
+
+    let unsigned: MirrorSpec = serde_yaml_ng::from_str(base).expect("a spec without `sign:` must parse");
+    assert!(unsigned.sign.is_none(), "an absent `sign:` must stay absent");
+}
