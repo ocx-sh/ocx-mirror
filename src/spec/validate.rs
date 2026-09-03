@@ -16,7 +16,8 @@ use ocx_lib::package::version::Version;
 
 use super::platform_keys::{infer_libc_from_image, infer_shell_from_image, libc_family_feature};
 use super::{
-    AnnounceConfig, ContainerConfig, ExcludeEntry, MirrorSpec, NotifyConfig, OcxMirrorConfig, PlatformConfig, TestEntry,
+    AnnounceConfig, ContainerConfig, ExcludeEntry, KeyConfig, KeylessConfig, MirrorSpec, NotifyConfig, OcxMirrorConfig,
+    PlatformConfig, Ref, SignConfig, TestEntry,
 };
 use super::{
     CRON_RE, DISCORD_USER_ID_RE, GHA_SECRET_NAME_RE, GIT_REV_RE, GITHUB_REPO_RE, INDEX_PACKAGE_RE, TEST_NAME_RE,
@@ -434,6 +435,297 @@ pub fn policy_check_notify(notify: &NotifyConfig) -> Result<(), MirrorError> {
     }
 
     Ok(())
+}
+
+/// Refuse a `sign:` shape that only exists on the raw document (C-051).
+///
+/// Runs between [`pre_scan`](super::pre_scan) and deserialization, so **every
+/// refusal here precedes every refusal in [`validate_sign_config`]**: C-051's
+/// listed order is read per seat, and this is the first seat. That is why
+/// `sign: {keyless: {}, key: {}}` is refused for its empty `key:` map rather
+/// than for naming both tags. Whatever survives deserialization is
+/// `validate_sign_config`'s.
+///
+/// Four shapes, in this order, each exit 64 naming the field and never
+/// echoing a value:
+///
+/// 1. a null `sign:` — `Option<SignConfig>` deserializes it to `None`,
+///    indistinguishable from an absent key, so the mirror would publish
+///    unsigned while the spec says otherwise (the S-051 hazard).
+/// 2. a null `keyless:`/`key:` — the same erasure one level down.
+///    `{keyless: null, key: env://K}` reads as plain key mode, and a lone
+///    null `keyless:` reports "neither tag" against a document that names one.
+/// 3. a non-string `passphrase`/`identity_token` — serde's type error is
+///    exit 65 *and quotes the offending scalar*, which for those two fields
+///    is the secret itself.
+/// 4. a `key:` map with no `ref` — `KeyFullConfig::reference` is a required
+///    field, so serde would reject the document as malformed data (65)
+///    before the usage error (64) the operator needs.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecUsageError`] (exit 64) for the first shape found; the
+/// message names the field and the spec path, never a value.
+pub fn refuse_raw_sign_shapes(merged: &serde_yaml_ng::Value, spec_path: &Path) -> Result<(), MirrorError> {
+    let Some(sign) = merged.as_mapping().and_then(|map| map.get("sign")) else {
+        return Ok(());
+    };
+
+    if sign.is_null() {
+        return Err(raw_sign_refusal(
+            spec_path,
+            "sign",
+            "is null; omit the key entirely to publish unsigned, or give it `keyless:`/`key:` to sign",
+        ));
+    }
+
+    // A `sign:` that is neither null nor a mapping is a shape error serde
+    // reports without reading a value — leave it to the typed seat.
+    let Some(sign) = sign.as_mapping() else {
+        return Ok(());
+    };
+
+    for tag in ["keyless", "key"] {
+        if sign.get(tag).is_some_and(serde_yaml_ng::Value::is_null) {
+            return Err(raw_sign_refusal(
+                spec_path,
+                &format!("sign.{tag}"),
+                "is null; give it a value or remove the key",
+            ));
+        }
+    }
+
+    for (tag, secret) in [("keyless", "identity_token"), ("key", "passphrase")] {
+        let field = sign
+            .get(tag)
+            .and_then(serde_yaml_ng::Value::as_mapping)
+            .and_then(|map| map.get(secret));
+        // Null is the legitimate spelling of "absent" for an `Option<Ref>`.
+        if field.is_some_and(|value| !matches!(value, serde_yaml_ng::Value::String(_) | serde_yaml_ng::Value::Null)) {
+            return Err(raw_sign_refusal(
+                spec_path,
+                &format!("sign.{tag}.{secret}"),
+                "must be a quoted string reference; use `env://NAME` or `file://PATH`",
+            ));
+        }
+    }
+
+    if sign
+        .get("key")
+        .and_then(serde_yaml_ng::Value::as_mapping)
+        .is_some_and(|key| !key.contains_key("ref"))
+    {
+        return Err(raw_sign_refusal(
+            spec_path,
+            "sign.key.ref",
+            "a `key:` map must name the signing key; ocx has no default",
+        ));
+    }
+
+    Ok(())
+}
+
+/// The raw seat's message shape: spec path, field, reason — never a value.
+///
+/// Prefixed with the spec path because every other refusal reaching the
+/// operator from this seat is ([`pre_scan`](super::pre_scan)); the typed seat
+/// is unprefixed, matching `policy_check_notify`.
+fn raw_sign_refusal(spec_path: &Path, field: &str, reason: &str) -> MirrorError {
+    MirrorError::SpecUsageError(format!("{}: {field}: {reason}", spec_path.display()))
+}
+
+/// Whether a [`Ref`] sits under a field whose value is a secret.
+///
+/// `passphrase` and `identity_token` accept only `env://`/`file://`: a
+/// literal there is key material in a file an operator commits. Every other
+/// field takes a literal legitimately (`key: ./cosign.key`, a Rekor URL), so
+/// the distinction is per call site and cannot be read off the value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefClass {
+    /// A literal is a legitimate spelling here.
+    Plain,
+    /// A literal would inline a secret.
+    Secret,
+}
+
+/// Whether `name` is a portably exportable environment variable name.
+///
+/// The grammar is `^[A-Z_][A-Z0-9_]*$` (C-051), spelled as a character walk
+/// rather than a regex: it is the only place in the crate that needs it, and
+/// an empty name falls out of the same check.
+fn is_env_variable_name(name: &str) -> bool {
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    (first.is_ascii_uppercase() || first == '_')
+        && characters.all(|character| character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_')
+}
+
+/// Whether `name` is one of the variables ocx's plugin dispatch scrubs.
+///
+/// The source of truth is ocx's own list — `ocx_lib::env::keys::CREDENTIAL_KEYS`
+/// (`external/ocx/crates/ocx_lib/src/env.rs:238`), the same constant
+/// `app/plugin_dispatch.rs` removes from the child environment. Naming it
+/// rather than copying the three strings is what keeps a rename upstream from
+/// silently reopening the hole: drift there is otherwise invisible here.
+fn is_dispatch_scrubbed(name: &str) -> bool {
+    ocx_lib::env::keys::CREDENTIAL_KEYS.contains(&name)
+}
+
+/// Refuse one [`Ref`] under `sign:`, naming `field` and never the value.
+///
+/// The rules are uniform across every `Ref` in the block (C-051): an empty
+/// reference names nothing, an inlined PEM body is key material in the spec,
+/// a secret-class field takes no literal, an `env://` name outside the
+/// grammar is one no shell can export, and an `env://` name ocx's plugin
+/// dispatch scrubs is one that means two different things depending on
+/// how the tool was invoked.
+///
+/// The scrub rule is what stops one spec meaning two things. Under
+/// `ocx mirror package pipeline push` the dispatch empties those three
+/// variables from the mirror's own environment *and* from the `ocx` child's,
+/// so the reference resolves to nothing however it is spelled; run directly,
+/// nothing scrubs them and the same reference resolves fine.
+///
+/// What that costs differs by seat, which is why the message claims neither:
+/// `sign.key`/`sign.key.ref` reach the child verbatim as `--key <ref>`, so
+/// `ocx package push --sign` tags the whole cascade before the signature
+/// fails and publishes it unsigned, while `sign.key.passphrase` and
+/// `sign.keyless.identity_token` are resolved by the mirror before the first
+/// push and fail as `SignMaterialMissing` (exit 78) with nothing published.
+/// Refusing the spec replaces both with a clean exit 64.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecUsageError`] (exit 64) for the first rule the value
+/// breaks; the message carries `field` and never the offending value.
+fn check_sign_ref(field: &str, value: &Ref, class: RefClass) -> Result<(), MirrorError> {
+    match value {
+        Ref::Literal(literal) if literal.is_empty() => Err(MirrorError::SpecUsageError(format!(
+            "{field}: an empty reference names nothing; give a literal, `env://NAME`, or `file://PATH`"
+        ))),
+        // A pasted PEM body, caught before the secret-class rule so the
+        // message says what is wrong rather than only where. ponytail:
+        // armour-marker match only — armourless base64 in a plain-class field
+        // is not caught. The control is against an accidental commit of
+        // armoured key material, not against an adversary, who is out of
+        // scope here anyway (`security-threat-model.md`: the spec author is
+        // inside the trusted boundary).
+        Ref::Literal(literal) if literal.contains("BEGIN ") => Err(MirrorError::SpecUsageError(format!(
+            "{field}: key material must not be inlined; use `env://NAME` or `file://PATH` to name where the key lives"
+        ))),
+        Ref::Literal(_) if class == RefClass::Secret => Err(MirrorError::SpecUsageError(format!(
+            "{field}: a literal secret is refused; use `env://NAME` or `file://PATH`"
+        ))),
+        Ref::Env(name) if !is_env_variable_name(name) => Err(MirrorError::SpecUsageError(format!(
+            "{field}: the `env://` variable name must match ^[A-Z_][A-Z0-9_]*$"
+        ))),
+        // The name, never the value: `name` is what the operator typed.
+        // Refused unconditionally rather than only under dispatch. A direct
+        // `ocx-mirror` run *can* read these — nothing scrubs them, and the
+        // rendered workflows invoke the binary directly — so the hazard is
+        // not unreadability but inconsistency: one spec, two meanings. The
+        // message stops there rather than naming a consequence, because the
+        // consequence is per-seat (see this function's doc comment). There is
+        // no marker to condition on (`OCX_BINARY_PIN` is set on the scrubbing
+        // and non-scrubbing paths alike), and keying off `env::var` would
+        // make spec validity depend on what happens to be exported.
+        Ref::Env(name) if is_dispatch_scrubbed(name) => Err(MirrorError::SpecUsageError(format!(
+            "{field}: `env://{name}` names a variable reserved by ocx, whose plugin dispatch \
+             strips it from the environment before launching the mirror; the same spec would resolve it under a \
+             direct `ocx-mirror` run and resolve to nothing under `ocx mirror ...`, so it is refused outright. \
+             Use an operator-owned name, for example `env://MIRROR_SIGNING_KEY`"
+        ))),
+        Ref::File(path) if path.as_os_str().is_empty() => Err(MirrorError::SpecUsageError(format!(
+            "{field}: the `file://` path is empty"
+        ))),
+        Ref::Literal(_) | Ref::Env(_) | Ref::File(_) => Ok(()),
+    }
+}
+
+/// Refuse the `sign.keyless` fields, in declaration order.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecUsageError`] (exit 64) — see [`check_sign_ref`].
+fn check_keyless(keyless: &KeylessConfig) -> Result<(), MirrorError> {
+    if let Some(fulcio) = &keyless.fulcio {
+        check_sign_ref("sign.keyless.fulcio", fulcio, RefClass::Plain)?;
+    }
+    if let Some(rekor) = &keyless.rekor {
+        check_sign_ref("sign.keyless.rekor", rekor, RefClass::Plain)?;
+    }
+    if let Some(identity_token) = &keyless.identity_token {
+        check_sign_ref("sign.keyless.identity_token", identity_token, RefClass::Secret)?;
+    }
+    Ok(())
+}
+
+/// Refuse the `sign.key` fields, in declaration order.
+///
+/// The string form is named `sign.key` and the map form `sign.key.ref`, so a
+/// refusal points at the line the operator actually wrote.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecUsageError`] (exit 64) — see [`check_sign_ref`].
+fn check_key(key: &KeyConfig) -> Result<(), MirrorError> {
+    match key {
+        KeyConfig::Reference(reference) => check_sign_ref("sign.key", reference, RefClass::Plain),
+        KeyConfig::Full(full) => {
+            check_sign_ref("sign.key.ref", &full.reference, RefClass::Plain)?;
+            if let Some(passphrase) = &full.passphrase {
+                check_sign_ref("sign.key.passphrase", passphrase, RefClass::Secret)?;
+            }
+            if let Some(rekor) = &full.rekor {
+                check_sign_ref("sign.key.rekor", rekor, RefClass::Plain)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Refuse a `sign:` block the mirror cannot honour (C-051).
+///
+/// Mirrors [`policy_check_notify`]'s placement and precedent: called from
+/// `load_spec` *before* [`MirrorSpec::validate`] so a policy violation is
+/// exit 64 (`SpecUsageError`) rather than 65 (`SpecInvalid`). Every
+/// rejection names the offending field and never echoes a value:
+///
+/// - `sign: {}` — neither `keyless` nor `key` present.
+/// - both `keyless` and `key` present — the D1 tags are mutually exclusive.
+/// - a `Ref` that is empty, or whose literal form contains `"BEGIN "`
+///   (a literal PEM pasted where a reference was meant).
+/// - a secret-class field (`passphrase`, `identity_token`) given a
+///   `Ref::Literal` — those two fields accept only `env://`/`file://`.
+/// - an `env://NAME` not matching `^[A-Z_][A-Z0-9_]*$`.
+/// - an `env://NAME` naming a variable ocx's plugin dispatch scrubs
+///   (`ocx_lib::env::keys::CREDENTIAL_KEYS`) — readable on a direct run,
+///   empty under dispatch, so the spec's meaning depends on the caller.
+/// - a `file://` whose path is empty.
+///
+/// The shapes that never survive deserialization — a null `sign:`, a null
+/// mode tag, a non-string secret, a `key:` map with no `ref` — are
+/// [`refuse_raw_sign_shapes`]'s, and it runs first.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecUsageError`] (exit 64) for the first violation found.
+pub fn validate_sign_config(cfg: &SignConfig) -> Result<(), MirrorError> {
+    // C-051's order, first violation wins: the mode tags before the fields,
+    // because a block naming no mode has no fields worth reporting on.
+    match (&cfg.keyless, &cfg.key) {
+        (None, None) => Err(MirrorError::SpecUsageError(
+            "sign: neither `keyless:` nor `key:` is set; name exactly one, or omit `sign:` to publish unsigned"
+                .to_string(),
+        )),
+        (Some(_), Some(_)) => Err(MirrorError::SpecUsageError(
+            "sign: `keyless:` and `key:` are mutually exclusive; name exactly one".to_string(),
+        )),
+        (Some(keyless), None) => check_keyless(keyless),
+        (None, Some(key)) => check_key(key),
+    }
 }
 
 /// Validate `notify:` block: webhook_secret must be a valid GHA secret name format.

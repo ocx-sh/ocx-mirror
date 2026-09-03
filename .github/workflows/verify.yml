@@ -93,9 +93,10 @@ jobs:
           compression-level: 0
           retention-days: 1
       - name: Build ocx (submodule pin)
-        # The acceptance job's checkout has no submodules, so it cannot build
-        # `ocx` itself (empty external/ocx = dangling [patch.crates-io]). This
-        # job can — its checkout is submodules:recursive — and the mount-
+        # The acceptance job's checkout is `submodules: true`, not recursive,
+        # so it cannot build `ocx` itself (empty external/ocx/external/* =
+        # dangling [patch.crates-io]). This job can — its checkout is
+        # submodules:recursive — and the mount-
         # dependent acceptance tests need an `ocx` at the exact submodule pin,
         # not whatever release setup-ocx installs.
         run: cargo build --release --bin ocx
@@ -133,6 +134,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The keyless-signing tier needs ocx's Sigstore compose file and the
+          # config, keys and trusted root beside it (external/ocx/test/) — all
+          # tracked in ocx itself, so one level is enough. Deliberately NOT
+          # `recursive`: ocx's own submodules are Rust fork patches this job
+          # never builds, and leaving them empty keeps the `real_ocx_binary`
+          # fixture's cargo-build fallback correctly unreachable (it is, in
+          # any case, short-circuited by OCX_TEST_BINARY below).
+          submodules: true
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -167,6 +177,15 @@ jobs:
           # job's "Build ocx" step); the `real_ocx_binary` fixture prefers it
           # over a local cargo build, which cannot work in this checkout.
           OCX_TEST_BINARY: ${{ github.workspace }}/test/bin/ocx
+          # Without this the keyless tier looks for a *sibling* ../ocx
+          # checkout, which CI does not have, and all 14 signing acceptance
+          # tests skip — a green check that tested none of the feature. The
+          # submodule's copy is the same file the sibling provides, at the
+          # pin this branch builds against. `pytest_sessionstart` brings the
+          # stack up by explicit service name, so ocx's own registries (5000,
+          # 5001, 5003, 5004) are never started and cannot contend with the
+          # `registry` service container on 5001.
+          OCX_SIGSTORE_COMPOSE: ${{ github.workspace }}/external/ocx/test/docker-compose.yml
       - name: Publish Acceptance Test Results
         if: ${{ !cancelled() }}
         uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0

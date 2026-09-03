@@ -10,7 +10,10 @@
 //! publish workflow they orbit.
 
 use super::matrix::ocx_cli_version;
-use super::permissions::{render_discover_permissions, render_registry_auth_steps, render_registry_write_permissions};
+use super::permissions::{
+    render_discover_permissions, render_patch_permissions, render_registry_auth_steps,
+    render_registry_write_permissions, render_sign_env,
+};
 use super::slot::{SpecSlot, indent_entries, slash_path, trigger_paths};
 use super::{GIT_SHA_SHORT, VERSION};
 use crate::spec::MirrorSpec;
@@ -101,8 +104,10 @@ pub fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> Stri
 /// one into nothing, so an empty dispatch patches every published version.
 ///
 /// Takes the same `packages: write` block describe does — this job re-emits
-/// manifests on the target repository. The announce it chains into writes to
-/// the index repository with `OCX_ANNOUNCE_TOKEN`.
+/// manifests on the target repository — plus `id-token: write` when the spec
+/// signs keylessly, because re-emitting a manifest signs it again. The
+/// announce it chains into writes to the index repository with
+/// `OCX_ANNOUNCE_TOKEN`.
 pub fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     PATCH_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
@@ -110,8 +115,9 @@ pub fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
-        .replace("{PATCH_PERMISSIONS}", render_registry_write_permissions(spec))
+        .replace("{PATCH_PERMISSIONS}", &render_patch_permissions(spec))
         .replace("{REGISTRY_AUTH_STEPS}", &render_registry_auth_steps(spec))
+        .replace("{SIGN_ENV}", &render_sign_env(spec))
         .replace("{OCX_CLI_VERSION}", ocx_cli_version())
 }
 

@@ -34,11 +34,18 @@ import re
 import subprocess
 import threading
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
 
-from src.helpers import fetch_manifest, push_ocx_description, push_stub_ocx_package, put_manifest
+from src.helpers import (
+    fetch_manifest,
+    push_ocx_description,
+    push_stub_ocx_package,
+    put_blob,
+    put_manifest,
+)
 from src.mirror_runner import MirrorRunner
 from src.registry_spec import SourceSpec, write_registry_spec
 from src.runner import OcxRunner
@@ -2032,55 +2039,147 @@ def test_repair_catalog_drops_an_entry_whose_root_is_gone(
 # ---------------------------------------------------------------------------
 
 
-def seed_referrer(registry: str, repository: str, subject_digest: str, subject_bytes: bytes) -> str:
+def referrer_fallback_tag(subject_digest: str) -> str:
+    """The OCI referrers tag-schema fallback tag for `subject_digest`.
+
+    `<algorithm>-<hex truncated to 64>`. sha256 hex is exactly 64 characters,
+    so the truncation is a no-op today — spelled out because a longer digest
+    algorithm would move both this and every cosign sidecar tag below with it.
+    """
+    algorithm, _, hex_digest = subject_digest.partition(":")
+    return f"{algorithm}-{hex_digest[:64]}"
+
+
+def seed_referrer(
+    registry: str,
+    repository: str,
+    subject_digest: str,
+    subject_bytes: bytes,
+    *,
+    tag: str = "referrer",
+    artifact_type: str = "application/vnd.dev.cosign.simplesigning+json",
+    salt: str = "",
+    own_bytes: bytes | None = None,
+) -> str:
     """Attaches a cosign-shaped referrer to `subject_digest` and publishes the fallback referrers tag.
 
     `registry:2` accepts a manifest carrying `subject` but implements neither
     the referrers API nor the fallback tag it would otherwise synthesize
     (verified: `/v2/<name>/referrers/<digest>` answers 404 and the
     `<algo>-<hex>` tag stays absent). So the tag is written here — which is
-    also the path C-024 cares about, since `pull_referrers` falls back to it
-    and a hand-rolled endpoint call would read such a registry as "no
+    also the path the copy engine reads, since `pull_referrers` falls back to
+    it and a hand-rolled endpoint call would read such a registry as "no
     referrers".
+
+    The fallback index is **merged**, not replaced, so a second call attaches a
+    second referrer to the same subject rather than evicting the first. `salt`
+    varies the manifest bytes: two calls with the same salt produce one digest,
+    which the copy engine correctly carries once.
+
+    By default the referrer reuses the subject's own config and layer blobs, so
+    it costs a copy nothing but its manifest. `own_bytes` instead uploads two
+    fresh blobs derived from it — one config, one layer — and points the
+    referrer at those. Nothing else in the package holds them, so a byte
+    estimate over the package grows by exactly their combined length, which is
+    what makes C-065's arithmetic assertable rather than merely non-zero.
     """
     child = json.loads(fetch_manifest(registry, repository, subject_digest)[1])["manifests"][0]
     child_manifest = json.loads(fetch_manifest(registry, repository, child["digest"])[1])
 
+    config = child_manifest["config"]
+    layers = child_manifest["layers"]
+    if own_bytes is not None:
+        config_digest, config_size = put_blob(registry, repository, b'{"referrer":"' + own_bytes + b'"}')
+        layer_digest, layer_size = put_blob(registry, repository, own_bytes)
+        config = {"mediaType": config["mediaType"], "digest": config_digest, "size": config_size}
+        layers = [{"mediaType": layers[0]["mediaType"], "digest": layer_digest, "size": layer_size}]
+
     referrer = {
         "schemaVersion": 2,
         "mediaType": "application/vnd.oci.image.manifest.v1+json",
-        "artifactType": "application/vnd.dev.cosign.simplesigning+json",
-        "config": child_manifest["config"],
-        "layers": child_manifest["layers"],
+        "artifactType": artifact_type,
+        "config": config,
+        "layers": layers,
         "subject": {
             "mediaType": INDEX_MEDIA_TYPE,
             "digest": subject_digest,
             "size": len(subject_bytes),
         },
+        "annotations": {
+            "org.opencontainers.image.created": "2026-01-01T00:00:00Z",
+            "dev.cosign.salt": salt,
+        },
     }
     referrer_bytes = json.dumps(referrer).encode()
     referrer_digest = put_manifest(
-        registry, repository, "referrer", referrer_bytes, "application/vnd.oci.image.manifest.v1+json"
+        registry, repository, tag, referrer_bytes, "application/vnd.oci.image.manifest.v1+json"
     )
 
-    algorithm, _, hex_digest = subject_digest.partition(":")
-    fallback = {
-        "schemaVersion": 2,
-        "mediaType": INDEX_MEDIA_TYPE,
-        "manifests": [
-            {
-                "mediaType": "application/vnd.oci.image.manifest.v1+json",
-                "digest": referrer_digest,
-                "size": len(referrer_bytes),
-                "artifactType": referrer["artifactType"],
-            }
-        ],
-    }
-    put_manifest(registry, repository, f"{algorithm}-{hex_digest}", json.dumps(fallback).encode(), INDEX_MEDIA_TYPE)
+    fallback_tag = referrer_fallback_tag(subject_digest)
+    entries = []
+    try:
+        entries = json.loads(fetch_manifest(registry, repository, fallback_tag)[1])["manifests"]
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    entries.append(
+        {
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "digest": referrer_digest,
+            "size": len(referrer_bytes),
+            "artifactType": artifact_type,
+            "annotations": referrer["annotations"],
+        }
+    )
+    fallback = {"schemaVersion": 2, "mediaType": INDEX_MEDIA_TYPE, "manifests": entries}
+    put_manifest(registry, repository, fallback_tag, json.dumps(fallback).encode(), INDEX_MEDIA_TYPE)
     return referrer_digest
 
 
-def test_a_package_carrying_a_referrer_fails_with_a_counted_error(
+def seed_sidecar(registry: str, repository: str, subject_digest: str, suffix: str, salt: bytes) -> str:
+    """Publishes a cosign sidecar tag (`sha256-<hex>.sig`) for `subject_digest`.
+
+    Nothing links a sidecar to its subject but the tag name — there is no
+    `subject` field and no referrers entry, which is exactly why the copy
+    engine has to look the three tags up by name rather than discover them.
+    `salt` varies the manifest so two calls produce two distinct digests.
+    """
+    child = json.loads(fetch_manifest(registry, repository, subject_digest)[1])["manifests"][0]
+    child_manifest = json.loads(fetch_manifest(registry, repository, child["digest"])[1])
+
+    sidecar = {
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": child_manifest["config"],
+        "layers": child_manifest["layers"],
+        "annotations": {"dev.cosign.salt": salt.decode()},
+    }
+    tag = f"{referrer_fallback_tag(subject_digest)}{suffix}"
+    return put_manifest(
+        registry, repository, tag, json.dumps(sidecar).encode(), "application/vnd.oci.image.manifest.v1+json"
+    )
+
+
+def referrer_carrying_spec(
+    tmp_path: Path,
+    mirror_registry: str,
+    output: Path,
+    index_url: str,
+    registry: str,
+) -> Path:
+    """The one-source spec every scenario in this section runs."""
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, index_url)],
+    )
+    return spec
+
+
+def test_a_package_carrying_a_referrer_is_copied_and_listed_in_the_fallback_index(
     sync: MirrorRunner,
     ocx_binary: Path,
     registry: str,
@@ -2089,7 +2188,116 @@ def test_a_package_carrying_a_referrer_fails_with_a_counted_error(
     published_index_server,
     tmp_path: Path,
 ) -> None:
-    """S-011: v1 detects referrers and fails the package rather than copying them silently."""
+    """S-011, inverted, plus S-053: the referrer is carried and made discoverable.
+
+    **This scenario asserts the opposite of what it asserted before this work
+    package.** v1 detected referrers and failed the package outright
+    (`CopyError::ReferrersPresent`), on the reasoning that a mirror silently
+    dropping signatures is worse than one that refuses. Carrying them removes
+    the refusal, so the same fixture now has to end green — the inversion is
+    the deliverable, not a relaxed assertion.
+
+    The destination is `registry:2`, which implements no Referrers API, so
+    discoverability means the tag-schema fallback index — and two referrers on
+    one subject prove the mirror *appends* to that index rather than replacing
+    it, which is the difference between two carried signatures and one.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
+    first_referrer = seed_referrer(registry, package, digest, body, tag="referrer-a", salt="a")
+    second_referrer = seed_referrer(registry, package, digest, body, tag="referrer-b", salt="b")
+    assert first_referrer != second_referrer, "the fixture must attach two distinct referrers"
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": digest}, {digest: body})],
+    )
+
+    output = tmp_path / "public"
+    spec = referrer_carrying_spec(tmp_path, mirror_registry, output, published_index_server.url(), registry)
+
+    result = run_sync(sync, spec, "--format", "json")
+    assert result.returncode == 0, f"a package carrying a referrer must now copy\n{outcome(result)}"
+
+    row = report_json(result)["sources"][0]["packages"][0]
+    assert row["outcome"] == "copied", row
+    assert row["referrers_copied"] == 2, f"both carried referrers must be counted\n{row}"
+
+    destination = destination_repository(package)
+    for referrer in (first_referrer, second_referrer):
+        assert fetch_manifest(mirror_registry, destination, referrer)[0] == referrer, (
+            "each referrer's own manifest must land at the destination by digest"
+        )
+
+    fallback_tag = referrer_fallback_tag(digest)
+    listed = json.loads(fetch_manifest(mirror_registry, destination, fallback_tag)[1])
+    assert sorted(entry["digest"] for entry in listed["manifests"]) == sorted([first_referrer, second_referrer]), (
+        "the fallback index is appended to, never replaced — a replacing write would leave "
+        "whichever referrer happened to be carried last and drop the other"
+    )
+    for entry in listed["manifests"]:
+        assert entry["artifactType"] == "application/vnd.dev.cosign.simplesigning+json", (
+            "artifactType is what a reader selects a signature by; an entry without it is unfindable"
+        )
+
+
+def test_one_referrer_reached_through_two_tags_is_copied_once(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """C-061: two tags resolving to one subject share one referrer, and it moves once.
+
+    Without the run-scoped claim the sweep would copy and re-append the same
+    referrer once per tag — harmless at two tags, quadratic on a real cascade
+    (`3.31.1`, `3.31`, `3`, `latest` all resolve to one index).
+    """
+    package = f"testns/{unique_mirror_repo}"
+    digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
+    referrer_digest = seed_referrer(registry, package, digest, body)
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": digest, "latest": digest}, {digest: body})],
+    )
+
+    output = tmp_path / "public"
+    spec = referrer_carrying_spec(tmp_path, mirror_registry, output, published_index_server.url(), registry)
+
+    result = run_sync(sync, spec, "--format", "json")
+    assert result.returncode == 0, outcome(result)
+
+    row = report_json(result)["sources"][0]["packages"][0]
+    assert row["referrers_copied"] == 1, f"the diamond must be walked once, not once per tag\n{row}"
+
+    listed = json.loads(
+        fetch_manifest(mirror_registry, destination_repository(package), referrer_fallback_tag(digest))[1]
+    )
+    assert [entry["digest"] for entry in listed["manifests"]] == [referrer_digest], (
+        "one referrer, one fallback entry — a re-append would duplicate the descriptor"
+    )
+
+
+def test_a_destination_with_a_referrers_api_gets_no_fallback_tag(
+    mirror_binary: Path,
+    ocx_binary: Path,
+    registry: str,
+    zot_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """S-058: against zot the referrer is discoverable through the API, so no tag is written.
+
+    The fallback tag is a *workaround* for registries without the Referrers
+    API. Writing it anyway would leave a registry that synthesizes its own
+    referrers response holding a second, hand-maintained list of the same
+    thing — which then disagrees the moment either side changes.
+    """
     package = f"testns/{unique_mirror_repo}"
     digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
     referrer_digest = seed_referrer(registry, package, digest, body)
@@ -2099,25 +2307,166 @@ def test_a_package_carrying_a_referrer_fails_with_a_counted_error(
         [tree_package(registry, package, {"1.0.0": digest}, {digest: body})],
     )
 
+    work_dir = tmp_path / "run"
+    work_dir.mkdir()
+    runner = MirrorRunner(mirror_binary, registry, work_dir)
+    runner.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{zot_registry}"
+    runner.env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
+
     output = tmp_path / "public"
-    spec = tmp_path / "registry.yml"
-    write_registry_spec(
-        spec,
-        target_registry=mirror_registry,
-        target_repository=TARGET_PREFIX,
-        output=output,
-        sources=[source_spec(registry, published_index_server.url())],
+    spec = referrer_carrying_spec(tmp_path, zot_registry, output, published_index_server.url(), registry)
+
+    result = run_sync(runner, spec, "--format", "json")
+    assert result.returncode == 0, outcome(result)
+    assert report_json(result)["sources"][0]["packages"][0]["referrers_copied"] == 1
+
+    destination = destination_repository(package)
+    with urllib.request.urlopen(f"http://{zot_registry}/v2/{destination}/referrers/{digest}") as response:
+        answered = json.loads(response.read())
+    assert [entry["digest"] for entry in answered["manifests"]] == [referrer_digest], (
+        "zot must resolve the carried referrer through its own Referrers API"
+    )
+    assert manifest_absent(zot_registry, destination, referrer_fallback_tag(digest)), (
+        "a destination that answers the Referrers API must not also be handed a fallback tag"
     )
 
+
+def test_a_cosign_sidecar_tag_travels_and_a_conflicting_one_is_skipped(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """S-055: the three cosign sidecar tags are copied, and never overwritten.
+
+    Nothing but the tag name links `sha256-<hex>.sig` to its subject, so the
+    sweep looks all three names up rather than discovering them. The second
+    run repoints the *source* sidecar at different bytes while the destination
+    still holds the first: overwriting there would replace a signature an
+    operator may already have verified, so the mirror skips and counts it.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
+    signature = seed_sidecar(registry, package, digest, ".sig", b"first")
+    attestation = seed_sidecar(registry, package, digest, ".att", b"attested")
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": digest}, {digest: body})],
+    )
+
+    output = tmp_path / "public"
+    spec = referrer_carrying_spec(tmp_path, mirror_registry, output, published_index_server.url(), registry)
+
     result = run_sync(sync, spec, "--format", "json")
-    assert result.returncode != 0, f"a detected referrer must fail the package\n{outcome(result)}"
+    assert result.returncode == 0, outcome(result)
+
+    row = report_json(result)["sources"][0]["packages"][0]
+    assert row["sidecars_copied"] == 2, f"the .sig and .att tags must both travel\n{row}"
+    assert row["sidecar_conflicts"] == 0, row
+
+    destination = destination_repository(package)
+    base = referrer_fallback_tag(digest)
+    assert fetch_manifest(mirror_registry, destination, f"{base}.sig")[0] == signature
+    assert fetch_manifest(mirror_registry, destination, f"{base}.att")[0] == attestation
+    assert manifest_absent(mirror_registry, destination, f"{base}.sbom"), (
+        "a sidecar the source does not have must not be invented at the destination"
+    )
+
+    # Upstream re-signs: same tag, different bytes, destination already holds
+    # the old ones. A second version goes in alongside it because the sidecar
+    # tags are invisible to the source catalog — without a catalog change the
+    # short-circuit (C-039) would end the second run before any sweep ran, and
+    # the test would pass by never executing the path it is about.
+    replaced = seed_sidecar(registry, package, digest, ".sig", b"second")
+    assert replaced != signature, "the fixture must actually change the sidecar's digest"
+    next_digest, next_body = seed_version(ocx_binary, registry, package, "1.0.1", tmp_path / "push-next")
+    write_published_index_tree(
+        published_index_server.dir,
+        [
+            tree_package(
+                registry,
+                package,
+                {"1.0.0": digest, "1.0.1": next_digest},
+                {digest: body, next_digest: next_body},
+            )
+        ],
+    )
+
+    rerun = run_sync(sync, spec, "--format", "json")
+    assert rerun.returncode == 0, f"a sidecar conflict is a skip, never a failure\n{outcome(rerun)}"
+
+    row = report_json(rerun)["sources"][0]["packages"][0]
+    assert row["sidecar_conflicts"] == 1, f"the conflict must be counted, not silent\n{row}"
+    assert fetch_manifest(mirror_registry, destination, f"{base}.sig")[0] == signature, (
+        "the destination's existing signature must survive — overwriting it is the defect"
+    )
+
+
+def test_a_dry_run_over_a_signed_package_measures_and_fails_nothing(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """S-019's signing half: `--dry-run` over a package carrying signatures writes nothing, and measures them.
+
+    The regression this guards is specific: the referrer sweep and the sidecar
+    sweep are the two paths that write to the destination *outside* the
+    manifest walk, so a dry run that forgot either would push a fallback index
+    or a sidecar tag while reporting that it copied nothing.
+
+    The byte assertion is the other half, and it is a *value*, not a walk: two
+    dry runs differing only by a referrer that carries blobs nothing else in
+    the package holds, and the estimate must grow by exactly those blobs. A
+    referrer reusing the subject's own blobs would add nothing measurable —
+    `dry_run_byte_estimate` dedupes by digest — so the fresh pair is what makes
+    the arithmetic observable at all.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
+    seed_sidecar(registry, package, digest, ".sig", b"first")
+
+    write_published_index_tree(
+        published_index_server.dir,
+        [tree_package(registry, package, {"1.0.0": digest}, {digest: body})],
+    )
+
+    output = tmp_path / "public"
+    spec = referrer_carrying_spec(tmp_path, mirror_registry, output, published_index_server.url(), registry)
+
+    baseline = run_sync(sync, spec, "--dry-run", "--format", "json")
+    assert baseline.returncode == 0, f"a dry run over a signed package must not fail\n{outcome(baseline)}"
+    unsigned_bytes = report_json(baseline)["estimated_bytes"]
+
+    referrer_digest = seed_referrer(registry, package, digest, body, own_bytes=b"carried by the referrer alone" * 64)
+    referrer_manifest = json.loads(fetch_manifest(registry, package, referrer_digest)[1])
+    introduced = referrer_manifest["config"]["size"] + sum(layer["size"] for layer in referrer_manifest["layers"])
+
+    result = run_sync(sync, spec, "--dry-run", "--format", "json")
+    assert result.returncode == 0, f"a dry run over a signed package must not fail\n{outcome(result)}"
 
     report = report_json(result)
-    assert report["counters"]["failed"] == 1, report
-    detail = report["sources"][0]["packages"][0].get("detail") or ""
-    assert referrer_digest in detail, f"the error must name what was not copied\n{detail}"
+    assert report["counters"]["failed"] == 0, report
+    assert report["estimated_bytes"] == unsigned_bytes + introduced, (
+        "the estimate must grow by exactly the bytes the referrer introduced "
+        f"({unsigned_bytes} + {introduced})\n{report}"
+    )
+
+    destination = destination_repository(package)
+    base = referrer_fallback_tag(digest)
+    for reference in ("1.0.0", base, f"{base}.sig"):
+        assert manifest_absent(mirror_registry, destination, reference), (
+            f"a dry run must write nothing, and {reference!r} is at the destination"
+        )
     assert not (output / SOURCE_AS / "p" / f"{package}.json").exists(), (
-        "a package whose referrers were not copied must not enter the index"
+        "a dry run publishes no package root — the tree's own directory is bootstrapped either way (S-028)"
     )
 
 

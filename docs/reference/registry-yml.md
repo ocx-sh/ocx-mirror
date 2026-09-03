@@ -462,10 +462,52 @@ ocx-mirror registry sync --dry-run
 
 Reports the packages that would be copied and the number of bytes that would transfer, and copies nothing. The byte figure is not an estimate: it asks the destination which blobs it is missing and sums their recorded sizes.
 
+## Signatures and attestations {#signatures}
+
+A mirrored package brings its signatures with it. Both shapes travel, and both are copied after the manifest they belong to has landed, so the destination never advertises a signature whose bytes are not there yet:
+
+- **Referrers** — anything attached to a manifest through the OCI `subject` field: cosign signatures, SLSA attestations, SBOMs. The mirror reads the source's referrers listing, copies each one by digest, and makes it discoverable at the destination.
+- **Cosign sidecar tags** — the older `sha256-<hex>.sig`, `.att` and `.sbom` convention, which predates the `subject` field. Nothing links these to their subject but the tag name, so the mirror looks all three up by name for every manifest it copies.
+
+Both are counted per package, in the run report and under `--format json`:
+
+```
+Source     Package         Outcome  Referrers  Sidecars  Conflicts  Detail
+upstream   kitware/cmake   copied   4          2         0
+```
+
+### How a referrer is made discoverable {#referrers-discovery}
+
+Registries disagree about how referrers are listed, so the mirror asks the destination once per run and follows its answer:
+
+| The destination | What the mirror writes |
+|---|---|
+| Answers `GET /v2/<name>/referrers/<digest>` | Nothing extra — the registry lists the copied referrer itself |
+| Answers `404` or `405` on that route | The `<algorithm>-<hex>` fallback tag the OCI spec defines for exactly this case |
+
+The fallback index is **appended to, never replaced**: a subject with four signatures ends up with four entries, and a later run adding a fifth keeps the earlier four. Each entry carries the source's own `artifactType` and annotations, because those are what a verifier filters on — an entry stripped of them is listed but unfindable by kind.
+
+### A sidecar the destination already holds is never overwritten {#sidecar-conflicts}
+
+If `sha256-<hex>.sig` exists at the destination pointing at *different* bytes than the source's, the mirror leaves it alone, counts it under `Conflicts`, and the run stays green. Overwriting would replace a signature someone may already have verified with one they have not — and a mirror is not the right place to decide that. Investigate the conflict; if the destination's copy is the stale one, delete that tag and re-run.
+
+!!! warning "A copied signature still names the source repository"
+
+    Signatures travel byte-for-byte, which is what makes them verify at all — and it means the identity inside them is still the upstream one (`ghcr.io/ocx-contrib/kitware/cmake`, not your mirror's path). A verifier configured to require an exact repository match rejects it. Allow the relocation on the consumer side: containers/image `policy.json` uses `signedIdentity: { "type": "matchRepository" }` for this, and cosign users set `COSIGN_REPOSITORY` to the repository the signature was made against. This is the same adjustment any registry mirror requires; it is not specific to this tool.
+
+### The bounds {#signature-bounds}
+
+Signatures are content from an upstream you do not control, so the sweep is bounded:
+
+- A referrer's own referrers are followed **two hops** from the manifest being copied — enough for a signature on an attestation, which is the deepest real shape. Deeper is refused and fails that package.
+- A single subject may carry **64** referrers. Past that the package fails rather than the run walking an unbounded graph.
+- The referrers listing is read as a single response. A registry that paginates a listing longer than one page has the remainder ignored — no registry in normal use paginates a signature list, and a mirror that silently followed pages would have no bound at all.
+
+A destination that refuses `subject`-bearing manifests outright — AWS ECR answers `405` to that PUT — fails the package with a message naming the registry, and the rest of the mirror still runs. Such a registry cannot hold referrers at all; use the sidecar convention against it, or a destination that implements the spec.
+
 ## Things this does not do {#limits}
 
 - **It never deletes.** No pruning verb, no way to remove a package or a tag. A tag that upstream retires stays in your mirror forever; that is the same property that stops a transient upstream failure from silently removing a version your fleet is pinned to.
-- **It does not copy signatures or attestations.** A package carrying them fails with an error naming up to 10 of the referrer digests found and the total count, rather than being mirrored silently incomplete. Signature mirroring arrives with signing support.
 - **It does not filter by version.** A mirrored package brings its whole tag set. Copying a subset would leave rolling tags like `latest` pointing at versions you never copied.
 - **It does not write your clients' `[mirrors]` config.** Under the default [`rewrite_pointers: false`](#rewrite-pointers) that config is what makes the copy reachable, and it is yours to distribute. Note that a package's address in the index is transport-only and need not match the source's own `registry:` — a source whose packages point at several hosts needs one `[mirrors]` entry per host.
 

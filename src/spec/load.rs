@@ -12,7 +12,7 @@ use std::path::Path;
 
 use ocx_lib::log;
 
-use super::validate::policy_check_notify;
+use super::validate::{policy_check_notify, refuse_raw_sign_shapes, validate_sign_config};
 use super::{DIST_KIND, DistSpec, KIND_KEY, MirrorSpec, REGISTRY_KIND, RegistrySpec, pre_scan};
 use crate::error::MirrorError;
 
@@ -73,20 +73,36 @@ async fn resolve_and_merge(spec_path: &Path) -> Result<serde_yaml_ng::Value, Mir
 /// and the child's top-level keys are shallow-merged on top. Chains of arbitrary
 /// depth are supported; circular references are detected and rejected.
 ///
-/// The `registry.yml` pre-scan is deliberately **not** wired in here: its
-/// `kind:` job makes an absent discriminator a hard exit 64, which every
-/// existing `mirror.yml` would then hit (C-007).
+/// `mirror.yml` carries no `kind:` field (unlike `RegistrySpec`/`DistSpec`),
+/// so [`pre_scan`] runs here too but with `expected_kind: None` — the
+/// credential deny-list and the source-index-userinfo check still run
+/// (C-053), and `pre_scan`'s `kind:` job is skipped rather than rejecting
+/// every existing `mirror.yml` (C-007).
 pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
     let merged = resolve_and_merge(spec_path).await?;
+
+    // C-053: runs on the merged document, so a credential in an `extends:`
+    // base is caught too. `None` skips `pre_scan`'s `kind:` job — see the
+    // function doc comment above.
+    pre_scan(&merged, spec_path, None)?;
+
+    // C-051: the `sign:` shapes that only exist before deserialization —
+    // a null block, a null mode tag, a non-string secret, a `key:` map with
+    // no `ref`. All exit 64; see `refuse_raw_sign_shapes` for why each one
+    // cannot wait for the typed seat.
+    refuse_raw_sign_shapes(&merged, spec_path)?;
 
     let spec: MirrorSpec = serde_yaml_ng::from_value(merged)
         .map_err(|e| MirrorError::SpecInvalid(vec![format!("YAML parse error: {e}")]))?;
 
-    // Policy check (exit 64 / SpecUsageError) must run before structural validate
+    // Policy checks (exit 64 / SpecUsageError) must run before structural validate
     // (exit 65 / SpecInvalid) so the correct exit code is returned for URL-literal
-    // webhook secrets.
+    // webhook secrets and for an un-honourable `sign:` block.
     if let Some(notify) = &spec.notify {
         policy_check_notify(notify)?;
+    }
+    if let Some(sign) = &spec.sign {
+        validate_sign_config(sign)?;
     }
 
     let errors = spec.validate(spec_path);
@@ -133,7 +149,7 @@ pub async fn load_spec(spec_path: &Path) -> Result<MirrorSpec, MirrorError> {
 pub async fn load_registry_spec(spec_path: &Path) -> Result<RegistrySpec, MirrorError> {
     let mut merged = resolve_and_merge(spec_path).await?;
 
-    pre_scan(&merged, spec_path, REGISTRY_KIND)?;
+    pre_scan(&merged, spec_path, Some(REGISTRY_KIND))?;
 
     if let serde_yaml_ng::Value::Mapping(ref mut map) = merged {
         map.remove(KIND_KEY);
@@ -168,7 +184,7 @@ pub async fn load_registry_spec(spec_path: &Path) -> Result<RegistrySpec, Mirror
 pub async fn load_dist_spec(spec_path: &Path) -> Result<DistSpec, MirrorError> {
     let mut merged = resolve_and_merge(spec_path).await?;
 
-    pre_scan(&merged, spec_path, DIST_KIND)?;
+    pre_scan(&merged, spec_path, Some(DIST_KIND))?;
 
     if let serde_yaml_ng::Value::Mapping(ref mut map) = merged {
         map.remove(KIND_KEY);

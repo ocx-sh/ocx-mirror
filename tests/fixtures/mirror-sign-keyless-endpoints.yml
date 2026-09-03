@@ -1,0 +1,39 @@
+# Mirror spec: keyless against a self-hosted Sigstore, endpoints and identity
+# token named as refs (S-061). `identity_token:` exists for CI platforms ocx
+# cannot auto-detect; GitHub Actions, GitLab and CircleCI leave it unset.
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+sign:
+  keyless:
+    fulcio: env://SIGSTORE_FULCIO_URL
+    rekor: env://SIGSTORE_REKOR_URL
+    identity_token: file:///run/secrets/sigstore-id-token

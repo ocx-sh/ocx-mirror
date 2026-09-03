@@ -327,6 +327,7 @@ async fn copy_sources(
     let blob_semaphore = Arc::new(Semaphore::new(spec.concurrency.max_blobs));
     let mounted_from = Arc::default();
     let mount_warnings = Arc::default();
+    let carried_referrers = Arc::default();
     // One credential resolver for the run: clones share the `Arc<RwLock>` cache
     // (`ensure_source_auth`), so a physical host resolved once is not resolved
     // again by a later package naming the same host.
@@ -364,6 +365,18 @@ async fn copy_sources(
             canonical_tags: spec.canonical_tags,
             mounted_from: Arc::clone(&mounted_from),
             mount_warnings: Arc::clone(&mount_warnings),
+            // Over the same client the rest of the destination goes through,
+            // so it inherits the timeouts and the plain-HTTP policy
+            // `build_destination_client` resolved rather than picking its own.
+            destination_transport: ocx_lib::oci::client::native_transport(
+                destination_client.clone(),
+                ocx_lib::auth::Auth::new(),
+            ),
+            // Per source rather than per run only because `CopyContext` is:
+            // one destination registry per run, so every source's probe would
+            // reach the same verdict, and the extra request is one per source.
+            referrer_destination: tokio::sync::OnceCell::new(),
+            carried_referrers: Arc::clone(&carried_referrers),
         };
 
         let mut source_failed = false;
@@ -436,8 +449,10 @@ async fn copy_sources(
 
         for row in outcomes {
             source_failed |= matches!(row.step, PackageStep::Failed(_));
-            missing.extend(row.missing);
-            source_report.packages.push(package_report(&row.name, row.step));
+            missing.extend(row.tally.missing);
+            source_report
+                .packages
+                .push(package_report(&row.name, row.step, row.tally.stats));
         }
 
         if stopped_early {
@@ -480,8 +495,22 @@ struct PackageOutcomeRow {
     name: String,
     /// What the pass did.
     step: PackageStep,
-    /// Descriptors a `--dry-run` measured for this package.
+    /// Everything the pass accumulated besides its outcome.
+    tally: PackageTally,
+}
+
+/// What one package's pass accumulates alongside its [`PackageStep`].
+///
+/// One sink rather than two out-parameters: both are filled by the same walk
+/// over the same tags and read together at the same place, and threading them
+/// separately is what pushed `sync_package` past the argument ceiling.
+#[derive(Default)]
+struct PackageTally {
+    /// Descriptors a `--dry-run` measured for this package (C-043).
     missing: Vec<(Digest, u64)>,
+    /// What the copy moved, including the three signature counters C-064
+    /// carries all the way into both report renderings.
+    stats: registry_copy::CopyStats,
 }
 
 /// One package's copy, with the progress line that announces it.
@@ -520,13 +549,13 @@ async fn copy_one_package(
         prepared.plan.as_name,
         package.name
     );
-    let mut missing = Vec::new();
-    let step = sync_package(spec, options, prepared, package, store, context, &mut missing).await?;
+    let mut tally = PackageTally::default();
+    let step = sync_package(spec, options, prepared, package, store, context, &mut tally).await?;
     Ok(PackageOutcomeRow {
         position: progress.position,
         name: package.name.clone(),
         step,
-        missing,
+        tally,
     })
 }
 
@@ -560,7 +589,7 @@ async fn sync_package(
     package: &PackageWork,
     store: &IndexStore,
     context: &CopyContext,
-    missing: &mut Vec<(Digest, u64)>,
+    tally: &mut PackageTally,
 ) -> Result<PackageStep, MirrorError> {
     let as_name = &prepared.plan.as_name;
     let source = prepared.source;
@@ -693,7 +722,7 @@ async fn sync_package(
             match registry_copy::missing_descriptors(&source_reference, &destination_reference, &entry.content, context)
                 .await
             {
-                Ok(descriptors) => missing.extend(descriptors),
+                Ok(descriptors) => tally.missing.extend(descriptors),
                 Err(error) => failures.push(tag_failure(&entry.tag, error)?),
             }
             continue;
@@ -733,6 +762,7 @@ async fn sync_package(
             &mut confirmed,
             &mut objects,
             &mut failures,
+            &mut tally.stats,
         )?;
     }
 
@@ -814,18 +844,24 @@ fn record_tag(
     confirmed: &mut BTreeSet<String>,
     objects: &mut BTreeMap<Digest, Vec<u8>>,
     failures: &mut Vec<String>,
+    totals: &mut registry_copy::CopyStats,
 ) -> Result<(), MirrorError> {
     match copied {
         Ok((stats, bytes)) => {
             tracing::info!(
-                "copied {package:?} tag {:?}: {} manifest(s), {} blob(s) skipped, {} mounted, {} uploaded ({} bytes)",
+                "copied {package:?} tag {:?}: {} manifest(s), {} blob(s) skipped, {} mounted, {} uploaded \
+                 ({} bytes), {} referrer(s), {} sidecar(s), {} sidecar conflict(s)",
                 entry.tag,
                 stats.manifests,
                 stats.blobs_skipped,
                 stats.blobs_mounted,
                 stats.blobs_uploaded,
-                stats.bytes_uploaded
+                stats.bytes_uploaded,
+                stats.referrers_copied,
+                stats.sidecars_copied,
+                stats.sidecar_conflicts
             );
+            totals.merge(stats);
             confirmed.insert(entry.tag.clone());
             objects.insert(entry.content.clone(), bytes);
         }
@@ -991,7 +1027,7 @@ fn write_failure(error: MirrorError) -> Result<String, MirrorError> {
 }
 
 /// One report row for a finished package.
-fn package_report(name: &str, step: PackageStep) -> PackageReport {
+fn package_report(name: &str, step: PackageStep, stats: registry_copy::CopyStats) -> PackageReport {
     let (outcome, detail) = match step {
         PackageStep::Copied => (PackageOutcome::Copied, None),
         PackageStep::Skipped => (PackageOutcome::Skipped, None),
@@ -1001,6 +1037,11 @@ fn package_report(name: &str, step: PackageStep) -> PackageReport {
         name: name.to_string(),
         outcome,
         detail,
+        signatures: report::SignatureCounts {
+            referrers_copied: stats.referrers_copied,
+            sidecars_copied: stats.sidecars_copied,
+            sidecar_conflicts: stats.sidecar_conflicts,
+        },
     }
 }
 

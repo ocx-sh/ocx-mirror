@@ -20,10 +20,22 @@ use super::*;
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
 fn package(name: &str, outcome: PackageOutcome, detail: Option<&str>) -> PackageReport {
+    signed_package(name, outcome, detail, SignatureCounts::default())
+}
+
+/// The same row with the signature counters set — the only thing that varies
+/// between the plain table and the JSON payload's `signatures` assertions.
+fn signed_package(
+    name: &str,
+    outcome: PackageOutcome,
+    detail: Option<&str>,
+    signatures: SignatureCounts,
+) -> PackageReport {
     PackageReport {
         name: name.to_string(),
         outcome,
         detail: detail.map(str::to_string),
+        signatures,
     }
 }
 
@@ -304,6 +316,89 @@ fn package_detail_appears_in_json_only_for_failures() {
 
     let value = rendered_json(&all_failure_report());
     assert_eq!(value["sources"][0]["packages"][0]["detail"], "digest mismatch");
+}
+
+// ── C-064 — the signature counters, in both renderings ─────────────────────
+
+/// The three counters are flat JSON keys, and they are **emitted at zero**.
+///
+/// `#[serde(flatten)]` plus no `skip_serializing_if` is what makes this true,
+/// and both halves matter to a script: a flattened field keeps the payload's
+/// shape stable, and a field that disappeared at zero would make "carried no
+/// signatures" indistinguishable from "this mirror does not carry signatures".
+#[test]
+fn json_rendering_carries_the_signature_counters_flat_and_at_zero() {
+    let carried = signed_package(
+        "kitware/cmake",
+        PackageOutcome::Copied,
+        None,
+        SignatureCounts {
+            referrers_copied: 3,
+            sidecars_copied: 2,
+            sidecar_conflicts: 1,
+        },
+    );
+    let none = package("sigstore/cosign", PackageOutcome::Copied, None);
+    let report = RegistrySyncReport {
+        sources: vec![source("ocx.sh", false, vec![carried, none])],
+        counters: RunCounters {
+            total: 2,
+            copied: 2,
+            skipped: 0,
+            failed: 0,
+        },
+        estimated_bytes: None,
+    };
+
+    let packages = rendered_json(&report)["sources"][0]["packages"].clone();
+
+    assert_eq!(packages[0]["referrers_copied"], 3);
+    assert_eq!(packages[0]["sidecars_copied"], 2);
+    assert_eq!(packages[0]["sidecar_conflicts"], 1);
+    assert!(
+        packages[0].get("signatures").is_none(),
+        "the counters are flattened into the row, not nested under a `signatures` object"
+    );
+
+    for field in ["referrers_copied", "sidecars_copied", "sidecar_conflicts"] {
+        assert_eq!(
+            packages[1][field], 0,
+            "`{field}` must be present at zero — an omitted field reads as \
+             'this mirror does not carry signatures'"
+        );
+    }
+}
+
+/// The plain table renders all three counters, one column each.
+///
+/// Structural, because `report_registry_sync` writes straight to real stdout
+/// and this crate has no capture seam for it — the same constraint the JSON
+/// `Err`-arm guard below is written under. Each counter is scanned for
+/// individually rather than by comparing a header count against a column
+/// count: one header dropped and one column added keeps any total identical.
+#[test]
+fn the_plain_table_renders_every_signature_counter() {
+    let source: String = include_str!("../report.rs")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    for (header, field) in [
+        ("\"Referrers\".into()", "referrers_copied"),
+        ("\"Sidecars\".into()", "sidecars_copied"),
+        ("\"Conflicts\".into()", "sidecar_conflicts"),
+    ] {
+        assert!(
+            source.contains(header),
+            "the plain table needs a {header} column header, or the counter has no column at all"
+        );
+        assert!(
+            source.contains(&format!("package.signatures.{field}")),
+            "`{field}` must reach the table body; a header with no matching push \
+             renders a column of blanks"
+        );
+    }
 }
 
 // ── Plain rendering — must not panic on any shape ───────────────────────

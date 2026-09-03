@@ -194,7 +194,7 @@ jobs:
           # Announcing into the index is opt-in via `announce:` in mirror.yml.
           # An absent secret degrades: the run pushes and records the announce
           # as skipped in run-summary.json rather than failing.
-          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
+          OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}{SIGN_ENV}
         run: |
           set -euo pipefail
           # Resolve this push job's html_url so the Discord embed can link
