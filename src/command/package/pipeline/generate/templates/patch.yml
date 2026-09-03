@@ -41,7 +41,7 @@ jobs:
           # Read through the environment, never interpolated into the script.
           VERSIONS: ${{ inputs.version }}
           MIN_VERSION: ${{ inputs.min_version }}
-          MAX_VERSION: ${{ inputs.max_version }}
+          MAX_VERSION: ${{ inputs.max_version }}{SIGN_ENV}
         run: |
           set -euo pipefail
           # Globbing off: the version input is word-split unquoted below, and a

@@ -33,5 +33,7 @@ mod multi_spec;
 mod notify;
 #[path = "tests/script_paths.rs"]
 mod script_paths;
+#[path = "tests/sign.rs"]
+mod sign;
 #[path = "tests/test_entries.rs"]
 mod test_entries;

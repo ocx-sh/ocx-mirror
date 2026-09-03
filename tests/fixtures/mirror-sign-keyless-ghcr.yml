@@ -1,0 +1,36 @@
+# Mirror spec: the GHCR × `sign:` cell of C-071's matrix — a keyless spec whose
+# push job already had a `permissions:` block for `packages: write`, so
+# `id-token: write` has to join that block rather than open a second one.
+name: bazelisk
+target:
+  registry: ghcr.io
+  repository: ocx-contrib/bazelbuild/bazelisk
+
+source:
+  type: github_release
+  owner: bazelbuild
+  repo: bazelisk
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "bazelisk-linux-amd64$"
+
+asset_type:
+  type: binary
+  name: bazelisk
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: bazelisk --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+sign:
+  keyless: {}
