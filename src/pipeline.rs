@@ -21,5 +21,6 @@ pub(crate) mod python_push;
 // directories is this module's own shape.
 pub mod registry_copy;
 pub mod registry_sync;
+pub mod sign_backfill;
 pub(crate) mod target_registry;
 pub mod verify;

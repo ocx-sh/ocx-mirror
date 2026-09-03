@@ -3,7 +3,7 @@
 
 //! `ocx-mirror package pipeline` subcommand group.
 //!
-//! Nine subcommands implement the pre-publish multi-runner test pipeline:
+//! Ten subcommands implement the pre-publish multi-runner test pipeline:
 //!
 //! | Subcommand | GHA job | Purpose |
 //! |---|---|---|
@@ -16,6 +16,7 @@
 //! | `announce` | `announce` | Announce every tag the registry holds into the index (dispatch, or on a timer via `announce.schedule`) |
 //! | `patch` | (none) | Republish published metadata against the existing layers (CLI-only) |
 //! | `cascade` | `cascade` | Repair broken rolling aliases and announce what moved (dispatch, or on a timer via `cascade.schedule`) |
+//! | `sign` | (none) | Sign every published subject the target repository holds unsigned (CLI-only) |
 
 pub mod announce;
 pub mod cascade;
@@ -26,6 +27,7 @@ pub mod patch;
 pub mod plan;
 pub mod prepare;
 pub mod push;
+pub mod sign;
 
 use ocx_lib::cli::DataInterface;
 
@@ -62,6 +64,9 @@ pub enum PipelineCommand {
 
     /// Repair the target repository's rolling-tag cascade.
     Cascade(cascade::Cascade),
+
+    /// Sign every published subject that does not already carry a signature.
+    Sign(sign::Sign),
 }
 
 impl PipelineCommand {
@@ -78,6 +83,7 @@ impl PipelineCommand {
             Self::Announce(cmd) => cmd.execute(printer).await,
             Self::Patch(cmd) => cmd.execute(printer).await,
             Self::Cascade(cmd) => cmd.execute(printer).await,
+            Self::Sign(cmd) => cmd.execute(printer).await,
         }
     }
 }
