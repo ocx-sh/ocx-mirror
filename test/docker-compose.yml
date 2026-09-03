@@ -17,3 +17,27 @@ services:
     image: registry:2
     ports:
       - "5002:5000"
+
+  # Native-Referrers-API registry (WP 5, C-073) — CNCF project-zot, OCI
+  # Distribution 1.1: GET /v2/<name>/referrers/<digest> plus OCI-Subject on a
+  # manifest push naming a subject. `registry` above (distribution v2) has
+  # neither, which is the point: it stays the permanent fallback-index leg
+  # (registry copy v2's fallback-index route, ADR mirror-signing D3), this is
+  # the native-Referrers-API leg (D6, S-058).
+  #
+  # zot garbage-collects untagged manifests, and a referrer IS untagged --
+  # ./zot-config.json ships with `storage.gc: false`, or referrer-copy
+  # assertions go flaky on a timer, in a way that reads as a copy bug.
+  #
+  # Host port 5011: clear of ocx's own registry ports (5000-5004) and this
+  # harness's own 5001/5002, so the two projects' compose stacks never
+  # contend when both run on one machine (adr_mirror_signing.md D6a).
+  #
+  # Pinned by digest, not a tag: resolved from ghcr.io/project-zot/zot:v2.1.18
+  # (multi-arch index) via `docker buildx imagetools inspect` on 2026-09-02.
+  zot:
+    image: ghcr.io/project-zot/zot@sha256:6f7bf2b8e43437c7c3a121bc80214845c85f27321e66f2ff4be6bf4220775fd7
+    ports:
+      - "5011:5000"
+    volumes:
+      - ./zot-config.json:/etc/zot/config.json:ro

@@ -45,6 +45,23 @@ tasks:
           SKIP_BUILD: "true"
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
 
+  signing:
+    desc: Run the mirror-signing acceptance tier (keyless, against a local Sigstore stack)
+    summary: |
+      Selects the zot / Sigstore / signing-fixture tests.
+
+      The keyless cases need a sibling ocx checkout for the Sigstore compose
+      profile; without one they skip with a reason naming the path.
+      Overrides, all read at call time:
+        OCX_SIGSTORE_COMPOSE  sigstore compose file (default ../ocx/test/docker-compose.yml)
+        ZOT_REGISTRY          zot host address       (default localhost:5011)
+        OCX_TEST_DEX_PORT / OCX_TEST_FULCIO_PORT / OCX_TEST_REKOR_PORT
+    cmds:
+      - task: default
+        vars:
+          SKIP_BUILD: "{{.SKIP_BUILD}}"
+          CLI_ARGS: '-v -k "sigstore or zot or sign or referrers or checkout or insecure or identity"'
+
   parallel:
     desc: Run mirror acceptance tests in parallel
     sources:
