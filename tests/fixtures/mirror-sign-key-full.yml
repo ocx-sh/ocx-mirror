@@ -1,0 +1,39 @@
+# Mirror spec: `sign.key` in the map form on a cron box (S-062) — key material
+# from a file, passphrase from the environment, and an explicit `rekor:` so the
+# digest goes to the named log rather than inheriting a fleet default.
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+sign:
+  key:
+    ref: file:///run/secrets/mirror.key
+    passphrase: env://MIRROR_KEY_PASSPHRASE
+    rekor: env://SIGSTORE_REKOR_URL

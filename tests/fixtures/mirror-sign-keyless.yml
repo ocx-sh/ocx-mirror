@@ -1,0 +1,37 @@
+# Mirror spec: `sign:` in its smallest keyless form — public Sigstore (S-050).
+# `keyless: {}` names no endpoint, so WP 2 emits the mirror-owned
+# DEFAULT_FULCIO_URL / DEFAULT_REKOR_URL rather than falling through to the
+# machine's consumer-side `[trust.sigstore]` (ADR D1).
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+sign:
+  keyless: {}
