@@ -32,6 +32,27 @@ fn module_source_without_comments() -> String {
         .join("\n")
 }
 
+/// The source text of one `async fn`, from its signature to the next item.
+///
+/// Structural guards that index occurrences by ordinal go stale the moment a
+/// call site is added elsewhere in the module — and go stale *silently*, still
+/// asserting something about whichever call the ordinal now lands on. Slicing
+/// the function by name is what keeps a guard scoped to the code it is about.
+fn function_body<'a>(module: &'a str, name: &str) -> &'a str {
+    let start = module
+        .find(&format!("async fn {name}("))
+        .unwrap_or_else(|| panic!("`{name}` must exist under this name, or this guard tests nothing"));
+    let function = &module[start..];
+    // The next item's opening line ends this one. Both spellings are searched
+    // because a `pub` item does not begin with `async`.
+    let end = ["\nasync fn ", "\npub async fn ", "\nfn ", "\npub fn "]
+        .iter()
+        .filter_map(|needle| function[1..].find(needle).map(|offset| offset + 1))
+        .min()
+        .unwrap_or(function.len());
+    &function[..end]
+}
+
 fn sha256_of(bytes: &[u8]) -> Digest {
     ocx_lib::oci::Algorithm::Sha256.hash(bytes)
 }
@@ -697,42 +718,256 @@ async fn no_more_than_the_fanout_ceiling_of_blobs_is_probed_at_once() {
     );
 }
 
-// ── C-024 — bounded referrer refusal ────────────────────────────────────────
+// ── C-061 — the bounded referrer sweep ──────────────────────────────────────
 
+/// The hop ceiling is a refusal, not a silent stop.
+///
+/// A mirror that quietly stopped carrying signatures past some undocumented
+/// depth would be indistinguishable, downstream, from one whose upstream never
+/// signed anything — which is the failure mode signing exists to make
+/// impossible.
 #[test]
-fn a_manifest_with_ten_thousand_referrers_produces_a_bounded_message() {
-    let referrers: Vec<ImageIndexEntry> = (0..10_000)
-        .map(|index| index_entry(&sha256_of(&index.to_string().into_bytes()), 2, None))
-        .collect();
+fn a_referrer_past_the_hop_ceiling_is_refused() {
+    let subject = digest_of(1);
 
-    let error = referrer_failure(&referrers);
+    for hop in 0..=REFERRER_DEPTH_CEILING {
+        assert!(
+            within_referrer_depth(&subject, hop).is_ok(),
+            "hop {hop} is inside the {REFERRER_DEPTH_CEILING}-hop ceiling"
+        );
+    }
 
-    let CopyError::ReferrersPresent { shown, total } = &error else {
-        panic!("referrers must be reported as such, got {error}");
+    let error = within_referrer_depth(&subject, REFERRER_DEPTH_CEILING + 1)
+        .expect_err("a referrer one hop past the ceiling must be refused");
+    let CopyError::MalformedManifest(message) = &error else {
+        panic!("a depth refusal is a malformed-source refusal, got {error}");
     };
-    assert_eq!(*total, 10_000, "the total is reported in full");
-    assert_eq!(shown.len(), REFERRER_REPORT_LIMIT, "the enumeration is bounded");
-
-    let message = error.to_string();
-    assert!(message.contains("10000"), "the message names the total: {message}");
     assert!(
-        message.len() < 2_000,
-        "the message must stay bounded, got {} bytes",
-        message.len()
+        message.contains(&REFERRER_DEPTH_CEILING.to_string()),
+        "the refusal names the ceiling it applied: {message}"
     );
-    assert!(!error.is_whole_run_abort(), "referrers fail the package, not the run");
+    assert!(
+        !error.is_whole_run_abort(),
+        "a hostile referrer chain fails its package, never the run"
+    );
 }
 
+/// The 65th referrer of one subject is where the sweep stops.
 #[test]
-fn a_short_referrer_list_is_named_in_full() {
-    let referrers = vec![index_entry(&digest_of(1), 2, None), index_entry(&digest_of(2), 2, None)];
+fn a_subject_past_the_referrer_budget_is_refused() {
+    let subject = digest_of(2);
 
-    let error = referrer_failure(&referrers);
-    let message = error.to_string();
+    assert!(
+        within_referrer_budget(&subject, REFERRER_COUNT_CEILING).is_ok(),
+        "exactly {REFERRER_COUNT_CEILING} referrers is inside the budget"
+    );
 
-    assert!(message.contains(&digest_of(1).to_string()));
-    assert!(message.contains(&digest_of(2).to_string()));
-    assert!(!message.contains("more"), "nothing was truncated: {message}");
+    let error = within_referrer_budget(&subject, REFERRER_COUNT_CEILING + 1)
+        .expect_err("one referrer past the budget must be refused");
+    let CopyError::ReferrerBudgetExceeded { subject: named, limit } = &error else {
+        panic!("a budget refusal is its own variant, got {error}");
+    };
+    assert_eq!(named, &subject, "the refusal names the subject that overran");
+    assert_eq!(*limit, REFERRER_COUNT_CEILING, "and the limit it applied");
+    assert!(
+        !error.is_whole_run_abort(),
+        "a subject with too many referrers fails its package, never the run"
+    );
+}
+
+/// Every field a fallback-index reader filters on survives the conversion.
+///
+/// `artifactType` and the annotations are exactly what
+/// [sigstore/cosign#4641](https://github.com/sigstore/cosign/issues/4641)
+/// reports cosign's own fallback write dropping: a descriptor without them
+/// lists the referrer but makes it unfindable by kind.
+#[test]
+fn a_carried_referrer_descriptor_keeps_what_a_reader_filters_on() {
+    let entry = ImageIndexEntry {
+        media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+        digest: digest_of(3).to_string(),
+        size: 1234,
+        platform: None,
+        annotations: Some(BTreeMap::from([(
+            "org.opencontainers.foo".to_string(),
+            "bar".to_string(),
+        )])),
+        artifact_type: Some("application/vnd.dev.cosign.simplesigning+json".to_string()),
+    };
+
+    let descriptor = referrer_descriptor(&entry);
+
+    assert_eq!(descriptor.digest, entry.digest);
+    assert_eq!(descriptor.size, entry.size);
+    assert_eq!(descriptor.media_type, entry.media_type);
+    assert_eq!(
+        descriptor.artifact_type, entry.artifact_type,
+        "artifactType is what a reader selects a signature by"
+    );
+    assert_eq!(
+        descriptor.annotations, entry.annotations,
+        "and the annotations are the rest of that selection"
+    );
+}
+
+// ── C-062 — cosign sidecar tags ─────────────────────────────────────────────
+
+/// The sidecar tag is the referrers fallback tag plus a suffix.
+///
+/// Not a coincidence worth leaving implicit: cosign's `sha256-<hex>.sig` and
+/// the OCI fallback tag `sha256-<hex>` share a prefix exactly because a sha256
+/// hex string is already 64 characters, so the spec's "truncate to 64"
+/// truncates nothing. A future algorithm with a longer digest would move both.
+#[test]
+fn a_sidecar_tag_extends_the_referrers_fallback_tag() {
+    let subject = digest_of(4);
+    let fallback = ocx_lib::package::tag::referrer_fallback_tag(&subject);
+
+    for suffix in SIDECAR_SUFFIXES {
+        let tag = sidecar_tag(&subject, suffix);
+        assert_eq!(tag, format!("{fallback}{suffix}"));
+        assert!(
+            is_legal_oci_tag(&tag),
+            "a sidecar tag must be publishable at the destination: {tag}"
+        );
+    }
+
+    assert!(
+        SIDECAR_SUFFIXES.contains(&".sig"),
+        "the signature suffix is the one every cosign user has"
+    );
+}
+
+// ── C-063 — the destination's referrer route ────────────────────────────────
+
+/// **404 and 405 both** route to the fallback tag.
+///
+/// The spec names 404, and a registry routing `/v2/<name>/referrers/…` to a
+/// handler it does not implement answers 405 instead. Reading the second as a
+/// transport fault would abort a run against a registry the fallback route
+/// serves perfectly well — which is the whole reason this is two arms and not
+/// one.
+#[test]
+fn a_destination_without_a_referrers_api_routes_to_the_fallback_tag() {
+    let empty_listing = ocx_lib::oci::ImageIndex {
+        schema_version: 2,
+        media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
+        manifests: Vec::new(),
+        artifact_type: None,
+        annotations: None,
+    };
+    assert_eq!(
+        referrer_verdict(Ok(Some(empty_listing))).expect("a listing is an answer"),
+        ReferrerDestination::Supported,
+        "an answered listing — empty or not — means the API is there"
+    );
+    assert_eq!(
+        referrer_verdict(Ok(None)).expect("the fork's own 404 verdict is an answer"),
+        ReferrerDestination::Fallback,
+        "`Ok(None)` is the fork reading a 404 off the status alone"
+    );
+
+    for status in [404, 405] {
+        assert_eq!(
+            referrer_verdict(Err(server_error(status)))
+                .unwrap_or_else(|error| panic!("{status} is a verdict: {error}")),
+            ReferrerDestination::Fallback,
+            "{status} on the referrers route means the endpoint is not implemented"
+        );
+    }
+}
+
+/// Anything else is not a verdict, and guessing either way is worse.
+#[test]
+fn an_unanswered_referrers_probe_aborts_the_run() {
+    for probe in [
+        server_error(503),
+        request_error(500),
+        registry_error(OciErrorCode::Denied),
+    ] {
+        let error = referrer_verdict(Err(probe)).expect_err("a non-verdict must not be read as one");
+        assert!(
+            error.is_whole_run_abort(),
+            "a run that cannot tell which referrer route the destination wants \
+             would publish signatures nothing can find: {error}"
+        );
+    }
+}
+
+/// A `405` on a **subject-bearing** PUT is the ECR refusal, and only then.
+///
+/// The same status on an ordinary manifest is an ordinary rejection: it is the
+/// `subject` field the destination is refusing, not these bytes, and
+/// collapsing the two would report a package failure for content that copied.
+#[test]
+fn only_a_subject_bearing_push_reads_a_405_as_a_subject_refusal() {
+    let destination = Reference::with_tag("dest.example".to_string(), "ns/pkg".to_string(), "1.0".to_string());
+
+    let refused = push_failure(&destination, SubjectCarriage::Present, &server_error(405));
+    let CopyError::SubjectRejected { registry, status } = &refused else {
+        panic!("a 405 on a subject-bearing push is its own class, got {refused}");
+    };
+    assert_eq!(registry, "dest.example", "the refusal names the registry that refused");
+    assert_eq!(*status, 405);
+    assert!(
+        !refused.is_whole_run_abort(),
+        "a registry that refuses subjects refuses them for every package; \
+         ending the run would mirror nothing at all"
+    );
+
+    assert!(
+        matches!(
+            push_failure(&destination, SubjectCarriage::Absent, &server_error(405)),
+            CopyError::PushRejected(_)
+        ),
+        "a 405 on an ordinary manifest is an ordinary rejection"
+    );
+    assert!(
+        matches!(
+            push_failure(&destination, SubjectCarriage::Present, &server_error(500)),
+            CopyError::PushRejected(_)
+        ),
+        "and a subject-bearing push can still fail for ordinary reasons"
+    );
+}
+
+/// The transport seam gets a retry predicate of its own, read structurally.
+///
+/// `ClientError` collapses 429/502/503/504/timeout into one variant, so the
+/// only honest predicate matches that variant — and it must **not** match an
+/// authoritative not-found, which is the answer `destination_tag_digest` reads
+/// as "no sidecar here yet" and would otherwise retry `max_retries` times
+/// before reaching the same conclusion.
+#[test]
+fn only_a_transient_transport_failure_is_retried() {
+    assert!(is_transient(&ClientError::RegistryTransient("503".into())));
+
+    for settled in [
+        ClientError::ManifestNotFound("sha256-…".to_string()),
+        ClientError::RepositoryNotFound("ns/pkg".to_string()),
+        ClientError::InvalidManifest("not an index".to_string()),
+    ] {
+        assert!(
+            !is_transient(&settled),
+            "an answered request must not be retried: {settled}"
+        );
+    }
+}
+
+/// The status is read off the error's **structure**, never its rendering.
+///
+/// ERR-13: the wording of an `OciDistributionError` is not a contract, and a
+/// `contains("405")` against it would silently stop classifying on the next
+/// fork bump — while still passing, because the number appears in the message.
+#[test]
+fn a_registry_status_is_read_structurally() {
+    assert_eq!(registry_status(&server_error(405)), Some(405));
+    assert_eq!(registry_status(&request_error(429)), Some(429));
+    assert_eq!(
+        registry_status(&registry_error(OciErrorCode::Denied)),
+        None,
+        "an OCI error envelope carries no status of its own"
+    );
 }
 
 // ── C-040 — the two error classes ───────────────────────────────────────────
@@ -747,9 +982,13 @@ fn only_a_non_authoritative_destination_read_aborts_the_run() {
         CopyError::SourceUnavailable("connection reset".to_string()),
         CopyError::MalformedManifest("descriptor digest 'x' is not a digest".to_string()),
         CopyError::PushRejected("507 insufficient storage".to_string()),
-        CopyError::ReferrersPresent {
-            shown: vec![digest_of(3)],
-            total: 1,
+        CopyError::SubjectRejected {
+            registry: "dest.example".to_string(),
+            status: 405,
+        },
+        CopyError::ReferrerBudgetExceeded {
+            subject: digest_of(3),
+            limit: REFERRER_COUNT_CEILING,
         },
         CopyError::ContentMissing { content: digest_of(4) },
     ];
@@ -807,6 +1046,9 @@ fn only_an_upload_moves_bytes() {
             blobs_mounted: 1,
             blobs_uploaded: 1,
             bytes_uploaded: 900,
+            referrers_copied: 0,
+            sidecars_copied: 0,
+            sidecar_conflicts: 0,
         },
         "a skipped or mounted blob transfers nothing"
     );
@@ -824,10 +1066,18 @@ fn child_counters_fold_into_the_parent() {
         blobs_mounted: 1,
         blobs_uploaded: 3,
         bytes_uploaded: 42,
+        referrers_copied: 2,
+        sidecars_copied: 1,
+        sidecar_conflicts: 3,
     });
 
     assert_eq!(parent.manifests, 7);
     assert_eq!(parent.bytes_uploaded, 42);
+    // The signature counters fold the same way: a referrer copied inside a
+    // child walk is a referrer this package carried (C-064).
+    assert_eq!(parent.referrers_copied, 2);
+    assert_eq!(parent.sidecars_copied, 1);
+    assert_eq!(parent.sidecar_conflicts, 3);
 }
 
 // ── C-046 — client construction ─────────────────────────────────────────────
@@ -1069,6 +1319,187 @@ async fn a_blob_body_longer_than_its_declared_size_is_refused() {
     );
 }
 
+/// The `--dry-run` measurement walks the signature surface too (C-065).
+///
+/// The estimate exists so an operator can size a first sync, and a run that
+/// measured only the manifests while the real run also moved every signature
+/// would under-report by the whole signature surface. Both halves are asserted
+/// because they fail independently: the referrer sweep and the sidecar sweep
+/// are separate loops, and dropping either leaves the other still measuring.
+///
+/// Structural, and the reason is what makes `--dry-run` cheap in the first
+/// place: `missing_descriptors` reaches the registry on every path, so there
+/// is no value to assert on without two live clients. This guard therefore
+/// asserts that the measurement *walks* the signature surface, never what it
+/// computes — a total wrong by a factor of two passes it unchanged. The
+/// arithmetic itself is the acceptance suite's
+/// (`test_a_dry_run_over_a_signed_package_measures_and_fails_nothing`), which
+/// seeds a referrer carrying blobs its subject does not via `put_blob` and
+/// asserts the estimate grows by exactly their length.
+#[test]
+fn the_dry_run_measurement_walks_referrers_and_sidecars() {
+    let body = module_source_without_comments();
+
+    let walk = function_body(&body, "missing_descriptors_at");
+    assert!(
+        walk.contains("missing_signature_descriptors("),
+        "the measuring walk must reach the signature surface, or `--dry-run` under-reports \
+         a signed mirror by every byte its signatures move"
+    );
+
+    let measured = function_body(&body, "missing_signature_descriptors");
+    assert!(
+        measured.contains("source_referrers("),
+        "the measurement must enumerate referrers"
+    );
+    assert!(
+        measured.contains("SIDECAR_SUFFIXES"),
+        "the measurement must enumerate the cosign sidecar tags"
+    );
+    // The same ceilings as the copy: a hostile referrer graph must not be
+    // walkable through the cheap path just because it moves no bytes.
+    for bound in ["within_referrer_budget(", "within_referrer_depth("] {
+        assert!(
+            measured.contains(bound),
+            "`{bound}` must bound the measurement too — an unbounded walk is unbounded \
+             whether or not it transfers anything"
+        );
+    }
+}
+
+/// Both sweeps run only **after** the subject's own manifest has been pushed.
+///
+/// C-060, and it is the ordering the whole feature rests on: a referrer names
+/// its subject, so publishing one before the subject landed leaves the
+/// destination holding a signature over content it does not have — precisely
+/// the state a registry with referrer garbage collection is entitled to
+/// delete. The sidecar sweep is second only because its tag is derived from
+/// the same digest.
+///
+/// Structural, and for the same reason as the guard below: the seam is
+/// `OciTransport`, ocx_lib's own double for it is `pub(crate)` there, and this
+/// crate has no `async-trait` dependency to write one against — so there is no
+/// call ordering to observe. Anchored on the two sweep calls by name rather
+/// than an ordinal, so adding a third call site cannot silently re-point it.
+#[test]
+fn the_subject_is_pushed_before_either_sweep_runs() {
+    let body = module_source_without_comments();
+    let walk = function_body(&body, "copy_manifest_tree_at");
+
+    let push = walk
+        .find("push_manifest(")
+        .expect("the walk must push the subject's own manifest, or this guard tests nothing");
+    for sweep in ["copy_referrers(", "copy_sidecars("] {
+        let call = walk
+            .find(sweep)
+            .unwrap_or_else(|| panic!("`{sweep}` must be reached from the copy walk"));
+        assert!(
+            push < call,
+            "`{sweep}` must sit after `push_manifest`; sweeping first advertises a \
+             signature over a subject the destination does not hold yet"
+        );
+    }
+
+    // The guard is only worth anything while the sweeps are reachable at all:
+    // the `hop` gate is what turns them off for a sidecar's own subtree, and a
+    // gate that stopped matching would leave the ordering above vacuously true.
+    assert!(
+        walk.contains("if let Some(hop) = carriage.hop"),
+        "the sweeps must stay gated on the carriage's hop, or a sidecar walks its own sidecars"
+    );
+}
+
+/// A referrer claim that fails is given back before the error propagates.
+///
+/// Structural rather than behavioural because the claim lives on
+/// `CopyContext`, whose `destination_transport` is a `Box<dyn OciTransport>`
+/// with no double reachable from this crate — the same wall every other guard
+/// in this file names. The property is an *absence*: no path may leave the
+/// claim behind, and a claim outliving its own failure is invisible to any
+/// single-walk assertion, because the wrong answer is only given to the
+/// *second* walk over that digest, which then reports success for a referrer
+/// it neither copied nor indexed.
+#[test]
+fn a_failed_referrer_carry_gives_its_claim_back() {
+    let body = module_source_without_comments();
+    let sweep = function_body(&body, "copy_referrers");
+
+    let claim = sweep
+        .find("claim_referrer(")
+        .expect("the sweep must claim each referrer, or this guard tests nothing");
+    let release = sweep
+        .find("release_referrer(")
+        .expect("a failed carry must release its claim; without this a later walk skips the referrer");
+    assert!(
+        claim < release,
+        "the release must follow the claim it undoes, not precede it"
+    );
+    assert!(
+        sweep[..release].contains("Err(error) =>"),
+        "the release must sit on the error arm; releasing unconditionally would defeat C-061's dedup"
+    );
+
+    // Scope check: the guard reads one function, so it is only sound while that
+    // function is the only claimant. A second call site elsewhere would need its
+    // own release and this guard would never look at it.
+    assert_eq!(
+        // The trailing comma is what separates the call from the definition,
+        // whose parameter list reads `claim_referrer(context: &CopyContext`.
+        body.matches("claim_referrer(context,").count(),
+        1,
+        "`claim_referrer` must have exactly one call site, or this guard's scope is wrong"
+    );
+}
+
+/// A fallback index entry is written only **after** the referrer itself landed.
+///
+/// The order is the whole contract: an entry appended before the push makes the
+/// destination advertise a referrer whose manifest is not there, and a reader
+/// resolving it gets a 404 from a mirror that told it the signature exists.
+/// Because `copy_manifest_tree_at` short-circuits on `?`, "after" is also what
+/// makes a failed push skip the append entirely — including the
+/// [`CopyError::SubjectRejected`] case, where a destination refusing the
+/// `subject` shape must not then be handed a fallback pointer to nothing.
+///
+/// Structural, and it has to be: the seam is `OciTransport`, ocx_lib's own
+/// double for it is crate-private there, and this crate has no `async_trait`
+/// dependency to write one against — so there is nothing to call.
+#[test]
+fn a_fallback_entry_is_appended_only_after_its_referrer_landed() {
+    let body = module_source_without_comments();
+    let sweep = function_body(&body, "copy_referrers");
+
+    let push = sweep
+        .find("copy_manifest_tree_at(")
+        .expect("the referrer sweep must copy the referrer's own manifest tree");
+    let append = sweep
+        .find("append_fallback(")
+        .expect("the referrer sweep must be what appends to the fallback index");
+    assert!(
+        push < append,
+        "`append_fallback` must sit after the referrer's own push, so a rejected \
+         push short-circuits before the destination is told the referrer exists"
+    );
+    assert!(
+        sweep[push..append].contains(".await?"),
+        "the push between them must propagate with `?`; an ignored result lets the \
+         append advertise a manifest that never landed:\n{}",
+        &sweep[push..append]
+    );
+
+    // The append has exactly one caller, so the ordering above is the whole
+    // story rather than one path of several.
+    let callers: Vec<&str> = ["copy_referrers", "copy_sidecars", "copy_manifest_tree_at"]
+        .into_iter()
+        .filter(|name| function_body(&body, name).contains("append_fallback("))
+        .collect();
+    assert_eq!(
+        callers,
+        vec!["copy_referrers"],
+        "only the referrer sweep may write the fallback index"
+    );
+}
+
 /// Both manifest walks must **descend** the counter, not merely carry it.
 ///
 /// `within_depth` has its own test, but a test of the predicate says nothing
@@ -1081,12 +1512,23 @@ fn both_manifest_walks_descend_the_depth_counter() {
     let body = module_source_without_comments();
 
     for walk in ["copy_manifest_tree_at", "missing_descriptors_at"] {
+        // Anchored on the definition and on the recursion's own argument, not
+        // on an occurrence ordinal: the referrer and sidecar sweeps added call
+        // sites to both walks, and an `nth(2)` guard silently walks onto the
+        // wrong one every time another is added.
+        let body = function_body(&body, walk);
+
+        // The child-manifest recursion, and only it. The signature sweeps
+        // deliberately re-enter at the *same* manifest depth — a signature is
+        // not nested inside the index it signs — so a blanket "every call
+        // passes depth + 1" would assert the opposite of the contract.
         let recursion = body
-            .match_indices(walk)
-            .nth(2)
-            .unwrap_or_else(|| panic!("`{walk}` should appear as definition, wrapper call, and recursion"))
-            .0;
-        let tail = &body[recursion..];
+            .find("&child_source")
+            .unwrap_or_else(|| panic!("`{walk}` should recurse into a `child_source` it addressed"));
+        let call = body[..recursion]
+            .rfind(walk)
+            .unwrap_or_else(|| panic!("`{walk}`'s child recursion should call `{walk}`"));
+        let tail = &body[call..];
         let call_end = tail
             .find("))")
             .unwrap_or_else(|| panic!("`{walk}`'s recursive call should be delimited"));

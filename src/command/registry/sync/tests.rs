@@ -95,7 +95,7 @@ fn the_flags_parse_alongside_a_spec_path() {
 
 use crate::error::MirrorError;
 use crate::pipeline::registry_sync::report::{
-    PackageOutcome, PackageReport, RegistrySyncReport, RunCounters, SourceReport,
+    PackageOutcome, PackageReport, RegistrySyncReport, RunCounters, SignatureCounts, SourceReport,
 };
 
 fn report(outcomes: &[(&str, PackageOutcome, Option<&str>)]) -> RegistrySyncReport {
@@ -113,6 +113,7 @@ fn report(outcomes: &[(&str, PackageOutcome, Option<&str>)]) -> RegistrySyncRepo
                     name: (*name).to_string(),
                     outcome: *outcome,
                     detail: detail.map(str::to_string),
+                    signatures: SignatureCounts::default(),
                 })
                 .collect(),
         }],
