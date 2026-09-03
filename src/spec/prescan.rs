@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! Raw-value pre-scan for `registry.yml` (C-005).
+//! Raw-value pre-scan for every spec root — `mirror.yml`, `registry.yml`
+//! and `dist.yml` (C-005).
 //!
 //! Runs on the **merged** document, before typed deserialization — which is
 //! the whole point. A credential in an `extends:` base is caught with no
@@ -61,15 +62,18 @@ pub const DIST_KIND: &str = "dist";
 /// must never do.
 const CREDENTIAL_REMEDY: &str = "set OCX_AUTH_<slug>_TOKEN in the environment instead";
 
-/// Refuse a merged `registry.yml` document that carries credentials, is not a
-/// registry spec, or hides userinfo in a source index URL (C-005).
+/// Refuse a merged spec document that carries credentials, declares the
+/// wrong `kind:`, or hides userinfo in a source index URL (C-005).
 ///
 /// Three jobs, in this order:
 ///
 /// 1. **Credential deny-list** — any key in [`CREDENTIAL_DENY_LIST`], at any
 ///    depth, whatever the value's type.
-/// 2. **`kind` discriminator** — absent, non-string, or not `expected_kind` at
-///    the top level.
+/// 2. **`kind` discriminator** — checked only when `expected_kind` is
+///    `Some`; absent, non-string, or not `expected_kind` at the top level
+///    is a rejection. `None` skips this job entirely — `mirror.yml` (the
+///    `load_spec` caller) carries no `kind:` field, so demanding one would
+///    reject every existing spec (C-053/C-007).
 /// 3. **`sources[].index` userinfo** — a URL whose authority carries a
 ///    non-empty userinfo component.
 ///
@@ -83,9 +87,11 @@ const CREDENTIAL_REMEDY: &str = "set OCX_AUTH_<slug>_TOKEN in the environment in
 ///
 /// [`MirrorError::SpecUsageError`](crate::error::MirrorError::SpecUsageError)
 /// (exit 64) for every rejection above, first violation wins.
-pub fn pre_scan(merged: &Value, spec_path: &Path, expected_kind: &str) -> Result<(), MirrorError> {
+pub fn pre_scan(merged: &Value, spec_path: &Path, expected_kind: Option<&str>) -> Result<(), MirrorError> {
     scan_for_credentials(merged, "", spec_path)?;
-    check_kind(merged, spec_path, expected_kind)?;
+    if let Some(expected_kind) = expected_kind {
+        check_kind(merged, spec_path, expected_kind)?;
+    }
     check_source_index_userinfo(merged, spec_path)
 }
 
@@ -122,6 +128,11 @@ fn scan_for_credentials(value: &Value, path: &str, spec_path: &Path) -> Result<(
             }
             Ok(())
         }
+        // A `!tag` is transparent to serde, which untags and accepts the
+        // contents — so leaving it opaque here would hide a whole subtree
+        // from the deny-list. The tag itself is never a key, so the path is
+        // unchanged by descending through it.
+        Value::Tagged(tagged) => scan_for_credentials(&tagged.value, path, spec_path),
         _ => Ok(()),
     }
 }

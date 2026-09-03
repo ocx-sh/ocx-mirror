@@ -740,3 +740,49 @@ ocx_install: {{}}
         }
     }
 }
+
+// ── C-050: `sign:` alongside the other pipeline blocks ───────────────────
+
+/// A full pipeline spec carrying `sign:` next to `tests:`, `platforms:` and
+/// `notify:` — the block composes with the rest of the document rather than
+/// being accepted only in isolation.
+#[test]
+fn round_trip_pipeline_spec_with_a_sign_block() {
+    let yaml = format!(
+        r#"{base}
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+notify:
+  discord:
+    webhook_secret: DISCORD_WEBHOOK_URL
+
+sign:
+  key:
+    ref: file:///run/secrets/mirror.key
+    passphrase: env://MIRROR_KEY_PASSPHRASE
+    rekor: env://SIGSTORE_REKOR_URL
+"#,
+        base = MINIMAL_BASE_YAML
+    );
+
+    let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).expect("the spec must parse");
+
+    let Some(SignConfig {
+        keyless: None,
+        key: Some(KeyConfig::Full(key)),
+    }) = spec.sign
+    else {
+        panic!("`sign:` must reach the spec in its map form: {:?}", spec.sign);
+    };
+    assert_eq!(
+        key.reference,
+        Ref::File(std::path::PathBuf::from("/run/secrets/mirror.key"))
+    );
+    assert_eq!(key.passphrase, Some(Ref::Env("MIRROR_KEY_PASSPHRASE".to_string())));
+    assert_eq!(key.rekor, Some(Ref::Env("SIGSTORE_REKOR_URL".to_string())));
+    // The neighbouring blocks are untouched by the addition.
+    assert!(spec.notify.is_some());
+    assert!(spec.platforms.is_some_and(|platforms| !platforms.is_empty()));
+}
