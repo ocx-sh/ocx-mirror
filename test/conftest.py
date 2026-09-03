@@ -15,7 +15,20 @@ from uuid import uuid4
 
 import pytest
 
-from src.helpers import PROJECT_ROOT, start_registry
+from src.helpers import (
+    PROJECT_ROOT,
+    SIGSTORE_SERVICES,
+    SigstoreStack,
+    mint_identity_token,
+    render_signing_fixture,
+    sigstore_base_urls,
+    sigstore_compose_path,
+    sigstore_skip_reason,
+    sigstore_trusted_root,
+    start_registry,
+    wait_for_sigstore,
+    zot_registry_address,
+)
 from src.mirror_runner import MirrorRunner
 from src.runner import OcxRunner
 
@@ -27,7 +40,18 @@ SHFMT_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "mirror-shfmt
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Start the registry once before xdist workers spawn.
+    """Start the registries and the Sigstore stack once, before xdist workers spawn.
+
+    Everything a worker would otherwise bring up itself is started here, on
+    the controller: under ``-n auto`` N workers racing one
+    ``docker compose up -d`` is a container-creation race, and for the
+    Sigstore stack it was worse than a race -- the first worker to finish
+    stopped services the others were still signing against. Nothing started
+    here is ever stopped, which is the same contract the two registries have
+    always had.
+
+    The first run on a machine pays the image pull and the stack's start-up;
+    every later run finds the services up and ``up -d`` is a no-op.
 
     Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): selecting only
     tests that never touch a registry on a runner without Docker sets this
@@ -41,6 +65,33 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     registry = os.environ.get("REGISTRY", "localhost:5001")
     start_registry(registry)
     start_registry(os.environ.get("MIRROR_REGISTRY", "localhost:5002"), "mirror_registry")
+    start_registry(zot_registry_address(), "zot")
+    _start_sigstore_stack()
+
+
+def _start_sigstore_stack() -> None:
+    """Bring up the sibling checkout's `sigstore` profile, by explicit service name.
+
+    Declines silently when there is nothing to bring up -- no sibling
+    checkout, no generated trusted root: the `sigstore_stack` fixture is
+    what turns that into a skip with a reason, per test that needs it.
+    Naming the services keeps the sibling project's own registries, which
+    collide with this harness's on 5001/5002, out of it.
+    """
+    if sigstore_skip_reason() is not None:
+        return
+    compose_file = sigstore_compose_path()
+    brought_up = subprocess.run(
+        ["docker", "compose", "-f", str(compose_file), "up", "-d", *SIGSTORE_SERVICES],
+        capture_output=True,
+        text=True,
+    )
+    if brought_up.returncode != 0:
+        raise RuntimeError(
+            f"docker compose up -d for the Sigstore profile in {compose_file} failed with "
+            f"exit {brought_up.returncode}\nstdout: {brought_up.stdout.strip()}\n"
+            f"stderr: {brought_up.stderr.strip()}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +111,19 @@ def mirror_registry() -> str:
     """Destination registry for `registry sync` acceptance tests — `registry` plays the upstream source."""
     addr = os.environ.get("MIRROR_REGISTRY", "localhost:5002")
     start_registry(addr, "mirror_registry")
+    return addr
+
+
+@pytest.fixture(scope="session")
+def zot_registry() -> str:
+    """Native-Referrers-API registry (WP 5, C-073) — project-zot on :5011.
+
+    The third leg alongside `registry`/`mirror_registry`: OCI Distribution
+    1.1 GET /v2/<name>/referrers/<digest>, which `registry` (distribution
+    v2) does not implement (adr_mirror_signing.md D6, S-058).
+    """
+    addr = zot_registry_address()
+    start_registry(addr, "zot")
     return addr
 
 
@@ -103,8 +167,9 @@ def real_ocx_binary() -> Path:
     submodule's binary.
 
     CI provides it via ``OCX_TEST_BINARY`` (built and uploaded by the smoke
-    job, whose checkout is ``submodules: recursive``; the acceptance job's
-    checkout is not, so a cargo build here would see an empty external/ocx
+    job, whose checkout is ``submodules: recursive``; the acceptance job's is
+    ``submodules: true`` — one level, enough for ocx's Sigstore compose file
+    — so a cargo build here would see an empty ``external/ocx/external/*``
     and a dangling ``[patch.crates-io]``). Local dev falls back to building
     from the submodule directly.
     """
@@ -118,6 +183,42 @@ def real_ocx_binary() -> Path:
         subprocess.run(["cargo", "build", "--release", "--bin", "ocx"], cwd=ocx_dir, check=True)
     assert binary.exists(), f"ocx binary not found at {binary} after build"
     return binary
+
+
+@pytest.fixture(scope="session")
+def sigstore_stack(tmp_path_factory: pytest.TempPathFactory) -> SigstoreStack:
+    """The running Sigstore stack, plus a spec and config rendered against it.
+
+    Bring-up belongs to ``pytest_sessionstart`` (controller-only, never torn
+    down); this fixture only refuses to run when there is nothing to bring
+    up, waits for readiness, mints the session's identity token and renders
+    the fixture spec against both.
+
+    The skip guard is real: a machine without a sibling `../ocx` checkout, or
+    an `OCX_SIGSTORE_COMPOSE` pointed at a missing file, skips with a visible
+    reason rather than failing or silently passing.
+    """
+    reason = sigstore_skip_reason()
+    if reason is not None:
+        pytest.skip(reason)
+
+    compose_file = sigstore_compose_path()
+    wait_for_sigstore(compose_file)
+
+    work = tmp_path_factory.mktemp("signing")
+    token_path = mint_identity_token(work / "identity-token")
+    spec_path = render_signing_fixture(
+        work / "spec", sigstore_trusted_root(compose_file), token_path
+    )
+    base = sigstore_base_urls()
+    return SigstoreStack(
+        compose_file=compose_file,
+        fulcio_url=base["fulcio"],
+        rekor_url=base["rekor"],
+        token_path=token_path,
+        spec_path=spec_path,
+        config_path=spec_path.parent / "config.toml",
+    )
 
 
 # ---------------------------------------------------------------------------

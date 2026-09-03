@@ -1,0 +1,55 @@
+# WP 5 (C-073) -- mirror spec for the keyless-signing acceptance tier
+# (S-050, S-059, S-061). Same minimal url_index shape as
+# ../mirror-shfmt-minimal/mirror.yml, which this fixture is copied from;
+# `localhost:5000` and the repository name are substituted by a materializing
+# fixture the same way (wave 3, WP 2) -- this directory has none yet.
+#
+# `__IDENTITY_TOKEN_PATH__` is a placeholder in the same style as
+# ../mirror-shfmt-minimal's `__ASSET_PORT__`: the wave-3 fixture that mints
+# the dex token (helpers.mint_identity_token) substitutes the real path
+# before this spec is loaded.
+name: shfmt
+target:
+  registry: localhost:5000
+  repository: test-shfmt-signing
+source:
+  type: url_index
+  versions:
+    "3.7.0":
+      assets:
+        "shfmt_v3.7.0_linux_amd64": "http://127.0.0.1:__ASSET_PORT__/shfmt_v3.7.0_linux_amd64"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+asset_type:
+  type: binary
+  name: shfmt
+metadata:
+  default: metadata.json
+cascade: true
+versions:
+  min: "3.7.0"
+platforms:
+  linux/amd64:
+    runner: ubuntu-22.04
+    containers:
+      - image: ubuntu:24.04
+    tests:
+      - name: version
+        command: "shfmt --version"
+tests:
+  - name: version
+    command: "shfmt --version"
+ocx_mirror:
+  rev: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# The block under test (adr_mirror_signing.md D1). Both endpoint refs
+# resolve against the local Sigstore stack (D6, C-073):
+# SIGSTORE_FULCIO_URL/SIGSTORE_REKOR_URL are the two variables
+# MirrorRunner.env whitelists for this fixture; identity_token names where
+# mint_identity_token (src/helpers.py) writes the dex token the harness
+# mints per session.
+sign:
+  keyless:
+    fulcio: env://SIGSTORE_FULCIO_URL
+    rekor: env://SIGSTORE_REKOR_URL
+    identity_token: file://__IDENTITY_TOKEN_PATH__
