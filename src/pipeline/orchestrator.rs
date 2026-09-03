@@ -26,6 +26,7 @@ use super::progress;
 use super::push;
 use super::verify;
 use crate::error::MirrorError;
+use crate::pipeline::ocx_cli::sign::{ResolvedSign, invoke_sign_reference};
 use crate::spec::{BinScanMode, MetadataConfig, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
 
@@ -342,6 +343,7 @@ pub async fn execute_mirror(
     fail_fast: bool,
     concurrency: ConcurrencyParams,
     annotations: &std::collections::BTreeMap<String, String>,
+    sign: Option<&ResolvedSign>,
 ) -> Vec<MirrorResult> {
     // Group tasks by version
     let mut by_version: HashMap<String, Vec<MirrorTask>> = HashMap::new();
@@ -460,6 +462,11 @@ pub async fn execute_mirror(
             break;
         }
 
+        // The reference every push in this range writes into, and the one
+        // whose image index is signed once the range is done.
+        let mut version_ref: Option<String> = None;
+        let mut version_pushed = false;
+
         for idx in range.clone() {
             let Some(outcome) = prepared[idx].take() else {
                 continue;
@@ -479,12 +486,21 @@ pub async fn execute_mirror(
                             publisher,
                             &cascade_versions,
                             annotations,
+                            sign,
                         ))
                         .await;
+
+                    version_ref.get_or_insert_with(|| {
+                        format!(
+                            "{}/{}:{}",
+                            prep.task.target.registry, prep.task.target.repository, prep.task.normalized_version,
+                        )
+                    });
 
                     match push_result {
                         Ok(result) => {
                             if matches!(&result, MirrorResult::Pushed { .. }) {
+                                version_pushed = true;
                                 // Register this (version, platform) immediately so
                                 // the next platform's cascade sees it.
                                 if let Some(v) = Version::parse(&version_keys[range_idx]) {
@@ -521,6 +537,30 @@ pub async fn execute_mirror(
                         break;
                     }
                 }
+            }
+        }
+
+        // ── The version's image index (D2, C-059) ────────────────────────────
+        //
+        // After the range, never inside it: an index is only whole once its
+        // last platform has merged in, and signing it per platform would attach
+        // one referrer per push to a subject that then changes. This is the
+        // in-process leg's counterpart to `pipeline push`'s closing
+        // `--tags-file` sweep.
+        //
+        // A failed index signature is reported as this version's failure rather
+        // than raised: the platform manifests are signed and in the registry,
+        // and `execute_mirror` returns outcomes rather than aborting.
+        if let (Some(resolved), Some(reference), true) = (sign, version_ref.as_deref(), version_pushed)
+            && let Err(error) = invoke_sign_reference(resolved, reference, None).await
+        {
+            results.push(MirrorResult::Failed {
+                version: version_keys[range_idx].clone(),
+                platform: ocx_lib::oci::Platform::default(),
+                error: format!("{error}"),
+            });
+            if fail_fast {
+                abort = true;
             }
         }
     }
@@ -837,6 +877,7 @@ async fn push_task(
     publisher: &Publisher,
     cascade_versions: &std::collections::BTreeSet<Version>,
     annotations: &std::collections::BTreeMap<String, String>,
+    sign: Option<&ResolvedSign>,
 ) -> Result<MirrorResult> {
     let identifier = ocx_lib::oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
         .clone_with_tag(&task.normalized_version);
@@ -855,6 +896,7 @@ async fn push_task(
         cascade_versions,
         task.variant.as_ref(),
         annotations,
+        sign,
     )
     .await
 }

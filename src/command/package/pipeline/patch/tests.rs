@@ -17,5 +17,7 @@ mod support;
 mod argv;
 #[path = "tests/skip_gate.rs"]
 mod skip_gate;
+#[path = "tests/verdict.rs"]
+mod verdict;
 #[path = "tests/version_selection.rs"]
 mod version_selection;

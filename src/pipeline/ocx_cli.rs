@@ -17,6 +17,7 @@
 
 pub(crate) mod announce;
 pub(crate) mod push;
+pub(crate) mod sign;
 
 use std::path::PathBuf;
 
@@ -53,6 +54,15 @@ pub(crate) fn forward_ocx_env(cmd: &mut tokio::process::Command) {
         "OCX_BINARY_PIN",
         "OCX_NO_UPDATE_CHECK",
         "OCX_NO_MODIFY_PATH",
+        // Deliberately NOT `OCX_IDENTITY_TOKEN` / `OCX_KEY_PASSWORD`
+        // (adr_mirror_signing.md, C-054). This list is a *forwarding*
+        // whitelist for names inherited from this process; the two signing
+        // secrets are resolved from `sign:` refs by
+        // [`sign::resolve_sign`] — which may name a variable this process
+        // never had — and applied per child by [`sign::ocx_child_env`].
+        // Adding them here would forward whatever the ambient environment
+        // happens to hold under the ocx-owned names, silently overriding the
+        // spec on a runner that already sets one.
     ];
 
     for var in OCX_VARS {

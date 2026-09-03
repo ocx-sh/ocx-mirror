@@ -17,6 +17,7 @@ use ocx_lib::cli::ExitCode;
 use ocx_lib::log;
 
 use super::forward_ocx_env;
+use super::sign::{ResolvedSign, ocx_child_env, sign_push_args};
 use crate::run_summary::LayerReuse;
 
 /// Parsed JSON output from `ocx package push --cascade --format json`.
@@ -65,6 +66,12 @@ pub(crate) struct PushReport {
 /// tag listing that answers `RepositoryNotFound` (registry 404) as the empty
 /// list and cascades from there, while every other listing failure — auth,
 /// 5xx — still aborts the push rather than re-pointing `latest` backwards.
+///
+/// `sign` is the run's resolved `sign:` block, appended as the C-052 tail. Its
+/// `None` yields no words at all, so an unsigned mirror's argv is exactly what
+/// it was before signing existed. The tail is last and contiguous: clap takes
+/// flags after positionals, and keeping it in one piece is what lets a test
+/// assert the whole of C-052 by slicing the end.
 pub(crate) fn build_push_args(
     platform: &str,
     target_ref: &str,
@@ -72,6 +79,7 @@ pub(crate) fn build_push_args(
     metadata: Option<&Path>,
     annotations: &BTreeMap<String, String>,
     cascade: bool,
+    sign: Option<&ResolvedSign>,
 ) -> Result<Vec<String>, String> {
     let mut args: Vec<String> = ["--format", "json", "package", "push"]
         .iter()
@@ -91,6 +99,7 @@ pub(crate) fn build_push_args(
     args.extend(layers.iter().map(|layer| (*layer).to_string()));
 
     args.extend(crate::annotations::push_args(annotations));
+    args.extend(sign_push_args(sign));
 
     Ok(args)
 }
@@ -134,7 +143,14 @@ pub(crate) struct PushAttemptError {
 ///
 /// `ocx` 0.5.3 draws the line for us: 75 means the same command may succeed if
 /// it is run again (registry connect failure, timeout, rate limit), and 69
-/// means rerunning will not change the outcome. Only 75 is worth an upload.
+/// means rerunning will not change the outcome.
+///
+/// 83 joins it once `--sign` is on the argv (C-057): a push that landed and
+/// then could not reach Rekor exits 83, and Rekor being briefly unavailable is
+/// the same "try again" class as a registry timeout. It is deliberately narrow
+/// — 84 (registry has no Referrers API) and 85 (key backend not built) are
+/// permanent facts about the destination and the binary, and retrying either
+/// buys nothing.
 ///
 /// A registry denial never reaches either code — 403 is 80 (auth), which is
 /// deterministic and not retried. `None` (signal-killed) is not retried either:
@@ -147,8 +163,12 @@ pub(crate) struct PushAttemptError {
 /// no version hint — unlike the exit-64 hint `pipeline cascade` emits for a
 /// missing verb, 65 is the ordinary data-error code here and a version guess
 /// would misdirect a genuine bad-metadata run. The floor is documented instead.
-fn push_exit_is_transient(code: Option<i32>) -> bool {
-    matches!(code, Some(code) if code == ExitCode::TempFail as i32)
+pub(crate) fn push_exit_is_transient(code: Option<i32>) -> bool {
+    matches!(
+        code,
+        Some(code)
+            if code == ExitCode::TempFail as i32 || code == ExitCode::TransparencyLogUnavailable as i32
+    )
 }
 
 /// Delay before attempt `attempt + 1`, doubling from
@@ -189,7 +209,7 @@ fn jitter(delay: Duration) -> Duration {
 /// nothing that [`push_retry_backoff`]'s own table test does not already pin.
 /// The scaling preserves the ladder's shape; what no test then covers is the
 /// production base reaching this call, which is one constant.
-fn push_retry_delay(attempt: u32) -> Duration {
+pub(crate) fn push_retry_delay(attempt: u32) -> Duration {
     let delay = jitter(push_retry_backoff(attempt));
     #[cfg(test)]
     let delay = delay / 1000;
@@ -205,6 +225,7 @@ pub(crate) async fn push_once(
     ocx_binary: &Path,
     args: &[String],
     timeout: Duration,
+    sign: Option<&ResolvedSign>,
 ) -> Result<PushReport, PushAttemptError> {
     let mut cmd = tokio::process::Command::new(ocx_binary);
     cmd.args(args);
@@ -212,6 +233,9 @@ pub(crate) async fn push_once(
     // Forward OCX_* environment variables into the subprocess.
     // This preserves offline mode, remote mode, registry config, etc.
     forward_ocx_env(&mut cmd);
+    // The two signing secrets, resolved from `sign:` refs rather than
+    // forwarded — the only channel that keeps them off argv (C-054).
+    ocx_child_env(&mut cmd, sign);
 
     // Tokio leaves a child running when its future is dropped; on timeout that
     // would orphan a push still streaming a bundle at the registry — and the
@@ -253,8 +277,8 @@ pub(crate) async fn push_once(
 }
 
 /// Run one push argv to a verdict: attempt it, and retry a transient failure
-/// (`ocx package push` exit 75 only) up to `budget` further times with
-/// [`push_retry_delay`] between attempts.
+/// (`ocx package push` exit 75 or 83, per [`push_exit_is_transient`]) up to
+/// `budget` further times with [`push_retry_delay`] between attempts.
 ///
 /// Shared by both publish paths — the archive leg via [`invoke_push`], the env
 /// leg via `pipeline::python_push::invoke_env_push` — so the ladder, the
@@ -271,6 +295,7 @@ pub(crate) async fn push_with_retry(
     label: &str,
     target_ref: &str,
     platform: &str,
+    sign: Option<&ResolvedSign>,
 ) -> Result<PushReport, String> {
     // The budget, named in every line this loop emits: an operator reading a
     // give-up message has to be able to tell an exhausted ladder from an exit
@@ -278,7 +303,7 @@ pub(crate) async fn push_with_retry(
     let total = budget.saturating_add(1);
     let mut attempt = 1u32;
     loop {
-        match push_once(ocx_binary, args, PUSH_TIMEOUT).await {
+        match push_once(ocx_binary, args, PUSH_TIMEOUT, sign).await {
             Ok(report) => return Ok(report),
             Err(failure) => {
                 if !failure.transient {

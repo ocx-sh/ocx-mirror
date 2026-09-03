@@ -14,6 +14,7 @@ fn a_published_layer_becomes_a_digest_reference_with_its_media_type_extension() 
         Path::new("/work/3.29.0-linux_amd64-metadata.json"),
         &BTreeMap::new(),
         true,
+        None,
     )
     .expect("argv assembles");
 
@@ -51,6 +52,7 @@ fn every_layer_is_re_referenced_in_manifest_order() {
         Path::new("/work/metadata.json"),
         &BTreeMap::new(),
         true,
+        None,
     )
     .expect("argv assembles");
 
@@ -74,6 +76,7 @@ fn cascade_follows_the_spec_flag() {
         Path::new("/work/metadata.json"),
         &BTreeMap::new(),
         true,
+        None,
     )
     .expect("argv assembles");
     let plain = patch_push_args(
@@ -82,6 +85,7 @@ fn cascade_follows_the_spec_flag() {
         Path::new("/work/metadata.json"),
         &BTreeMap::new(),
         false,
+        None,
     )
     .expect("argv assembles");
 
@@ -99,6 +103,7 @@ fn the_sidecar_is_always_passed_explicitly() {
         Path::new("/work/metadata.json"),
         &BTreeMap::new(),
         true,
+        None,
     )
     .expect("argv assembles");
 
@@ -121,6 +126,7 @@ fn spec_annotations_survive_onto_the_patched_index() {
         Path::new("/work/metadata.json"),
         &annotations,
         true,
+        None,
     )
     .expect("argv assembles");
 
@@ -141,6 +147,7 @@ fn an_unmappable_layer_media_type_errors_instead_of_guessing() {
         Path::new("/work/metadata.json"),
         &BTreeMap::new(),
         true,
+        None,
     )
     .expect_err("must reject");
 
@@ -192,6 +199,7 @@ async fn a_rejected_republish_reports_the_exit_code_and_the_stderr() {
         &dir.path().join("3.29.0-linux_amd64-metadata.json"),
         &BTreeMap::new(),
         &script,
+        None,
     )
     .await
     .expect_err("a rejected push must not read as a republished manifest");
@@ -225,6 +233,7 @@ async fn a_republish_that_exits_zero_with_a_parseable_report_succeeds() {
         &dir.path().join("3.29.0-linux_amd64-metadata.json"),
         &BTreeMap::new(),
         &script,
+        None,
     )
     .await
     .expect("exit 0 with a parseable report is a republished manifest");
