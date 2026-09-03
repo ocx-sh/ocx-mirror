@@ -12,6 +12,7 @@ use ocx_lib::publisher::{LayerRef, Publisher};
 
 use super::mirror_result::MirrorResult;
 use super::mirror_task::VariantContext;
+use super::ocx_cli::sign::{ResolvedSign, invoke_sign_reference};
 
 /// Push a bundled package to the registry and optionally cascade to rolling tags.
 ///
@@ -25,6 +26,18 @@ use super::mirror_task::VariantContext;
 ///
 /// `annotations` are the OCI annotations for this run (see [`crate::annotations`]),
 /// written onto the image index of every tag the push touches.
+///
+/// `sign` is the run's resolved `sign:` block. This leg publishes through
+/// `ocx_lib`'s [`Publisher`] rather than an `ocx package push` subprocess, so
+/// there is no `--sign` to pass: the platform manifest is signed afterwards,
+/// by `ocx package sign -p` (C-059). The enclosing index is signed once the
+/// version's last platform has landed — by `orchestrator::execute_mirror`,
+/// which is the only caller that knows where a version ends. Same division of
+/// labour as `push --sign` plus the closing sweep on the subprocess legs (D2).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the push identity (publisher, info, bundle, cascade, versions, variant, annotations) plus the signing block; grouping them would name a struct nothing else constructs"
+)]
 pub async fn push_and_cascade(
     publisher: &Publisher,
     info: Info,
@@ -33,9 +46,14 @@ pub async fn push_and_cascade(
     cascade_versions: &BTreeSet<Version>,
     variant: Option<&VariantContext>,
     annotations: &BTreeMap<String, String>,
+    sign: Option<&ResolvedSign>,
 ) -> Result<MirrorResult> {
     let version_str = info.identifier.tag_or_latest().to_string();
     let platform = info.platform.clone();
+    // `Display` on an `Identifier` is `registry/repository:tag` — the exact
+    // reference `ocx package sign` takes. Captured before `info` is moved into
+    // the push.
+    let signed_ref = info.identifier.to_string();
     // ponytail: default layout (no strip/prefix) preserves pre-bump behavior
     // exactly. Archive/binary pushes never cross-repository mount — only the
     // pylock env-push path's wheel layers carry `mount_from`.
@@ -93,8 +111,16 @@ pub async fn push_and_cascade(
                     annotations,
                 )
                 .await?;
+            // Nothing is signed here. The bare alias is the same manifest
+            // under a second tag: `test_default_variant_aliases_the_bare_tags_to_its_own_manifest`
+            // asserts every bare tag resolves to the default variant's own
+            // digest, and a non-default variant gets no bare alias at all. A
+            // signature is a referrer against the subject digest, not the tag,
+            // so the one call below already covers this alias — and a second
+            // one would spend another candidate against the verifier's cap.
         }
 
+        sign_platform(sign, &signed_ref, &platform.to_string()).await?;
         return Ok(MirrorResult::Pushed {
             version: version_str,
             platform,
@@ -106,9 +132,26 @@ pub async fn push_and_cascade(
         .push(vec![info], &layers, None, canonical_tag, annotations)
         .await?;
 
+    sign_platform(sign, &signed_ref, &platform.to_string()).await?;
+
     Ok(MirrorResult::Pushed {
         version: version_str,
         platform,
         digest: String::new(),
     })
 }
+
+/// Sign one platform manifest of `reference`, or do nothing without `sign:`.
+///
+/// A failed signature fails the leg, exactly as a failed `push --sign` fails
+/// the subprocess legs: a package that published and did not sign must never
+/// read as a clean publish (S-050). The manifest is already in the registry by
+/// then — the exit code is how that partial outcome reaches the operator.
+async fn sign_platform(sign: Option<&ResolvedSign>, reference: &str, platform: &str) -> Result<()> {
+    let Some(resolved) = sign else { return Ok(()) };
+    Ok(invoke_sign_reference(resolved, reference, Some(platform)).await?)
+}
+
+#[cfg(test)]
+#[path = "push/tests.rs"]
+mod tests;

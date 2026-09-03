@@ -241,6 +241,20 @@ impl Sync {
         // asset download fails verification with no way to fix it from config.
         let http_client = crate::http::client()?;
 
+        // Resolved here because this is the only place that can: the chain is
+        // `sync` -> `orchestrator::execute_mirror` -> `push_task` ->
+        // `pipeline::push::push_and_cascade`, and `execute_mirror` takes only
+        // spec-*derived* values (annotations, concurrency), never the
+        // `MirrorSpec` itself. So the resolved block is threaded down as one
+        // parameter rather than handing the orchestrator the whole spec or
+        // reaching for a global (ARCH-13).
+        //
+        // Once per run, before the first push (C-054): a `sign:` naming an
+        // unset variable fails here, with one message naming the field, rather
+        // than after N platforms have published and advanced their tags
+        // unsigned.
+        let sign = crate::pipeline::ocx_cli::sign::resolve_sign_from_env(spec.sign.as_ref())?;
+
         let compression_threads = crate::spec::resolve_compression_threads(
             spec.concurrency.compression_threads,
             spec.concurrency.max_bundles,
@@ -260,6 +274,7 @@ impl Sync {
                 compression_threads,
             },
             &crate::annotations::build_annotations(&spec.annotations),
+            sign.as_ref(),
         )
         .await;
 

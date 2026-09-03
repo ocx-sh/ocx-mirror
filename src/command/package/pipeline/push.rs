@@ -32,6 +32,7 @@ use crate::pipeline::ocx_cli::announce::{
 };
 use crate::pipeline::ocx_cli::push::{PushReport, build_push_args, push_with_retry};
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
+use crate::pipeline::ocx_cli::sign::{ResolvedSign, resolve_sign_from_env, sweep_index_tags};
 use crate::pipeline::python_prepare::EnvManifest;
 use crate::pipeline::python_push;
 use crate::run_summary::{
@@ -84,13 +85,19 @@ impl Push {
         // ── Load spec ────────────────────────────────────────────────────────
         let spec = spec::load_spec(&self.spec).await?;
 
+        // Once per run, before the first push (C-054). A `sign:` naming an
+        // unset variable or an unreadable file fails the whole run here, with
+        // one message naming the field — rather than after N versions have
+        // published and advanced their tags unsigned (S-051).
+        let sign = resolve_sign_from_env(spec.sign.as_ref())?;
+
         // Env sources (pylock/pypi) take a parallel env-push path: env
         // packages (wheel layers + composed metadata) instead of the
         // archive/binary bundle. Mirrors `prepare.rs`'s `is_env()` dispatch —
         // prepare writes env-manifest.json (never bundle-*.tar.xz) for both,
         // so the archive loop below would silently find nothing.
         if spec.source.is_env() {
-            return self.execute_pylock_push(&spec).await;
+            return self.execute_pylock_push(&spec, sign.as_ref()).await;
         }
 
         // GHA workflow stamps the push job's html_url here so the Discord
@@ -220,7 +227,7 @@ impl Push {
                 // an earlier push in this loop.
                 let cascade = platforms_failed.is_empty();
 
-                match invoke_push(&spec, platform_str, &target_ref, bundle_path, cascade).await {
+                match invoke_push(&spec, platform_str, &target_ref, bundle_path, cascade, sign.as_ref()).await {
                     Ok(report) => {
                         let status_str = report.status.as_deref().unwrap_or("pushed");
                         if status_str == "skipped_existing" {
@@ -303,7 +310,8 @@ impl Push {
             });
         }
 
-        self.finalize_run(&spec, version_summaries, push_job_url).await
+        self.finalize_run(&spec, version_summaries, push_job_url, sign.as_ref())
+            .await
     }
 
     /// Run-level flags, `run-summary.json`, the single index announce, and the
@@ -319,6 +327,7 @@ impl Push {
         spec: &MirrorSpec,
         version_summaries: Vec<VersionSummary>,
         push_job_url: Option<String>,
+        sign: Option<&ResolvedSign>,
     ) -> Result<(), MirrorError> {
         // ── Compute run-level flags ───────────────────────────────────────────
         let any_red = version_summaries
@@ -368,6 +377,27 @@ impl Push {
         // go unannounced *and* unreported.
         write_run_summary(&self.write_summary, &summary).await?;
 
+        // ── Sign the indexes this run wrote (D2, C-058) ──────────────────────
+        //
+        // `push --sign` signed each platform manifest as it landed; an image
+        // index is only whole once its last platform is in, so the indexes are
+        // signed here, from the tag set the run published. Before the announce
+        // deliberately: the index entry the announce curates should not point
+        // at a tag whose signature this run then failed to write.
+        //
+        // Held rather than returned: the announce below still has to run, and
+        // its own outcome still has to reach the summary. The sweep's exit code
+        // is surfaced at the end, ahead of the aggregated push failures,
+        // because it names something the operator fixes (identity, Rekor,
+        // registry) rather than a per-platform test result.
+        let sweep_result = sign_run_indexes(
+            sign,
+            spec,
+            &summary.versions,
+            &self.write_summary.with_extension("sign-tags"),
+        )
+        .await;
+
         // One announce per run, after every version has been pushed — never
         // one per version or per platform. Concurrent announces on the same
         // package are a race the index singleflight exists to survive; there
@@ -393,6 +423,12 @@ impl Push {
             summary.any_red,
             summary.any_new_green,
         );
+
+        // The sweep's verdict, ahead of the aggregation below and after the
+        // summary write: an index this run could not sign is a failure whose
+        // exit code the operator acts on, and it must not be flattened into
+        // the generic `ExecutionFailed` (1) that a red test leg produces.
+        sweep_result?;
 
         // Fail the push job whenever any (V, P) pair was red — even when
         // other platforms published successfully. Per-platform publication
@@ -456,7 +492,7 @@ impl Push {
     /// cross-repository mount it instead of re-uploading. Registration
     /// failures are warn-only; a miss falls back to a full upload, so the push
     /// always succeeds either way.
-    async fn execute_pylock_push(&self, spec: &MirrorSpec) -> Result<(), MirrorError> {
+    async fn execute_pylock_push(&self, spec: &MirrorSpec, sign: Option<&ResolvedSign>) -> Result<(), MirrorError> {
         let push_job_url = std::env::var("OCX_MIRROR_JOB_URL")
             .ok()
             .map(|s| s.trim().to_owned())
@@ -632,6 +668,7 @@ impl Push {
                     &env_entry.layers,
                     &annotations,
                     cascade,
+                    sign,
                 )
                 .await;
 
@@ -732,7 +769,7 @@ impl Push {
             });
         }
 
-        self.finalize_run(spec, version_summaries, push_job_url).await
+        self.finalize_run(spec, version_summaries, push_job_url, sign).await
     }
 }
 
@@ -752,6 +789,7 @@ async fn invoke_push(
     target_ref: &str,
     bundle_path: &Path,
     cascade: bool,
+    sign: Option<&ResolvedSign>,
 ) -> Result<PushReport, String> {
     let ocx_binary = resolve_ocx_binary()?;
 
@@ -759,7 +797,7 @@ async fn invoke_push(
         .to_str()
         .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?;
     let annotations = crate::annotations::build_annotations(&spec.annotations);
-    let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade)?;
+    let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade, sign)?;
 
     push_with_retry(
         &ocx_binary,
@@ -768,6 +806,7 @@ async fn invoke_push(
         &spec.name,
         target_ref,
         platform,
+        sign,
     )
     .await
 }
@@ -918,6 +957,30 @@ async fn run_announce(
             })
         }
     }
+}
+
+/// Sign the image index behind every tag this run published (C-058).
+///
+/// A no-op without `sign:`, and a no-op when the run published nothing —
+/// `ocx package sign --tags-file` over an empty file has nothing to act on and
+/// the child would only cost a process.
+///
+/// The tag set is [`announce_tag_union`]'s: exactly the tags this run wrote,
+/// deduped, which is also the set whose indexes it moved. Written to its own
+/// file rather than shared with the announce's, so neither writer can be
+/// reading a list the other is mid-write on.
+///
+/// # Errors
+/// [`MirrorError::SignFailed`] carrying the child's own exit code, so a Rekor
+/// outage (83) stays distinguishable from a missing identity (78) and from a
+/// registry without a Referrers API (84).
+async fn sign_run_indexes(
+    sign: Option<&ResolvedSign>,
+    spec: &MirrorSpec,
+    versions: &[VersionSummary],
+    tags_file: &Path,
+) -> Result<(), MirrorError> {
+    sweep_index_tags(sign, &announce_tag_union(versions), &spec.target.reference(), tags_file).await
 }
 
 /// Write a [`RunSummary`] to the given path as pretty-printed JSON.

@@ -28,6 +28,7 @@ use ocx_lib::publisher::Publisher;
 
 use super::python_prepare::{EnvLayer, EnvManifest};
 use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, push_once};
+use crate::pipeline::ocx_cli::sign::{ResolvedSign, sign_push_args};
 use crate::pipeline::target_registry;
 use crate::run_summary::LayerReuse;
 use crate::spec::MirrorSpec;
@@ -159,6 +160,7 @@ pub(crate) fn build_env_push_args(
     layers: &[EnvLayer],
     annotations: &BTreeMap<String, String>,
     cascade: bool,
+    sign: Option<&ResolvedSign>,
 ) -> Result<Vec<String>, String> {
     let metadata_str = metadata_path
         .to_str()
@@ -195,6 +197,7 @@ pub(crate) fn build_env_push_args(
     }
 
     args.extend(crate::annotations::push_args(annotations));
+    args.extend(sign_push_args(sign));
 
     Ok(args)
 }
@@ -212,6 +215,10 @@ pub(crate) fn build_env_push_args(
 /// Returns a descriptive error string on subprocess failure (caller records
 /// as `push_error` without aborting the run), matching `invoke_push`'s
 /// contract.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one env-push leg's full identity; same shape and same reasoning as the archive leg's `push_with_retry`"
+)]
 pub(crate) async fn invoke_env_push(
     spec: &MirrorSpec,
     platform: &str,
@@ -220,8 +227,9 @@ pub(crate) async fn invoke_env_push(
     layers: &[EnvLayer],
     annotations: &BTreeMap<String, String>,
     cascade: bool,
+    sign: Option<&ResolvedSign>,
 ) -> Result<EnvPushReport, String> {
-    let args = build_env_push_args(platform, target_ref, metadata_path, layers, annotations, cascade)?;
+    let args = build_env_push_args(platform, target_ref, metadata_path, layers, annotations, cascade, sign)?;
     let ocx_binary = crate::pipeline::ocx_cli::resolve_ocx_binary()?;
 
     let report = crate::pipeline::ocx_cli::push::push_with_retry(
@@ -231,6 +239,7 @@ pub(crate) async fn invoke_env_push(
         &spec.name,
         target_ref,
         platform,
+        sign,
     )
     .await?;
 
@@ -359,7 +368,11 @@ async fn push_wheel_layer(
     args.extend(crate::annotations::push_args(annotations));
 
     let ocx_binary = crate::pipeline::ocx_cli::resolve_ocx_binary()?;
-    push_once(&ocx_binary, &args, PUSH_TIMEOUT)
+    // Unsigned, deliberately: this push registers a wheel *layer* in the
+    // shared `pip-packages/...` repository so the app's own push can mount it.
+    // It is upload-avoidance, not a mirror-produced package — the signed
+    // subjects are the app's platform manifests and their index.
+    push_once(&ocx_binary, &args, PUSH_TIMEOUT, None)
         .await
         .map(|_report| ())
         .map_err(|failure| failure.message)
@@ -455,8 +468,16 @@ mod tests {
         let metadata_path = PathBuf::from("/work/metadata.json");
         let empty = BTreeMap::new();
 
-        let args = build_env_push_args("linux/amd64", "pycowsay:1.0.0", &metadata_path, &layers, &empty, true)
-            .expect("valid UTF-8 paths build cleanly");
+        let args = build_env_push_args(
+            "linux/amd64",
+            "pycowsay:1.0.0",
+            &metadata_path,
+            &layers,
+            &empty,
+            true,
+            None,
+        )
+        .expect("valid UTF-8 paths build cleanly");
 
         assert!(args.contains(&"--cascade".to_string()));
 
@@ -469,6 +490,7 @@ mod tests {
             &layers,
             &empty,
             false,
+            None,
         )
         .expect("valid UTF-8 paths build cleanly");
         assert!(!no_cascade.contains(&"--cascade".to_string()));
@@ -491,6 +513,7 @@ mod tests {
             &layers,
             &empty,
             true,
+            None,
         )
         .expect("valid UTF-8 paths build cleanly");
         let libc_flag = libc_args.iter().position(|a| a == "-p").expect("-p flag present");
@@ -542,6 +565,7 @@ mod tests {
             &layers,
             &declared,
             true,
+            None,
         )
         .expect("valid UTF-8 paths build cleanly");
 
@@ -558,6 +582,57 @@ mod tests {
         );
         // The tail comes AFTER the layer positionals, never between them.
         assert!(args[args.len() - 5].ends_with(":from=pip-packages/files.pythonhosted.org/pycowsay"));
+    }
+
+    /// The env leg carries the same C-052 tail as the archive leg.
+    ///
+    /// Its own test rather than trusting the shared `sign_push_args`: the two
+    /// argv builders are separate functions, and the env leg has already
+    /// shipped once without the `--annotation` tail the archive leg had.
+    #[test]
+    fn build_env_push_args_carries_the_sign_tail() {
+        use crate::spec::{KeylessConfig, Ref, SignConfig};
+
+        let config = SignConfig {
+            keyless: Some(KeylessConfig {
+                fulcio: Some(Ref::Literal("http://localhost:5555".into())),
+                rekor: Some(Ref::Literal("http://localhost:3000".into())),
+                identity_token: None,
+            }),
+            key: None,
+        };
+        let sign = crate::pipeline::ocx_cli::sign::resolve_sign(&config, &|_| None, &|_| {
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "no files"))
+        })
+        .expect("literal endpoints resolve without reading anything");
+
+        let layers = vec![env_layer(
+            "/work/layers/pycowsay.tar.zst",
+            "pip-packages/files.pythonhosted.org/pycowsay",
+            "aaa",
+            "pycowsay",
+        )];
+        let args = build_env_push_args(
+            "linux/amd64",
+            "pycowsay:1.0.0",
+            Path::new("/work/metadata.json"),
+            &layers,
+            &BTreeMap::new(),
+            true,
+            Some(&sign),
+        )
+        .expect("valid UTF-8 paths build cleanly");
+
+        assert_eq!(
+            &args[args.len() - 5..],
+            [
+                "--sign",
+                "--fulcio-url",
+                "http://localhost:5555",
+                "--rekor-url",
+                "http://localhost:3000",
+            ],
+        );
     }
 
     #[tokio::test]
