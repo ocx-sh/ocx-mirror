@@ -251,6 +251,78 @@ Omitting `--version`, `--min-version`, and `--max-version` all at once patches e
 
 **Layer pins are never disturbed.** Layer digests are unchanged by a metadata patch, so no layer is ever orphaned; the patched manifest gets its own canonical `sha256:<hex>` tag alongside the version tag.
 
+### `package pipeline sign` {#pipeline-sign}
+
+Sign every published subject in the target repository that does not already carry a signature: filter first (a pure listing pass, no cryptographic verification), then sign each unsigned subject with `ocx package sign`, narrowing to a platform manifest with `-p <platform>`. Subjects are grouped by digest, so a cascade collapsing five tags onto one index is one subject, and a tag resolving to a bare manifest is itself that subject. Repeatable and convergent — a re-run signs nothing a previous run already signed. Needs a [`sign:`][spec-sign] block on the spec.
+
+No generated workflow renders this command in v1: run it by hand, or add it to the operator's own job with the four-line snippet below.
+
+```sh
+ocx-mirror package pipeline sign [SPEC] [OPTIONS]
+```
+
+| Argument / flag | Default | Description |
+|-----------------|---------|-------------|
+| `[SPEC]` | `./mirror.yml` | Path to the mirror spec file |
+| `--dry-run` | off | Report the filter verdict per subject and sign nothing |
+| `--force` | off | Sign every subject regardless of any existing signature |
+| `--identity <SAN>` | unset | Count only signatures whose certificate identity is this exact value |
+| `--issuer <URL>` | unset | Count only signatures whose certificate OIDC issuer is this exact value |
+| `--format <FMT>` | `plain` | Output format: `plain` (table + summary) or `json` |
+
+**Skip rule.** A subject already carrying an existing signature candidate — a signature-typed referrer, the `sha256-<hex>` fallback-index entry of that type, or a `sha256-<hex>.sig` cosign sidecar; attestations (`.att`) and SBOMs (`.sbom`) are not signatures and do not count — is skipped by default. Presence alone decides that default skip: no certificate chain is built and no Rekor entry or trust policy is consulted.
+
+**Narrowing the skip.** `--identity` and `--issuer` change what "already signed" means from *signed by anyone* to *signed by this signer*. A subject carrying only a **different** signer's signature then counts as unsigned and **is signed again** — that is the rotation case the flags exist for: after moving to a new workflow identity, an operator wants their own signature present on everything, and `ocx package sign` appends, so the older signature survives beside the new one. Both flags are exact, byte-equal matches (no glob, no regex), matching `ocx package verify`'s own `--certificate-identity`.
+
+Five rules make the narrowing unambiguous:
+
+- **Given together, they are AND, and both must hold on one signature.** Two signatures each satisfying one half is not a match — nothing signed the subject with the pair named.
+- **A signature with no identity to read never matches.** A `sha256-<hex>.sig` cosign sidecar carries its certificate in a per-layer annotation, so there is no single identity to report and all three identity fields are absent; a bundle that cannot be parsed is the same shape. Neither satisfies `--identity` or `--issuer`, so such a subject is signed again. The direction is deliberate: a redundant signature costs one candidate slot, a wrongly skipped subject stays unsigned indefinitely.
+- **Narrow on the identity this run signs as.** The re-sign converges because the signature it writes then satisfies the filter — as long as the subject holds fewer than eight signatures. At or above that, convergence is no longer guaranteed even for a correct value: `ocx` lists only the first eight referrers, in whatever order the registry returns them, so a signature this run wrote correctly may sit outside the window the next pass reads and be written again ([ocx-sh/ocx#403](https://github.com/ocx-sh/ocx/issues/403)). A value this run does not produce — another signer's, or any `--identity` against key-pair signing, which carries a public-key hint and no certificate identity — matches nothing the run can ever add, so every pass signs every subject again and walks the subject towards `ocx package verify`'s eight-candidate ceiling. Nothing here catches it: a keyless SAN is minted by the OIDC exchange inside the signing child, so it is not knowable beforehand.
+- **`--force` outranks both.** It skips nothing, so there is nothing left for a narrowing flag to narrow; `--force --identity X` signs every subject, exactly as `--force` alone does.
+- **Nothing is verified.** The identity and issuer come from a certificate whose chain was not checked, so the flags decide *what to sign*, never *what to trust* — `ocx package verify` remains the only answer to whether a signature is good.
+
+**Report.** `--format json` emits the pinned batch envelope, never a bare array:
+
+```json
+{
+  "summary": { "status": "partial_failure", "total": 42, "succeeded": 39,
+               "failed": 2, "skipped": 1, "exit_code": 83 },
+  "items": [
+    { "tag": "3.28.1", "platform": null, "status": "succeeded",
+      "subject": "sha256:…" },
+    { "tag": "3.28.1", "platform": "linux/amd64", "status": "skipped",
+      "subject": "sha256:…", "discovery": "referrers_api",
+      "reason": "already_signed" },
+    { "tag": "3.27.9", "platform": "linux/arm64", "status": "failed",
+      "subject": "sha256:…",
+      "error": { "code": "transparency_log_unavailable", "exit": 83 } }
+  ]
+}
+```
+
+`summary.status` is one of `success`, `partial_failure`, `failure`, or `cancelled`; per-item `status` is `succeeded`, `failed`, or `skipped`; `summary.exit_code` mirrors the process exit code, which is the **worst** classified failure among `failed` items — never derived from item counts. See [Exit codes](#exit-codes) for what each carried-through code means.
+
+Every row carries `tag`, `platform` (`null` for the index itself), `status` and `subject`. The other three are conditional: `discovery` names how an existing signature was found and so appears only on an `already_signed` skip, `reason` only on a skip, and `error` only on a failure.
+
+**Interrupting a run.** `SIGINT` (Ctrl-C) drains the batch rather than killing it: no further subject is attempted, the one in flight is abandoned, and every subject the pass never reached is reported `skipped` with `"reason": "cancelled"` so the report still accounts for all of them. `summary.status` is then `cancelled` — distinct from `partial_failure`, which means subjects actually failed. The exit code still reflects the worst failure the run did reach, so an interrupted pass that hit no failures exits 0 — stderr therefore carries a `warning: interrupted — N of M subjects were never attempted` line, so a run that stopped early is visible without parsing the envelope. Re-running is safe and signs only what is still unsigned.
+
+The backfill runs as its own GitLab job, separate from push — a push job
+with `sign:` set already signs each platform manifest inline (S-061, D2):
+
+```yaml
+# GitLab CI — keyless, ambient OIDC. mirror.yml carries
+#   sign: { keyless: { fulcio: env://SIGSTORE_FULCIO_URL, rekor: env://SIGSTORE_REKOR_URL } }
+sign:
+  id_tokens:
+    SIGSTORE_ID_TOKEN: { aud: sigstore }
+  variables:
+    SIGSTORE_FULCIO_URL: https://fulcio.corp.example
+    SIGSTORE_REKOR_URL: https://rekor.corp.example
+  script:
+    - ocx-mirror package pipeline sign mirror.yml
+```
+
 ## `registry sync` {#registry-sync}
 
 Copy one or more whole upstream index sources into a corporate registry you control, and write the servable index tree that points at them: pre-flight every source (fetch its catalog, filter and expand `include`/`exclude` into destination repositories), detect destination collisions across all sources, then copy each source's packages by digest and write the index documents last. A package's root document is written only after every byte it names is confirmed at the destination, so an interrupted run never leaves a partially-visible package.
@@ -303,13 +375,19 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 | Code | Meaning | Raised by |
 |------|---------|-----------|
 | 0 | Success | — |
-| 1 | Pipeline execution failure (download, push, verify, republish, a cascade repair that could not run at all, or a failed post-patch / post-repair announce); for `registry sync`, one or more packages failed to copy (digest mismatch, malformed manifest, a rejected push, referrers present, or source content missing) — reported per package in the summary, the run continues per `on_error`; for `dist sync`, an `upload.identity` environment variable was unset or empty, one or more archives failed to download or verify, two releases rendered to the same `publish.layout` path, `select:` left no release at all, or an upload was rejected — no manifest is published in any of those cases | `sync`, `prepare`, `push`, `pipeline patch`, `pipeline cascade`, `registry sync`, `dist sync` |
-| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root`, an unparseable `--version`/`--min-version`/`--max-version`, a `--version` the registry does not publish or that names a cascade alias; for `registry sync`, a credential-shaped key anywhere in `registry.yml`, a missing or wrong `kind:`, or `sources[].index` carrying userinfo; the same three rules apply to `dist.yml` under `dist sync` | `validate`, `pipeline generate ci`, `pipeline announce`, `pipeline patch`, `registry sync`, `dist sync` |
+| 1 | Pipeline execution failure (download, push, verify, republish, a cascade repair that could not run at all, or a failed post-patch / post-repair announce); for `registry sync`, one or more packages failed to copy (digest mismatch, malformed manifest, a rejected push, or source content missing) — reported per package in the summary, the run continues per `on_error`; for `dist sync`, an `upload.identity` environment variable was unset or empty, one or more archives failed to download or verify, two releases rendered to the same `publish.layout` path, `select:` left no release at all, or an upload was rejected — no manifest is published in any of those cases | `sync`, `prepare`, `push`, `pipeline patch`, `pipeline cascade`, `pipeline sign`, `registry sync`, `dist sync` |
+| 64 | Usage error: hardcoded webhook URL, empty `tests:`, ambiguous shell, no `announce:` block, two specs sharing one directory, a spec outside `--repo-root`, an unparseable `--version`/`--min-version`/`--max-version`, a `--version` the registry does not publish or that names a cascade alias, or a credential-shaped key or malformed `sign:` block anywhere in `mirror.yml` (see the [`sign:`][spec-sign] shape rules); for `registry sync`, the same credential rule plus a missing or wrong `kind:`, or `sources[].index` carrying userinfo; the same three rules apply to `dist.yml` under `dist sync` | `sync`, `validate`, `pipeline generate ci`, `pipeline announce`, `pipeline patch`, `pipeline sign`, `registry sync`, `dist sync` |
 | 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed, cascade findings remain; for `registry sync`, `registry.yml` validation failed (bad `target`/`destination`/`as:`/glob syntax, duplicate `as:`, a missing `{registry}` placeholder with more than one source, an expanded destination that fails the OCI grammar or collides with another package) or a source declared an index `format_version` newer than this build supports; for `dist sync`, `dist.yml` validation failed (empty `output`, a plaintext or userinfo-bearing `source`/`publish.base_url`, an unknown `publish.layout` placeholder, an `Authorization` entry in `upload.headers`) or the upstream manifest declared a `schema` newer than this build supports | all |
-| 69 | Upstream source or target registry unreachable; Discord 5xx / timeout; for `registry sync`, a source's index tree could not be fetched (unreachable, an unparseable or hostless base URL, or a host refused by the SSRF floor), a root's `repository` pointer was unparseable or SSRF-refused, or the destination registry answered a blob-presence probe without a definite yes or no, aborting the whole run; for `dist sync`, the upstream `dist.json` could not be fetched or parsed, or its body exceeded the 8 MiB cap | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch`, `registry sync`, `dist sync` |
+| 69 | Upstream source or target registry unreachable; Discord 5xx / timeout; for `registry sync`, a source's index tree could not be fetched (unreachable, an unparseable or hostless base URL, or a host refused by the SSRF floor), a root's `repository` pointer was unparseable or SSRF-refused, or the destination registry answered a blob-presence probe without a definite yes or no, aborting the whole run; for `dist sync`, the upstream `dist.json` could not be fetched or parsed, or its body exceeded the 8 MiB cap | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch`, `pipeline sign`, `registry sync`, `dist sync` |
 | 74 | I/O error: template render or file write failure; for `registry sync`, a local write into the served index tree failed (root document, `c/index.json`, `config.json`, a dispatch object, or `--repair-catalog`); for `dist sync`, a write into `output:` failed (an archive, `dist.json`, or a snapshot) | `pipeline generate ci`, `push`, `registry sync`, `dist sync` |
-| 77 | Discord 401/403 — webhook secret likely rotated | `pipeline notify` |
+| 75 | Transient failure, retried automatically with capped, jittered backoff and surfaced only once retries are exhausted — either a plain registry push retry (see [`pipeline push`](#pipeline-push)) or a signing child's (`ocx package push --sign` / `ocx package sign`) transient failure | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 77 | Discord 401/403 — webhook secret likely rotated; also a signing offline-refusal (`--offline`), carried through unchanged from the `ocx` child | `pipeline notify`, `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 78 | Config error during signing — carried through unchanged from the `ocx` child's own classified exit | `sync`, `push`, `pipeline patch`, `pipeline sign` |
 | 79 | Spec file not found | all |
+| 80 | Authentication failure during signing — carried through unchanged from the `ocx` child's own classified exit | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 83 | Transparency log (Rekor) unavailable during signing — retried automatically, same code once retries are exhausted; carried through unchanged from the `ocx` child's own classified exit | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 84 | Referrers unsupported at the destination and the fallback index was refused during signing — carried through unchanged from the `ocx` child | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 85 | KMS key backend not implemented — a `sign.key` reference used one of the five KMS schemes (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`), none of which ocx 0.6.0 implements; carried through unchanged from the `ocx` child | `sync`, `push`, `pipeline patch`, `pipeline sign` |
 
 <!-- external -->
 [discord]: https://discord.com/developers/docs/resources/webhook
@@ -321,6 +399,7 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 [ref-multi-spec]: ./mirror-yml.md#multi-spec
 [spec-announce]: ./mirror-yml.md#announce
 [spec-cascade]: ./mirror-yml.md#cascade
+[spec-sign]: ./mirror-yml.md#sign
 [spec-concurrency]: ./mirror-yml.md#concurrency
 [spec-on-error]: ./registry-yml.md#on-error
 [env-discord-hook]: ./environment.md#ocx-mirror-discord-hook

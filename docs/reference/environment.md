@@ -110,6 +110,33 @@ See the [OCX environment reference][ocx-env] for what each variable does.
 
 **Scope:** `sync`, `pipeline push`, `pipeline describe` (any command that spawns `ocx`).
 
+### Signing credentials set on the ocx child {#signing-credentials}
+
+`OCX_IDENTITY_TOKEN` and `OCX_KEY_PASSWORD` are the conventional variable names `ocx` itself reads for a keyless identity-token override and a key-mode passphrase. `ocx-mirror` resolves [`sign.keyless.identity_token`][spec-sign] and [`sign.key.passphrase`][spec-sign] — each an `env://`-or-`file://` `Ref`; a literal is refused there — and exports the resolved value onto these two names in every `ocx` child's environment, identically on the subprocess push legs, the closing sign sweep, and the backfill.
+
+On GitLab specifically, `ocx` reads its own ambient `SIGSTORE_ID_TOKEN` for the identity token — the `id_tokens` block in the [backfill job](./cli.md#pipeline-sign) is what supplies it, not the mirror. `OCX_IDENTITY_TOKEN` stays the mirror's explicit path, used when `sign.keyless.identity_token` is set.
+
+This is a deliberate re-supply, not an oversight. `ocx`'s own plugin dispatch (`ocx mirror …`) strips both names from the ambient environment before launching a plugin, on the reasoning that a plugin is third-party code that must not inherit a bearer credential. Resolving the ref itself and re-exporting it is what lets signing survive that path — accepted under this project's threat model, where the execution environment is trusted. It survives only while the ref names a variable of the operator's own choosing: naming one of the scrubbed variables empties the mirror's own lookup, which is why doing so is [refused outright](#plugin-dispatch-scrub).
+
+Neither name is added to [`OCX_VARS`](#ocx-forwarding): the `ocx` child inherits the full process environment on every spawn (no `env_clear()` anywhere in the spawn path), so a value already set on the environment — including these two — reaches the child without an explicit forward entry. `OCX_VARS` exists for variables `ocx-mirror` reads out of *its own* environment and re-declares; these two are values `ocx-mirror` computed, not read.
+
+That same inheritance makes an ambient **`OCX_FROZEN=1` incompatible with signing**: both sign argv builders pass `--remote` unconditionally, and `ocx` refuses `--frozen` together with `--remote` with exit 64 — a guard that fires on the env-sourced value too, because `OCX_FROZEN` reaches it through the flag's clap *default* rather than through a flag `conflicts_with` can see. Unset `OCX_FROZEN` on any job that signs; do not drop `--remote` to keep it, because that is exactly the local-index tag resolution `--remote` was added to stop.
+
+**Scope:** any command that signs — `sync`, `pipeline push`, `pipeline patch`, `pipeline sign`.
+
+### Plugin-dispatch credential scrub, and the spec refusal that closes it {#plugin-dispatch-scrub}
+
+`ocx`'s plugin dispatch strips `OCX_IDENTITY_TOKEN`, `OCX_KEY_PASSWORD` **and** `OCX_SIGNING_KEY` from the ambient environment before launching `ocx-mirror` as a plugin (`ocx mirror package pipeline push`). The scrub reaches every `sign:` field that could name one of them, by two different routes:
+
+- A bare [`sign.key`][spec-sign] or `sign.key.ref` is handed to `ocx` as `--key <ref>` and resolved by the **child**, from the environment the dispatch just emptied.
+- `sign.keyless.identity_token` and `sign.key.passphrase` are resolved by the **mirror**, from *its own* environment — which the dispatch emptied one level earlier. The re-supply described [above](#signing-credentials) survives the scrub only because the operator names a variable of their own choosing; name an ocx-owned one and there is nothing left to re-export.
+
+The `--key` route is the dangerous one: `ocx package push --sign` writes the whole cascade before the signature fails, so a run that cannot read its key publishes every rolling tag **unsigned** and then exits non-zero. Reporting failure while the registry holds unsigned artifacts is the worst of both.
+
+`ocx-mirror` therefore **refuses any `sign:` `env://NAME` naming one of those three variables, at spec validation, exit 64** — before a single tag is written. The message names the field and the variable, never the value. The remedy is a rename: pick a name `ocx`'s plugin dispatch does not know to scrub, for example `MIRROR_SIGNING_KEY`, and set `sign.key: env://MIRROR_SIGNING_KEY`.
+
+The refusal is unconditional, not dispatch-detected. A direct, unwrapped `ocx-mirror` invocation — the command line, or a generated workflow's own push step — *can* read `OCX_SIGNING_KEY`, so that one working case is given up deliberately: one `mirror.yml` is read by both invocation shapes, and a spec that signs when run one way and cannot resolve its material when run the other is a trap worth more than the case it costs — whether it then publishes unsigned or fails closed depends on the seat, as the two routes above show. (`ocx exec -- …` and `ocx run -- …` scrub `OCX_SIGNING_KEY` exactly like plugin dispatch, so that case is narrower than it looks.)
+
 ## Secrets in generated workflows {#workflow-secrets}
 
 The rendered workflows reference repository secrets by name. These are GitHub Actions secrets, not variables `ocx-mirror` reads directly.
@@ -144,3 +171,4 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [cli-cascade]: ./cli.md#pipeline-cascade
 [spec-announce]: ./mirror-yml.md#announce
 [spec-push-retry]: ./mirror-yml.md#concurrency-push-retry
+[spec-sign]: ./mirror-yml.md#sign

@@ -47,6 +47,16 @@ gh workflow run "Deploy Dev" --repo ocx-sh/ocx-mirror --ref <branch>
 Tier 2 dispatches real cloud workflows and publishes dev artifacts —
 get explicit user confirmation before dispatching.
 
+## Signing canary (tier 2)
+
+`e2e-ocxmirror-signing` does not exist yet. It is a planned permanent tier-2
+repository under the owner's profile for the signing pipeline specifically,
+created by the owner — not by an agent — at WP 12 of the signing plan after
+explicit confirmation. Once created, it renders keyless in GitHub Actions,
+pushes to `dev.ocx.sh`, and `ocx package verify` checks the pushed index and
+every platform manifest against the workflow's own OIDC identity. Re-pin it
+to a Deploy Dev build the same way as any other tier-2 precedent repo.
+
 ## References
 
 - `references/local-pipeline.md` — Tier 1 verified recipes: fleet sweep,

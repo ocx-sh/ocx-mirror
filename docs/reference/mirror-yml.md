@@ -26,6 +26,7 @@
 | `tests` | array | No* | Commands to run against each installed bundle. Required when `pipeline generate ci` is used. |
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
 | `ocx_mirror` | object | No | Provenance of the ocx-mirror behind a plan. Pins nothing. |
+| `sign` | object | No | Publish-side package signing: keyless Sigstore or a signing key — exactly one mode tag is required. See [`sign`](#sign). |
 | `notify` | object | No | Discord webhook notification settings |
 | `announce` | object | No | Index announce settings. See [`announce`](#announce). |
 | `annotations` | object | No | Extra OCI annotations written onto every published image index. See [`annotations`](#annotations). |
@@ -801,6 +802,46 @@ ocx_mirror:
 !!! info "Where the binaries come from"
     Generated jobs install the toolchain via the [`ocx-sh/setup-ocx`][setup-ocx] action, which activates the mirror repository's project toolchain (`ocx.toml` / `ocx.lock`) onto `PATH` — `ocx-mirror` and `ocx` both come from there. Every generated job pins one `ocx` version end to end: `setup-ocx` is called with an explicit `version:` input, and container test legs download the statically-linked release of that same version. The version is a constant in the renderer, not a spec field, so the whole fleet tests against one binary and it advances when the repository's pinned `ocx-mirror` does.
 
+## `sign` {#sign}
+
+Configures publish-side signing of every package this mirror produces: keyless Sigstore or a signing key — exactly one mode tag is required.
+
+```yaml
+sign:
+  keyless:                      # tag. `keyless: {}` = public Sigstore.
+    fulcio: <ref>               # optional; default https://fulcio.sigstore.dev
+    rekor:  <ref>               # optional; default https://rekor.sigstore.dev
+    identity_token: <ref>       # optional; env:// or file:// only. Only for CIs ocx cannot auto-detect.
+  # xor
+  key: <ref>                    # string form: the ocx --key reference
+  key:                          # map form
+    ref: <ref>                  # required
+    passphrase: <ref>           # optional; env:// or file:// only
+    rekor: <ref>                # optional; present = --rekor-upload --rekor-url, absent = --no-rekor-upload
+```
+
+A present `sign:` carries exactly one mode tag, `keyless` or `key`, never both. Every value under it is a `Ref`: a literal, `env://NAME`, or `file://PATH`. What each spelling means per field:
+
+| Field | literal | `env://NAME` | `file://PATH` |
+|---|---|---|---|
+| `key` / `key.ref` | a bare path, as ocx | passed verbatim to `--key` (ocx resolves) | passed verbatim |
+| `passphrase`, `identity_token` | refused, 64 | resolved by the mirror | resolved by the mirror (≤ `MAX_SECRET_FILE_BYTES`) |
+| `fulcio`, `rekor` | the URL | resolved by the mirror | resolved by the mirror |
+
+**Refused at load, exit 64, naming the field and never the value:** a bare `sign: {}` or a null `sign:`; both `keyless` and `key` tags present; `key: {}` or a `key` map with no `ref`; a `ref` that is empty or contains `BEGIN ` (a literal PEM); a literal `passphrase`/`identity_token` (the secret-class fields refuse the literal form); an `env://` name outside `^[A-Z_][A-Z0-9_]*$`; an `env://` name that is `OCX_IDENTITY_TOKEN`, `OCX_KEY_PASSWORD` or `OCX_SIGNING_KEY`; an empty `file://` path. An unknown key under `sign:` stays a schema error, exit 65.
+
+**Why those three names are refused.** `ocx`'s plugin dispatch strips exactly them from the child's environment ([environment reference][spec-env-signing-scrub]), so under `ocx mirror package pipeline push` the reference resolves to nothing however it is spelled. What that costs depends on the seat, per the table above: `key`/`key.ref` pass verbatim, so `ocx package push --sign` tags the whole cascade *before* the signature fails and publishes it unsigned; `passphrase`/`identity_token` are resolved by the mirror before the first push and fail closed at exit 78 with nothing published. Refusing the spec keeps both unreachable. The remedy is a rename: pick a name `ocx` does not own, for example `env://MIRROR_SIGNING_KEY`, and export the value under it. This costs one working case — a direct, unwrapped `ocx-mirror` invocation, as a generated workflow's own push step makes, *can* read `OCX_SIGNING_KEY` — but a spec that works when run one way and cannot resolve its key when run the other is a trap, and the rename is one line.
+
+**Keyless endpoints are always passed to ocx.** Under `keyless:`, the mirror renders both `--fulcio-url` and `--rekor-url` on every `ocx package push --sign` and `ocx package sign` invocation — from `fulcio`/`rekor` when the spec sets them, otherwise from the mirror's own `DEFAULT_FULCIO_URL`/`DEFAULT_REKOR_URL` constants (the public Sigstore instances). A machine's `[trust.sigstore]` table is therefore never consulted for publishing, even when the spec omits both fields — that table governs `ocx`'s consumer-side (`verify`) resolution only.
+
+**Key references.** A `key:` ref naming a KMS scheme — `awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://` — is passed through to ocx unvalidated. ocx 0.6.0 exits 85 (`UnsupportedKeyBackend`) on all five; only `file` and `env://` key references are implemented.
+
+**Key-mode Rekor.** `key.rekor` present renders `--rekor-upload --rekor-url <U>`; absent renders `--no-rekor-upload`. The mirror emits that flag explicitly rather than leaving it unset: ocx's own resolution ladder falls through flag → `[trust.sigstore].rekor_upload` → off, so an unset flag would silently inherit a fleet-wide `rekor_upload = true` and push a private digest to the public log.
+
+**What a `sign:` block renders into a generated workflow.** [`pipeline generate ci`][cli-generate-ci] gives the push step and the patch step an `env:` line for every `env://NAME` the block names — `${{ secrets.NAME }}` for `key`, `key.ref`, `key.passphrase` and `keyless.identity_token`, `${{ vars.NAME }}` for `keyless.fulcio`, `keyless.rekor` and `key.rekor`, so each name is a repository *secret* or a repository *variable* accordingly (one name claimed by both classes resolves to `secrets.`). A `file://` ref names a path on the runner and a literal is already the value, so neither renders a line. Under `keyless:` those two jobs additionally declare `id-token: write`, the OIDC scope the Fulcio exchange needs; key mode exchanges no token and is granted no such scope. No other job is touched.
+
+**Signing needs an `ocx` that carries the endpoint flags.** `keyless:` renders `--fulcio-url` and `--rekor-url` onto `ocx package push --sign`, and `key:` renders `--rekor-url` whenever `key.rekor` is set. `ocx package push` gained those two flags *after* 0.6.0, so an `ocx` at 0.6.0 or older fails the push leg with exit 64 and `unexpected argument '--fulcio-url'`. Two pins decide which `ocx` runs, and they move independently: the co-located `ocx.toml`/`ocx.lock` toolchain for a local [`package sync`][cli-sync] or [`pipeline push`][cli-push], and `OCX_CONTAINER_CLI_TAG` — the constant [`pipeline generate ci`][cli-generate-ci] bakes into every rendered `setup-ocx` step's `version:` — for a run in CI. Neither is checked when the workflow is rendered, and the rendered YAML names no flag, because the argv is assembled at run time. `ocx package sign` has carried both flags since 0.6.0, so [`pipeline sign`][cli-sign] and the closing sweep are unaffected; so is a `key:` with no `key.rekor`, which renders only `--no-rekor-upload`.
+
 ## `notify` {#notify}
 
 Configures [Discord][discord] webhook notifications. The webhook fires after the push job completes.
@@ -1192,6 +1233,7 @@ notify:
 ```
 
 [spec-ocx-forwarding]: ./environment.md#ocx-forwarding
+[spec-env-signing-scrub]: ./environment.md#plugin-dispatch-scrub
 
 <!-- external -->
 [github-releases]: https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
@@ -1214,6 +1256,9 @@ notify:
 [cmd-sync]: ./cli.md#sync
 [cli-announce]: ./cli.md#pipeline-announce
 [cli-generate-ci]: ./cli.md#pipeline-generate-ci
+[cli-push]: ./cli.md#pipeline-push
+[cli-sync]: ./cli.md#sync
+[cli-sign]: ./cli.md#pipeline-sign
 [cli-describe]: ./cli.md#pipeline-describe
 [cli-patch]: ./cli.md#pipeline-patch
 [cli-pipeline-cascade]: ./cli.md#pipeline-cascade
