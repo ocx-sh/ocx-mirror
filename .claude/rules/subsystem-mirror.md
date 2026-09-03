@@ -69,9 +69,10 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
 | `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`, optional `schedule` putting the generated catch-up workflow on a timer — charset-checked by `validate_announce_config`); logical index name, spelled out — never derived from `target` |
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); the URL-reject validator itself is `spec/validate.rs::policy_check_notify` |
+| `spec/sign_config.rs` | `SignConfig` (`keyless:` xor `key:`), `KeylessConfig`, `KeyConfig` (string or map — hand-rolled `Deserialize` keeps serde's `unknown field` naming), `KeyFullConfig`, and `Ref` (literal, `env://NAME`, `file://PATH`; `Debug` redacts literals). Shape refusals run in two seats: the raw merged document before deserialization (null block or tag, `key` map without `ref`, non-string secret scalar) and `spec/validate.rs::validate_sign_config` over the typed value (mode tags, empty or PEM-bearing ref, literal in a secret-class field, `env://` name grammar, empty `file://`); every refusal is `SpecUsageError` (64) naming the dotted field, never the value |
 | `spec/registry.rs` | `RegistrySpec` root (`registry.yml`) + `RegistrySource`, `RegistryConcurrency`, `OnError` — a different root type from `MirrorSpec`, not a variant of it (C-001…C-004, C-006); re-exported through `spec.rs` alongside `MirrorSpec`, `lib.rs` untouched (C-008) |
 | `spec/dist.rs` | `DistSpec` root (`dist.yml`) + `Select`, `Publish`, `Upload`, `Identity` — the third root type, same tier and re-export shape as `RegistrySpec`. **Deliberate convention, third occurrence:** a spec root validates a grammar by calling into the pipeline module that owns it (here `dist_sync::layout::LayoutTemplate`, as `spec/registry.rs` calls `registry_sync::destination` and `catalog::index_host`). The owner of a grammar is the only place that can validate it; this inversion is accepted, not debt |
-| `spec/prescan.rs` | `pre_scan()` — raw-`serde_yaml_ng::Value` scan of a merged spec document before typed deserialization: credential deny-list at any depth, the `kind:` discriminator (parameterised — `registry.yml` and `dist.yml` both pass their expected kind), `sources[].index` userinfo (C-005); every rejection is `SpecUsageError` (64), no offending value ever echoed. The deny-list is why `dist.yml` spells its upload credentials `identity:` with `*_env` names — a key called `auth` is refused at any depth, and the guard is worth more than the field name |
+| `spec/prescan.rs` | `pre_scan()` — raw-`serde_yaml_ng::Value` scan of a merged spec document before typed deserialization: credential deny-list at any depth, the `kind:` discriminator (parameterised — `registry.yml` and `dist.yml` pass their expected kind; `load_spec` passes `None` for `mirror.yml`, which skips the `kind:` job and keeps the deny-list), `sources[].index` userinfo (C-005); every rejection is `SpecUsageError` (64), no offending value ever echoed. The deny-list is why `dist.yml` spells its upload credentials `identity:` with `*_env` names — a key called `auth` is refused at any depth, and the guard is worth more than the field name |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
 | `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
 | `source/pylock.rs` | PEP 751 `pylock.toml` reader → single `VersionInfo` (the app's locked version, PEP 503 name match); wheel selection happens later in `plan.rs`/`prepare.rs` via `ocx_python` |
@@ -135,10 +136,10 @@ The bolded window is load-bearing. Every step in it must sit between extraction 
 ### Phase 2: Push (sequential by version, oldest first)
 
 1. Push bundle to registry, each attempt bounded by a 3600s timeout; a
-   transient failure (`ocx package push` exit 75 only — exit 69 is never
-   retried, since a rerun would not change that outcome) is retried up to
-   `concurrency.max_retries` extra attempts with 1s-doubling-to-30s-capped
-   backoff plus ±10% jitter
+   transient failure (`ocx package push` exit 75, or exit 83 once `sign:` is
+   set — a transparency-log outage; exit 69 is never retried, since a rerun
+   would not change that outcome) is retried up to `concurrency.max_retries`
+   extra attempts with 1s-doubling-to-30s-capped backoff plus ±10% jitter
 2. Cascade derived tags if enabled (X.Y.Z → X.Y → X → latest)
 3. Track pushed (version, platform) pairs for cascade correctness
 4. Complete the cascade for the platforms an EARLIER run published
@@ -157,7 +158,14 @@ whose config bytes the running build would not reproduce exactly — a re-push
 there would rewrite the platform manifest digest instead of only moving tags.
 Best-effort: the packages are published either way, so a failure warns.
 
-The 75/69 split above only exists from **ocx ≥ 0.5.3** onward — the `ocx`
+With `sign:` set on the spec: push signs each platform manifest inline as it
+lands, the closing sign sweep signs each index once its tag is written, and
+the legacy in-process leg signs per reference (platform, then tag) with no
+sweep of its own.
+
+The 75/69 split above only exists from **ocx ≥ 0.5.3** onward, and the 83
+arm only from the ocx release carrying `push --fulcio-url`/`--rekor-url` —
+the floor bumps off 0.6.0 (the submodule bump lands it) — the `ocx`
 binary that actually runs the push subprocess, i.e. whatever `ocx.toml` /
 `ocx.lock` toolchain the running `ocx-mirror` is co-located with, not the
 separately-pinned `ocx` version a *generated* downstream workflow bakes into
@@ -222,7 +230,7 @@ To re-enable a pair, delete the entry (next clean run backfills). Use these fiel
 | `PylockError` | 65 (DataError) | `source.type: pylock`/`pypi` resolution failure: no locked package matches the app name, invalid platform/variant, no compatible wheel (`select_wheels`), wheel sha256 ≠ lock hash, collision, or compose failure — all malformed spec/lock content, not a transient resource. Also covers a `pypi` lock-derivation `uv pip compile` non-zero exit or fail-closed re-parse rejection (`lock_derive.rs`). `RepackError` maps to `ExecutionFailed` (1); download failure to `SourceError` (69); `uv` binary missing/spawn failure, timeout, or interpreter materialization failure also maps to `ExecutionFailed` (1) |
 | `PypiError` | 65 (DataError) | `source.type: pypi` discovery failure classified as malformed input: a Simple API 404 from **every** configured index (the package name exists on none of them). A genuinely unreachable index — connection refused, timeout, 5xx, 401, malformed body — stays `SourceError` (69), because it means "unknown", not "absent"; see `source::pypi::classify_error` |
 | `TargetError` | 69 (Unavailable) | Target registry read failed (tag list / manifest fetch) — fail-safe abort instead of re-flagging published versions as new (issue #157) |
-| `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, ambiguous shell, `ocx_install:` block |
+| `SpecUsageError` | 64 (UsageError) | Invalid `mirror.yml` usage: hardcoded webhook URL, empty `tests:`, ambiguous shell, `ocx_install:` block, a malformed `sign:` block (`spec/sign_config.rs`), or a credential-named key anywhere in the document (`spec/prescan.rs` deny-list) |
 | `RendererDrift` | 65 (DataError) | `--check` mode: generated files differ from current spec |
 | `JunitParseError` | 65 (DataError) | JUnit XML parse failure in `pipeline push` |
 | `RunSummaryError` | 65 (DataError) | Cannot read or write `run-summary.json` |
