@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! GHCR-specific job permissions and registry login steps.
+//! Job permissions, registry login steps, and the signing environment.
 //!
 //! A mirror publishing to `ghcr.io` authenticates with the workflow's own
 //! `GITHUB_TOKEN` and needs `packages:` scopes the default token does not
 //! carry; every other registry uses explicit credentials and needs neither.
+//!
+//! A `sign:` block adds a second reason for a job to declare permissions —
+//! keyless signing exchanges an OIDC token, which needs `id-token: write` —
+//! and a set of `env:` lines carrying the variables the spec names. Both live
+//! here because both answer the same question: what capability does this job's
+//! credential have to grant.
 
-use crate::spec::MirrorSpec;
+use std::collections::BTreeMap;
+
+use crate::spec::{KeyConfig, MirrorSpec, Ref};
 
 /// GitHub's own container registry — authenticated with the workflow's
 /// `GITHUB_TOKEN`, not with the shared `OCX_MIRROR_REGISTRY_*` org secrets.
@@ -44,12 +52,121 @@ pub const GHCR_REGISTRY: &str = "ghcr.io";
 /// — a separate secret, not this token.
 pub const GHCR_PUSH_PERMISSIONS: &str = "    permissions:\n      contents: read\n      packages: write\n      actions: read\n      checks: write\n      pull-requests: write\n";
 
-pub fn render_push_permissions(spec: &MirrorSpec) -> &'static str {
-    if spec.target.registry == GHCR_REGISTRY {
-        GHCR_PUSH_PERMISSIONS
-    } else {
-        ""
+/// `id-token: write` — the OIDC scope a keyless signature is exchanged for.
+///
+/// Always appended to whichever block the job already declares rather than
+/// emitted as one of its own: two `permissions:` keys in one job parse as
+/// YAML and the later silently wins, which on a GHCR push would drop
+/// `packages: write` from a mirror that had been publishing for years.
+const ID_TOKEN_PERMISSION: &str = "      id-token: write\n";
+
+/// `permissions:` block for a *non-GHCR* push job that signs keylessly.
+///
+/// A non-GHCR push job has never declared a permission — it runs on the
+/// repository's default token scopes, and that is the first block ever
+/// emitted there. Naming `id-token: write` sets every unnamed scope to
+/// `none`, so the block has to pay for the job's other steps at the same
+/// time: it is [`GHCR_PUSH_PERMISSIONS`] minus `packages: write`, the one
+/// scope only ghcr.io's own push needs (every other registry authenticates
+/// with `OCX_MIRROR_REGISTRY_TOKEN`). See that constant for the per-step
+/// justification of the remaining four.
+const SIGNING_PUSH_PERMISSIONS: &str =
+    "    permissions:\n      contents: read\n      actions: read\n      checks: write\n      pull-requests: write\n";
+
+/// `permissions:` block for a *non-GHCR* patch job that signs keylessly.
+///
+/// Patch checks out and installs ocx and nothing else — no test results, no
+/// job-URL lookup — so `contents: read` is the whole block beside the OIDC
+/// scope.
+const SIGNING_PATCH_PERMISSIONS: &str = "    permissions:\n      contents: read\n";
+
+/// Whether this spec signs with an OIDC identity rather than a key.
+///
+/// Key mode signs with material the spec names and never exchanges a token,
+/// so it takes no `id-token` scope — granting one would hand the job a
+/// capability nothing in it uses.
+fn signs_keyless(spec: &MirrorSpec) -> bool {
+    spec.sign.as_ref().is_some_and(|sign| sign.keyless.is_some())
+}
+
+pub fn render_push_permissions(spec: &MirrorSpec) -> String {
+    match (spec.target.registry == GHCR_REGISTRY, signs_keyless(spec)) {
+        (true, false) => GHCR_PUSH_PERMISSIONS.to_string(),
+        (true, true) => format!("{GHCR_PUSH_PERMISSIONS}{ID_TOKEN_PERMISSION}"),
+        (false, false) => String::new(),
+        (false, true) => format!("{SIGNING_PUSH_PERMISSIONS}{ID_TOKEN_PERMISSION}"),
     }
+}
+
+/// `permissions:` block for the patch job.
+///
+/// Splits off [`render_registry_write_permissions`], which describe and
+/// cascade keep: patch re-emits published manifests and so signs them (C-071),
+/// while describe publishes catalog metadata and cascade re-points tags —
+/// neither pushes a package manifest, so neither takes the OIDC scope.
+pub fn render_patch_permissions(spec: &MirrorSpec) -> String {
+    match (spec.target.registry == GHCR_REGISTRY, signs_keyless(spec)) {
+        (true, false) => GHCR_REGISTRY_WRITE_PERMISSIONS.to_string(),
+        (true, true) => format!("{GHCR_REGISTRY_WRITE_PERMISSIONS}{ID_TOKEN_PERMISSION}"),
+        (false, false) => String::new(),
+        (false, true) => format!("{SIGNING_PATCH_PERMISSIONS}{ID_TOKEN_PERMISSION}"),
+    }
+}
+
+/// The `env:` lines a signing step needs, appended to the block it already has.
+///
+/// `resolve_sign` reads every `env://NAME` the spec names out of the child
+/// process's own environment, so the workflow is what has to put it there.
+/// Secret-class refs — the key, its passphrase, an explicit identity token —
+/// map from `secrets.`; the Fulcio and Rekor endpoints are URLs rather than
+/// secrets and map from `vars.`, which keeps them readable in a run log.
+/// A `file://` ref names a path on the runner and a literal is already the
+/// value, so neither contributes a line.
+///
+/// Keyed by variable name rather than emitted in field order: two fields may
+/// legitimately name one variable, and a repeated key would make GitHub reject
+/// the workflow outright. Secrets are collected after vars so a name claimed by
+/// both classes resolves to the more conservative of the two.
+pub fn render_sign_env(spec: &MirrorSpec) -> String {
+    let Some(sign) = spec.sign.as_ref() else {
+        return String::new();
+    };
+
+    let mut vars: Vec<&Ref> = Vec::new();
+    let mut secrets: Vec<&Ref> = Vec::new();
+    if let Some(keyless) = &sign.keyless {
+        vars.extend(keyless.fulcio.iter().chain(keyless.rekor.iter()));
+        secrets.extend(keyless.identity_token.iter());
+    }
+    match &sign.key {
+        Some(KeyConfig::Reference(reference)) => secrets.push(reference),
+        Some(KeyConfig::Full(key)) => {
+            secrets.push(&key.reference);
+            secrets.extend(key.passphrase.iter());
+            vars.extend(key.rekor.iter());
+        }
+        None => {}
+    }
+
+    let mut mapped: BTreeMap<&str, &str> = BTreeMap::new();
+    for (references, context) in [(vars, "vars"), (secrets, "secrets")] {
+        for reference in references {
+            if let Ref::Env(name) = reference {
+                mapped.insert(name, context);
+            }
+        }
+    }
+    if mapped.is_empty() {
+        return String::new();
+    }
+
+    let mut rendered = String::from(
+        "\n          # Signing material named by `sign:` in the spec — ocx-mirror resolves\n          # each `env://NAME` from this step's environment.",
+    );
+    for (name, context) in mapped {
+        rendered.push_str(&format!("\n          {name}: ${{{{ {context}.{name} }}}}"));
+    }
+    rendered
 }
 
 /// `permissions:` block for the discover job.

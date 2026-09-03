@@ -1,0 +1,35 @@
+# Mirror spec: `sign.key` in the string form — the bare ocx `--key` reference,
+# no passphrase and no Rekor upload (renders `--no-rekor-upload`).
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+
+sign:
+  key: env://MIRROR_SIGNING_KEY

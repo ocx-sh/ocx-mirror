@@ -76,6 +76,14 @@ const NATIVE_FIXTURES: &[&str] = &[
     "mirror-variants.yml",
     "mirror-pylock.yml",
     "mirror-pypi.yml",
+    // The `sign:` matrix (C-071). Four non-GHCR shapes — public keyless, named
+    // endpoints, and the two key forms — plus the GHCR cell, whose push job
+    // already carried a `permissions:` block for `id-token: write` to join.
+    "mirror-sign-keyless.yml",
+    "mirror-sign-keyless-endpoints.yml",
+    "mirror-sign-keyless-ghcr.yml",
+    "mirror-sign-key.yml",
+    "mirror-sign-key-full.yml",
 ];
 
 /// Render every generated file for `fixture` into one comparable blob,
