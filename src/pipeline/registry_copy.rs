@@ -19,11 +19,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
+use ocx_lib::oci::client::OciTransport;
+use ocx_lib::oci::client::error::ClientError;
 use ocx_lib::oci::index::RootTag;
 use ocx_lib::oci::native::oci_client::client::BlobMountResponse;
 use ocx_lib::oci::native::oci_client::errors::{OciDistributionError, OciErrorCode};
-use ocx_lib::oci::{Digest, Identifier, Index, Manifest, Reference, native};
-use tokio::sync::{Mutex, Semaphore};
+use ocx_lib::oci::{Descriptor, Digest, Identifier, ImageIndexEntry, Index, Manifest, Reference, native};
+use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::error::MirrorError;
 use crate::filter::pep440_sort_key;
@@ -39,7 +41,7 @@ use crate::spec::{RegistrySource, Target};
 /// bare `res.bytes()`, so bounding the allocation needs a capped read on the
 /// transport itself and neither layer has one.
 ///
-/// [`detect_referrers`]'s two legs are bounded differently, and neither by
+/// [`source_referrers`]'s two legs are bounded differently, and neither by
 /// this constant alone. The native leg is bounded *before* the read: ocx
 /// v0.6.0's `Client::pull_referrers_native` streams through a 4 MiB counted
 /// read and additionally refuses past 4096 descriptors, which is the pre-read
@@ -111,8 +113,8 @@ const CHILD_FANOUT_CEILING: usize = 8;
 /// chain of indexes each naming one more is a few hundred bytes to author and
 /// ends in stack exhaustion. Digest cycles are not the risk: a child's digest
 /// covers its parent's bytes, so a cycle would need a sha256 preimage. Depth
-/// alone is. [`detect_referrers`] was bounded to one level for this same
-/// reason; this walk was not.
+/// alone is. The referrer sweep is bounded separately, by
+/// [`REFERRER_DEPTH_CEILING`], because its hops are a different graph.
 ///
 /// 8, counting the dispatch object the tag names as level 0. Every
 /// multi-platform artifact published anywhere is **depth 1** — one image index
@@ -124,9 +126,63 @@ const CHILD_FANOUT_CEILING: usize = 8;
 /// recursion is a problem.
 const MANIFEST_DEPTH_CEILING: usize = 8;
 
-/// Referrer digests named in a detection failure before the message is
-/// truncated to a total count (C-024).
-pub const REFERRER_REPORT_LIMIT: usize = 10;
+/// Referrer hops the sweep carries below a copied manifest (C-061).
+///
+/// A referrer is itself a manifest and can carry referrers of its own — a
+/// signature over a signature, an attestation over an attestation — so the
+/// sweep is a walk over a second graph, not a flat list, and it needs its own
+/// ceiling for the same reason [`MANIFEST_DEPTH_CEILING`] exists: the depth is
+/// chosen by the source.
+///
+/// 2, counting the copied manifest itself as hop 0. Hop 1 is what cosign,
+/// notation and every attestation tool writes; hop 2 covers an attestation
+/// *about* a signature, which is the deepest shape anyone ships. A referrer
+/// discovered at hop 3 is refused rather than silently dropped — a mirror that
+/// quietly stops carrying signatures past some depth is worse than one that
+/// says so.
+const REFERRER_DEPTH_CEILING: usize = 2;
+
+/// Referrers of one subject the sweep carries before refusing the package
+/// (C-061).
+///
+/// The referrers listing is foreign data with no bound of its own below the
+/// 4096 descriptors ocx's own read already refuses, and every entry costs a
+/// manifest fetch plus a blob fan-out at the destination. 64 clears every real
+/// subject by orders of magnitude — a signed release carries a signature, an
+/// attestation and an SBOM, so three — while keeping a hostile subject from
+/// turning one tag into 4096 nested copies.
+const REFERRER_COUNT_CEILING: usize = 64;
+
+/// The cosign sidecar tag suffixes, appended to [`referrer_fallback_tag`]'s
+/// spelling of a subject digest (C-062).
+///
+/// [`referrer_fallback_tag`]: ocx_lib::package::tag::referrer_fallback_tag
+///
+/// Cosign's pre-OCI-1.1 scheme parks a signature at `sha256-<hex>.sig` beside
+/// its subject, and the OCI referrers fallback tag for a sha256 subject is
+/// `sha256-<hex>` exactly — 64 hex characters, so the spec's "truncated to 64"
+/// truncates nothing. The two schemes therefore share a prefix, which is why
+/// one helper spells both.
+///
+/// These tags are **not** referrers: nothing links them to their subject but
+/// the tag name, so no referrers listing at either end mentions them and a
+/// mirror that copies only the referrers graph silently drops every cosign
+/// signature written before OCI 1.1.
+///
+/// **Duplicates ocx's `package::tag::SIDECAR_SUFFIXES`** (`tag.rs:205-207`),
+/// identical today and asymmetrically consumed: the backfill's tag filter
+/// reaches *ocx's* list through `Tag::is_reserved_str`, while this sweep uses
+/// this one. A fourth suffix added upstream would therefore be **reserved by
+/// the backfill and not carried by `registry sync`** — one-sided and silent.
+///
+/// Not deduplicated here because ocx's list and its `sidecar_tag` are both
+/// `pub(crate)`, and `is_reserved_str` cannot substitute: it is a predicate
+/// ("is this tag reserved") where the sweep needs an enumerator ("which tags
+/// do I go fetch"). Closing it needs an ocx export — tracked upstream at
+/// ocx-sh/ocx#404. The mitigating fact is that both the list and
+/// `is_referrer_fallback_tag` sit within six lines of each other in `tag.rs`,
+/// so whoever adds a fourth is already editing the place that must change.
+const SIDECAR_SUFFIXES: [&str; 3] = [".sig", ".att", ".sbom"];
 
 /// The reserved tag carrying a package's rendered description (C-025).
 ///
@@ -350,6 +406,35 @@ pub struct CopyContext {
     /// correct, but an unsuppressed warning fires once per blob, ~9,510 times
     /// on a full catalog.
     pub mount_warnings: Arc<Mutex<HashSet<(String, String)>>>,
+    /// Destination-side transport — the **only** route to the referrers
+    /// tag-schema merge (C-063).
+    ///
+    /// `native::Client` can push a manifest and read a tag, but it has no
+    /// spelling for the read-modify-write append an OCI fallback index needs,
+    /// and re-implementing that here would fork the retry budget and the
+    /// already-present check away from `ocx_lib`'s. Everything else on the
+    /// destination keeps going through `destination_client`, so this field is
+    /// not a second client so much as one missing verb.
+    pub destination_transport: Box<dyn OciTransport>,
+    /// Whether the destination answers the Referrers API, probed **once per
+    /// run** (C-063).
+    ///
+    /// One destination registry per run, so the verdict cannot differ between
+    /// packages; a per-package probe would be one extra round trip per tag for
+    /// an answer already known. Fallible init, so `get_or_try_init` — a probe
+    /// that could not be answered must not cache a guess.
+    pub referrer_destination: OnceCell<ReferrerDestination>,
+    /// `(destination repository, referrer digest)` pairs this run already
+    /// carried, so a diamond copies its shared subject once (C-061).
+    ///
+    /// Keyed by repository for the same reason [`confirmed_here`] is: a
+    /// referrer present in one destination repository says nothing about
+    /// another, and each package resolves to its own `physical_repository`.
+    /// That makes this **at least** the per-package set C-061 asks for, plus
+    /// the dedup across the tags of one package that a per-package set would
+    /// also give — 21 tags over 9 indexes is an ordinary package, and every
+    /// one of them re-declares the same signature.
+    pub carried_referrers: Arc<Mutex<HashSet<(String, Digest)>>>,
 }
 
 /// One tag to copy, and the manifest digest it names (C-021).
@@ -375,6 +460,100 @@ pub enum BlobOutcome {
     Uploaded,
 }
 
+/// How a carried referrer becomes discoverable at the destination (C-063).
+///
+/// Not a capability report about the registry so much as a routing decision:
+/// pushing a subject-bearing manifest is the same request either way, and this
+/// says only whether a fallback index has to be written beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferrerDestination {
+    /// The destination answers `/v2/<name>/referrers/<digest>` and computes
+    /// the listing itself — nothing more to write.
+    Supported,
+    /// The destination has no Referrers API, so the carried referrer is
+    /// discoverable only through the OCI tag-schema fallback index, which this
+    /// mirror appends to.
+    Fallback,
+}
+
+/// Whether the manifest about to be pushed carries an OCI `subject`
+/// descriptor.
+///
+/// An enum rather than a `bool` because it decides how one status code is
+/// read: a `405` on a subject-bearing PUT is [`CopyError::SubjectRejected`]
+/// and a `405` on any other PUT is an ordinary rejection, and a bare `true` at
+/// the call site says neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubjectCarriage {
+    /// An ordinary manifest — a tag's content, a platform manifest, a sidecar.
+    Absent,
+    /// A referrer manifest, whose `subject` is the whole reason it exists.
+    Present,
+}
+
+/// What a manifest walk carries besides its own bytes (C-060…C-063).
+///
+/// Threaded beside `depth` rather than folded into it: the manifest-nesting
+/// depth and the referrer hop count are two different graphs with two
+/// different ceilings, and collapsing them would let a deep index budget away
+/// a signature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Carriage {
+    /// The referrer hop this manifest sits at, or `None` where the sweep does
+    /// not run below it at all — a sidecar's own subtree, which is a leaf by
+    /// construction.
+    hop: Option<usize>,
+    /// How a `405` from the destination is read for this manifest's push.
+    subject: SubjectCarriage,
+}
+
+impl Carriage {
+    /// The carriage a tag's own content starts with: hop 0, no subject.
+    fn root() -> Self {
+        Self {
+            hop: Some(0),
+            subject: SubjectCarriage::Absent,
+        }
+    }
+
+    /// The carriage a child manifest of an image index inherits.
+    ///
+    /// The hop is **not** advanced: an index's platform manifests sit at the
+    /// same referrer depth as the index, and cosign signs the platform
+    /// manifests, so a child that did not sweep would drop every per-platform
+    /// signature.
+    fn child(self) -> Self {
+        Self {
+            hop: self.hop,
+            subject: SubjectCarriage::Absent,
+        }
+    }
+
+    /// The carriage a referrer sitting `hop` hops out is copied under.
+    ///
+    /// Takes the hop rather than deriving it from `self`, because the caller
+    /// has already had to compute and bound it ([`within_referrer_depth`]) —
+    /// deriving it twice is where the two would drift.
+    fn referrer(hop: usize) -> Self {
+        Self {
+            hop: Some(hop),
+            subject: SubjectCarriage::Present,
+        }
+    }
+
+    /// The carriage a cosign sidecar is copied under.
+    ///
+    /// `hop: None` — a sidecar is discovered by tag name alone, so its own
+    /// referrers and sidecars are not part of any subject's graph, and
+    /// sweeping them would walk `.sig.sig` tags forever.
+    fn sidecar() -> Self {
+        Self {
+            hop: None,
+            subject: SubjectCarriage::Absent,
+        }
+    }
+}
+
 /// Per-package transfer counters, summed into the run report.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CopyStats {
@@ -383,16 +562,27 @@ pub struct CopyStats {
     pub blobs_mounted: usize,
     pub blobs_uploaded: usize,
     pub bytes_uploaded: u64,
+    /// Referrer manifests carried across, counted once per (repository,
+    /// digest) pair the sweep actually copied (C-064).
+    pub referrers_copied: usize,
+    /// Cosign sidecar tags carried across (C-064).
+    pub sidecars_copied: usize,
+    /// Sidecar tags **not** carried because the destination already holds that
+    /// tag at a different digest (C-062, C-064).
+    pub sidecar_conflicts: usize,
 }
 
 impl CopyStats {
     /// Fold a child manifest's counters into this one.
-    fn merge(&mut self, other: CopyStats) {
+    pub fn merge(&mut self, other: CopyStats) {
         self.manifests += other.manifests;
         self.blobs_skipped += other.blobs_skipped;
         self.blobs_mounted += other.blobs_mounted;
         self.blobs_uploaded += other.blobs_uploaded;
         self.bytes_uploaded += other.bytes_uploaded;
+        self.referrers_copied += other.referrers_copied;
+        self.sidecars_copied += other.sidecars_copied;
+        self.sidecar_conflicts += other.sidecar_conflicts;
     }
 
     /// Record one blob outcome and the bytes it moved.
@@ -435,9 +625,18 @@ pub enum CopyError {
     MalformedManifest(String),
     /// The destination rejected a push.
     PushRejected(String),
-    /// The manifest carries referrers, which v1 detects and refuses to copy.
-    /// Bounded to [`REFERRER_REPORT_LIMIT`] digests plus the total.
-    ReferrersPresent { shown: Vec<Digest>, total: usize },
+    /// The destination refused a manifest carrying an OCI `subject`
+    /// descriptor — Amazon ECR answers `405 Method Not Allowed` (C-063).
+    ///
+    /// Its own variant rather than a [`Self::PushRejected`] because it is not
+    /// a fault of these bytes: the *package* copied, and only its signatures
+    /// did not. Aggregating, per package, never a run abort — a registry that
+    /// refuses subjects refuses them for every package, and ending the run
+    /// would mean a mirror pointed at ECR copies nothing at all.
+    SubjectRejected { registry: String, status: u16 },
+    /// One subject named more referrers than [`REFERRER_COUNT_CEILING`]
+    /// (C-061).
+    ReferrerBudgetExceeded { subject: Digest, limit: usize },
     /// A manifest the source no longer serves — a tag's `content` digest, or
     /// a descriptor nested under one, garbage-collected upstream between the
     /// root fetch and the copy.
@@ -472,22 +671,15 @@ impl std::fmt::Display for CopyError {
             Self::SourceUnavailable(message) => write!(f, "source unavailable: {message}"),
             Self::MalformedManifest(message) => write!(f, "malformed source manifest: {message}"),
             Self::PushRejected(message) => write!(f, "destination rejected the push: {message}"),
-            Self::ReferrersPresent { shown, total } => {
-                write!(
-                    f,
-                    "manifest carries {total} referrer(s), which v1 detects but does not copy: "
-                )?;
-                for (position, digest) in shown.iter().enumerate() {
-                    if position > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{digest}")?;
-                }
-                if *total > shown.len() {
-                    write!(f, ", and {} more", total - shown.len())?;
-                }
-                Ok(())
-            }
+            Self::SubjectRejected { registry, status } => write!(
+                f,
+                "{registry} answered {status} to a manifest carrying a subject descriptor, \
+                 so this package's signatures were not carried"
+            ),
+            Self::ReferrerBudgetExceeded { subject, limit } => write!(
+                f,
+                "subject {subject} names more than {limit} referrers, past the sweep's ceiling"
+            ),
             Self::ContentMissing { content } => {
                 write!(f, "content {content} no longer resolves at the source")
             }
@@ -621,6 +813,132 @@ fn within_depth(digest: &Digest, depth: usize) -> Result<(), CopyError> {
     )))
 }
 
+/// Refuse a referrer discovered past [`REFERRER_DEPTH_CEILING`] (C-061).
+///
+/// Called on the *discovered* referrer's hop, before it is fetched, so a chain
+/// authored to exhaust the sweep costs one refusal rather than one round trip
+/// per level. A refusal rather than a silent stop: a mirror that quietly drops
+/// signatures past a depth nobody documented is indistinguishable from one
+/// that never had them.
+fn within_referrer_depth(subject: &Digest, hop: usize) -> Result<(), CopyError> {
+    if hop <= REFERRER_DEPTH_CEILING {
+        return Ok(());
+    }
+    Err(CopyError::MalformedManifest(format!(
+        "a referrer of {subject} sits {hop} referrer hops out, past the \
+         {REFERRER_DEPTH_CEILING}-hop ceiling"
+    )))
+}
+
+/// Refuse a subject naming more referrers than [`REFERRER_COUNT_CEILING`]
+/// (C-061).
+fn within_referrer_budget(subject: &Digest, count: usize) -> Result<(), CopyError> {
+    if count <= REFERRER_COUNT_CEILING {
+        return Ok(());
+    }
+    Err(CopyError::ReferrerBudgetExceeded {
+        subject: subject.clone(),
+        limit: REFERRER_COUNT_CEILING,
+    })
+}
+
+/// The HTTP status behind a registry error, where the fork kept one.
+///
+/// Structural, never a string match on the rendered message (ERR-13): the
+/// wording of an `OciDistributionError` is not a contract and a `contains`
+/// against it would silently stop classifying on the next fork bump. Two of
+/// the three shapes carry a status — `ServerError` its own `code`, a
+/// `reqwest`-wrapped `RequestError` its response's — and `RegistryError`
+/// carries an OCI error envelope with no status at all, which is why this
+/// answers `Option`.
+fn registry_status(error: &OciDistributionError) -> Option<u16> {
+    match error {
+        OciDistributionError::ServerError { code, .. } => Some(*code),
+        OciDistributionError::RequestError(source) => source.status().map(|status| status.as_u16()),
+        _ => None,
+    }
+}
+
+/// Read a destination referrers probe into a routing decision (C-063).
+///
+/// `Ok(None)` is the fork's own capability verdict — it checks the status
+/// before reading the body, which is what makes it usable against `registry:2`
+/// at all: that registry answers the referrers route with a plain-text
+/// `404 page not found`, so anything asserting on a parsed body would report a
+/// malformed index instead of a missing endpoint.
+///
+/// **404 and 405 both mean "no Referrers API"** (C-063). The spec names 404,
+/// but a registry that routes `/v2/<name>/referrers/…` to a handler it does
+/// not implement answers `405 Method Not Allowed`, and reading that as a
+/// transport fault would abort a run against a registry the fallback route
+/// serves perfectly well.
+///
+/// Any other failure aborts the run rather than guessing: routing a carried
+/// referrer down the wrong branch either publishes a fallback index a
+/// Referrers-API registry will contradict, or publishes nothing discoverable
+/// at all.
+fn referrer_verdict(
+    probe: Result<Option<ocx_lib::oci::ImageIndex>, OciDistributionError>,
+) -> Result<ReferrerDestination, CopyError> {
+    match probe {
+        Ok(Some(_)) => Ok(ReferrerDestination::Supported),
+        Ok(None) => Ok(ReferrerDestination::Fallback),
+        Err(error) if matches!(registry_status(&error), Some(404 | 405)) => Ok(ReferrerDestination::Fallback),
+        Err(error) => Err(CopyError::Abort(MirrorError::TargetError(format!(
+            "destination referrers probe did not answer authoritatively: {error}"
+        )))),
+    }
+}
+
+/// Classify a failed manifest PUT (C-063).
+///
+/// `subject` is the whole discriminator. ECR answers a subject-bearing
+/// manifest PUT with `405 Method Not Allowed`, and that refusal is about the
+/// *shape* — it applies to every package in the run, so it fails the package
+/// and lets the rest of the mirror proceed. The same status on an ordinary
+/// manifest is an ordinary rejection of those bytes.
+///
+/// The status is read off the error's structure by [`registry_status`], never
+/// off its rendering: an `OciDistributionError`'s wording is not a contract,
+/// and a `contains("405")` would keep passing while it stopped classifying.
+fn push_failure(
+    destination_reference: &Reference,
+    subject: SubjectCarriage,
+    error: &OciDistributionError,
+) -> CopyError {
+    match (subject, registry_status(error)) {
+        (SubjectCarriage::Present, Some(status @ 405)) => CopyError::SubjectRejected {
+            registry: destination_reference.registry().to_string(),
+            status,
+        },
+        _ => CopyError::PushRejected(format!("manifest at {destination_reference}: {error}")),
+    }
+}
+
+/// The cosign sidecar tag for `subject` and one suffix (C-062).
+fn sidecar_tag(subject: &Digest, suffix: &str) -> String {
+    format!("{}{suffix}", ocx_lib::package::tag::referrer_fallback_tag(subject))
+}
+
+/// Convert a source referrers-listing entry into the descriptor the
+/// destination's fallback index has to carry.
+///
+/// Taken from the source's own listing rather than re-derived from the pushed
+/// bytes: `artifactType` and the annotations are what a reader filters on, and
+/// a fallback entry that drops them is the defect sigstore/cosign#4641 reports
+/// in cosign's own fallback write. `platform` is deliberately not carried —
+/// `Descriptor` has no such field, and a referrer is not platform-specific.
+fn referrer_descriptor(entry: &ImageIndexEntry) -> Descriptor {
+    Descriptor {
+        media_type: entry.media_type.clone(),
+        digest: entry.digest.clone(),
+        size: entry.size,
+        urls: None,
+        artifact_type: entry.artifact_type.clone(),
+        annotations: entry.annotations.clone(),
+    }
+}
+
 /// What one manifest references, one level down.
 #[derive(Debug, PartialEq, Eq)]
 enum ChildReferences {
@@ -747,6 +1065,25 @@ fn is_rate_limited(error: &OciDistributionError) -> bool {
     }
 }
 
+/// Whether a transport-level destination error is worth retrying.
+///
+/// The [`OciTransport`] surface is the one destination seam that does **not**
+/// hand back an `OciDistributionError`, so [`is_rate_limited`] cannot read it:
+/// `ClientError` collapses "429 / 502 / 503 / 504 / timed out" into one
+/// [`ClientError::RegistryTransient`] variant whose own documentation says
+/// "run the same command again". Matching that variant is therefore the only
+/// structural spelling available — a status match would need a `contains` on a
+/// boxed source error, which is exactly what [`registry_status`] exists to
+/// avoid.
+///
+/// Wider than [`is_rate_limited`] by the three 5xx codes, and deliberately so:
+/// without it a destination hiccup on a sidecar conflict check aborts the whole
+/// run, while the identical hiccup on the blob probe beside it costs
+/// `max_retries` and continues.
+fn is_transient(error: &ClientError) -> bool {
+    matches!(error, ClientError::RegistryTransient(_))
+}
+
 /// Delay before retry `attempt`, doubling from [`RETRY_BACKOFF_BASE`] and
 /// capped at [`RETRY_BACKOFF_MAX`].
 ///
@@ -858,8 +1195,11 @@ fn addressed(reference: &Reference, digest: &Digest) -> Reference {
 /// one, so a caller wanting `<repo>:<tag>` at the destination must pass a
 /// tag-only reference. Children are always addressed by digest.
 ///
-/// Referrer detection runs per copied manifest and **before** the push, so a
-/// manifest this version cannot carry faithfully is never published.
+/// The referrer sweep and the cosign sidecar sweep run per copied manifest and
+/// **after** the push (C-060): a referrer's `subject` names this manifest, so
+/// publishing the referrer first would leave the destination holding a
+/// signature over content it does not have — the state a registry with
+/// referrer garbage collection is entitled to delete.
 ///
 /// Returns the counters **and the verified manifest bytes**, because the
 /// top-level call's bytes are the package's dispatch object: C-033 writes them
@@ -877,20 +1217,32 @@ pub async fn copy_manifest_tree(
     digest: &Digest,
     context: &CopyContext,
 ) -> Result<(CopyStats, Vec<u8>), CopyError> {
-    copy_manifest_tree_at(source_reference, destination_reference, digest, context, 0).await
+    copy_manifest_tree_at(
+        source_reference,
+        destination_reference,
+        digest,
+        context,
+        0,
+        Carriage::root(),
+    )
+    .await
 }
 
-/// [`copy_manifest_tree`] with the recursion depth threaded through.
+/// [`copy_manifest_tree`] with the recursion depth and the signature carriage
+/// threaded through.
 ///
-/// Split rather than adding a parameter to the public entry point: `depth` is
+/// Split rather than adding parameters to the public entry point: `depth` is
 /// an implementation detail of the walk, and a caller passing anything but 0
-/// would silently move the ceiling it exists to enforce.
+/// would silently move the ceiling it exists to enforce — the same argument
+/// applies to [`Carriage`], where a caller passing `hop: None` would silently
+/// disable the sweep for a whole package.
 async fn copy_manifest_tree_at(
     source_reference: &Reference,
     destination_reference: &Reference,
     digest: &Digest,
     context: &CopyContext,
     depth: usize,
+    carriage: Carriage,
 ) -> Result<(CopyStats, Vec<u8>), CopyError> {
     within_depth(digest, depth)?;
     let identifier = source_identifier(source_reference).clone_with_digest(digest.clone());
@@ -921,8 +1273,6 @@ async fn copy_manifest_tree_at(
             bytes.len()
         )));
     }
-
-    detect_referrers(source_reference, digest, context).await?;
 
     let mut stats = CopyStats {
         manifests: 1,
@@ -957,6 +1307,7 @@ async fn copy_manifest_tree_at(
                         &child_digest,
                         context,
                         depth + 1,
+                        carriage.child(),
                     ))
                     .await?;
                     Ok::<_, CopyError>(child_stats)
@@ -989,10 +1340,33 @@ async fn copy_manifest_tree_at(
         }
     }
 
-    push_manifest(destination_reference, &bytes, manifest.content_type(), context).await?;
+    push_manifest(
+        destination_reference,
+        &bytes,
+        manifest.content_type(),
+        context,
+        carriage.subject,
+    )
+    .await?;
     if context.canonical_tags {
-        push_canonical_tag(destination_reference, digest, &bytes, manifest.content_type(), context).await?;
+        push_canonical_tag(
+            destination_reference,
+            digest,
+            &bytes,
+            manifest.content_type(),
+            context,
+            carriage.subject,
+        )
+        .await?;
     }
+
+    // C-060: after the push, never before. Both sweeps are keyed on this
+    // manifest's digest, which the destination now holds.
+    if let Some(hop) = carriage.hop {
+        stats.merge(copy_referrers(source_reference, destination_reference, digest, context, depth, hop).await?);
+        stats.merge(copy_sidecars(source_reference, destination_reference, digest, context, depth).await?);
+    }
+
     Ok((stats, bytes))
 }
 
@@ -1032,6 +1406,7 @@ async fn push_canonical_tag(
     bytes: &[u8],
     content_type: &str,
     context: &CopyContext,
+    subject: SubjectCarriage,
 ) -> Result<(), CopyError> {
     let (algorithm, hex) = digest.parts();
     let canonical = Reference::with_tag(
@@ -1039,15 +1414,25 @@ async fn push_canonical_tag(
         destination_reference.repository().to_string(),
         format!("{algorithm}.{hex}"),
     );
-    push_manifest(&canonical, bytes, content_type, context).await
+    // The same bytes the digest-addressed push already carried, so the subject
+    // reading is the same one: a referrer's keep tag is still a subject-bearing
+    // PUT, and a destination that refused the first refuses this too.
+    push_manifest(&canonical, bytes, content_type, context, subject).await
 }
 
 /// Push one manifest's bytes verbatim, retrying only a rate limit.
+///
+/// `subject` decides how a `405` is read (C-063) and nothing else: a
+/// destination that refuses `subject`-bearing manifests is not refusing *these
+/// bytes*, it is refusing the whole shape, and collapsing that into
+/// [`CopyError::PushRejected`] would report a package failure for content that
+/// copied.
 async fn push_manifest(
     destination_reference: &Reference,
     bytes: &[u8],
     content_type: &str,
     context: &CopyContext,
+    subject: SubjectCarriage,
 ) -> Result<(), CopyError> {
     // `HeaderValue` is `http` 1.x's type, which reqwest 0.12 (this crate) and
     // reqwest 0.13 (the fork) both re-export from the single `http` in the
@@ -1071,7 +1456,7 @@ async fn push_manifest(
         }
     })
     .await
-    .map_err(|error| CopyError::PushRejected(format!("manifest at {destination_reference}: {error}")))?;
+    .map_err(|error| push_failure(destination_reference, subject, &error))?;
 
     Ok(())
 }
@@ -1378,8 +1763,7 @@ async fn upload(
     .map_err(|failure| failure.into_copy_error(digest))
 }
 
-/// Detect referrers on a copied manifest and fail the package if any exist
-/// (C-024).
+/// List one subject's referrers **at the source** (C-061).
 ///
 /// Goes through the fork's `Client::pull_referrers_native`, **never raw
 /// HTTP** — and then owns the referrers **tag-schema** fallback itself. ocx
@@ -1387,23 +1771,28 @@ async fn upload(
 /// call now answers `None` for "this registry has no Referrers API" instead of
 /// degrading it to an empty index, and the consumer applies its own bounds and
 /// error policy to the fallback index. Reading `None` as "no referrers" would
-/// ship the exact silent drop this contract exists to prevent, so it is
-/// [`fallback_referrers`] that decides, not this call.
+/// silently drop every signature on a source registry without the API, so it
+/// is [`fallback_referrers`] that answers, not this call.
 ///
-/// Depth **1**, no recursion — a referrer's own referrers are never queried,
-/// so there is no graph and no cycle. This is the referrers **API** surface;
-/// referrer and attestation descriptors nested inside an image index are a
-/// different surface and are copied, not detected.
+/// **Pagination is deliberately not followed.** The distribution spec lets a
+/// registry paginate this listing with a `Link` header, and the fork reads the
+/// first page only. Every registry surveyed answers a subject's referrers in
+/// one page — the count is single digits — and both real bounds
+/// (`MAX_REFERRERS_DESCRIPTORS` upstream, [`REFERRER_COUNT_CEILING`] here) sit
+/// far below any page size. A reader assuming completeness here would be
+/// wrong for a subject with thousands of referrers, which is why it is said
+/// out loud rather than left to the absence of a loop.
 ///
 /// # Errors
 ///
-/// [`CopyError::ReferrersPresent`] when the response is non-empty, naming at
-/// most [`REFERRER_REPORT_LIMIT`] digests plus the total count.
-pub async fn detect_referrers(
+/// [`CopyError::SourceUnavailable`] when neither route answers;
+/// [`CopyError::MalformedManifest`] when the fallback tag holds something that
+/// is not an image index.
+async fn source_referrers(
     source_reference: &Reference,
     digest: &Digest,
     context: &CopyContext,
-) -> Result<(), CopyError> {
+) -> Result<Vec<ImageIndexEntry>, CopyError> {
     let subject = addressed(source_reference, digest);
     let native = context
         .source_client
@@ -1411,17 +1800,12 @@ pub async fn detect_referrers(
         .await
         .map_err(|error| CopyError::SourceUnavailable(format!("referrers for {digest}: {error}")))?;
 
-    let manifests = match native {
-        Some(index) => index.manifests,
+    match native {
+        Some(index) => Ok(index.manifests),
         // `None` is the capability verdict — the registry answered 404 on the
         // native endpoint — never "this subject has no referrers".
-        None => fallback_referrers(source_reference, digest, context).await?,
-    };
-
-    if manifests.is_empty() {
-        return Ok(());
+        None => fallback_referrers(source_reference, digest, context).await,
     }
-    Err(referrer_failure(&manifests))
 }
 
 /// The OCI referrers tag-schema fallback, for a source registry with no
@@ -1447,7 +1831,7 @@ async fn fallback_referrers(
     source_reference: &Reference,
     digest: &Digest,
     context: &CopyContext,
-) -> Result<Vec<ocx_lib::oci::ImageIndexEntry>, CopyError> {
+) -> Result<Vec<ImageIndexEntry>, CopyError> {
     let tag = ocx_lib::package::tag::referrer_fallback_tag(digest);
     let identifier = source_identifier(source_reference).clone_with_tag(tag.clone());
     let fetched = context
@@ -1474,19 +1858,273 @@ async fn fallback_referrers(
     }
 }
 
-/// The bounded refusal for a manifest that carries referrers.
+/// Probe the destination's Referrers API once per run (C-063).
 ///
-/// Bounded on purpose: a subject with 10,000 referrers must not produce a
-/// 10,000-line error, so the message names the first
-/// [`REFERRER_REPORT_LIMIT`] digests and the total.
-fn referrer_failure(manifests: &[ocx_lib::oci::ImageIndexEntry]) -> CopyError {
-    CopyError::ReferrersPresent {
-        shown: manifests
-            .iter()
-            .take(REFERRER_REPORT_LIMIT)
-            .filter_map(|entry| Digest::try_from(entry.digest.as_str()).ok())
-            .collect(),
-        total: manifests.len(),
+/// The probe is a read of the destination, so its failure class is the same as
+/// [`probe_blob_present`]'s: a rate limit is retried, and an answer that is
+/// neither a listing nor a capability verdict aborts the run
+/// ([`referrer_verdict`] owns that decision).
+///
+/// Addressed at the subject the caller is copying rather than at some fixed
+/// probe digest: the endpoint is per-repository, and a registry may well
+/// answer 404 for a repository that does not exist yet — which is the same
+/// verdict the fallback route wants anyway.
+async fn referrer_destination(
+    destination_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+) -> Result<ReferrerDestination, CopyError> {
+    context
+        .referrer_destination
+        .get_or_try_init(|| async {
+            let subject = addressed(destination_reference, digest);
+            let probe = retry_while(context.max_retries, is_rate_limited, || {
+                context.destination_client.pull_referrers_native(&subject, None)
+            })
+            .await;
+            referrer_verdict(probe)
+        })
+        .await
+        .copied()
+}
+
+/// Carry every referrer of one copied manifest across (C-061, C-063).
+///
+/// Runs after the subject's own push (C-060). Each referrer is copied by the
+/// ordinary manifest walk — same digest verification, same blob ladder — under
+/// a [`Carriage`] one hop further out, so a referrer's own referrers are swept
+/// too, bounded by [`REFERRER_DEPTH_CEILING`].
+///
+/// Where the destination has no Referrers API, the carried referrer is
+/// additionally appended to the destination's tag-schema fallback index. That
+/// index is a **mutable tag**: anyone with push access to the repository can
+/// rewrite it, and the read-modify-write append is optimistic with a bounded
+/// attempt budget. Both are residual risks inherited from ocx's own fallback
+/// implementation (`adr_signing.md` Amendment 10) rather than introduced here;
+/// the alternative — not writing it — is a mirror whose signatures are
+/// undiscoverable.
+///
+/// # Errors
+///
+/// [`CopyError::ReferrerBudgetExceeded`] past [`REFERRER_COUNT_CEILING`];
+/// [`CopyError::SubjectRejected`] when the destination refuses a
+/// subject-bearing manifest; every other [`CopyError`] the walk itself raises.
+async fn copy_referrers(
+    source_reference: &Reference,
+    destination_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+    depth: usize,
+    hop: usize,
+) -> Result<CopyStats, CopyError> {
+    let entries = source_referrers(source_reference, digest, context).await?;
+    if entries.is_empty() {
+        // Before the capability probe, so an unsigned mirror never asks the
+        // destination a question about a feature it does not use.
+        return Ok(CopyStats::default());
+    }
+    within_referrer_budget(digest, entries.len())?;
+    let referrer_hop = hop.saturating_add(1);
+    within_referrer_depth(digest, referrer_hop)?;
+
+    let route = referrer_destination(destination_reference, digest, context).await?;
+    let destination_repository = destination_reference.repository().to_string();
+
+    let mut stats = CopyStats::default();
+    // Sequential, unlike the blob and child fan-outs: a subject carries single
+    // digits of referrers, and under `ReferrerDestination::Fallback` every one
+    // of them appends to the *same* mutable tag — a fan-out would have this run
+    // race itself for an index whose write is already optimistic.
+    for entry in &entries {
+        let (referrer_digest, _size) = descriptor_target(&entry.digest, entry.size)?;
+        // The claim is what makes a diamond copy once (C-061): two subjects
+        // naming one referrer, or one referrer reached through two tags of the
+        // same package.
+        if !claim_referrer(context, &destination_repository, &referrer_digest).await {
+            continue;
+        }
+        // The claim is released on every error path, so it records only a
+        // *completed* carry. A claim outliving its own failure would let a
+        // later walk over the same referrer skip it and report success for a
+        // referrer neither copied nor indexed.
+        let attempt = async {
+            let (carried, _bytes) = Box::pin(copy_manifest_tree_at(
+                &addressed(source_reference, &referrer_digest),
+                &addressed(destination_reference, &referrer_digest),
+                &referrer_digest,
+                context,
+                depth,
+                Carriage::referrer(referrer_hop),
+            ))
+            .await?;
+            if route == ReferrerDestination::Fallback {
+                append_fallback(destination_reference, digest, &referrer_descriptor(entry), context).await?;
+            }
+            Ok::<CopyStats, CopyError>(carried)
+        }
+        .await;
+
+        let carried = match attempt {
+            Ok(carried) => carried,
+            Err(error) => {
+                release_referrer(context, &destination_repository, &referrer_digest).await;
+                return Err(error);
+            }
+        };
+        stats.merge(carried);
+        stats.referrers_copied += 1;
+    }
+    Ok(stats)
+}
+
+/// Append one carried referrer's descriptor to the destination's referrers
+/// tag-schema fallback index (C-063).
+///
+/// The outcome is discarded because both of them are success: `Written` is the
+/// append, and `AlreadyPresent` is a re-run finding its own earlier descriptor,
+/// which is the ordinary idempotent case for a mirror.
+///
+/// # Errors
+///
+/// [`CopyError::PushRejected`] — the append is a write, and C-040 fails a
+/// package on a failed write rather than aborting the run.
+async fn append_fallback(
+    destination_reference: &Reference,
+    subject: &Digest,
+    descriptor: &Descriptor,
+    context: &CopyContext,
+) -> Result<(), CopyError> {
+    // Through the same retry ladder every other destination write uses
+    // ([`push_manifest`]): the append's own loop retries a *concurrent writer*,
+    // never a rate limit, so without this a 429 fails the package where the
+    // manifest push beside it would have waited.
+    retry_while(context.max_retries, is_transient, || {
+        context
+            .destination_transport
+            .append_referrer_fallback_index(destination_reference, subject, descriptor)
+    })
+    .await
+    .map(|_outcome| ())
+    .map_err(|error| {
+        CopyError::PushRejected(format!(
+            "referrers fallback index for {subject} at {destination_reference}: {error}"
+        ))
+    })
+}
+
+/// Carry every cosign sidecar tag parked beside one copied manifest (C-062).
+///
+/// The pre-OCI-1.1 scheme: a signature at `sha256-<hex>.sig` in the subject's
+/// own repository, linked to its subject by the tag name alone. An absent tag
+/// is a no-op — most manifests have none.
+///
+/// A destination already holding that tag **at a different digest** is skipped
+/// and counted in [`CopyStats::sidecar_conflicts`], never overwritten: the tag
+/// is mutable and the local one may be a signature the operator produced,
+/// while an upstream that re-signed is not evidence the local signature is
+/// wrong. The package still succeeds — a conflicting sidecar is a fact to
+/// report, not a copy failure.
+///
+/// # Errors
+///
+/// [`CopyError`] from the walk that copies a sidecar's own content.
+async fn copy_sidecars(
+    source_reference: &Reference,
+    destination_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+    depth: usize,
+) -> Result<CopyStats, CopyError> {
+    let mut stats = CopyStats::default();
+    for suffix in SIDECAR_SUFFIXES {
+        let tag = sidecar_tag(digest, suffix);
+        let Some(content) = source_sidecar(source_reference, &tag, context).await? else {
+            continue;
+        };
+        let destination_tag = Reference::with_tag(
+            destination_reference.registry().to_string(),
+            destination_reference.repository().to_string(),
+            tag.clone(),
+        );
+        if let Some(held) = destination_tag_digest(&destination_tag, context).await?
+            && held != content
+        {
+            // `{tag:?}` because the tag is derived from an upstream digest and
+            // reaches a log an operator reads (CWE-117).
+            tracing::warn!("skipping sidecar {tag:?}: the destination already holds it at {held}, not {content}");
+            stats.sidecar_conflicts += 1;
+            continue;
+        }
+        let (carried, _bytes) = Box::pin(copy_manifest_tree_at(
+            source_reference,
+            &destination_tag,
+            &content,
+            context,
+            depth,
+            Carriage::sidecar(),
+        ))
+        .await?;
+        stats.merge(carried);
+        stats.sidecars_copied += 1;
+    }
+    Ok(stats)
+}
+
+/// The digest one cosign sidecar tag resolves to at the source, or `None` when
+/// the tag is absent (C-062).
+///
+/// An absent tag is the overwhelmingly common case — most manifests carry no
+/// sidecar at all — so it is an `Ok(None)`, never an error.
+///
+/// # Errors
+///
+/// [`CopyError::SourceUnavailable`] when the source cannot answer.
+async fn source_sidecar(
+    source_reference: &Reference,
+    tag: &str,
+    context: &CopyContext,
+) -> Result<Option<Digest>, CopyError> {
+    let identifier = source_identifier(source_reference).clone_with_tag(tag);
+    let fetched = context
+        .source_index
+        .fetch_manifest_raw_bytes(&identifier)
+        .await
+        .map_err(|error| CopyError::SourceUnavailable(format!("sidecar {identifier}: {error}")))?;
+    Ok(fetched.map(|(_bytes, content, _manifest)| content))
+}
+
+/// The digest the destination currently holds at `reference`, or `None` when
+/// the tag is absent (C-062).
+///
+/// Through the transport rather than the raw client because the transport
+/// already classifies a not-found into its own variant: reading "absent" out
+/// of a raw `OciDistributionError` would mean re-deriving that from a status
+/// code this crate does not own.
+///
+/// # Errors
+///
+/// [`CopyError::Abort`] — this is a destination read, and an answer that is
+/// neither a digest nor an authoritative not-found leaves the run unable to
+/// tell a conflict from a first publish, exactly as [`probe_verdict`] does for
+/// a blob.
+async fn destination_tag_digest(reference: &Reference, context: &CopyContext) -> Result<Option<Digest>, CopyError> {
+    // Retried exactly as [`probe_blob_present`] is, and for the same reason:
+    // this is the sibling destination read, and an unretried one turns an
+    // ordinary 429 into a whole-run abort.
+    let answer = retry_while(context.max_retries, is_transient, || {
+        context.destination_transport.fetch_manifest_digest(reference)
+    })
+    .await;
+    match answer {
+        Ok(digest) => Digest::try_from(digest.as_str()).map(Some).map_err(|_| {
+            CopyError::Abort(MirrorError::TargetError(format!(
+                "destination reported an unparseable digest for {reference}"
+            )))
+        }),
+        Err(ClientError::ManifestNotFound(_) | ClientError::RepositoryNotFound(_)) => Ok(None),
+        Err(error) => Err(CopyError::Abort(MirrorError::TargetError(format!(
+            "destination did not answer authoritatively for {reference}: {error}"
+        )))),
     }
 }
 
@@ -1547,7 +2185,17 @@ pub async fn tag_manifest(
 ) -> Result<(), CopyError> {
     let manifest: Manifest = serde_json::from_slice(bytes)
         .map_err(|error| CopyError::MalformedManifest(format!("cached manifest is unreadable: {error}")))?;
-    push_manifest(destination_reference, bytes, manifest.content_type(), context).await
+    // `Absent`: this points one more tag at a package's own dispatch object,
+    // which is never a referrer. A referrer is addressed by digest and never
+    // reaches this path.
+    push_manifest(
+        destination_reference,
+        bytes,
+        manifest.content_type(),
+        context,
+        SubjectCarriage::Absent,
+    )
+    .await
 }
 
 /// Copy a package's `<repository>:__ocx.desc` tag (C-025).
@@ -1606,9 +2254,11 @@ pub async fn copy_description(
 /// estimate is therefore exact for the bytes that dominate it and short by the
 /// manifest bodies.
 ///
-/// Referrer detection is deliberately **not** run: `--dry-run` reports what a
-/// copy would move, and refusing a package here would report a failure the
-/// operator did not ask this run to discover.
+/// **Referrers and cosign sidecars are measured** (C-065), under the same
+/// carriage rules the copy walk uses, because a copy moves them and an
+/// estimate that omitted them would understate every signed package. Their
+/// *presence* is never a failure — that refusal was v1's, and removing it is
+/// the point of this work package.
 ///
 /// # Errors
 ///
@@ -1621,13 +2271,22 @@ pub async fn missing_descriptors(
     digest: &Digest,
     context: &CopyContext,
 ) -> Result<Vec<(Digest, u64)>, CopyError> {
-    missing_descriptors_at(source_reference, destination_reference, digest, context, 0).await
+    missing_descriptors_at(
+        source_reference,
+        destination_reference,
+        digest,
+        context,
+        0,
+        Carriage::root(),
+    )
+    .await
 }
 
-/// [`missing_descriptors`] with the recursion depth threaded through.
+/// [`missing_descriptors`] with the recursion depth and signature carriage
+/// threaded through.
 ///
 /// The `--dry-run` walk recurses exactly as the copy walk does, so it needs the
-/// same ceiling: a hostile chain would exhaust the stack before a single byte
+/// same ceilings: a hostile chain would exhaust the stack before a single byte
 /// was ever going to move, which is the one path an operator reaches for
 /// *because* it is supposed to be harmless.
 async fn missing_descriptors_at(
@@ -1636,6 +2295,7 @@ async fn missing_descriptors_at(
     digest: &Digest,
     context: &CopyContext,
     depth: usize,
+    carriage: Carriage,
 ) -> Result<Vec<(Digest, u64)>, CopyError> {
     within_depth(digest, depth)?;
     let identifier = source_identifier(source_reference).clone_with_digest(digest.clone());
@@ -1670,6 +2330,7 @@ async fn missing_descriptors_at(
                     &child_digest,
                     context,
                     depth + 1,
+                    carriage.child(),
                 ))
                 .await?;
                 missing.extend(nested);
@@ -1686,6 +2347,80 @@ async fn missing_descriptors_at(
             }
         }
     }
+
+    if let Some(hop) = carriage.hop {
+        missing.extend(
+            missing_signature_descriptors(source_reference, destination_reference, digest, context, depth, hop).await?,
+        );
+    }
+    Ok(missing)
+}
+
+/// The referrer and sidecar half of [`missing_descriptors`] (C-065).
+///
+/// Split out rather than inlined so the walk above reads as one shape — fetch,
+/// verify, decompose, probe — with the signature surface named once beside it.
+///
+/// # Errors
+///
+/// [`CopyError`] exactly as [`missing_descriptors_at`] raises it.
+async fn missing_signature_descriptors(
+    source_reference: &Reference,
+    destination_reference: &Reference,
+    digest: &Digest,
+    context: &CopyContext,
+    depth: usize,
+    hop: usize,
+) -> Result<Vec<(Digest, u64)>, CopyError> {
+    let mut missing = Vec::new();
+
+    let entries = source_referrers(source_reference, digest, context).await?;
+    if !entries.is_empty() {
+        within_referrer_budget(digest, entries.len())?;
+        let referrer_hop = hop.saturating_add(1);
+        within_referrer_depth(digest, referrer_hop)?;
+        for entry in &entries {
+            let (referrer_digest, _size) = descriptor_target(&entry.digest, entry.size)?;
+            missing.extend(
+                Box::pin(missing_descriptors_at(
+                    &addressed(source_reference, &referrer_digest),
+                    &addressed(destination_reference, &referrer_digest),
+                    &referrer_digest,
+                    context,
+                    depth,
+                    Carriage::referrer(referrer_hop),
+                ))
+                .await?,
+            );
+        }
+    }
+
+    for suffix in SIDECAR_SUFFIXES {
+        let tag = sidecar_tag(digest, suffix);
+        let Some(content) = source_sidecar(source_reference, &tag, context).await? else {
+            continue;
+        };
+        // The conflict check is a *copy* decision, not a measurement one: a
+        // conflicting sidecar moves no bytes either way, and asking would cost
+        // one destination read per suffix per manifest on a path whose whole
+        // promise is that it is cheap.
+        missing.extend(
+            Box::pin(missing_descriptors_at(
+                source_reference,
+                &Reference::with_tag(
+                    destination_reference.registry().to_string(),
+                    destination_reference.repository().to_string(),
+                    tag,
+                ),
+                &content,
+                context,
+                depth,
+                Carriage::sidecar(),
+            ))
+            .await?,
+        );
+    }
+
     Ok(missing)
 }
 
@@ -1703,6 +2438,37 @@ async fn confirmed_here(context: &CopyContext, digest: &Digest, repository: &str
         .await
         .get(digest)
         .is_some_and(|recorded| recorded == repository)
+}
+
+/// Claim `digest` as this run's carry of a referrer into `repository`, and
+/// answer whether the claim was new (C-061).
+///
+/// One lock acquisition rather than a check followed by an insert: the child
+/// manifests of an index sweep concurrently, and a shared referrer would
+/// otherwise be claimed twice between the two calls — copying it twice is
+/// harmless (the push is idempotent) but counting it twice is a wrong report.
+async fn claim_referrer(context: &CopyContext, repository: &str, digest: &Digest) -> bool {
+    context
+        .carried_referrers
+        .lock()
+        .await
+        .insert((repository.to_string(), digest.clone()))
+}
+
+/// Give back a claim [`claim_referrer`] granted, because the carry it stood
+/// for did not complete.
+///
+/// The set means "this run has carried that referrer into that repository",
+/// and a failed attempt carried nothing. Leaving the claim behind would make
+/// the next walk reaching the same digest `continue` past it and finish
+/// green — a referrer missing from the destination and from the fallback
+/// index, with nothing in the report saying so.
+async fn release_referrer(context: &CopyContext, repository: &str, digest: &Digest) {
+    context
+        .carried_referrers
+        .lock()
+        .await
+        .remove(&(repository.to_string(), digest.clone()));
 }
 
 /// Record which destination repository now holds `digest`, for later mounts.

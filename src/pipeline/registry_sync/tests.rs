@@ -111,6 +111,7 @@ fn row(name: &str, outcome: PackageOutcome) -> PackageReport {
         name: name.to_string(),
         outcome,
         detail: None,
+        signatures: report::SignatureCounts::default(),
     }
 }
 
@@ -183,9 +184,17 @@ fn every_aggregating_copy_failure_fails_only_its_package() {
         CopyError::SourceUnavailable("connection reset".to_string()),
         CopyError::MalformedManifest("descriptor digest 'x' is not a digest".to_string()),
         CopyError::PushRejected("507 insufficient storage".to_string()),
-        CopyError::ReferrersPresent {
-            shown: vec![digest.clone()],
-            total: 1,
+        // Both replaced `ReferrersPresent`, the refusal this work package
+        // deleted (S-011 inverted): a package carrying referrers is now copied,
+        // and only a hostile referrer graph or a destination that refuses the
+        // `subject` shape outright fails the package.
+        CopyError::SubjectRejected {
+            registry: "dest.example".to_string(),
+            status: 405,
+        },
+        CopyError::ReferrerBudgetExceeded {
+            subject: digest.clone(),
+            limit: 64,
         },
         CopyError::ContentMissing { content: digest },
     ];
@@ -330,10 +339,20 @@ fn a_clean_pass_reports_copied_and_a_failed_one_carries_every_message() {
 
 #[test]
 fn a_report_row_carries_a_detail_only_for_a_failure() {
-    assert_eq!(package_report("ns/pkg", PackageStep::Copied).detail, None);
-    assert_eq!(package_report("ns/pkg", PackageStep::Skipped).detail, None);
+    assert_eq!(
+        package_report("ns/pkg", PackageStep::Copied, registry_copy::CopyStats::default()).detail,
+        None
+    );
+    assert_eq!(
+        package_report("ns/pkg", PackageStep::Skipped, registry_copy::CopyStats::default()).detail,
+        None
+    );
 
-    let failed = package_report("ns/pkg", PackageStep::Failed("tag 'a': gone".to_string()));
+    let failed = package_report(
+        "ns/pkg",
+        PackageStep::Failed("tag 'a': gone".to_string()),
+        registry_copy::CopyStats::default(),
+    );
     assert_eq!(failed.outcome, PackageOutcome::Failed);
     assert_eq!(failed.detail.as_deref(), Some("tag 'a': gone"));
     assert_eq!(failed.name, "ns/pkg");
@@ -391,6 +410,7 @@ fn a_tag_joins_the_confirmed_set_only_when_its_content_landed() {
     let mut confirmed = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut failures = Vec::new();
+    let mut totals = registry_copy::CopyStats::default();
 
     record_tag(
         "ns/pkg",
@@ -399,6 +419,7 @@ fn a_tag_joins_the_confirmed_set_only_when_its_content_landed() {
         &mut confirmed,
         &mut objects,
         &mut failures,
+        &mut totals,
     )
     .expect("a successful copy does not abort");
 
@@ -431,6 +452,7 @@ fn a_failed_tag_never_reaches_the_confirmed_set() {
         let mut confirmed = BTreeSet::new();
         let mut objects = BTreeMap::new();
         let mut failures = Vec::new();
+        let mut totals = registry_copy::CopyStats::default();
 
         record_tag(
             "ns/pkg",
@@ -439,6 +461,7 @@ fn a_failed_tag_never_reaches_the_confirmed_set() {
             &mut confirmed,
             &mut objects,
             &mut failures,
+            &mut totals,
         )
         .expect("an aggregating failure does not abort the run");
 
@@ -455,6 +478,7 @@ fn an_abort_during_a_tag_copy_stops_the_run_without_recording_anything() {
     let mut confirmed = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut failures = Vec::new();
+    let mut totals = registry_copy::CopyStats::default();
 
     let error = record_tag(
         "ns/pkg",
@@ -465,6 +489,7 @@ fn an_abort_during_a_tag_copy_stops_the_run_without_recording_anything() {
         &mut confirmed,
         &mut objects,
         &mut failures,
+        &mut totals,
     )
     .expect_err("a non-authoritative destination read aborts the run");
 
@@ -478,6 +503,7 @@ fn two_tags_sharing_a_dispatch_object_write_it_once() {
     let mut confirmed = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut failures = Vec::new();
+    let mut totals = registry_copy::CopyStats::default();
 
     for tag in ["1.2.3", "1.2"] {
         record_tag(
@@ -490,6 +516,7 @@ fn two_tags_sharing_a_dispatch_object_write_it_once() {
             &mut confirmed,
             &mut objects,
             &mut failures,
+            &mut totals,
         )
         .expect("no abort");
     }

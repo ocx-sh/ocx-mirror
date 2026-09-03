@@ -43,6 +43,29 @@ pub struct PackageReport {
     /// The failure message for [`PackageOutcome::Failed`], absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// What the signature sweeps carried for this package (C-064).
+    #[serde(flatten)]
+    pub signatures: SignatureCounts,
+}
+
+/// The three signature counters C-064 carries into both renderings.
+///
+/// A struct rather than three fields on [`PackageReport`] so the plain table
+/// and the JSON payload cannot drift apart on which three they mean, and
+/// `#[serde(flatten)]`ed so the JSON shape stays flat for whatever parses it.
+///
+/// **Zeros are emitted, never omitted.** "No signatures carried" and "this
+/// mirror does not carry signatures" are different facts, and a field that
+/// disappears at zero makes them indistinguishable to a script.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SignatureCounts {
+    /// Referrer manifests carried across.
+    pub referrers_copied: usize,
+    /// Cosign sidecar tags carried across.
+    pub sidecars_copied: usize,
+    /// Sidecar tags the destination already held at a different digest, so
+    /// they were skipped rather than overwritten.
+    pub sidecar_conflicts: usize,
 }
 
 /// What happened to one package.
@@ -131,6 +154,9 @@ pub fn report_registry_sync(report: &RegistrySyncReport, format: OutputFormat, p
             let mut sources = Vec::new();
             let mut names = Vec::new();
             let mut outcomes = Vec::new();
+            let mut referrers = Vec::new();
+            let mut sidecars = Vec::new();
+            let mut conflicts = Vec::new();
             let mut details = Vec::new();
 
             for source in &report.sources {
@@ -138,6 +164,9 @@ pub fn report_registry_sync(report: &RegistrySyncReport, format: OutputFormat, p
                     sources.push(source.as_name.clone());
                     names.push(package.name.clone());
                     outcomes.push(package.outcome.label().to_string());
+                    referrers.push(package.signatures.referrers_copied.to_string());
+                    sidecars.push(package.signatures.sidecars_copied.to_string());
+                    conflicts.push(package.signatures.sidecar_conflicts.to_string());
                     details.push(package.detail.clone().unwrap_or_default());
                 }
             }
@@ -148,8 +177,17 @@ pub fn report_registry_sync(report: &RegistrySyncReport, format: OutputFormat, p
             // the summary line below be the explanation.
             if !names.is_empty() {
                 printer.print_table(
-                    &["Source".into(), "Package".into(), "Outcome".into(), "Detail".into()],
-                    &[sources, names, outcomes, details].map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
+                    &[
+                        "Source".into(),
+                        "Package".into(),
+                        "Outcome".into(),
+                        "Referrers".into(),
+                        "Sidecars".into(),
+                        "Conflicts".into(),
+                        "Detail".into(),
+                    ],
+                    &[sources, names, outcomes, referrers, sidecars, conflicts, details]
+                        .map(|c| c.into_iter().map(Cell::from).collect::<Vec<_>>()),
                 );
                 println!("---");
             }
