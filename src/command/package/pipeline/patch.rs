@@ -35,6 +35,8 @@
 //! - [`MirrorError::TargetError`] (exit 69) from the fail-safe registry reads.
 //! - [`MirrorError::ExecutionFailed`] when a re-push or the closing announce
 //!   fails.
+//! - [`MirrorError::SignFailed`] (83/84/85/…) when the closing index sweep
+//!   could not sign an index this run re-emitted.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -53,6 +55,7 @@ use crate::pipeline::ocx_cli::announce::{
 };
 use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, build_push_args, push_once};
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
+use crate::pipeline::ocx_cli::sign::{ResolvedSign, resolve_sign_from_env, sweep_index_tags};
 use crate::pipeline::orchestrator;
 use crate::pipeline::target_registry::{self, PublishedImage};
 use crate::spec::{self, MirrorSpec, strip_build};
@@ -120,6 +123,10 @@ impl Patch {
         }
 
         let ocx_binary = resolve_ocx_binary().map_err(|e| MirrorError::ExecutionFailed(vec![e]))?;
+        // Once per run, before the first push (C-054): a `sign:` naming an
+        // unset variable must fail the run here, not once per republished
+        // manifest with a dozen tags already advanced.
+        let sign = resolve_sign_from_env(spec.sign.as_ref())?;
         let annotations = crate::annotations::build_annotations(&spec.annotations);
         // Sidecars go under the pipeline's own work dir rather than the shared
         // system temp dir, for the reason `pipeline announce` gives: a
@@ -130,6 +137,11 @@ impl Patch {
         let mut republished = 0usize;
         let mut current = 0usize;
         let mut failures: Vec<String> = Vec::new();
+        // Leaf tags whose index this run moved, in selection order. The cascade
+        // aliases are deliberately absent: `--cascade` re-points them at the
+        // same index digest, and a referrer is filed against the subject
+        // digest, so signing the leaf signs the index every alias resolves to.
+        let mut patched_tags: Vec<String> = Vec::new();
 
         for (version, tag) in &selected {
             // A tag whose variant the spec no longer declares has nothing to be
@@ -141,6 +153,7 @@ impl Patch {
             };
 
             let images = target_registry::fetch_published_images(&publisher, &identifier, &[tag.as_str()]).await?;
+            let republished_before = republished;
             for image in &images {
                 let expected =
                     orchestrator::expected_metadata(&plan.config, &image.platform, spec_dir).map_err(|error| {
@@ -177,6 +190,7 @@ impl Patch {
                     &sidecar,
                     &annotations,
                     &ocx_binary,
+                    sign.as_ref(),
                 )
                 .await;
 
@@ -188,7 +202,31 @@ impl Patch {
                     Err(error) => failures.push(format!("{tag} ({}): {error}", image.platform)),
                 }
             }
+            if republished > republished_before {
+                patched_tags.push(tag.clone());
+            }
         }
+
+        // ── Sign the indexes this patch rewrote (D2, C-058) ──────────────────
+        //
+        // The same closing sweep `pipeline push` runs, for the same reason:
+        // `push --sign` signed each re-emitted platform manifest, and the image
+        // index above it is a *different* subject whose digest changed when the
+        // manifests underneath it did. Without this, a patch on a signed mirror
+        // leaves the tag — and every cascade alias re-pointed onto it —
+        // resolving to an unsigned index.
+        //
+        // Before the announce, deliberately: the index entry the announce
+        // curates must not point at a tag whose signature this run then failed
+        // to write. Held rather than returned so the announce below still runs
+        // and its own outcome still reaches the operator.
+        let sweep_result = sweep_index_tags(
+            sign.as_ref(),
+            &patched_tags,
+            &spec.target.reference(),
+            &work_dir.join("sign-tags"),
+        )
+        .await;
 
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
 
@@ -239,10 +277,36 @@ impl Patch {
             }
         }
 
-        if !failures.is_empty() {
-            return Err(MirrorError::ExecutionFailed(failures));
+        let (unreported, verdict) = closing_verdict(sweep_result, failures);
+        for failure in &unreported {
+            log::error!("[patch] {failure}");
         }
-        Ok(())
+        verdict
+    }
+}
+
+/// The run's closing verdict, and the failure lines that must be logged before
+/// it is returned.
+///
+/// The sweep's exit code wins over the aggregation, exactly as `pipeline push`
+/// orders it: an index this run could not sign is a failure whose code the
+/// operator acts on (83 Rekor, 84 no Referrers API, 85 …), and flattening it
+/// into `ExecutionFailed` (1) would lose that.
+///
+/// What does *not* carry over from `push` is dropping `failures` on that path.
+/// `push` can, because its failure strings are pointers into a
+/// `run-summary.json` already written to disk before the sweep runs; here the
+/// strings *are* the detail — nothing else records a refused layout, a failed
+/// republish, or the announce failure that says the index still points at the
+/// digests those manifests replaced. So they are handed back to be reported,
+/// and only then is the sweep error propagated.
+fn closing_verdict(sweep: Result<(), MirrorError>, failures: Vec<String>) -> (Vec<String>, Result<(), MirrorError>) {
+    match sweep {
+        Err(sign_error) => (failures, Err(sign_error)),
+        Ok(()) if failures.is_empty() => (Vec::new(), Ok(())),
+        // Reported by the returned error, so logging them here too would print
+        // one failure twice.
+        Ok(()) => (Vec::new(), Err(MirrorError::ExecutionFailed(failures))),
     }
 }
 
@@ -313,6 +377,10 @@ fn layout_refusal(
 /// does not parse as a `PushReport` fails the patch rather than counting as a
 /// republished manifest. Every `PushReport` field defaults, so `{}` satisfies
 /// it; silence does not.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one republished manifest's full identity, plus the binary and the signing block the caller resolved once for the run"
+)]
 async fn republish(
     spec: &MirrorSpec,
     tag: &str,
@@ -321,6 +389,7 @@ async fn republish(
     sidecar: &Path,
     annotations: &BTreeMap<String, String>,
     ocx_binary: &Path,
+    sign: Option<&ResolvedSign>,
 ) -> Result<(), String> {
     if let Some(parent) = sidecar.parent() {
         tokio::fs::create_dir_all(parent)
@@ -332,9 +401,9 @@ async fn republish(
         .map_err(|e| format!("failed to write {}: {e}", sidecar.display()))?;
 
     let target_ref = format!("{}:{}", spec.target.reference(), tag);
-    let args = patch_push_args(&target_ref, image, sidecar, annotations, spec.cascade.enabled)?;
+    let args = patch_push_args(&target_ref, image, sidecar, annotations, spec.cascade.enabled, sign)?;
 
-    push_once(ocx_binary, &args, PUSH_TIMEOUT)
+    push_once(ocx_binary, &args, PUSH_TIMEOUT, sign)
         .await
         .map(|_report| ())
         .map_err(|failure| failure.message)
@@ -351,6 +420,7 @@ pub(crate) fn patch_push_args(
     sidecar: &Path,
     annotations: &BTreeMap<String, String>,
     cascade: bool,
+    sign: Option<&ResolvedSign>,
 ) -> Result<Vec<String>, String> {
     let layers: Vec<String> = image.layers.iter().map(layer_reference).collect::<Result<_, _>>()?;
     let layers: Vec<&str> = layers.iter().map(String::as_str).collect();
@@ -362,6 +432,7 @@ pub(crate) fn patch_push_args(
         Some(sidecar),
         annotations,
         cascade,
+        sign,
     )
 }
 

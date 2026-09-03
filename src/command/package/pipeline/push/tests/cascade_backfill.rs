@@ -92,8 +92,15 @@ fn the_re_cascade_argv_carries_cascade_and_the_published_layer_digests() {
     let image = published_tile("linux/amd64+libc.glibc", "application/vnd.oci.image.layer.v1.tar+zstd");
     let sidecar = PathBuf::from("/work/26.5.1-linux_amd64_libc.glibc-metadata.json");
 
-    let args = patch_push_args("ghcr.io/ocx-sh/black:26.5.1", &image, &sidecar, &BTreeMap::new(), true)
-        .expect("the published layer media type has an archive extension");
+    let args = patch_push_args(
+        "ghcr.io/ocx-sh/black:26.5.1",
+        &image,
+        &sidecar,
+        &BTreeMap::new(),
+        true,
+        None,
+    )
+    .expect("the published layer media type has an archive extension");
 
     assert_eq!(
         args,
@@ -123,6 +130,7 @@ fn build_push_args_without_annotations_matches_the_bare_invocation() {
         None,
         &BTreeMap::new(),
         true,
+        None,
     )
     .expect("utf-8 bundle path");
 
@@ -143,6 +151,7 @@ fn build_push_args_omits_cascade_so_a_platform_can_land_without_moving_an_alias(
         None,
         &BTreeMap::new(),
         false,
+        None,
     )
     .expect("utf-8 bundle path");
 
@@ -194,6 +203,7 @@ fn build_push_args_never_carries_a_non_allowlisted_env_value() {
         None,
         &annotations,
         true,
+        None,
     )
     .expect("utf-8 bundle path");
 

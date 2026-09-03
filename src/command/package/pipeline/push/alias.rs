@@ -57,9 +57,14 @@ pub async fn alias_newest_as_latest(
             &env_entry.layers,
             annotations,
             false,
+            // Unsigned, and already signed: this re-pushes a manifest the
+            // primary publish just wrote, so the digest is identical and the
+            // signature referrer attached to it already covers this tag. A
+            // second `--sign` would attach a duplicate referrer for nothing.
+            None,
         )?;
         let ocx_binary = resolve_ocx_binary()?;
-        push_once(&ocx_binary, &args, PUSH_TIMEOUT)
+        push_once(&ocx_binary, &args, PUSH_TIMEOUT, None)
             .await
             .map_err(|failure| failure.message)
     }
@@ -367,9 +372,14 @@ pub async fn re_cascade_entry(
         .map_err(|error| format!("failed to write {}: {error}", sidecar.display()))?;
 
     let target_ref = format!("{}:{}", spec.target.reference(), image.version);
-    let args = patch_push_args(&target_ref, image, &sidecar, annotations, true)?;
+    // Same reasoning as `alias_newest_as_latest`: this re-pushes an
+    // already-published manifest at its existing digest to move the rolling
+    // tags, so whatever signature that digest carries still applies. A
+    // platform published before `sign:` was added stays unsigned here and is
+    // what `package pipeline sign` (the backfill) exists for.
+    let args = patch_push_args(&target_ref, image, &sidecar, annotations, true, None)?;
 
-    push_once(ocx_binary, &args, PUSH_TIMEOUT)
+    push_once(ocx_binary, &args, PUSH_TIMEOUT, None)
         .await
         .map(|report| report.cascade_tags_written)
         .map_err(|failure| failure.message)

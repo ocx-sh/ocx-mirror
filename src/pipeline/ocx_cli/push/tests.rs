@@ -29,7 +29,7 @@ fn a_hung_push_is_killed_by_the_push_timeout() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let started = std::time::Instant::now();
     let failure = rt
-        .block_on(push_once(&script, &[], Duration::from_millis(200)))
+        .block_on(push_once(&script, &[], Duration::from_millis(200), None))
         .expect_err("a hung push must not hang the run");
 
     assert!(failure.message.contains("timed out"), "got: {}", failure.message);
@@ -111,6 +111,24 @@ fn only_a_temporary_fault_is_worth_retrying() {
         push_exit_is_transient(Some(ExitCode::TempFail as i32)),
         "75 is the temporary fault that may clear",
     );
+    // C-057: 83 joined the set with `--sign`. A push that landed and then
+    // could not reach Rekor is the same "try again" class as a registry
+    // timeout — and without this the whole version is thrown away over a
+    // transparency log that was briefly down.
+    assert!(
+        push_exit_is_transient(Some(ExitCode::TransparencyLogUnavailable as i32)),
+        "83 is a Rekor outage, which a retry can clear",
+    );
+    // The two neighbours are deliberately NOT in the set: 84 is a registry
+    // with no Referrers API and 85 a key backend this binary was not built
+    // with. Both are permanent facts, and retrying either only slows the
+    // failure down.
+    for permanent in [ExitCode::ReferrersUnsupported, ExitCode::UnsupportedKeyBackend] {
+        assert!(
+            !push_exit_is_transient(Some(permanent as i32)),
+            "{permanent:?} is a permanent fact about the destination or the binary",
+        );
+    }
 
     for code in [
         ExitCode::Failure,

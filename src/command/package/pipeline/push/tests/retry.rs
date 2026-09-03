@@ -215,6 +215,7 @@ concurrency:
         "ocx.sh/minimal:1.0.0",
         &dir.path().join("bundle-1.0.0-linux_amd64.tar.xz"),
         false,
+        None,
     ));
     // SAFETY: cleanup so neighbouring tests don't inherit the pin.
     unsafe { std::env::remove_var("OCX_BINARY_PIN") };
