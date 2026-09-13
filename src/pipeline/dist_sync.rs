@@ -32,7 +32,9 @@
 //! **Rolling versus immutable.** Archives and the snapshot are content-addressed
 //! by name and may be skipped when the store already holds them. `dist.json` is
 //! rolling — the path outlives its contents — and is republished every run
-//! ([`upload::Precheck`]).
+//! ([`upload::Precheck`]). Where the two documents land is `publish.dist`
+//! ([`DistDocs`]); the tree under `output:` always holds both, and the switches
+//! there govern the upload alone.
 //!
 //! There is deliberately **no `dist.json.sha256` sidecar.** Nothing read it:
 //! `install.sh` verifies each archive against the manifest's own inline
@@ -57,20 +59,14 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use url::Url;
 
-use self::layout::{LayoutTemplate, RowValues};
+use self::layout::{LayoutTemplate, RowValues, SnapshotTemplate};
 use self::manifest::{DistManifest, ReleaseRow, SUPPORTED_SCHEMA};
 use self::report::{ArchiveOutcome, ArchiveReport, DistSyncReport, RunCounters};
 use self::upload::{Precheck, Probe, UploadOutcome, Uploader};
 use crate::error::MirrorError;
 use crate::pipeline::download::download;
 use crate::pipeline::verify::verify_digest;
-use crate::spec::DistSpec;
-
-/// Fixed name of the rolling manifest, relative to `output:` and to
-/// `publish.base_url`.
-const MANIFEST_NAME: &str = "dist.json";
-/// Directory the content-addressed snapshots live in.
-const SNAPSHOT_DIR: &str = "dist";
+use crate::spec::{DistDocs, DistSpec};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
@@ -133,7 +129,7 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     // the report would look wrong.
     if manifest.releases.is_empty() {
         return Err(MirrorError::ExecutionFailed(vec![format!(
-            "no release survived `select:`; publishing an empty {MANIFEST_NAME} would strand every consumer \
+            "no release survived `select:`; publishing an empty manifest would strand every consumer \
              of this mirror, so the run stops instead"
         )]));
     }
@@ -142,6 +138,9 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     // is a value, not a validation result.
     let template = LayoutTemplate::parse(&spec.publish.layout)
         .map_err(|error| MirrorError::SpecInvalid(vec![format!("publish.layout: {error}")]))?;
+    let docs = spec.publish.dist_docs();
+    let snapshot_template = SnapshotTemplate::parse(&docs.snapshots)
+        .map_err(|error| MirrorError::SpecInvalid(vec![format!("publish.dist.snapshots: {error}")]))?;
 
     let mut report = DistSyncReport {
         dry_run,
@@ -159,7 +158,10 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     // Two rows rendering to one path would have the second silently overwrite
     // the first, and the manifest would then name one file for two targets —
     // a wrong-binary install with nothing in the output to show for it.
-    let mut claimed: HashMap<String, String> = HashMap::with_capacity(manifest.releases.len());
+    let mut claimed: HashMap<String, String> = HashMap::with_capacity(manifest.releases.len() + 1);
+    // The rolling manifest is a fixed path in the same tree, so it claims
+    // first; the snapshot cannot collide — its path carries a 64-hex digest.
+    claimed.insert(docs.path.clone(), "publish.dist.path".to_string());
     let mut planned: Vec<PlannedRow> = Vec::with_capacity(manifest.releases.len());
     // Indexed rather than pushed, so the report keeps manifest order whatever
     // order the fetches below finish in.
@@ -280,11 +282,12 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
         return Ok(report);
     }
 
-    let (digest, snapshot) = publish_manifest(spec, &manifest).await?;
+    let (digest, snapshot) = publish_manifest(spec, &docs, &snapshot_template, &manifest).await?;
     report.manifest_sha256 = Some(digest);
+    report.snapshot = Some(snapshot.clone());
 
     if let Some(uploader) = &uploader {
-        upload_manifest(uploader, spec, &snapshot, &mut report).await?;
+        upload_manifest(uploader, spec, &docs, &snapshot, &mut report).await?;
     }
 
     Ok(report)
@@ -300,15 +303,22 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
 ///
 /// [`MirrorError::IndexWriteError`] for a render failure or any failed write
 /// into `output:`.
-async fn publish_manifest(spec: &DistSpec, manifest: &DistManifest) -> Result<(String, String), MirrorError> {
+async fn publish_manifest(
+    spec: &DistSpec,
+    docs: &DistDocs,
+    snapshot_template: &SnapshotTemplate,
+    manifest: &DistManifest,
+) -> Result<(String, String), MirrorError> {
     let rendered = manifest
         .render()
-        .map_err(|error| MirrorError::IndexWriteError(format!("cannot render {MANIFEST_NAME}: {error}")))?;
+        .map_err(|error| MirrorError::IndexWriteError(format!("cannot render {}: {error}", docs.path)))?;
     let digest = hex::encode(Sha256::digest(rendered.as_bytes()));
-    let snapshot = format!("{SNAPSHOT_DIR}/{digest}.json");
+    let snapshot = snapshot_template.expand(&digest);
 
+    // Both are always written, whatever `publish.dist` switches off: the tree
+    // is the deliverable that works against every store.
     write_output(&spec.output.join(&snapshot), rendered.as_bytes()).await?;
-    write_output(&spec.output.join(MANIFEST_NAME), rendered.as_bytes()).await?;
+    write_output(&spec.output.join(&docs.path), rendered.as_bytes()).await?;
 
     Ok((digest, snapshot))
 }
@@ -330,16 +340,21 @@ async fn publish_manifest(spec: &DistSpec, manifest: &DistManifest) -> Result<(S
 async fn upload_manifest(
     uploader: &Uploader,
     spec: &DistSpec,
+    docs: &DistDocs,
     snapshot: &str,
     report: &mut DistSyncReport,
 ) -> Result<(), MirrorError> {
-    for (relative, precheck) in [
+    for (relative, precheck, enabled) in [
         // Content-addressed: a re-run whose manifest did not change writes the
         // same name, and the store already holds it.
-        (snapshot, Precheck::HeadFirst),
+        (snapshot, Precheck::HeadFirst, docs.upload_snapshots),
         // Rolling: "already there" says nothing about which version is there.
-        (MANIFEST_NAME, Precheck::Unconditional),
+        (docs.path.as_str(), Precheck::Unconditional, docs.upload_path),
     ] {
+        if !enabled {
+            tracing::info!("skip {relative} (switched off by publish.dist)");
+            continue;
+        }
         tracing::info!("PUT {relative}");
         report
             .counters
@@ -403,9 +418,9 @@ fn plan_row(
     // Every row is visited exactly once, so a repeat claim is always a genuine
     // duplicate — including two rows sharing `(version, target)`, whose
     // digests may differ and whose collision is exactly what this catches.
-    if let Some(first) = claimed.insert(relative.clone(), name.clone()) {
+    if let Some(first) = claimed.insert(relative.clone(), format!("release {name}")) {
         return Err(format!(
-            "layout path {relative:?} is already claimed by release {first}; \
+            "layout path {relative:?} is already claimed by {first}; \
              `publish.layout` must render one path per release and target"
         ));
     }

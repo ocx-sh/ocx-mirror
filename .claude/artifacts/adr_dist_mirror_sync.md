@@ -145,6 +145,17 @@ quoting bugs in exchange for no control over retries.
 **Cost:** WebDAV does not work under a nested layout — RFC 4918 §9.7.1 forbids
 `PUT` from creating collections. Documented rather than worked around.
 
+**Amendment (2026-09-14, [#63](https://github.com/ocx-sh/ocx-mirror/issues/63)).**
+"The same `PUT`" held for the archives and not for the manifest documents:
+sub-decision 2 gave the rows a layout, but `dist.json` and `dist/<sha256>.json`
+stayed at fixed paths under `base_url`, and a GitLab generic package registry
+has no route for a file two segments deep. Resolved by extending the principle
+rather than the store list — every published path is a layout over its file's
+own attributes. `publish.dist` places the rolling manifest (`path`, a plain
+path — there is one such file) and the snapshots (`snapshots`, a template over
+`{sha256}`), each switchable off for the upload; the tree under `output:`
+always holds both. Defaults reproduce the fixed paths, so no consumer moves.
+
 ## Invariants
 
 All are enforced in code and pinned by tests:
@@ -206,3 +217,4 @@ All are enforced in code and pinned by tests:
 |------|--------|--------|
 | 2026-08-18 | Michael Herwig | Initial draft, accepted; records the four decisions the implementation made |
 | 2026-08-18 | Michael Herwig | Round-two review: added invariants 2 and 4 (empty selection publishes nothing; one URL composition) and the 8 MiB cap on the manifest fetch |
+| 2026-09-14 | Michael Herwig | Amended sub-decision 4: the manifest documents get a layout too (`publish.dist`), after #63 showed a package registry cannot take them at fixed paths |

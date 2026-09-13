@@ -93,7 +93,7 @@ public/
 
     Earlier builds wrote one. Nothing read it — `install.sh` verifies each archive against the manifest's own inline `sha256`, and pinning is `dist/<sha256>.json` — and it could not be served faithfully either: Artifactory reads a `PUT` to a `*.sha256` path as a checksum declaration about the *sibling* artifact rather than as a file to store, 404ing when the sibling does not exist yet and synthesising its own body when it does.
 
-The manifest file names are fixed and not configurable: `OCX_INSTALL_DIST_URL` is set once per consumer and must not move when [`layout`](#publish) changes.
+Where the two manifest documents land is [`publish.dist`](#dist). The defaults above are what every earlier release wrote, so an existing consumer's `OCX_INSTALL_DIST_URL` does not move on upgrade — and a package registry that cannot take a file at the root of its base gets its own shape without the archives changing theirs.
 
 ### Reproducible installs {#snapshots}
 
@@ -137,7 +137,8 @@ publish:
 | Key | Type | Required | Purpose |
 |-----|------|----------|---------|
 | `base_url` | URL | Yes | Public base every mirrored `url` is composed from. Trailing slashes are ignored; a query or fragment is refused. |
-| `layout` | string | No | Path shape below `base_url`. Defaults to `{tag}/{filename}`. |
+| `layout` | string | No | Path shape of the archives below `base_url`. Defaults to `{tag}/{filename}`. |
+| `dist` | bool or object | No | Where the two manifest documents land, and whether they are uploaded. See [`dist`](#dist). |
 
 `layout` is plain substitution over five placeholders — `{version}`, `{tag}`, `{target}`, `{filename}`, `{channel}` — with no template engine. An unknown placeholder is a load error rather than an empty string, because an empty expansion would collapse a path segment and quietly collide every release onto one path.
 
@@ -164,11 +165,55 @@ Teaching every consumer a URL template would mean placeholder substitution in fi
 publish:
   base_url: https://gitlab.corp.example/api/v4/projects/42/packages/generic/ocx
   layout: "{version}/{filename}"
+  dist:
+    path: dist/latest.json
 ```
+
+The `dist:` block is the other half of that shape — a package registry has no route for a file at the root of the package, so the rolling manifest needs a version segment of its own. See [`dist`](#dist).
 
 Like `source`, `base_url` must be `https` unless its host is trusted, and must not embed userinfo — a credential there would be copied into every manifest row and served to every consumer.
 
 **No query or fragment either.** Two consumers compose onto this base — the published URL and the upload target — and they treat a query differently, so the same byte would be advertised at one URL and stored at another. It is also the shape a credential arrives in: an Azure Blob SAS *is* a query string, and a base carrying one would put a live write credential into a manifest served to everybody while the upload itself still succeeded. Put such a credential in [`identity`](#identity) or `headers` instead.
+
+### `dist` {#dist}
+
+```yaml
+publish:
+  dist:
+    path: dist.json                  # the rolling manifest — a plain path
+    snapshots: "dist/{sha256}.json"  # the pinned copies — a template, or false
+```
+
+Where the two manifest documents land below `base_url`, and whether each is uploaded. Omitting the block (or writing `dist: true`) is the shape shown, which is the tree every earlier release wrote. `dist: false` uploads the archives only.
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `path` | string | Relative path of the rolling manifest — what `OCX_INSTALL_DIST_URL` points at. A plain path: there is exactly one such file, so there is nothing to substitute, and a `{` is refused. Default `dist.json`. |
+| `snapshots` | string or `false` | Template for the content-addressed copy, over the single placeholder `{sha256}` — the digest of the rendered manifest, which must appear or every snapshot would render to one path. `false` uploads no snapshot. Default `dist/{sha256}.json`. |
+
+**The switches govern the upload alone.** Whatever `dist:` says, both documents are always written under `output:` at these paths (the defaults, when switched off): the tree is the deliverable that works against every store, and "I publish my own `dist.json`" starts from the one written there. The run report names the snapshot's rendered path either way.
+
+The same rendered path is used everywhere, as for archives: the file under `output:`, the `PUT` target, and the URL a consumer is given. The rolling path is also claimed against the archive layout, so a `layout` that renders a release onto it fails the run rather than overwriting the manifest.
+
+A bare string is deliberately **not** accepted as shorthand for `path:` — a shorthand that reads as "the manifest goes here" while silently keeping or dropping the snapshots would surprise either way.
+
+The reason this is configurable is the package registry. GitLab addresses every file as `<package>/<version>/<file>` and has no route for `<package>/dist.json`, so the default fails there with a `400` while the snapshot, three segments deep, lands by accident in a package version called `dist`. Giving the rolling manifest a version segment puts both documents in that one package, beside the per-version archive packages:
+
+```yaml
+publish:
+  base_url: https://gitlab.corp.example/api/v4/projects/42/packages/generic/ocx
+  layout: "{version}/{filename}"
+  dist:
+    path: dist/latest.json
+```
+
+```text
+…/generic/ocx/0.6.0/ocx-x86_64-unknown-linux-gnu.tar.gz   → package ocx, version 0.6.0
+…/generic/ocx/dist/latest.json                            → package ocx, version dist   (rolling — re-published every run)
+…/generic/ocx/dist/<sha256>.json                          → package ocx, version dist   (pinned — skipped when already there)
+
+OCX_INSTALL_DIST_URL=https://gitlab.corp.example/api/v4/projects/42/packages/generic/ocx/dist/latest.json
+```
 
 ## `upload` {#upload}
 
@@ -234,8 +279,8 @@ Files fall into two classes, and only one of them is skippable:
 
 | Class | Files | Behaviour |
 |-------|-------|-----------|
-| **Immutable** | archives at the rendered layout, `dist/<sha256>.json` | Asked for first; one the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
-| **Rolling** | `dist.json` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
+| **Immutable** | archives at the rendered layout, the snapshot at `dist.snapshots` | Asked for first; one the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
+| **Rolling** | the manifest at `dist.path` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
 
 The destination is the authority for the immutable class: a file deleted from the store is re-uploaded by the next run instead of being skipped forever by stale local state.
 
@@ -245,7 +290,7 @@ Each archive is probed, downloaded, verified and uploaded as one unit, so one ro
 
 !!! note "GitLab generic packages are immutable by default"
 
-    Re-publishing the rolling `dist.json` needs duplicate publishing enabled for generic packages on the project. Content-addressed snapshots never collide, so they work either way.
+    Re-publishing the rolling manifest into the same package version needs duplicate publishing enabled for generic packages on the project. Content-addressed snapshots never collide, so they work either way — or switch them off with [`dist.snapshots: false`](#dist) if a file per digest is clutter in the package view.
 
 ## `concurrency` {#concurrency}
 

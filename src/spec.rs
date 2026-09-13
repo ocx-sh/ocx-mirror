@@ -39,7 +39,7 @@ pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 // `DistSpec` joins the tier `MirrorSpec` and `RegistrySpec` occupy, which is
 // what makes `tests/dist_spec_validation.rs` reachable without touching
 // `lib.rs`. Its children ride along so the pipeline can name them.
-pub use dist::{DistSpec, Identity, Publish, Select, Upload};
+pub use dist::{DistDocs, DistLayout, DistPublish, DistSpec, Identity, Publish, Select, Snapshots, Upload};
 #[allow(unused_imports)]
 // Glob so `crate::spec::…` stays the one path callers use — the split is an
 // internal file boundary, not a new namespace for them to learn — and so this
