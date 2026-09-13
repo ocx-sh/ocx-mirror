@@ -522,3 +522,111 @@ publish:
         "output, source scheme and layout are three independent violations"
     );
 }
+
+/// `publish.dist` is `false`, `true`, or the block; a bare string is refused
+/// rather than read as `path:`.
+#[test]
+fn publish_dist_switches_the_upload_and_keeps_the_tree() {
+    let off = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+  dist: false
+",
+    );
+    assert_eq!(
+        off.publish.dist_docs(),
+        DistDocs {
+            path: "dist.json".to_string(),
+            snapshots: "dist/{sha256}.json".to_string(),
+            upload_path: false,
+            upload_snapshots: false,
+        }
+    );
+    assert!(off.validate(Path::new(SPEC_PATH)).is_empty());
+
+    let on = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+  dist: true
+",
+    );
+    assert_eq!(on.publish.dist_docs(), valid(MINIMAL).publish.dist_docs());
+
+    assert!(
+        parse(
+            r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+  dist: dist/latest.json
+"
+        )
+        .is_err(),
+        "a bare string must not be read as a shorthand for path:"
+    );
+}
+
+/// The GitLab shape: the rolling manifest moves into a package version, the
+/// snapshots are switched off, and the tree still holds both.
+#[test]
+fn publish_dist_places_the_rolling_manifest_and_switches_snapshots_off() {
+    let spec = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://gitlab.test/api/v4/projects/42/packages/generic/ocx
+  layout: '{version}/{filename}'
+  dist:
+    path: dist/latest.json
+    snapshots: false
+",
+    );
+
+    assert_eq!(
+        spec.publish.dist_docs(),
+        DistDocs {
+            path: "dist/latest.json".to_string(),
+            snapshots: "dist/{sha256}.json".to_string(),
+            upload_path: true,
+            upload_snapshots: false,
+        }
+    );
+    assert!(spec.validate(Path::new(SPEC_PATH)).is_empty());
+
+    let templated = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+  dist:
+    snapshots: 'pins/{sha256}/dist.json'
+",
+    );
+    assert_eq!(templated.publish.dist_docs().snapshots, "pins/{sha256}/dist.json");
+    assert!(templated.validate(Path::new(SPEC_PATH)).is_empty());
+}
+
+#[test]
+fn publish_dist_paths_are_validated_at_load() {
+    let spec = valid(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+  dist:
+    path: '{filename}'
+    snapshots: 'dist/pinned.json'
+",
+    );
+
+    let errors = spec.validate(Path::new(SPEC_PATH));
+
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert!(errors[0].starts_with("publish.dist.path: "), "{}", errors[0]);
+    assert!(errors[1].starts_with("publish.dist.snapshots: "), "{}", errors[1]);
+    assert!(errors[1].contains("{sha256}"), "{}", errors[1]);
+}

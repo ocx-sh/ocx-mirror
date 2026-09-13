@@ -38,10 +38,27 @@ fn a_gitlab_generic_package_base_composes_into_a_reachable_url() {
     );
 }
 
+/// The default `publish.dist` reproduces the fixed tree earlier releases
+/// wrote: `OCX_INSTALL_DIST_URL` is set once per consumer and must not move
+/// when the mirror is upgraded.
 #[test]
-fn the_manifest_file_names_are_the_ones_consumers_configure() {
-    // These are fixed rather than templated: `OCX_INSTALL_DIST_URL` is set
-    // once per consumer and must not move when `publish.layout` changes.
-    assert_eq!(MANIFEST_NAME, "dist.json");
-    assert_eq!(SNAPSHOT_DIR, "dist");
+fn the_default_manifest_paths_are_the_ones_consumers_already_configure() {
+    let spec: DistSpec = serde_yaml_ng::from_str(
+        r"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+",
+    )
+    .expect("the fixture must deserialize");
+
+    let docs = spec.publish.dist_docs();
+    assert_eq!(docs.path, "dist.json");
+    assert_eq!(
+        SnapshotTemplate::parse(&docs.snapshots)
+            .expect("the default must parse")
+            .expand("abc"),
+        "dist/abc.json"
+    );
+    assert!(docs.upload_path && docs.upload_snapshots);
 }

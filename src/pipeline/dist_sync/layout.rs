@@ -2,7 +2,8 @@
 // Copyright 2026 The OCX Authors
 
 //! `publish.layout` — where one archive lands, below both `output:` and
-//! `publish.base_url`.
+//! `publish.base_url` — and `publish.dist`, where the two manifest documents
+//! land.
 //!
 //! The same rendered path is the file written on disk *and* the tail of the
 //! `url` stamped into the mirrored manifest, so the two can never disagree
@@ -72,8 +73,12 @@ pub struct RowValues<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LayoutError {
-    /// A `{…}` naming something other than the five known placeholders.
-    UnknownPlaceholder { name: String },
+    /// A `{…}` naming something other than the placeholders this template
+    /// knows; `known` spells them out for the message.
+    UnknownPlaceholder { name: String, known: &'static str },
+    /// A template that must vary per document but names no placeholder at
+    /// all — every snapshot would render to one path.
+    MissingPlaceholder { template: String, name: &'static str },
     /// A literal `{` that never closes.
     UnterminatedPlaceholder { template: String },
     /// A substituted value that is not a single safe path component.
@@ -81,15 +86,24 @@ pub enum LayoutError {
     /// A template whose own literals would leave `output:` — an absolute
     /// path, or a `..` / `.` segment.
     EscapingTemplate { template: String },
+    /// A `publish.dist.path` that is empty or carries a `{` — it is a plain
+    /// path, and there is nothing to substitute into it.
+    NotAPlainPath { path: String },
 }
 
 impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownPlaceholder { name } => write!(
+            Self::UnknownPlaceholder { name, known } => {
+                write!(
+                    f,
+                    "unknown placeholder '{{{name}}}'; the known placeholders are {known}"
+                )
+            }
+            Self::MissingPlaceholder { template, name } => write!(
                 f,
-                "unknown placeholder '{{{name}}}'; the known placeholders are {{version}}, {{tag}}, \
-                 {{target}}, {{filename}} and {{channel}}"
+                "template {template:?} names no '{{{name}}}' placeholder, so every document would render \
+                 to the same path"
             ),
             Self::UnterminatedPlaceholder { template } => {
                 write!(f, "unterminated '{{' in layout template {template:?}")
@@ -103,6 +117,11 @@ impl fmt::Display for LayoutError {
                 f,
                 "layout template {template:?} would write outside the output directory — it must be \
                  relative and carry no '.' or '..' segment"
+            ),
+            Self::NotAPlainPath { path } => write!(
+                f,
+                "{path:?} is not a plain path — it must be non-empty and carry no placeholder; there is \
+                 exactly one rolling manifest, so there is nothing to substitute"
             ),
         }
     }
@@ -138,6 +157,7 @@ impl LayoutTemplate {
                 unknown => {
                     return Err(LayoutError::UnknownPlaceholder {
                         name: unknown.to_string(),
+                        known: "{version}, {tag}, {target}, {filename} and {channel}",
                     });
                 }
             };
@@ -185,6 +205,86 @@ impl LayoutTemplate {
         }
         Ok(out)
     }
+}
+
+/// A parsed `publish.dist.snapshots` template.
+///
+/// One placeholder, `{sha256}` — the digest of the rendered manifest, which is
+/// the whole point of the document: the path pins the bytes. It must appear,
+/// because a template without it renders every snapshot to one path and the
+/// second run silently overwrites the first pin.
+#[derive(Debug, Clone)]
+pub struct SnapshotTemplate {
+    template: String,
+}
+
+impl SnapshotTemplate {
+    const PLACEHOLDER: &'static str = "{sha256}";
+
+    /// Parse a `publish.dist.snapshots` template.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::MissingPlaceholder`] when `{sha256}` is absent,
+    /// [`LayoutError::UnknownPlaceholder`] for any other `{…}`,
+    /// [`LayoutError::UnterminatedPlaceholder`] for a `{` that never closes,
+    /// and [`LayoutError::EscapingTemplate`] for literals that leave `output:`.
+    pub fn parse(template: &str) -> Result<SnapshotTemplate, LayoutError> {
+        let mut rest = template;
+        let mut seen = false;
+        while let Some(open) = rest.find('{') {
+            let after_open = &rest[open + 1..];
+            let Some(close) = after_open.find('}') else {
+                return Err(LayoutError::UnterminatedPlaceholder {
+                    template: template.to_string(),
+                });
+            };
+            match &after_open[..close] {
+                "sha256" => seen = true,
+                unknown => {
+                    return Err(LayoutError::UnknownPlaceholder {
+                        name: unknown.to_string(),
+                        known: "{sha256}",
+                    });
+                }
+            }
+            rest = &after_open[close + 1..];
+        }
+        if !seen {
+            return Err(LayoutError::MissingPlaceholder {
+                template: template.to_string(),
+                name: "sha256",
+            });
+        }
+        check_literals(template)?;
+        Ok(SnapshotTemplate {
+            template: template.to_string(),
+        })
+    }
+
+    /// Render the snapshot path for one manifest digest (lowercase hex, which
+    /// is always a single safe path component).
+    #[must_use]
+    pub fn expand(&self, sha256_hex: &str) -> String {
+        self.template.replace(Self::PLACEHOLDER, sha256_hex)
+    }
+}
+
+/// Validate `publish.dist.path` — a plain relative path, not a template.
+///
+/// There is exactly one rolling manifest, so it has nothing to substitute; a
+/// `{` is refused so an operator who writes `{filename}` out of habit gets an
+/// error rather than a file literally named that.
+///
+/// # Errors
+///
+/// [`LayoutError::NotAPlainPath`] for an empty path or one carrying a `{`,
+/// [`LayoutError::EscapingTemplate`] for literals that leave `output:`.
+pub fn check_plain_path(path: &str) -> Result<(), LayoutError> {
+    if path.is_empty() || path.contains(['{', '}']) {
+        return Err(LayoutError::NotAPlainPath { path: path.to_string() });
+    }
+    check_literals(path)
 }
 
 /// Refuse a template whose own literals leave `output:`.

@@ -29,6 +29,13 @@ const DEFAULT_SOURCE: &str = "https://setup.ocx.sh/dist.json";
 /// produces.
 const DEFAULT_LAYOUT: &str = "{tag}/{filename}";
 
+/// Where the rolling manifest lands when `publish.dist.path` is omitted.
+const DEFAULT_DIST_PATH: &str = "dist.json";
+
+/// Where a content-addressed snapshot lands when `publish.dist.snapshots` is
+/// omitted.
+const DEFAULT_SNAPSHOT_LAYOUT: &str = "dist/{sha256}.json";
+
 /// Backoff schedule when `upload.retry_delays` is omitted, in seconds.
 ///
 /// The array *is* the retry count — there is deliberately no separate
@@ -57,8 +64,7 @@ pub struct DistSpec {
     pub source: Url,
 
     /// Directory the mirror tree is written into — archives at the rendered
-    /// [`Publish::layout`], plus `dist.json` and `dist/<sha256>.json` at fixed
-    /// paths.
+    /// [`Publish::layout`], the manifest documents at [`Publish::dist`].
     ///
     /// Always written, whether or not [`Self::upload`] is configured: the
     /// operator's own `aws s3 sync` / `rsync` / commit step is the path that
@@ -98,9 +104,8 @@ pub struct DistSpec {
     /// of the whole mirror.
     ///
     /// `true` forces retention even when uploading, for an operator who ships
-    /// the tree *and* the store. Governs archives only: `dist.json` and
-    /// `dist/<sha256>.json` are a few KB, are what the report names, and are
-    /// always written.
+    /// the tree *and* the store. Governs archives only: the manifest documents
+    /// are a few KB, are what the report names, and are always written.
     ///
     /// [`Self::retain_archives_resolved`] applies the auto rule.
     #[serde(default)]
@@ -208,10 +213,135 @@ pub struct Publish {
     /// manifest rewrites `url` rather than leaving consumers to compose it.
     #[serde(default = "default_layout")]
     pub layout: String,
+
+    /// Where the two manifest documents land, and whether they are uploaded.
+    ///
+    /// `false` uploads archives only; the block sets the paths; omitted (or
+    /// `true`) is the block with its defaults. Whatever is set, both documents
+    /// are always written under `output:` — the tree is the deliverable that
+    /// works against every store, and "publish my own `dist.json`" starts
+    /// from the one written there.
+    #[serde(default)]
+    pub dist: DistPublish,
 }
 
 fn default_layout() -> String {
     DEFAULT_LAYOUT.to_string()
+}
+
+/// `publish.dist` — `false`, `true`, or the block.
+///
+/// Untagged so the spec reads `dist: false` rather than a nested switch. A
+/// bare string is deliberately not accepted as shorthand for `path:` — a
+/// shorthand that reads as "the manifest goes here" while silently keeping
+/// every other default would be a surprise either way.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum DistPublish {
+    /// `true` is the default block; `false` uploads neither document.
+    Switch(bool),
+    Layout(DistLayout),
+}
+
+impl Default for DistPublish {
+    fn default() -> Self {
+        Self::Layout(DistLayout::default())
+    }
+}
+
+/// Where each manifest document lands below `base_url` (and `output:`).
+///
+/// Two documents, two shapes: the rolling manifest is one file, so `path` is
+/// a plain path; a snapshot is one file *per manifest digest*, so `snapshots`
+/// is a template over `{sha256}`. The defaults reproduce the fixed tree
+/// earlier releases wrote, so an existing consumer's `OCX_INSTALL_DIST_URL`
+/// does not move.
+///
+/// A GitLab generic package registry, which addresses every file as
+/// `<package>/<version>/<file>`, is the reason this is configurable at all:
+/// `path: dist/latest.json` puts the rolling manifest into package version
+/// `dist`, beside the snapshots the default already lands there.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct DistLayout {
+    /// Plain relative path of the rolling manifest. Defaults to `dist.json`.
+    #[serde(default = "default_dist_path")]
+    pub path: String,
+
+    /// Template for the content-addressed snapshot, over `{sha256}`, or
+    /// `false` to upload none. Defaults to `dist/{sha256}.json`.
+    #[serde(default)]
+    pub snapshots: Snapshots,
+}
+
+impl Default for DistLayout {
+    fn default() -> Self {
+        Self {
+            path: default_dist_path(),
+            snapshots: Snapshots::default(),
+        }
+    }
+}
+
+fn default_dist_path() -> String {
+    DEFAULT_DIST_PATH.to_string()
+}
+
+/// `publish.dist.snapshots` — `false`, `true`, or a template.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum Snapshots {
+    /// `true` is the default template; `false` uploads no snapshot.
+    Switch(bool),
+    Template(String),
+}
+
+impl Default for Snapshots {
+    fn default() -> Self {
+        Self::Template(DEFAULT_SNAPSHOT_LAYOUT.to_string())
+    }
+}
+
+/// [`Publish::dist`] with every switch applied: where each document is
+/// written, and whether each is uploaded.
+///
+/// Paths are always present because the tree is always written — a disabled
+/// document keeps its default path there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistDocs {
+    /// Relative path of the rolling manifest.
+    pub path: String,
+    /// Unparsed snapshot template; validated at spec load.
+    pub snapshots: String,
+    /// Whether the rolling manifest is uploaded.
+    pub upload_path: bool,
+    /// Whether the snapshot is uploaded.
+    pub upload_snapshots: bool,
+}
+
+impl Publish {
+    /// Resolve [`Self::dist`] into concrete paths and upload switches.
+    #[must_use]
+    pub fn dist_docs(&self) -> DistDocs {
+        let default = DistLayout::default();
+        let (layout, upload) = match &self.dist {
+            DistPublish::Switch(on) => (&default, *on),
+            DistPublish::Layout(layout) => (layout, true),
+        };
+        let (snapshots, upload_snapshots) = match &layout.snapshots {
+            Snapshots::Switch(on) => (DEFAULT_SNAPSHOT_LAYOUT.to_string(), upload && *on),
+            Snapshots::Template(template) => (template.clone(), upload),
+        };
+        DistDocs {
+            path: layout.path.clone(),
+            snapshots,
+            upload_path: upload,
+            upload_snapshots,
+        }
+    }
 }
 
 /// Native HTTP PUT of the emitted tree.
@@ -310,6 +440,13 @@ impl DistSpec {
 
         if let Err(error) = crate::pipeline::dist_sync::layout::LayoutTemplate::parse(&self.publish.layout) {
             errors.push(format!("publish.layout: {error}"));
+        }
+        let docs = self.publish.dist_docs();
+        if let Err(error) = crate::pipeline::dist_sync::layout::check_plain_path(&docs.path) {
+            errors.push(format!("publish.dist.path: {error}"));
+        }
+        if let Err(error) = crate::pipeline::dist_sync::layout::SnapshotTemplate::parse(&docs.snapshots) {
+            errors.push(format!("publish.dist.snapshots: {error}"));
         }
 
         if let Some(upload) = &self.upload {

@@ -92,6 +92,17 @@ def upload_store(request: pytest.FixtureRequest):
     # a HEAD with no digest at all — the store the probe must degrade against
     # rather than break on.
     omit_checksum = options.get("omit_checksum", False)
+    # `package_base="/…/generic/ocx"` stands in for a GitLab generic package
+    # registry, which addresses every file as `<package>/<version>/<file>` and
+    # has no route for anything shallower — a PUT to `<package>/dist.json` is
+    # answered 400, which is exactly how issue #63 surfaced.
+    package_base = options.get("package_base")
+
+    def routed(path: str) -> bool:
+        if package_base is None:
+            return True
+        below = path.removeprefix(package_base + "/")
+        return below != path and len(below.split("/")) >= 2
 
     stored: dict[str, bytes] = {}
     requests: list[tuple[str, str]] = []
@@ -104,6 +115,10 @@ def upload_store(request: pytest.FixtureRequest):
             # wire, and a plain dict() of the parsed message loses the
             # case-insensitive lookup `email.message.Message` provides.
             headers.append({name.lower(): value for name, value in self.headers.items()})
+            if not routed(self.path):
+                self.send_response(400)
+                self.end_headers()
+                return
             body = stored.get(self.path)
             self.send_response(404 if body is None else 200)
             # Artifactory, Nexus and GitLab all answer a HEAD with the digest
@@ -123,6 +138,11 @@ def upload_store(request: pytest.FixtureRequest):
             headers.append({name.lower(): value for name, value in self.headers.items()})
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
+
+            if not routed(self.path):
+                self.send_response(400)
+                self.end_headers()
+                return
 
             if remaining_failures["count"] > 0:
                 remaining_failures["count"] -= 1
@@ -214,6 +234,7 @@ def write_spec(
     *,
     base_url: str = "https://art.corp.test/ocx-dist",
     layout: str | None = None,
+    dist: str | None = None,
     min_version: str | None = None,
     upload: bool = False,
     retry_delays: list[int] | None = None,
@@ -231,6 +252,10 @@ def write_spec(
     ]
     if layout:
         body.append(f"  layout: '{layout}'")
+    if dist is not None:
+        # Verbatim YAML — `false`, or a flow mapping such as
+        # `{path: dist/latest.json, snapshots: false}`.
+        body.append(f"  dist: {dist}")
     if min_version:
         body += ["select:", f"  min_version: '{min_version}'"]
     if upload:
@@ -609,6 +634,84 @@ def test_the_gitlab_layout_changes_both_the_tree_and_the_manifest_urls(dist_mirr
         assert row["url"] == (
             f"https://gitlab.corp.test/api/v4/projects/42/packages/generic/ocx/0.5.8/{row['filename']}"
         )
+
+
+@pytest.mark.upload_store(package_base="/api/v4/projects/42/packages/generic/ocx")
+def test_a_gitlab_generic_package_registry_takes_every_document_under_a_package_version(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """Issue #63: the store has no route for `<package>/dist.json`.
+
+    `publish.dist.path` moves the rolling manifest into a package version of
+    its own, beside the snapshots the default already lands there, and the
+    same path is what the tree holds and what the report names.
+    """
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    output = tmp_path / "public"
+    base = "/api/v4/projects/42/packages/generic/ocx"
+    spec = write_spec(
+        tmp_path / "dist.yml",
+        source,
+        output,
+        base_url=upload_store.url(base),
+        layout="{version}/{filename}",
+        dist="{path: dist/latest.json}",
+        upload=True,
+    )
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
+
+    report = json.loads(result.stdout)
+    digest = report["manifest_sha256"]
+    assert report["snapshot"] == f"dist/{digest}.json"
+    puts = upload_store.paths("PUT")
+    assert puts[-1] == f"{base}/dist/latest.json", f"the rolling manifest is published last, in a package version: {puts}"
+    assert f"{base}/dist/{digest}.json" in puts, f"the snapshot lands in the same package version: {puts}"
+    assert f"{base}/0.5.8/ocx-x86_64-unknown-linux-gnu.tar.gz" in puts, puts
+    assert (output / "dist" / "latest.json").read_bytes() == upload_store.stored[f"{base}/dist/latest.json"]
+    assert (output / "dist" / f"{digest}.json").is_file()
+    assert not (output / "dist.json").exists(), "the rolling manifest lives at publish.dist.path and nowhere else"
+
+
+def test_publish_dist_false_uploads_archives_only_and_still_writes_the_tree(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """The switch governs the upload alone: the tree stays the complete deliverable."""
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    output = tmp_path / "public"
+    spec = write_spec(tmp_path / "dist.yml", source, output, base_url=upload_store.url(), dist="false", upload=True)
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
+
+    report = json.loads(result.stdout)
+    puts = upload_store.paths("PUT")
+    assert puts and all(path.startswith("/v0.5.8/") for path in puts), f"only archives are uploaded: {puts}"
+    assert (output / "dist.json").is_file()
+    assert (output / report["snapshot"]).is_file()
+    assert report["counters"]["uploaded"] == len(puts)
+
+
+def test_publish_dist_snapshots_false_uploads_the_rolling_manifest_alone(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml", source, output, base_url=upload_store.url(), dist="{snapshots: false}", upload=True
+    )
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    dist_mirror.run("dist", "sync", str(spec))
+
+    puts = upload_store.paths("PUT")
+    assert puts[-1] == "/dist.json", puts
+    assert not any(path.startswith("/dist/") for path in puts), f"no snapshot is uploaded: {puts}"
+    assert list((output / "dist").glob("*.json")), "the snapshot is still written under output:"
 
 
 def test_upload_puts_the_rolling_manifest_after_every_archive_it_names(

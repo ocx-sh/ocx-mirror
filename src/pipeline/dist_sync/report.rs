@@ -21,6 +21,11 @@ pub struct DistSyncReport {
     /// snapshot, and the value an operator pins.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest_sha256: Option<String>,
+    /// The snapshot's rendered path below `output:` and `publish.base_url` —
+    /// `publish.dist.snapshots` expanded, so what an operator pins is spelled
+    /// out rather than left for them to compose.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
     pub counters: RunCounters,
     /// `true` when nothing was written or uploaded.
     pub dry_run: bool,
@@ -192,8 +197,8 @@ pub fn report_dist_sync(report: &DistSyncReport, format: OutputFormat, printer: 
                 println!("---");
             }
 
-            if let Some(sha256) = &report.manifest_sha256 {
-                println!("manifest: dist/{sha256}.json");
+            if let Some(snapshot) = &report.snapshot {
+                println!("manifest: {snapshot}");
             }
             println!("{}", report.summary_line());
         }

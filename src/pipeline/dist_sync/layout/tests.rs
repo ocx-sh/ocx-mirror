@@ -68,11 +68,9 @@ fn an_unknown_placeholder_is_refused_rather_than_expanded_to_nothing() {
     // release onto one path.
     let error = LayoutTemplate::parse("{tag}/{sha256}").expect_err("an unknown placeholder must be refused");
 
-    assert_eq!(
-        error,
-        LayoutError::UnknownPlaceholder {
-            name: "sha256".to_string()
-        }
+    assert!(
+        matches!(&error, LayoutError::UnknownPlaceholder { name, .. } if name == "sha256"),
+        "{error:?}"
     );
 }
 
@@ -174,4 +172,49 @@ fn a_refusal_message_escapes_a_value_that_would_forge_a_log_line() {
         !rendered.contains('\n'),
         "a newline in a manifest value must not reach the log verbatim: {rendered}"
     );
+}
+
+/// The snapshot template knows one placeholder, and it must be present: a
+/// template without it renders every snapshot to one path, and the second run
+/// silently overwrites the first pin.
+#[test]
+fn a_snapshot_template_needs_its_digest_and_nothing_else() {
+    let template = SnapshotTemplate::parse("dist/{sha256}.json").expect("the default must parse");
+    assert_eq!(template.expand("abc"), "dist/abc.json");
+
+    let error = SnapshotTemplate::parse("dist/pinned.json").expect_err("no placeholder must be refused");
+    assert!(
+        matches!(error, LayoutError::MissingPlaceholder { name: "sha256", .. }),
+        "{error:?}"
+    );
+
+    let error = SnapshotTemplate::parse("{tag}/{sha256}.json").expect_err("a row placeholder must be refused");
+    assert!(
+        matches!(&error, LayoutError::UnknownPlaceholder { name, known } if name == "tag" && *known == "{sha256}"),
+        "{error:?}"
+    );
+
+    let error = SnapshotTemplate::parse("../{sha256}.json").expect_err("an escaping literal must be refused");
+    assert!(matches!(error, LayoutError::EscapingTemplate { .. }), "{error:?}");
+}
+
+/// `publish.dist.path` is one file, so it is a path, not a template — a `{`
+/// there is a habit from `layout:`, and it is refused rather than written
+/// literally into a file name.
+#[test]
+fn the_rolling_manifest_path_is_plain_and_contained() {
+    assert!(check_plain_path("dist.json").is_ok());
+    assert!(check_plain_path("dist/latest.json").is_ok());
+
+    for bad in ["", "{filename}", "dist/{sha256}.json"] {
+        let error = check_plain_path(bad).expect_err(bad);
+        assert!(matches!(error, LayoutError::NotAPlainPath { .. }), "{bad:?}: {error:?}");
+    }
+    for bad in ["/dist.json", "../dist.json", "./dist.json"] {
+        let error = check_plain_path(bad).expect_err(bad);
+        assert!(
+            matches!(error, LayoutError::EscapingTemplate { .. }),
+            "{bad:?}: {error:?}"
+        );
+    }
 }
