@@ -20,7 +20,7 @@
 //! for plan in &plans {                                // Phase 2, per source
 //!     if plan.short_circuited { continue; }
 //!     // per-root fallback: fetch each root, then
-//!     //   index_write::should_skip(&package.name, &source_root, local.as_ref(), local_catalog)
+//!     //   index_write::should_skip(&package.name, &root_bytes, &source_root, local.as_ref(), local_catalog)
 //! }
 //! ```
 //!

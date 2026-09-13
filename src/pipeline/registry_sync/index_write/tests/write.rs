@@ -70,7 +70,7 @@ async fn write_root_refuses_a_pointer_that_does_not_parse() {
 
 #[tokio::test]
 async fn a_bare_image_manifest_is_refused_as_a_dispatch_object() {
-    // `o/` is indices-only by format invariant and `write_dispatch_object`
+    // every `.json` under `o/` is an image index by format invariant and `write_dispatch_object`
     // verifies the digest but NOT the shape, so a source serving a leaf
     // manifest under a `content` pointer would otherwise poison the tree with
     // a document no reader accepts. The upstream registry is in scope.

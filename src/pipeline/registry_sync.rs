@@ -544,10 +544,13 @@ enum PackageStep {
 /// Mirror one package (C-044's phase 2 body).
 ///
 /// The write order is C-030's visibility guarantee and is not negotiable:
-/// dispatch objects → merge → rewrite → open the transaction → root → commit →
-/// `config.json`. `root exists ⇒ its objects exist`, and `config.json` after
-/// the commit because it re-acquires the same source lock rather than
-/// inheriting the transaction's — the inverted order self-deadlocks.
+/// dispatch objects → description objects → merge → rewrite → open the
+/// transaction → root → commit → prune → `config.json`. `root exists ⇒ its
+/// objects exist` (the README/logo its `desc` names included, C-048), the prune
+/// after the commit so no published root ever names an object it removed, and
+/// `config.json` after the commit because it re-acquires the same source lock
+/// rather than inheriting the transaction's — the inverted order
+/// self-deadlocks.
 ///
 /// # Errors
 ///
@@ -593,6 +596,7 @@ async fn sync_package(
 
     if index_write::should_skip(
         &package.name,
+        &root_bytes,
         &source_root,
         local_root.as_ref(),
         &prepared.local_catalog,
@@ -668,6 +672,34 @@ async fn sync_package(
             &destination.physical_repository,
         );
     }
+
+    // The README/logo the root's `desc` names, from the source tree — **before
+    // a single blob moves**, so a root naming an object the tree does not
+    // serve fails its package here, for a few KB, rather than after a
+    // multi-gigabyte copy it would then refuse to publish. A root published
+    // without the objects it names is the dangling reference the catalog
+    // refuses (ocx-mirror#68/#69), so on a refusal nothing is written to the
+    // tree at all and the next ordinary run retries. Deliberately ahead of the
+    // `--dry-run` split too: it is a read, and a dry run that reports the
+    // failure a real run would hit is the one worth having.
+    //
+    // Two classes (C-040), told apart by variant the way `write_failure` does:
+    // `ExecutionFailed` is the source's own bytes refusing to validate — one
+    // package's failure, never the run's — and anything else is a read that
+    // did not answer, which aborts.
+    let description_objects =
+        match catalog::fetch_description_objects(&prepared.index_client, &source.index, &package.name, &root_bytes)
+            .await
+        {
+            Ok(objects) => objects,
+            Err(MirrorError::ExecutionFailed(messages)) => {
+                return Ok(PackageStep::Failed(format!(
+                    "description objects: {}",
+                    messages.join("; ")
+                )));
+            }
+            Err(other) => return Err(other),
+        };
 
     let mut confirmed = BTreeSet::new();
     let mut objects: BTreeMap<Digest, Vec<u8>> = BTreeMap::new();
@@ -776,6 +808,7 @@ async fn sync_package(
         destination_root,
         &confirmed,
         &objects,
+        &description_objects,
     )
     .await
     {
@@ -862,9 +895,11 @@ async fn write_package(
     destination_root: Option<&[u8]>,
     confirmed: &BTreeSet<String>,
     objects: &BTreeMap<Digest, Vec<u8>>,
+    description_objects: &[catalog::DescriptionObject],
 ) -> Result<(), MirrorError> {
     // First, unconditionally: `root exists ⇒ its dispatch objects exist`
-    // (C-033). Content-addressed and idempotent, so the ordering is free.
+    // (C-033), and the README/logo its `desc` names with them. Content-addressed
+    // and idempotent, so the ordering is free.
     //
     // `objects` by reference, never rebuilt into a `Vec` of pairs: it holds one
     // verified manifest body per distinct `content` digest for the whole
@@ -873,6 +908,7 @@ async fn write_package(
     // for a callee that only iterates it.
     let as_name = target.as_name;
     index_write::write_dispatch_objects(store, as_name, target.name, objects).await?;
+    index_write::write_description_objects(store, as_name, target.name, description_objects).await?;
 
     // `Value` end to end so forward-compat fields ride through both sides
     // (C-047), then one key mutated (C-028).
@@ -900,6 +936,12 @@ async fn write_package(
     transaction.commit().await.map_err(|error| {
         MirrorError::IndexWriteError(format!("cannot commit the catalog for source '{as_name}': {error}"))
     })?;
+
+    // After the commit: the published root now names exactly the description
+    // objects written above, so anything else under `o/` that is not a
+    // dispatch object is a previous description's leftovers (ocx-mirror#71).
+    let named: Vec<Digest> = description_objects.iter().map(|object| object.digest.clone()).collect();
+    index_write::prune_description_objects(store, as_name, target.name, &named).await?;
 
     // After the commit, never before: this re-acquires the same source lock
     // rather than inheriting the transaction's, so the inverted order

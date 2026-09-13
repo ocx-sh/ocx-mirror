@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-//! The source side: the guarded HTTP client and the three index-tree fetches
-//! (`config.json`, `c/index.json`, `p/<ns>/<pkg>.json`), plus the SSRF check on
-//! a root's physical host.
+//! The source side: the guarded HTTP client and the four index-tree fetches
+//! (`config.json`, `c/index.json`, `p/<ns>/<pkg>.json`, and the README/logo
+//! objects a root's `desc` names under `p/<ns>/<pkg>/o/`), plus the SSRF check
+//! on a root's physical host.
 //!
 //! Every byte read here is foreign data. Each fetch returns the **raw bytes**
 //! alongside the parsed shape, because the mirror re-serves the bytes verbatim
@@ -45,10 +46,12 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use ocx_lib::oci::Digest;
 use ocx_lib::oci::index::{
     CatalogDocument, IndexFormatConfig, IndexRoot, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
 };
 use ocx_lib::oci::ssrf::{resolve_and_validate, split_host_port};
+use serde::Deserialize;
 use url::{Host, Url};
 
 use crate::error::MirrorError;
@@ -309,6 +312,141 @@ pub async fn fetch_source_root(
     Ok((bytes, root))
 }
 
+/// One README or logo object the source tree serves beside a root — the bytes
+/// a `desc.readme` / `desc.logo` digest points at, and the extension the tree
+/// serves them under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DescriptionObject {
+    /// The digest the root names, and `sha256(bytes)` — verified on fetch.
+    pub digest: Digest,
+    /// `md`, `svg` or `png` — the extension the object was found under, which
+    /// is the one the mirrored tree must serve it under too.
+    pub extension: &'static str,
+    /// The object, verbatim.
+    pub bytes: Vec<u8>,
+}
+
+/// Extensions a `desc.readme` object is served under.
+const README_EXTENSIONS: &[&str] = &["md"];
+/// Extensions a `desc.logo` object is served under.
+const LOGO_EXTENSIONS: &[&str] = &["svg", "png"];
+
+/// The two `desc` fields that point into the package's own CAS subtree —
+/// the only part of `desc` the mirror reads. Every other `desc` field rides
+/// through the root rewrite verbatim and is never modelled here.
+#[derive(Deserialize)]
+struct DescriptionPointers {
+    #[serde(default)]
+    readme: Option<String>,
+    #[serde(default)]
+    logo: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DescribedRoot {
+    #[serde(default)]
+    desc: Option<DescriptionPointers>,
+}
+
+/// `GET <index>/p/<ns>/<pkg>/o/<algo>/<hex>.<ext>` for every object the root's
+/// `desc.readme` / `desc.logo` name — the README and logo the index serves
+/// beside the root, which a catalog renderer resolves against the tree and
+/// nothing else.
+///
+/// Fetched from the source **tree**, not rebuilt from the registry's
+/// `__ocx.desc` layers, so the mirrored root and the objects it references
+/// always come from one source snapshot: a registry whose description moved
+/// ahead of the index it is published in would otherwise leave the root
+/// naming digests the tree does not hold — the exact dangling reference the
+/// catalog refuses (ocx-mirror#68).
+///
+/// A digest alone carries no extension, and an HTTP tree cannot be listed, so
+/// each pointer is tried under the extensions the index writes for that field
+/// — `.md` for the README, `.svg` then `.png` for the logo — and the first hit
+/// wins. Every body is verified against the digest the root named before it
+/// is returned.
+///
+/// # Errors
+///
+/// Two classes, split the way C-040 splits them and the way
+/// [`super::index_write`] already does with `refused`: **foreign data that
+/// will not validate** — a `desc` that is not the documented shape, a pointer
+/// that is not a digest, an object absent under every extension (a dangling
+/// reference upstream), a body that does not hash to its digest — is
+/// [`MirrorError::ExecutionFailed`], one package's failure, because a hostile
+/// or merely broken upstream must not deny the whole mirror through one root.
+/// **A read that did not answer** — a transport failure, a non-404 status, a
+/// body over the cap — stays [`MirrorError::SourceError`] and aborts the run,
+/// exactly as the root fetch above does.
+pub async fn fetch_description_objects(
+    client: &reqwest::Client,
+    index_base: &str,
+    name: &str,
+    root_bytes: &[u8],
+) -> Result<Vec<DescriptionObject>, MirrorError> {
+    let root: DescribedRoot = serde_json::from_slice(root_bytes)
+        .map_err(|error| refused(format!("source root for {name:?} has an unusable desc: {error}")))?;
+    let Some(desc) = root.desc else {
+        return Ok(Vec::new());
+    };
+
+    let mut objects = Vec::new();
+    for (field, pointer, extensions) in [
+        ("desc.readme", desc.readme, README_EXTENSIONS),
+        ("desc.logo", desc.logo, LOGO_EXTENSIONS),
+    ] {
+        let Some(pointer) = pointer else { continue };
+        let digest = Digest::try_from(pointer.as_str()).map_err(|error| {
+            refused(format!(
+                "source root for {name:?} has an unusable {field} pointer {pointer:?}: {error}"
+            ))
+        })?;
+        objects.push(fetch_description_object(client, index_base, name, field, digest, extensions).await?);
+    }
+    Ok(objects)
+}
+
+/// One `desc` pointer: the first extension the tree serves it under, verified.
+async fn fetch_description_object(
+    client: &reqwest::Client,
+    index_base: &str,
+    name: &str,
+    field: &str,
+    digest: Digest,
+    extensions: &[&'static str],
+) -> Result<DescriptionObject, MirrorError> {
+    for extension in extensions {
+        let relative = cas_object_path(name, &digest, extension)?;
+        let Some(bytes) = fetch_index_document(client, index_base, &relative).await? else {
+            continue;
+        };
+        let observed = digest.algorithm().hash(&bytes);
+        if observed != digest {
+            return Err(refused(format!(
+                "source object {relative} for {name:?} hashes to {observed}, not the {digest} its root names"
+            )));
+        }
+        return Ok(DescriptionObject {
+            digest,
+            extension,
+            bytes,
+        });
+    }
+    Err(refused(format!(
+        "source root for {name:?} names {field} {digest} but the source tree serves no such object under .{}",
+        extensions.join("/.")
+    )))
+}
+
+/// A refusal of **upstream bytes** on the description path — C-040's
+/// aggregating class (exit 1), the same split `index_write::refused` documents.
+/// Every other error this module returns is a read that did not answer and
+/// aborts the run; only [`fetch_description_objects`] can tell the two apart,
+/// because only it verifies content rather than transporting it.
+fn refused(message: String) -> MirrorError {
+    MirrorError::ExecutionFailed(vec![message])
+}
+
 /// The one comparison against [`SUPPORTED_FORMAT_VERSION`] on this path.
 ///
 /// Fail-closed and exact: **any** version other than the supported one is
@@ -373,6 +511,24 @@ fn document_name(index_base: &str, relative: &str) -> String {
 /// terminal (CWE-117). `char::escape_debug` escapes both classes and supplies
 /// the quoting the message already implies.
 fn package_document_path(name: &str) -> Result<String, MirrorError> {
+    check_package_name(name)?;
+    Ok(format!("p/{name}.json"))
+}
+
+/// `p/<ns>/<pkg>/o/<algo>/<hex>.<ext>` for one of a root's `desc` objects —
+/// the same key guard as [`package_document_path`], because the key is the
+/// same foreign data on its way into the same `p/` subtree.
+fn cas_object_path(name: &str, digest: &Digest, extension: &str) -> Result<String, MirrorError> {
+    check_package_name(name)?;
+    Ok(format!(
+        "p/{name}/o/{}/{}.{extension}",
+        digest.algorithm().prefix(),
+        digest.hex()
+    ))
+}
+
+/// The key guard behind both path builders above.
+fn check_package_name(name: &str) -> Result<(), MirrorError> {
     let refuse = || MirrorError::SourceError(format!("source catalog key cannot address a root document: {name:?}"));
 
     if !name
@@ -387,7 +543,7 @@ fn package_document_path(name: &str) -> Result<String, MirrorError> {
     {
         return Err(refuse());
     }
-    Ok(format!("p/{name}.json"))
+    Ok(())
 }
 
 /// One index-document `GET`, capped at [`INDEX_FETCH_CEILING`].

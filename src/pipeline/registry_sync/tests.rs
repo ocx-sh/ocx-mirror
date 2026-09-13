@@ -541,6 +541,11 @@ fn the_package_write_follows_c030s_order_exactly() {
     // while a dispatch write does not is skipped forever and `--repair-catalog`
     // cannot help, because `regenerate_catalog` only writes `c/index.json`.
     assert_ordered(&body, "write_dispatch_objects", "merge_root_tags");
+    // The README/logo the root's `desc` names sit in the same slot: `root
+    // exists ⇒ every object it names exists` covers them, or the mirrored root
+    // is the dangling reference the catalog refuses (ocx-mirror#69).
+    assert_ordered(&body, "write_dispatch_objects", "write_description_objects");
+    assert_ordered(&body, "write_description_objects", "merge_root_tags");
     assert_ordered(&body, "merge_root_tags", "rewrite_root");
     assert_ordered(&body, "rewrite_root", "begin_catalog_transaction");
     // Qualified: `rewrite_root` *contains* `write_root`, so the bare needle
@@ -551,6 +556,39 @@ fn the_package_write_follows_c030s_order_exactly() {
     // source lock rather than inheriting the transaction's, so the inverted
     // order self-deadlocks for the whole lock timeout.
     assert_ordered(&body, "transaction.commit", "write_config_json");
+    // The prune is after the commit, never before it: at no point may a
+    // published root name an object the prune has already removed
+    // (ocx-mirror#71).
+    assert_ordered(&body, "transaction.commit", "prune_description_objects");
+}
+
+#[test]
+fn the_description_objects_are_fetched_before_a_blob_moves_and_only_a_refusal_fails_the_package() {
+    let body = function_body("sync_package");
+    // Before the tag loop: a root naming an object the source tree does not
+    // serve fails its package for a few KB, not after a multi-gigabyte copy
+    // it would then refuse to publish. Ahead of the `--dry-run` split too, so
+    // a dry run reports the failure a real run would hit.
+    assert_ordered(&body, "fetch_description_objects", "tag_copy_plan");
+    assert_ordered(&body, "fetch_description_objects", "options.dry_run");
+    // C-040's two classes, told apart by variant exactly as `write_failure`
+    // does: the source's own bytes refusing to validate fail one package,
+    // and a read that did not answer aborts the run.
+    let fetch = body
+        .find("fetch_description_objects")
+        .expect("the description objects are fetched");
+    let arms = &body[fetch..];
+    let refusal = arms
+        .find("Err(MirrorError::ExecutionFailed(messages))")
+        .expect("a refusal of upstream bytes is matched by variant");
+    let abort = arms
+        .find("Err(other) => return Err(other)")
+        .expect("every other error propagates");
+    assert!(refusal < abort, "the refusal arm must precede the catch-all abort arm");
+    assert!(
+        arms[..abort].contains("PackageStep::Failed"),
+        "a refusal must fail the package, not the run"
+    );
 }
 
 #[test]

@@ -186,13 +186,21 @@ fn read_result(raw: &[u8]) -> RootReadResult {
 /// The fallback, spelled the way the orchestrator spells it: the work list
 /// trimmed by `index_write::should_skip`. There is deliberately no second
 /// predicate here — C-039 and C-032 are one comparison in the design.
-fn packages_needing_copy(work: &[PackageWork], source: &IndexRoot, local: &RootReadResult) -> Vec<String> {
+fn packages_needing_copy(work: &[PackageWork], source: &RootReadResult, local: &RootReadResult) -> Vec<String> {
     let mut catalog = CatalogIndex::new();
     for package in work {
         catalog.insert(package.name.clone(), IndexStore::root_catalog_entry(&local.bytes));
     }
     work.iter()
-        .filter(|package| !super::super::super::index_write::should_skip(&package.name, source, Some(local), &catalog))
+        .filter(|package| {
+            !super::super::super::index_write::should_skip(
+                &package.name,
+                &source.bytes,
+                &source.root,
+                Some(local),
+                &catalog,
+            )
+        })
         .map(|package| package.name.clone())
         .collect()
 }
@@ -212,11 +220,11 @@ fn the_fallback_re_copies_a_tag_re_pointed_without_a_new_key() {
     let mirrored = root_document("oci://registry.test/mirror/ocx.sh/kitware/cmake", &[("latest", &old)]);
 
     // GREEN — same key, same digest: nothing to do.
-    let unchanged = parse_root(&root_document("oci://ghcr.io/ocx-sh/cmake", &[("latest", &old)]));
+    let unchanged = read_result(&root_document("oci://ghcr.io/ocx-sh/cmake", &[("latest", &old)]));
     assert!(packages_needing_copy(&work, &unchanged, &read_result(&mirrored)).is_empty());
 
     // RED — the same key set, one digest moved.
-    let repointed = parse_root(&root_document("oci://ghcr.io/ocx-sh/cmake", &[("latest", &new)]));
+    let repointed = read_result(&root_document("oci://ghcr.io/ocx-sh/cmake", &[("latest", &new)]));
     assert_eq!(
         packages_needing_copy(&work, &repointed, &read_result(&mirrored)),
         vec!["kitware/cmake"],
@@ -233,7 +241,7 @@ fn the_fallback_re_copies_a_tag_added_upstream() {
         "oci://registry.test/mirror/ocx.sh/kitware/cmake",
         &[("3.28.1", &content)],
     );
-    let grown = parse_root(&root_document(
+    let grown = read_result(&root_document(
         "oci://ghcr.io/ocx-sh/cmake",
         &[("3.28.1", &content), ("3.29.0", &digest("b"))],
     ));

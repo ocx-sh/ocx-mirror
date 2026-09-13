@@ -204,6 +204,7 @@ async fn preserving_republishes_the_upstream_pointer_byte_for_byte() {
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(release.clone(), bytes)]),
+        &[],
     )
     .await
     .expect("the publish");
@@ -236,6 +237,7 @@ async fn rewriting_replaces_the_upstream_pointer_with_the_destination() {
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(release.clone(), bytes)]),
+        &[],
     )
     .await
     .expect("the publish");
@@ -273,6 +275,7 @@ async fn a_tag_whose_copy_failed_keeps_the_digest_the_last_good_run_published() 
             (first_release.clone(), first_bytes),
             (second_release.clone(), second_bytes),
         ]),
+        &[],
     )
     .await
     .expect("the first publish");
@@ -296,6 +299,7 @@ async fn a_tag_whose_copy_failed_keeps_the_digest_the_last_good_run_published() 
         Some(&after_first),
         &confirmed(&["3.28.1"]),
         &objects(&[(first_moved.clone(), first_moved_bytes)]),
+        &[],
     )
     .await
     .expect("the partial publish");
@@ -332,9 +336,10 @@ async fn a_refused_dispatch_object_leaves_no_root_document_behind() {
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(bare, bare_bytes)]),
+        &[],
     )
     .await
-    .expect_err("`o/` is indices-only by format invariant");
+    .expect_err("every `.json` under `o/` is an image index by format invariant");
 
     // Upstream's bytes, so it fails the package rather than the run.
     assert_eq!(error.kind_exit_code(), ExitCode::Failure, "{error:?}");
@@ -359,6 +364,7 @@ async fn a_refused_dispatch_object_leaves_no_root_document_behind() {
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(index, index_bytes)]),
+        &[],
     )
     .await
     .expect("a valid dispatch object publishes");
@@ -388,6 +394,7 @@ async fn a_published_package_lands_its_object_root_catalog_entry_and_config() {
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(release.clone(), release_bytes)]),
+        &[],
     )
     .await
     .expect("publish");
@@ -455,6 +462,7 @@ async fn an_unreadable_destination_root_fails_the_package_without_truncating_it(
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(release.clone(), release_bytes)]),
+        &[],
     )
     .await
     .expect("the first publish");
@@ -468,6 +476,7 @@ async fn an_unreadable_destination_root_fails_the_package_without_truncating_it(
         Some(b"{ this is not a root document"),
         &confirmed(&["3.28.1"]),
         &objects(&[(moved, moved_bytes)]),
+        &[],
     )
     .await
     .expect_err("a corrupt destination root is refused, never read as absent");
@@ -495,6 +504,7 @@ async fn nothing_confirmed_republishes_the_destinations_own_tags() {
         None,
         &confirmed(&["3.28.1"]),
         &objects(&[(release.clone(), release_bytes)]),
+        &[],
     )
     .await
     .expect("the first publish");
@@ -508,6 +518,7 @@ async fn nothing_confirmed_republishes_the_destinations_own_tags() {
         Some(&after_first),
         &confirmed(&[]),
         &objects(&[]),
+        &[],
     )
     .await
     .expect("a publish that confirmed nothing");
@@ -516,5 +527,145 @@ async fn nothing_confirmed_republishes_the_destinations_own_tags() {
         tag_digests(&published_root(&store)),
         vec![("3.28.1".to_string(), release.to_string())],
         "the tag keeps the digest the destination actually holds"
+    );
+}
+
+/// A `desc` object on a root document, pointing at `readme` — the
+/// package-level field a description update moves (ocx-mirror#70).
+fn described(root: Vec<u8>, readme: &Digest) -> Vec<u8> {
+    let mut document: Value = serde_json::from_slice(&root).expect("parse root document");
+    document["desc"] = json!({
+        "digest": "sha256:0000",
+        "title": "cmake",
+        "readme": readme.to_string(),
+        "logo": null,
+    });
+    serialize_root(&document)
+}
+
+fn readme(text: &str) -> catalog::DescriptionObject {
+    catalog::DescriptionObject {
+        digest: Algorithm::Sha256.hash(text.as_bytes()),
+        extension: "md",
+        bytes: text.as_bytes().to_vec(),
+    }
+}
+
+/// The path a catalog renderer resolves a `desc` digest against.
+fn readme_path(store: &IndexStore, object: &catalog::DescriptionObject) -> std::path::PathBuf {
+    store
+        .dispatch_object_path(AS_NAME, PACKAGE, &object.digest)
+        .with_extension(object.extension)
+}
+
+/// The README the root's `desc` names is on disk once the root is (C-048),
+/// and a description update leaves only the current one behind — while the
+/// dispatch object, tag history under the append-only ruling, stays.
+#[tokio::test]
+async fn a_description_update_replaces_the_readme_and_keeps_the_dispatch_object() {
+    let directory = tempfile::TempDir::new().expect("temp dir");
+    let (store, _output) = store_at(directory.path()).await;
+    let (release, release_bytes) = image_index("3.28.1");
+    let (first, second) = (readme("# cmake\n"), readme("# cmake, revised\n"));
+
+    write_package(
+        &store,
+        publish_target(Some(POINTER)),
+        &described(root_document(&[("3.28.1", &release)]), &first.digest),
+        None,
+        &confirmed(&["3.28.1"]),
+        &objects(&[(release.clone(), release_bytes.clone())]),
+        std::slice::from_ref(&first),
+    )
+    .await
+    .expect("the first publish");
+    assert_eq!(
+        std::fs::read(readme_path(&store, &first)).expect("the README is on disk"),
+        first.bytes,
+        "the root names it, so the tree must hold it (ocx-mirror#69)"
+    );
+    let after_first = published_root(&store);
+
+    write_package(
+        &store,
+        publish_target(Some(POINTER)),
+        &described(root_document(&[("3.28.1", &release)]), &second.digest),
+        Some(&after_first),
+        &confirmed(&["3.28.1"]),
+        &objects(&[(release.clone(), release_bytes)]),
+        std::slice::from_ref(&second),
+    )
+    .await
+    .expect("the second publish");
+
+    assert_eq!(
+        std::fs::read(readme_path(&store, &second)).expect("the new README"),
+        second.bytes
+    );
+    assert!(
+        !readme_path(&store, &first).exists(),
+        "nothing names the previous README any more (ocx-mirror#71)"
+    );
+    assert!(
+        store.dispatch_object_path(AS_NAME, PACKAGE, &release).exists(),
+        "dispatch objects are tag history and are never pruned"
+    );
+    let document: Value = serde_json::from_slice(&published_root(&store)).expect("parse the root");
+    assert_eq!(document["desc"]["readme"], second.digest.to_string());
+}
+
+/// The skip predicate's fourth condition must hold **on the bytes the publish
+/// actually wrote**, not only on a fixture: if the store or the merge added or
+/// normalised one package-level field, every package would re-copy on every
+/// run and the cheap path would be gone (ocx-mirror#70's acceptance).
+#[tokio::test]
+async fn an_unchanged_source_is_skipped_right_after_its_own_publish() {
+    let directory = tempfile::TempDir::new().expect("temp dir");
+    let (store, _output) = store_at(directory.path()).await;
+    let (release, release_bytes) = image_index("3.28.1");
+    let object = readme("# cmake\n");
+    let source_bytes = described(root_document(&[("3.28.1", &release)]), &object.digest);
+
+    write_package(
+        &store,
+        publish_target(Some(POINTER)),
+        &source_bytes,
+        None,
+        &confirmed(&["3.28.1"]),
+        &objects(&[(release.clone(), release_bytes)]),
+        std::slice::from_ref(&object),
+    )
+    .await
+    .expect("publish");
+
+    let local = store
+        .read_root_uncatalogued(AS_NAME, PACKAGE, |root| {
+            parse_physical_repository(&root.repository).map(|_| ())
+        })
+        .await
+        .expect("read the published root")
+        .expect("the root exists");
+    let catalog = store
+        .read_source_catalog(AS_NAME)
+        .await
+        .expect("read the catalog")
+        .expect("the catalog exists");
+    let source_root: ocx_lib::oci::index::IndexRoot =
+        serde_json::from_slice(&source_bytes).expect("parse the source root");
+
+    assert!(
+        index_write::should_skip(PACKAGE, &source_bytes, &source_root, Some(&local), &catalog),
+        "the same source, published once, is fully present"
+    );
+
+    // And the red half: the description moves, nothing else does.
+    let moved = described(
+        root_document(&[("3.28.1", &release)]),
+        &readme("# cmake, revised\n").digest,
+    );
+    let moved_root: ocx_lib::oci::index::IndexRoot = serde_json::from_slice(&moved).expect("parse");
+    assert!(
+        !index_write::should_skip(PACKAGE, &moved, &moved_root, Some(&local), &catalog),
+        "a description-only change must re-sync (ocx-mirror#70)"
     );
 }
