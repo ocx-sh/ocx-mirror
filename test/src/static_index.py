@@ -8,6 +8,7 @@ at `external/ocx`). Only the "published" shapes are written here:
     c/index.json                       {"format_version": 1, "packages": {"<ns>/<pkg>": "sha256:<root-digest>", ...}}
     p/<ns>/<pkg>.json                  root: {"repository": "oci://...", "tags": {tag: {"content": "sha256:...", "observed": ...}}}
     p/<ns>/<pkg>/o/<algo>/<hex>.json   the OCI image index a tag resolves to, verbatim
+    p/<ns>/<pkg>/o/<algo>/<hex>.md     the README the root's `desc.readme` names (`.svg` / `.png` for `desc.logo`)
 
 `ocx index sync` against a plain OCI registry produces a *derived* tree with
 no `config.json`/`c/index.json` — the mirror's source read requires both, so
@@ -51,6 +52,12 @@ class TreePackage:
     # fixtures can pin C-028's verbatim passthrough of fields the mirror does
     # not model.
     desc: dict | None = None
+    # The README/logo objects `desc.readme` / `desc.logo` point at, keyed
+    # `"sha256:<hex>.<ext>"` — indexbot's own `content_by_digest` key shape —
+    # and served at `p/<name>/o/<algo>/<hex>.<ext>` beside the dispatch
+    # objects. A root naming a digest absent here is the dangling reference
+    # the catalog refuses (ocx-mirror#68), which one scenario wants on purpose.
+    description_objects: dict[str, bytes] = dataclasses.field(default_factory=dict)
 
 
 def write_published_index_tree(fixture_root: Path, packages: list[TreePackage]) -> None:
@@ -86,6 +93,13 @@ def write_published_index_tree(fixture_root: Path, packages: list[TreePackage]) 
             dispatch_path = fixture_root / "p" / package.name / "o" / algo / f"{hex_digest}.json"
             dispatch_path.parent.mkdir(parents=True, exist_ok=True)
             dispatch_path.write_bytes(body)
+
+        for key, body in package.description_objects.items():
+            digest, _, extension = key.rpartition(".")
+            algo, _, hex_digest = digest.partition(":")
+            object_path = fixture_root / "p" / package.name / "o" / algo / f"{hex_digest}.{extension}"
+            object_path.parent.mkdir(parents=True, exist_ok=True)
+            object_path.write_bytes(body)
 
     catalog_path = fixture_root / "c" / "index.json"
     catalog_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,6 +182,30 @@ def verify_dispatch_object_exists(tree_root: Path, package: str, content_digest:
     if not dispatch_path.is_file():
         return [f"{package}: no dispatch object at {dispatch_path}"]
     return []
+
+
+def verify_description_object(tree_root: Path, package: str, digest: str, extension: str, expected: bytes) -> list[str]:
+    """Checks that `package`'s `o/` subtree holds `digest` under `extension` with exactly `expected` bytes.
+
+    The path a catalog renderer resolves a root's `desc.readme` / `desc.logo`
+    against — so a root naming a digest this cannot find is the dangling
+    reference `ocx-catalog build` refuses (ocx-mirror#68).
+    """
+    algorithm, _, hex_digest = digest.partition(":")
+    object_path = tree_root / "p" / package / "o" / algorithm / f"{hex_digest}.{extension}"
+    if not object_path.is_file():
+        return [f"{package}: no description object at {object_path}"]
+    if object_path.read_bytes() != expected:
+        return [f"{package}: description object at {object_path} does not hold the expected bytes"]
+    return []
+
+
+def list_description_objects(tree_root: Path, package: str) -> list[str]:
+    """Every non-`.json` file name under `package`'s `o/<algo>/` directories, sorted — what a prune leaves behind."""
+    objects_root = tree_root / "p" / package / "o"
+    if not objects_root.is_dir():
+        return []
+    return sorted(path.name for path in objects_root.rglob("*") if path.is_file() and path.suffix != ".json")
 
 
 def verify_config_exists(tree_root: Path) -> list[str]:

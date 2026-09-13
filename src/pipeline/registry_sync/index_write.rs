@@ -2,15 +2,19 @@
 // Copyright 2026 The OCX Authors
 
 //! Writing the servable index tree: store construction, the root rewrite and
-//! its tag merge, the catalog transaction, dispatch objects, `config.json`, the
-//! skip predicate, and `--repair-catalog`.
+//! its tag merge, the catalog transaction, dispatch objects, the README/logo
+//! objects beside them, `config.json`, the skip predicate, and
+//! `--repair-catalog`.
 //!
-//! **Writes here are additive.** `CatalogTransaction::write_root` is
-//! merge-blind — it persists exactly the bytes handed to it — and the
+//! **Writes here are additive for tag history.** `CatalogTransaction::write_root`
+//! is merge-blind — it persists exactly the bytes handed to it — and the
 //! never-delete guarantee lives in `merge_root`, which is unreachable from this
 //! crate. So the mirror owns its own merge (C-047), or a `continue`-on-error run
 //! would write a root holding only the tags that succeeded and silently delete
-//! tags a previous run had mirrored.
+//! tags a previous run had mirrored. The one deletion this module performs is
+//! [`prune_description_objects`]: a README or logo no root field names any
+//! more is an orphan under the index's own reachability ruling, not tag
+//! history.
 //!
 //! # Call order for one package
 //!
@@ -18,11 +22,13 @@
 //!
 //! ```text
 //! write_dispatch_objects(…)                       // root exists ⇒ its objects exist
+//! write_description_objects(…)                    // …the README/logo it names too (C-048)
 //! let merged = merge_root_tags(&source, dest, &confirmed)?;   // C-047
 //! let rewritten = rewrite_root(&serialize_root(&merged), &pointer)?;  // C-028
 //! let mut transaction = store.begin_catalog_transaction(as_name).await?;
 //! write_root(&mut transaction, name, &rewritten).await?;      // C-029
 //! transaction.commit().await?;
+//! prune_description_objects(…)                    // C-048, AFTER commit
 //! write_config_json(&store, as_name).await?;                  // C-031, AFTER commit
 //! ```
 //!
@@ -45,6 +51,7 @@ use ocx_lib::oci::index::{
 use ocx_lib::oci::manifest::validate_image_index;
 use ocx_lib::oci::{Digest, ImageIndex};
 
+use super::catalog::DescriptionObject;
 use crate::error::MirrorError;
 
 /// Build the store for one output tree, with locks redirected out of it
@@ -284,7 +291,9 @@ pub async fn write_root(
 /// One fetch serves both the registry push and the index write.
 ///
 /// The shape check is not optional and is enforced **here**, not at the call
-/// site: `o/` is indices-only by format invariant, `write_dispatch_object`
+/// site: every `.json` under `o/` is an image index by format invariant (the
+/// README/logo objects beside them carry their own extensions — see
+/// [`write_description_objects`]), `write_dispatch_object`
 /// verifies the digest but **not** the shape, and the upstream registry is in
 /// scope per the threat model — so a source serving a bare image manifest under
 /// a `content` pointer would otherwise poison the tree with a document no
@@ -294,7 +303,7 @@ pub async fn write_root(
 /// `mediaType`/`digest`, a negative `size`).
 ///
 /// A refusal is an error, never a skip. Skipping would let the root land naming
-/// a `content` digest with no object under `o/`, which satisfies all three of
+/// a `content` digest with no object under `o/`, which satisfies all four of
 /// [`should_skip`]'s conditions forever — the package would be permanently
 /// broken and permanently skipped.
 ///
@@ -341,6 +350,184 @@ pub async fn write_dispatch_objects(
             })?;
     }
     Ok(())
+}
+
+/// Write a package's README/logo objects beside its dispatch objects —
+/// `p/<ns>/<pkg>/o/<algo>/<hex>.<ext>`, the path a catalog renderer resolves
+/// the root's `desc.readme` / `desc.logo` digests against.
+///
+/// Same slot in C-030's order as [`write_dispatch_objects`]: before the root,
+/// so `root exists ⇒ every object it names exists` covers these too. The
+/// bytes were verified against their digest on fetch
+/// (`catalog::fetch_description_objects`), which is the trust boundary; here
+/// they are persisted verbatim.
+///
+/// Write-if-changed, never unconditional: the atomic rename churns mtime even
+/// for byte-identical content, and the served tree is one an operator commits
+/// — the same reason `write_config_json` probes before writing.
+///
+/// `IndexStore` has no writer for a non-`.json` object (its object store is
+/// dispatch objects only, by upstream ruling), so the path is derived from the
+/// dispatch-object path with the extension swapped and the file written here,
+/// through the same tempfile + rename `write_config_json` uses.
+///
+/// # Errors
+///
+/// [`MirrorError::IndexWriteError`] (exit 74).
+pub async fn write_description_objects(
+    store: &IndexStore,
+    as_name: &str,
+    repository: &str,
+    objects: &[DescriptionObject],
+) -> Result<(), MirrorError> {
+    for object in objects {
+        let target = store
+            .dispatch_object_path(as_name, repository, &object.digest)
+            .with_extension(object.extension);
+        let write_failed = |error: std::io::Error| {
+            MirrorError::IndexWriteError(format!(
+                "failed to write the description object for {repository:?} at {}: {error}",
+                target.display()
+            ))
+        };
+
+        if tokio::fs::read(&target)
+            .await
+            .is_ok_and(|existing| existing == object.bytes)
+        {
+            continue;
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| MirrorError::IndexWriteError(format!("{} has no parent directory", target.display())))?
+            .to_path_buf();
+        tokio::fs::create_dir_all(&parent).await.map_err(write_failed)?;
+        publish_atomically("description object", parent, target.clone(), object.bytes.clone())
+            .await?
+            .map_err(write_failed)?;
+    }
+    Ok(())
+}
+
+/// Tempfile in `parent`, `sync_data`, then rename onto `target` — the one
+/// atomic publish every file this module writes outside a
+/// `CatalogTransaction` goes through. `tempfile` and `persist_temp_file` are
+/// both blocking, hence the `spawn_blocking`; `what` names the file class in
+/// the one message a panicking task produces.
+///
+/// # Errors
+///
+/// The I/O failure of the write or the rename, for the caller to classify;
+/// a panicking task is [`MirrorError::IndexWriteError`] outright.
+async fn publish_atomically(
+    what: &'static str,
+    parent: std::path::PathBuf,
+    target: std::path::PathBuf,
+    bytes: Vec<u8>,
+) -> Result<std::io::Result<()>, MirrorError> {
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut temporary = tempfile::NamedTempFile::new_in(&parent)?;
+        std::io::Write::write_all(&mut temporary, &bytes)?;
+        temporary.as_file().sync_data()?;
+        ocx_lib::utility::fs::persist_temp_file(temporary, &target)
+    })
+    .await
+    .map_err(|error| MirrorError::IndexWriteError(format!("the {what} write task panicked: {error}")))
+}
+
+/// Remove a package's README/logo objects its root no longer names.
+///
+/// The upstream index's own ruling (indexbot's `_reachable_digests`, ADR-1
+/// D8): the served tree keeps only *reachable* objects — every live tag's
+/// content plus the current `desc.readme` / `desc.logo` — and drops the rest.
+/// A description update would otherwise leave the previous README and logo
+/// behind forever.
+///
+/// **Non-`.json` objects only.** Dispatch objects are tag history, and the
+/// append-only `tags{}` merge (C-047) rules that nothing a tag ever pointed at
+/// is deleted; a README the root no longer names is not tag history. Runs
+/// after the root commit, so at no point does a published root name an object
+/// this has removed.
+///
+/// # Errors
+///
+/// [`MirrorError::IndexWriteError`] (exit 74). An absent object directory is
+/// a package with nothing to prune, not an error.
+pub async fn prune_description_objects(
+    store: &IndexStore,
+    as_name: &str,
+    repository: &str,
+    keep: &[Digest],
+) -> Result<(), MirrorError> {
+    let objects_root = store
+        .root_document_path(as_name, repository)
+        .with_extension("")
+        .join("o");
+    let mut algorithms = match tokio::fs::read_dir(&objects_root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(prune_failed(&objects_root, error)),
+    };
+    while let Some(algorithm_dir) = algorithms
+        .next_entry()
+        .await
+        .map_err(|error| prune_failed(&objects_root, error))?
+    {
+        // Directories only: `o/` holds one directory per digest algorithm, and
+        // a stray file there is nothing this owns — reading it as a directory
+        // would abort the whole run over a `.DS_Store`.
+        let file_type = algorithm_dir
+            .file_type()
+            .await
+            .map_err(|error| prune_failed(&objects_root, error))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let algorithm = algorithm_dir.file_name().to_string_lossy().into_owned();
+        let directory = algorithm_dir.path();
+        let mut entries = tokio::fs::read_dir(&directory)
+            .await
+            .map_err(|error| prune_failed(&directory, error))?;
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|error| prune_failed(&directory, error))?
+        {
+            // Files only, for the same reason as above — and one more: catalog
+            // keys nest (`a/b` and `a/b/o/sha256/c` are both legal), so a
+            // sibling package's whole subtree can sit in this directory.
+            if !entry
+                .file_type()
+                .await
+                .map_err(|error| prune_failed(&directory, error))?
+                .is_file()
+            {
+                continue;
+            }
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "json") {
+                continue;
+            }
+            let named = path
+                .file_stem()
+                .map(|stem| format!("{algorithm}:{}", stem.to_string_lossy()));
+            if named.is_some_and(|named| keep.iter().any(|digest| digest.to_string() == named)) {
+                continue;
+            }
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|error| prune_failed(&path, error))?;
+            log::info!("removed {} — no longer named by {repository:?}'s root", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn prune_failed(path: &Path, error: std::io::Error) -> MirrorError {
+    MirrorError::IndexWriteError(format!(
+        "failed to prune description objects under {}: {error}",
+        path.display()
+    ))
 }
 
 /// Write `config.json` for one source subtree — **write-if-absent, after
@@ -401,28 +588,30 @@ pub async fn write_config_json(store: &IndexStore, as_name: &str) -> Result<(), 
         name_segments: None,
     });
 
-    // `tempfile` and `persist_temp_file` are both blocking.
-    let written = target.clone();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let mut temporary = tempfile::NamedTempFile::new_in(&parent)?;
-        std::io::Write::write_all(&mut temporary, &bytes)?;
-        temporary.as_file().sync_data()?;
-        ocx_lib::utility::fs::persist_temp_file(temporary, &written)
-    })
-    .await
-    .map_err(|error| MirrorError::IndexWriteError(format!("the config.json write task panicked: {error}")))?
-    .map_err(|error| MirrorError::IndexWriteError(format!("failed to write {}: {error}", target.display())))
+    publish_atomically("config.json", parent, target.clone(), bytes)
+        .await?
+        .map_err(|error| MirrorError::IndexWriteError(format!("failed to write {}: {error}", target.display())))
 }
 
 /// Whether a package can be skipped entirely (C-032).
 ///
-/// Skipped iff **all three** hold:
+/// Skipped iff **all four** hold:
 ///
 /// 1. its root exists under `p/<ns>/<pkg>.json`; **and**
 /// 2. every source `tags{}` key is present locally **with the same `content`
 ///    digest** — key→digest **pairs**, never key sets; **and**
 /// 3. its repository is a key in the local `c/index.json` **and** that entry's
-///    digest equals `sha256(local root bytes)`.
+///    digest equals `sha256(local root bytes)`; **and**
+/// 4. every package-level field — the source root minus `tags` and
+///    `repository` — is byte-for-byte what the local root carries.
+///
+/// Condition 4 is what makes a description-only change reach the mirror: a
+/// new README or logo pushed to `__ocx.desc` moves `desc` without adding or
+/// re-pointing a tag, so conditions 1–3 all still hold and the package would
+/// be skipped on every run after (ocx-mirror#70). `tags` is excluded because
+/// the local map is the union of every run (`local ⊇ source` always), and
+/// `repository` because a rewrite replaces it; everything else is copied from
+/// the source verbatim, so any difference is an update the merge would carry.
 ///
 /// Anything else re-copies. **Pairs, not key sets**, is the guard on the
 /// headline requirement: a tag that moves to a new digest without adding a key
@@ -438,6 +627,7 @@ pub async fn write_config_json(store: &IndexStore, as_name: &str) -> Result<(), 
 /// The straddle condition *is* this predicate's damage list.
 pub fn should_skip(
     name: &str,
+    source_bytes: &[u8],
     source_root: &IndexRoot,
     local_root: Option<&RootReadResult>,
     catalog: &CatalogIndex,
@@ -460,9 +650,31 @@ pub fn should_skip(
     }
 
     // 3. the catalog entry is exactly `sha256(local root bytes)`.
-    catalog
+    if catalog
         .get(name)
-        .is_some_and(|entry| *entry == IndexStore::root_catalog_entry(&local.bytes))
+        .is_none_or(|entry| *entry != IndexStore::root_catalog_entry(&local.bytes))
+    {
+        return false;
+    }
+
+    // 4. the package-level fields match. An unparseable document on either
+    // side is "not skipped": the copy path then reports it properly.
+    match (package_fields(source_bytes), package_fields(&local.bytes)) {
+        (Some(source), Some(local)) => source == local,
+        _ => false,
+    }
+}
+
+/// A root document with the two mirror-owned keys removed — the fields the
+/// merge copies from the source verbatim, and therefore the ones a skip
+/// decision has to compare.
+fn package_fields(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let serde_json::Value::Object(mut fields) = serde_json::from_slice(bytes).ok()? else {
+        return None;
+    };
+    fields.remove("tags");
+    fields.remove("repository");
+    Some(fields)
 }
 
 /// Re-derive `c/index.json` from the roots on disk (C-034).

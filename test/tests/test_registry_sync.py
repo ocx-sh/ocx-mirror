@@ -45,7 +45,9 @@ from src.runner import OcxRunner
 from src.static_index import (
     TreePackage,
     TreeTag,
+    list_description_objects,
     verify_config_exists,
+    verify_description_object,
     verify_dispatch_object_exists,
     verify_root_repository,
     verify_tag_content,
@@ -138,6 +140,7 @@ def tree_package(
     *,
     physical_path: str | None = None,
     desc: dict | None = None,
+    description_objects: dict[str, bytes] | None = None,
 ) -> TreePackage:
     """A source-tree package rooted at the real repository the content was pushed to.
 
@@ -153,7 +156,37 @@ def tree_package(
         tags=[TreeTag(name=tag, content_digest=digest) for tag, digest in tags.items()],
         dispatch_objects=dispatch,
         desc=desc,
+        description_objects=description_objects or {},
     )
+
+
+def sha256_of(body: bytes) -> str:
+    return f"sha256:{hashlib.sha256(body).hexdigest()}"
+
+
+# A README and a logo in the shape indexbot serves them beside a root — the
+# bytes `desc.readme` / `desc.logo` name.
+README_ONE = b"# stub\n"
+README_TWO = b"# stub, revised\n"
+LOGO_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
+
+
+def described_package(
+    registry: str,
+    name: str,
+    tags: dict[str, str],
+    dispatch: dict[str, bytes],
+    *,
+    source_description: str,
+    readme: bytes,
+    logo: bytes | None = LOGO_SVG,
+) -> TreePackage:
+    """[`tree_package`] whose root carries a production-shaped `desc` **and** the objects it names."""
+    desc = {"digest": source_description, "readme": sha256_of(readme), "logo": sha256_of(logo) if logo else None}
+    objects = {f"{sha256_of(readme)}.md": readme}
+    if logo is not None:
+        objects[f"{sha256_of(logo)}.svg"] = logo
+    return tree_package(registry, name, tags, dispatch, desc=desc, description_objects=objects)
 
 
 def destination_repository(package: str) -> str:
@@ -2135,32 +2168,29 @@ def test_the_package_description_travels(
     The described package's root also carries the `desc` object a real
     published root carries (`digest`/`logo`/`readme`), which the mirror does
     not model — so this doubles as C-028's verbatim-passthrough check on a
-    field only a production-shaped fixture has.
+    field only a production-shaped fixture has. And the README/logo those
+    digests name must land in the output tree beside the dispatch object
+    (C-048): a root naming digests the tree does not hold is the dangling
+    reference `ocx-catalog build` refuses (ocx-mirror#68, #69).
     """
     described = f"testns/{unique_mirror_repo}_described"
     bare = f"testns/{unique_mirror_repo}_bare"
     described_digest, described_body = seed_version(ocx_binary, registry, described, "1.0.0", tmp_path / "push-d", b"d")
     bare_digest, bare_body = seed_version(ocx_binary, registry, bare, "1.0.0", tmp_path / "push-b", b"b")
-    push_ocx_description(ocx_binary, registry, described, tmp_path / "describe")
+    push_ocx_description(ocx_binary, registry, described, tmp_path / "describe", readme=README_ONE.decode())
     source_description = fetch_manifest(registry, described, "__ocx.desc")[0]
 
-    desc = {
-        "digest": source_description,
-        "logo": f"sha256:{'1' * 64}",
-        "readme": f"sha256:{'2' * 64}",
-    }
+    package = described_package(
+        registry,
+        described,
+        {"1.0.0": described_digest},
+        {described_digest: described_body},
+        source_description=source_description,
+        readme=README_ONE,
+    )
     write_published_index_tree(
         published_index_server.dir,
-        [
-            tree_package(
-                registry,
-                described,
-                {"1.0.0": described_digest},
-                {described_digest: described_body},
-                desc=desc,
-            ),
-            tree_package(registry, bare, {"1.0.0": bare_digest}, {bare_digest: bare_body}),
-        ],
+        [package, tree_package(registry, bare, {"1.0.0": bare_digest}, {bare_digest: bare_body})],
     )
 
     output = tmp_path / "public"
@@ -2178,10 +2208,154 @@ def test_the_package_description_travels(
     assert fetch_manifest(mirror_registry, destination_repository(described), "__ocx.desc")[0] == source_description
     assert manifest_absent(mirror_registry, destination_repository(bare), "__ocx.desc")
 
-    mirrored_root = json.loads((output / SOURCE_AS / "p" / f"{described}.json").read_text())
-    assert mirrored_root.get("desc") == desc, (
+    tree = output / SOURCE_AS
+    mirrored_root = json.loads((tree / "p" / f"{described}.json").read_text())
+    assert mirrored_root.get("desc") == package.desc, (
         "a package-level field the mirror does not model must ride through the rewrite verbatim"
     )
+    assert (
+        verify_description_object(tree, described, sha256_of(README_ONE), "md", README_ONE)
+        + verify_description_object(tree, described, sha256_of(LOGO_SVG), "svg", LOGO_SVG)
+        + verify_dispatch_object_exists(tree, described, described_digest)
+    ) == [], "every digest the mirrored root names must resolve to a file under o/ (ocx-mirror#69)"
+    assert list_description_objects(tree, bare) == [], "a package without a description gets no objects"
+
+
+def test_a_description_only_change_is_resynced_and_the_old_objects_pruned(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """S-029: a new README upstream with no new tag re-syncs the package and prunes the old README.
+
+    Three runs. The second moves `desc` alone — every tag pair unchanged — so
+    only the skip predicate's fourth condition can notice it (ocx-mirror#70);
+    once it does, the previous README is an orphan under the index's own
+    reachability ruling and must go, while the dispatch object, tag history
+    under the append-only ruling, stays (ocx-mirror#71). The third adds a
+    second package, which forces the per-package fallback past the catalog
+    short-circuit and proves the re-synced package is now *skipped*, not
+    re-copied on every run.
+    """
+    package = f"testns/{unique_mirror_repo}"
+    other = f"testns/{unique_mirror_repo}_other"
+    digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push", b"one")
+    push_ocx_description(ocx_binary, registry, package, tmp_path / "describe", readme=README_ONE.decode())
+    source_description = fetch_manifest(registry, package, "__ocx.desc")[0]
+
+    def publish(readme: bytes, *, with_other: bool) -> None:
+        packages = [
+            described_package(
+                registry,
+                package,
+                {"1.0.0": digest},
+                {digest: body},
+                source_description=source_description,
+                readme=readme,
+            )
+        ]
+        if with_other:
+            packages.append(tree_package(registry, other, {"1.0.0": other_digest}, {other_digest: other_body}))
+        write_published_index_tree(published_index_server.dir, packages)
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+    )
+    tree = output / SOURCE_AS
+
+    publish(README_ONE, with_other=False)
+    first = run_sync(sync, spec)
+    assert first.returncode == 0, outcome(first)
+    assert verify_description_object(tree, package, sha256_of(README_ONE), "md", README_ONE) == []
+
+    # The description moves; not one tag does.
+    publish(README_TWO, with_other=False)
+    second = run_sync(sync, spec)
+    assert second.returncode == 0, outcome(second)
+    assert "1 copied" in second.stdout, f"a description-only change must re-sync (ocx-mirror#70)\n{outcome(second)}"
+    assert verify_description_object(tree, package, sha256_of(README_TWO), "md", README_TWO) == []
+    assert json.loads((tree / "p" / f"{package}.json").read_text())["desc"]["readme"] == sha256_of(README_TWO)
+    assert list_description_objects(tree, package) == sorted(
+        [f"{sha256_of(README_TWO).partition(':')[2]}.md", f"{sha256_of(LOGO_SVG).partition(':')[2]}.svg"]
+    ), "the previous README is an orphan and must be pruned (ocx-mirror#71); the logo is still named"
+    assert verify_dispatch_object_exists(tree, package, digest) == [], "dispatch objects are never pruned"
+    after_second = tree_snapshot(tree / "p" / package)
+
+    # A second package forces the per-package fallback; the first must skip.
+    other_digest, other_body = seed_version(ocx_binary, registry, other, "1.0.0", tmp_path / "push-o", b"two")
+    publish(README_TWO, with_other=True)
+    third = run_sync(sync, spec)
+    assert third.returncode == 0, outcome(third)
+    assert "2 total, 1 copied, 1 skipped, 0 failed" in third.stdout, (
+        f"an unchanged description must still take the cheap path\n{outcome(third)}"
+    )
+    assert tree_snapshot(tree / "p" / package) == after_second, "a skipped package's objects are left untouched"
+
+
+def test_a_root_naming_a_description_object_the_tree_lacks_fails_that_package_only(
+    sync: MirrorRunner,
+    ocx_binary: Path,
+    registry: str,
+    mirror_registry: str,
+    unique_mirror_repo: str,
+    published_index_server,
+    tmp_path: Path,
+) -> None:
+    """S-030: a dangling `desc` reference upstream fails its package (exit 1), never the run, and writes no root.
+
+    That is the source's own bytes refusing to validate — C-040's aggregating
+    class — so the other package still copies, and the broken one is retried
+    rather than skipped on the next run, because no root was written for it.
+    """
+    broken = f"testns/{unique_mirror_repo}_broken"
+    fine = f"testns/{unique_mirror_repo}_fine"
+    broken_digest, broken_body = seed_version(ocx_binary, registry, broken, "1.0.0", tmp_path / "push-x", b"x")
+    fine_digest, fine_body = seed_version(ocx_binary, registry, fine, "1.0.0", tmp_path / "push-y", b"y")
+    push_ocx_description(ocx_binary, registry, broken, tmp_path / "describe")
+    source_description = fetch_manifest(registry, broken, "__ocx.desc")[0]
+
+    dangling = {"digest": source_description, "logo": f"sha256:{'1' * 64}", "readme": f"sha256:{'2' * 64}"}
+    write_published_index_tree(
+        published_index_server.dir,
+        [
+            tree_package(registry, broken, {"1.0.0": broken_digest}, {broken_digest: broken_body}, desc=dangling),
+            tree_package(registry, fine, {"1.0.0": fine_digest}, {fine_digest: fine_body}),
+        ],
+    )
+
+    output = tmp_path / "public"
+    spec = tmp_path / "registry.yml"
+    write_registry_spec(
+        spec,
+        target_registry=mirror_registry,
+        target_repository=TARGET_PREFIX,
+        output=output,
+        sources=[source_spec(registry, published_index_server.url())],
+    )
+    tree = output / SOURCE_AS
+
+    # The fine package copies once and skips thereafter; the broken one fails
+    # both times, because no root was written that could satisfy the skip.
+    for expected in ("2 total, 1 copied, 0 skipped, 1 failed", "2 total, 0 copied, 1 skipped, 1 failed"):
+        result = run_sync(sync, spec)
+        assert result.returncode == 1, f"one package's foreign data must fail that package, not the run\n{outcome(result)}"
+        assert expected in result.stdout, outcome(result)
+        assert "desc.readme" in result.stdout and "serves no such object" in result.stdout, outcome(result)
+        assert not (tree / "p" / f"{broken}.json").exists(), (
+            "a root naming objects the tree does not hold must not be published"
+        )
+        assert list_description_objects(tree, broken) == []
+        assert verify_root_repository(tree, fine, destination_pointer(mirror_registry, fine)) == []
 
 
 # ---------------------------------------------------------------------------

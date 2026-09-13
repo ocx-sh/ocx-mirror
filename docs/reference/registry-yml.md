@@ -60,10 +60,15 @@ public/
 └── ocx.sh/
     ├── config.json
     ├── c/index.json
-    └── p/<namespace>/<package>.json
+    ├── p/<namespace>/<package>.json
+    └── p/<namespace>/<package>/o/sha256/
+        ├── <hex>.json                  the image index each tag resolves to
+        └── <hex>.md, <hex>.svg|.png    the README and logo the package's `desc` names
 ```
 
 Serve `public/` with any static file server and point consumers at `https://<host>/ocx.sh`. Nothing but index content is ever written here — no lock files, no caches, no state. The tree is safe to commit to git and to rsync.
+
+The README and logo are copied from the upstream tree, verified against the digests the package document names, so a catalog built over the mirror (`ocx-catalog build`) renders them the way the upstream catalog does. When upstream publishes a new description, the next run replaces them and removes the ones nothing names any more; the `.json` image indices are never removed.
 
 The state a run *does* need — the source-catalog digest behind the no-op short-circuit below, and the index lock files — lives outside `output:` entirely, under `--cache-dir` (default `${XDG_CACHE_HOME:-~/.cache}/ocx-mirror`).
 
@@ -434,7 +439,7 @@ Silence would be indistinguishable from a job that never started.
 
 ### What a re-run does {#incremental}
 
-A package is skipped only when the mirror can confirm it is fully present: its document exists, every upstream tag is recorded against the same content, and the catalog agrees. Anything else is re-copied — and re-copying is cheap, because every blob already at the destination is skipped after a single query.
+A package is skipped only when the mirror can confirm it is fully present: its document exists, every upstream tag is recorded against the same content, the catalog agrees, and every package-level field — the description among them — matches what upstream serves. Anything else is re-copied — and re-copying is cheap, because every blob already at the destination is skipped after a single query. A new README or logo upstream therefore reaches the mirror on the next run even when no tag moved.
 
 Before checking packages individually, each source gets a cheaper test first: if the source's catalog is byte-identical to the last fully successful run **and** nothing new has been added to `include:`, the whole source is skipped in one request and the run prints `<as>: unchanged since the last run — nothing to compare` instead of a package table. Only a source that fails this test falls through to the per-package check above.
 

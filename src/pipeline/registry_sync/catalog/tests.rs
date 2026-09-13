@@ -12,6 +12,8 @@ mod support;
 
 #[path = "tests/client.rs"]
 mod client;
+#[path = "tests/description.rs"]
+mod description;
 #[path = "tests/fetch.rs"]
 mod fetch;
 #[path = "tests/ssrf.rs"]

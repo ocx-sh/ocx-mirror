@@ -13,6 +13,8 @@
 #[path = "tests/support.rs"]
 mod support;
 
+#[path = "tests/description.rs"]
+mod description;
 #[path = "tests/merge.rs"]
 mod merge;
 #[path = "tests/rewrite.rs"]
