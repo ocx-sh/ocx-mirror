@@ -5,7 +5,7 @@ agent = []
 lock_version = 1
 declaration_hash_version = 1
 declaration_hash = "sha256:ab336cd06935567b6ef67120a47077e51a8d34b7cceb3d3d4f93678d9ee96bbb"
-generated_by = "grim 0.13.0"
+generated_by = "grim 0.14.0"
 generated_at = "2026-08-19T22:54:47Z"
 
 [[rule]]

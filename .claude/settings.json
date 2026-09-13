@@ -1,0 +1,6 @@
+{
+  "claudeMdExcludes": [
+    "**/.claude/rules/rust-cargo/**",
+    "**/.claude/rules/rust-quality/**"
+  ]
+}
