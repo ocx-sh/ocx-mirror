@@ -33,6 +33,9 @@ allow = [
   # starlark family: starlark → debugserver-types → schemafy → Inflector.
   # REMOVE when 'cargo tree -i inflector' is empty after a starlark family bump.
   "BSD-2-Clause",
+  # libbz2-rs-sys, the pure-Rust bzip2 decoder `ocx_lib::archive` reads
+  # `.tar.bz2` upstream assets with (ocx 0.6.2). Permissive, BSD-like.
+  "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 

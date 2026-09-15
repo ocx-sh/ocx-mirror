@@ -61,9 +61,8 @@ document the four-line job, let them own the pipeline.
   crate and made `ocx_lib`'s reqwest types unnameable here, which is how the
   mirror ended up with its own TLS-root handling and a corporate CA that no leg
   trusted. `src/http.rs` now calls `ocx_lib::utility::tls::seed_embedded_roots`
-  directly. Deliberately **not** `system-proxy` — that feature reads Windows
-  and macOS system proxy *settings*; the `HTTP_PROXY` family is honoured
-  without it.
+  directly. **Since v0.6.1** ocx adds `system-proxy` (its SSRF guard consults
+  reqwest's own proxy matcher), so the mirror carries it too — copy-exactly.
 - Clone/checkout always `--recurse-submodules`.
 
 ## Build & Development

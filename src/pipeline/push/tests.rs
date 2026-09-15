@@ -15,41 +15,43 @@ fn source_without_comments() -> String {
         .join("\n")
 }
 
-/// The default-variant alias block signs nothing of its own.
+/// The default-variant alias is `Publisher`'s own `default` track, not a
+/// second push.
 ///
-/// A Sigstore signature is a referrer against the **subject digest**, not the
-/// tag. `test_default_variant_aliases_the_bare_tags_to_its_own_manifest` pins
-/// that every bare tag resolves to the default variant's own manifest, so the
-/// alias push lands on a digest the version tag's own `sign_platform` below
-/// already covers. A second call there is a duplicate referrer spending a
-/// candidate against ocx's verifier cap, not a gap being closed.
+/// ocx 0.6.2 re-tags the pushed manifest onto the bare version track inside
+/// `push_cascade` (`default: true`), through the index alone. The earlier
+/// shape — a second `push_cascade` under a variant-less identifier —
+/// re-uploaded one manifest per platform and, had it signed, would have spent
+/// a duplicate referrer against the verifier's cap (a signature is a referrer
+/// on the subject digest, not the tag). One cascade call, one signing call,
+/// the flag derived from the variant context: that is the whole shape.
 ///
 /// Structural rather than behavioural because the property is the *absence*
 /// of a call on a path that needs a live `Publisher` and a variant-carrying
 /// registry fixture to reach.
 #[test]
-fn the_bare_alias_push_signs_nothing_of_its_own() {
+fn the_default_variant_alias_is_the_publishers_default_track_not_a_second_push() {
     let source = source_without_comments();
 
-    // The needle is live: an absence assertion over a pattern that matches
-    // nothing anywhere reports green forever.
-    assert!(
-        source.matches("sign_platform(").count() >= 2,
-        "sign_platform is no longer spelled this way; this guard scans for nothing"
+    assert_eq!(
+        source.matches("push_cascade(").count(),
+        1,
+        "one cascade push per platform; the bare alias rides on its `default` flag"
     );
-
-    let open = source
-        .find("vec![bare_info]")
-        .expect("the default-variant alias push names bare_info");
-    let close = source
-        .find("sign_platform(sign, &signed_ref")
-        .expect("the version tag's platform manifest is signed after the alias push");
-    assert!(open < close, "the alias push precedes the version tag's signing call");
-
-    let alias_block = &source[open..close];
     assert!(
-        !alias_block.contains("sign_platform("),
-        "the bare alias push signs its own reference; that is a duplicate \
-         referrer on the digest the version tag's call already covers"
+        source.contains("let default = variant.is_some_and(|ctx| ctx.is_default);"),
+        "the default flag is derived from the variant context"
+    );
+    // The derived flag, not its negation or a literal, is what the cascade
+    // receives: pinned on the argument list itself, whitespace ignored.
+    let flat: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        flat.contains("canonical_tag,default,annotations,"),
+        "`default` is passed to push_cascade as derived"
+    );
+    assert_eq!(
+        source.matches("sign_platform(sign, &signed_ref").count(),
+        2,
+        "one signing call per branch (cascade and plain), none for an alias"
     );
 }

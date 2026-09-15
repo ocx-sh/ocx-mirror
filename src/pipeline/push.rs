@@ -20,9 +20,10 @@ use super::ocx_cli::sign::{ResolvedSign, invoke_sign_reference};
 /// cascade blockers. Rolling tags are excluded — build-tagged versions already
 /// provide correct blocking semantics.
 ///
-/// When `variant` indicates a default variant, a second cascade pass generates
-/// unadorned alias tags (e.g., `3.12.5`, `3.12`, `3`, `latest`) pointing to
-/// the same manifest as the variant-prefixed tags.
+/// When `variant` indicates a default variant, the cascade push also writes
+/// the unadorned alias tags (e.g., `3.12.5`, `3.12`, `3`, `latest`) pointing
+/// to the same manifest as the variant-prefixed tags — `Publisher`'s own
+/// `default` track, re-tagged through the index, no second upload.
 ///
 /// `annotations` are the OCI annotations for this run (see [`crate::annotations`]),
 /// written onto the image index of every tag the push touches.
@@ -75,50 +76,28 @@ pub async fn push_and_cascade(
     // (`python_push`), whose layers do carry `:from=` mount tails.
 
     if cascade {
+        // Default variant aliasing: `default` re-tags the pushed manifest onto
+        // the bare track too — e.g. `pgo.lto-3.12.5_b1` also cascades `3.12.5`,
+        // `3.12`, `3`, `latest`. A version carrying no variant writes no alias.
+        // Nothing extra is signed for it: the bare alias is the same manifest
+        // under a second tag (`test_default_variant_aliases_the_bare_tags_to_its_own_manifest`
+        // asserts every bare tag resolves to the default variant's own digest,
+        // and a non-default variant gets none). A signature is a referrer
+        // against the subject digest, not the tag, so the one call below
+        // covers the alias — a second would spend another candidate against
+        // the verifier's cap.
+        let default = variant.is_some_and(|ctx| ctx.is_default);
         publisher
             .push_cascade(
-                vec![info.clone()],
+                vec![info],
                 &layers,
                 cascade_versions.clone(),
                 None,
                 canonical_tag,
+                default,
                 annotations,
             )
             .await?;
-
-        // Default variant aliasing: generate unadorned tags for the default variant.
-        // e.g., pushing `pgo.lto-3.12.5_b1` also cascades `3.12.5`, `3.12`, `3`, `latest`.
-        if let Some(ctx) = variant
-            && ctx.is_default
-            && let Some(version) = Version::parse(&version_str)
-            && version.variant().is_some()
-        {
-            let bare = version.without_variant();
-            let bare_tag = bare.to_string();
-            let bare_id = info.identifier.clone_with_tag(bare_tag);
-            let bare_info = Info {
-                identifier: bare_id,
-                metadata: info.metadata.clone(),
-                platform: info.platform,
-            };
-            publisher
-                .push_cascade(
-                    vec![bare_info],
-                    &layers,
-                    cascade_versions.clone(),
-                    None,
-                    canonical_tag,
-                    annotations,
-                )
-                .await?;
-            // Nothing is signed here. The bare alias is the same manifest
-            // under a second tag: `test_default_variant_aliases_the_bare_tags_to_its_own_manifest`
-            // asserts every bare tag resolves to the default variant's own
-            // digest, and a non-default variant gets no bare alias at all. A
-            // signature is a referrer against the subject digest, not the tag,
-            // so the one call below already covers this alias — and a second
-            // one would spend another candidate against the verifier's cap.
-        }
 
         sign_platform(sign, &signed_ref, &platform.to_string()).await?;
         return Ok(MirrorResult::Pushed {
@@ -129,7 +108,7 @@ pub async fn push_and_cascade(
     }
 
     publisher
-        .push(vec![info], &layers, None, canonical_tag, annotations)
+        .push(vec![info], &layers, None, canonical_tag, false, annotations)
         .await?;
 
     sign_platform(sign, &signed_ref, &platform.to_string()).await?;

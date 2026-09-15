@@ -81,10 +81,10 @@ quick-junit = "0.6"
 # resolves to the platform verifier, which reads the host trust store and
 # therefore `SSL_CERT_FILE` / `SSL_CERT_DIR`; `src/http.rs` seeds the bundled
 # Mozilla roots on top so an empty store is still usable. `json` is ours —
-# `ocx_lib` does not need it. Deliberately not `system-proxy`: that feature is
-# the Windows/macOS system *settings* reader, and the `HTTP_PROXY` family is
-# honoured without it.
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2"] }
+# `ocx_lib` does not need it. `system-proxy` is copied from ocx (0.6.1+): its
+# SSRF guard asks reqwest's own proxy matcher which route a dial takes, and the
+# matcher must read the same Windows/macOS system settings the client does.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "system-proxy"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
 sha2 = "0.11.0"
 # `dist sync` announces four checksums on every upload, because Artifactory's
@@ -104,6 +104,10 @@ tokio = { version = "1.52", features = ["full", "test-util"] }
 # emits (`is_rate_limited`) — reqwest exposes no other constructor for an
 # `Error` carrying a status.
 http = "1.5"
+# The test seam for `ocx_lib::oci::ssrf::ProxyRules::new` (an explicit
+# `Matcher` instead of the ambient proxy environment); copied exactly from
+# ocx's `[workspace.dependencies]`.
+hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 
 # ocx_lib is developed against the ocx-sh forks of oci-client and
 # docker_credential via [patch.crates-io] in the ocx workspace. Patch tables
@@ -112,13 +116,14 @@ http = "1.5"
 # submodules of external/ocx. Requires `git submodule update --init --recursive`.
 #
 # Invariant: the fork versions must keep satisfying ocx_lib's requirements
-# (oci-client "0.17", docker_credential "1.3"). A drift surfaces as a hard
+# (oci-client "0.17", docker_credential "1.3", sigstore "0.14"). A drift surfaces as a hard
 # resolution error at `cargo update`. WARNING: dropping this table does NOT
 # error — cargo would silently resolve the unpatched crates.io releases.
 # CI guards this with `cargo tree -i oci-client` (see verify workflow).
 [patch.crates-io]
 oci-client = { path = "external/ocx/external/rust-oci-client" }
 docker_credential = { path = "external/ocx/external/docker_credential" }
+sigstore = { path = "external/ocx/external/sigstore-rs" }
 
 # Deny warnings for this package only. Cargo applies --cap-lints to registry
 # and git deps but NOT path deps; a blanket RUSTFLAGS=-D warnings would

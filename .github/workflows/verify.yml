@@ -71,8 +71,10 @@ jobs:
         # silently resolve the unpatched crates.io releases. Assert the fork
         # path source is in the graph.
         run: |
-          cargo tree -i oci-client --locked | head -1 | grep -F 'external/ocx/external/rust-oci-client' \
-            || { echo "::error::oci-client does not resolve to the vendored fork — [patch.crates-io] broken"; exit 1; }
+          for fork in oci-client:rust-oci-client sigstore:sigstore-rs; do
+            cargo tree -i "${fork%%:*}" --locked | head -1 | grep -F "external/ocx/external/${fork#*:}" \
+              || { echo "::error::${fork%%:*} does not resolve to the vendored fork — [patch.crates-io] broken"; exit 1; }
+          done
       - name: Check formatting
         id: fmt
         run: task rust:format:check
@@ -156,15 +158,15 @@ jobs:
       - name: Prepare Binary
         run: chmod +x test/bin/ocx-mirror test/bin/ocx
       - name: Setup OCX
-        # Provides the `ocx` binary OcxRunner drives for install-side
-        # verification. Bump the version alongside external/ocx submodule bumps.
-        # Must stay >= the ocx that wrote ocx.lock: setup-ocx runs `ocx pull`
-        # against it, and an older binary exits 78 on a newer lock_version.
-        # Floor is 0.6.0: the harness spells `package description push`, which
-        # 0.5.x rejects with exit 64.
+        # Activates the project toolchain (task, uv, …) from ocx.lock. The
+        # `ocx` the acceptance tier drives is the submodule build under
+        # OCX_COMMAND below, not this one. Bump the version alongside
+        # external/ocx submodule bumps once the release exists. Must stay >=
+        # the ocx that wrote ocx.lock: setup-ocx runs `ocx pull` against it,
+        # and an older binary exits 78 on a newer lock_version.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.0"
+          version: "0.6.2"
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task
@@ -173,7 +175,15 @@ jobs:
         run: task test:parallel -- --junit-xml=results/junit.xml
         env:
           OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
-          # Submodule-pin ocx for the mount-dependent tests (see the smoke
+          # Submodule-pin ocx for the whole acceptance tier: the harness's
+          # own `ocx` calls and — via `OCX_BINARY_PIN`, which `MirrorRunner`
+          # derives from this — every `ocx` the mirror under test spawns.
+          # The setup-ocx `ocx` above activates the toolchain; it is a
+          # *release*, and the mirror's subprocess contract (cascade
+          # `--tags-file`, the positional announce package) moves with the
+          # submodule, ahead of the release that ships it.
+          OCX_COMMAND: ${{ github.workspace }}/test/bin/ocx
+          # The same binary for the mount-dependent tests (see the smoke
           # job's "Build ocx" step); the `real_ocx_binary` fixture prefers it
           # over a local cargo build, which cannot work in this checkout.
           OCX_TEST_BINARY: ${{ github.workspace }}/test/bin/ocx

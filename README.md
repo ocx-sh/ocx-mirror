@@ -53,6 +53,23 @@ Checklist when bumping:
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
 
+When the bump raises the `ocx` floor (a new subcommand or flag the mirror
+spawns), the pinned `ocx` moves with it, in four places:
+
+- `ocx.toml` / `ocx.lock` — `ocx update`, so `task verify` runs the child the
+  code expects
+- `OCX_CONTAINER_CLI_TAG` in `src/command/package/pipeline/generate/ci/matrix.rs`
+  (the `setup-ocx` version every generated workflow bakes in), then regenerate
+  the golden fixtures under `tests/golden/`
+- the `setup-ocx` `version:` in `.github/workflows/verify.yml`
+- the floor prose in `.claude/rules/subsystem-mirror.md` and
+  `docs/reference/environment.md`
+
+To build ahead of an ocx release, point the submodule at the unreleased commit
+(a provisional pointer) and re-point it at the release tag before this
+repository's own release — a mirror release must never ship before the ocx
+release it pins.
+
 ## Bumping the pinned uv crates
 
 `crates/ocx_python` parses `pylock.toml`, wheel filenames, and PEP 508/440

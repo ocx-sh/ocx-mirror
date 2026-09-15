@@ -165,7 +165,7 @@ sweep of its own.
 
 The 75/69 split above only exists from **ocx ≥ 0.5.3** onward, and the 83
 arm only from the ocx release carrying `push --fulcio-url`/`--rekor-url` —
-the floor bumps off 0.6.0 (the submodule bump lands it) — the `ocx`
+the floor is 0.6.2 (the submodule pins the release tag) — the `ocx`
 binary that actually runs the push subprocess, i.e. whatever `ocx.toml` /
 `ocx.lock` toolchain the running `ocx-mirror` is co-located with, not the
 separately-pinned `ocx` version a *generated* downstream workflow bakes into
