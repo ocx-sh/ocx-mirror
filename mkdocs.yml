@@ -27,6 +27,11 @@ theme:
     - content.code.copy
     - toc.follow
 
+# A `[text](page.md#anchor)` whose anchor no page renders is a broken link
+# the reader only finds by clicking; surface it so `--strict` fails the build.
+validation:
+  anchors: warn
+
 markdown_extensions:
   - admonition
   - attr_list

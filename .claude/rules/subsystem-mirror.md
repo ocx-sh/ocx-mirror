@@ -48,7 +48,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `command/package/pipeline/push/gating.rs` | Which container legs gate a `+libc.*` platform entry |
 | `command/package/pipeline/push/bundles.rs` | Bundle discovery and slug ↔ platform-key mapping |
 | `command/package/pipeline/notify.rs` | `pipeline notify` — Discord webhook POST |
-| `command/package/pipeline/cascade.rs` | `pipeline cascade` — wraps `ocx package cascade repair` (needs ocx ≥ 0.5.4), then announces the tags it moved |
+| `command/package/pipeline/cascade.rs` | `pipeline cascade` — wraps `ocx package cascade repair --tags-file` (needs ocx ≥ 0.6.2), then announces the tags it left in the registry |
 | `spec.rs` | `MirrorSpec` root and its `impl`; shared regexes. Children glob re-exported `pub(crate)`, so callers keep saying `crate::spec::…` |
 | `spec/validate.rs` | Every validation rule. Rejected documents are covered by `tests/fixtures/invalid/*.yml`, one file per rule |
 | `spec/load.rs` | `load_spec()`, `extends:` chain resolution, shallow merge |
@@ -67,18 +67,18 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `spec/tests_config.rs` | `TestEntry` (name + command); top-level `tests:` schema |
 | `spec/platforms_config.rs` | `PlatformConfig`, `ContainerConfig` (`image`/`shell`/`id`/`setup` — `setup` provisions the leg's image once per leg via `docker build`); `platforms:` matrix schema; per-platform version applicability (`min_version`/`max_version`/`exclude` of `ExcludeEntry`+`Severity`) |
 | `spec/ocx_mirror_config.rs` | `OcxMirrorConfig` (`rev` only, `deny_unknown_fields`); pins nothing — reported as `ocx_mirror_rev` in `pipeline plan` |
-| `spec/announce_config.rs` | `AnnounceConfig` (`package`, `fork`, `index_repo`, optional `schedule` putting the generated catch-up workflow on a timer — charset-checked by `validate_announce_config`); logical index name, spelled out — never derived from `target` |
+| `spec/announce_config.rs` | `AnnounceConfig` (`package`, optional `fork`, `index_repo` as `[HOST/]NAMESPACE/PROJECT` parsed by `ocx_lib::forge::RepoCoordinate`, optional `forge` / `transport` for a self-hosted GitLab over the git transport, optional `schedule` putting the generated catch-up workflow on a timer — checked by `validate_announce_config`); logical index name, spelled out — never derived from `target` |
 | `spec/notify_config.rs` | `NotifyConfig`, `DiscordConfig` (`webhook_secret` + `user_id` snowflake); the URL-reject validator itself is `spec/validate.rs::policy_check_notify` |
 | `spec/sign_config.rs` | `SignConfig` (`keyless:` xor `key:`), `KeylessConfig`, `KeyConfig` (string or map — hand-rolled `Deserialize` keeps serde's `unknown field` naming), `KeyFullConfig`, and `Ref` (literal, `env://NAME`, `file://PATH`; `Debug` redacts literals). Shape refusals run in two seats: the raw merged document before deserialization (null block or tag, `key` map without `ref`, non-string secret scalar) and `spec/validate.rs::validate_sign_config` over the typed value (mode tags, empty or PEM-bearing ref, literal in a secret-class field, `env://` name grammar, empty `file://`); every refusal is `SpecUsageError` (64) naming the dotted field, never the value |
 | `spec/registry.rs` | `RegistrySpec` root (`registry.yml`) + `RegistrySource`, `RegistryConcurrency`, `OnError` — a different root type from `MirrorSpec`, not a variant of it (C-001…C-004, C-006); re-exported through `spec.rs` alongside `MirrorSpec`, `lib.rs` untouched (C-008) |
 | `spec/dist.rs` | `DistSpec` root (`dist.yml`) + `Select`, `Publish`, `Upload`, `Identity` — the third root type, same tier and re-export shape as `RegistrySpec`. **Deliberate convention, third occurrence:** a spec root validates a grammar by calling into the pipeline module that owns it (here `dist_sync::layout::LayoutTemplate`, as `spec/registry.rs` calls `registry_sync::destination` and `catalog::index_host`). The owner of a grammar is the only place that can validate it; this inversion is accepted, not debt |
 | `spec/prescan.rs` | `pre_scan()` — raw-`serde_yaml_ng::Value` scan of a merged spec document before typed deserialization: credential deny-list at any depth, the `kind:` discriminator (parameterised — `registry.yml` and `dist.yml` pass their expected kind; `load_spec` passes `None` for `mirror.yml`, which skips the `kind:` job and keeps the deny-list), `sources[].index` userinfo (C-005); every rejection is `SpecUsageError` (64), no offending value ever echoed. The deny-list is why `dist.yml` spells its upload credentials `identity:` with `*_env` names — a key called `auth` is refused at any depth, and the guard is worth more than the field name |
 | `source/github_release.rs` | GitHub API client, tag pattern extraction |
-| `source/url_index.rs` | JSON index fetch (remote, inline, generator) |
+| `source/url_index.rs` | JSON index fetch (remote, inline, generator); the remote fetch builds its client through `http.rs`, so it carries the same roots and connect bound as every other mirror-owned request |
 | `source/pylock.rs` | PEP 751 `pylock.toml` reader → single `VersionInfo` (the app's locked version, PEP 503 name match); wheel selection happens later in `plan.rs`/`prepare.rs` via `ocx_python` |
 | `source/pypi.rs` | `source.type: pypi` discovery over the **Simple Repository API**: `GET {index}/{project}/` content-negotiated to PEP 691 JSON, falling back to a PEP 503 HTML anchor scan (Artifactory/Nexus serve only the latter). Versions come from the listed *filenames* (`uv_distribution_filename`, re-exported by `ocx_python`) — PEP 700's `versions` key is 1.1-only and has no HTML twin. One `VersionInfo` per version with ≥1 non-yanked file (PEP 592); PEP 440-aware prerelease flag; `assets` stays empty (wheel selection happens later, same as `pylock`). Indexes are tried in order and the first that **has** the project wins — never merged, which is the dependency-confusion guard |
 | `auth.rs` | Host-keyed credentials for the mirror's own HTTP legs: `OCX_AUTH_<slug>_{TYPE,USER,TOKEN}` → `netrc` (`$NETRC`, else `~/.netrc`) → anonymous, resolved per **request URL** so one lock naming several hosts sends each host only its own credential. Nothing in `mirror.yml` names a variable — a contributed spec able to do so is a spec able to exfiltrate one (the reason npm/pnpm dropped env expansion from project-level `.npmrc`). The OCI legs keep `ocx_lib::auth`'s own ladder; netrc is deliberately absent there |
-| `http.rs` | The only constructor for a mirror-owned `reqwest::Client`: bundled Mozilla roots **and** the platform trust store, so a distroless host still works and `SSL_CERT_FILE`/`SSL_CERT_DIR` reach a corporate CA. ocx solved this in its own reqwest major (`ocx_lib::utility::tls`); a path dep does not inherit it |
+| `http.rs` | The only constructor for a mirror-owned `reqwest::Client`: bundled Mozilla roots, the platform trust store (`SSL_CERT_FILE`/`SSL_CERT_DIR`) **and** the operator's `OCX_EXTRA_CA_CERTS` — resolved once at startup by `install_extra_roots` through `ocx_lib::tls`, and handed to the three OCI client factories via `extra_roots()` (a scan test refuses a fourth factory without it) |
 | `pipeline/orchestrator.rs` | `execute_mirror()`: prepare (concurrent) + push (sequential) |
 | `pipeline/download.rs` | Single GET buffered to a file — no retry, no resume; an empty body is an error |
 | `pipeline/lock_derive.rs` | `pipeline plan`'s per-candidate PEP 751 lock derivation for `source.type: pypi`: shells `uv pip compile` (indexes map onto `--index`/`--default-index` — uv treats the default as *lowest* priority, so the last entry is it — with `--index-strategy first-index` pinned, and credentials injected as `UV_INDEX_<NAME>_*` env, never argv) — universal locks (the default) via `--python-version X.Y`, no interpreter on disk; only `universal: false` materializes the pinned interpreter via `ocx package pull` (`--python <path>`) — relaxes the `requires-python` floor (uv#15995), stamps a provenance header, fail-closed re-parses via `ocx_python::parse_pylock` |
@@ -86,7 +86,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/python_push.rs` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
 | `pipeline/ocx_cli.rs` | The `ocx` subprocess boundary: binary resolution and `OCX_*` env forwarding |
 | `pipeline/ocx_cli/push.rs` | `ocx package push` — argv assembly, one attempt, the retry ladder (`PUSH_TIMEOUT`, `push_once`, `push_with_retry`) |
-| `pipeline/ocx_cli/announce.rs` | `ocx package announce` — token, `TagSource`, argv, one bounded invocation |
+| `pipeline/ocx_cli/announce.rs` | `ocx package announce <package>` — credential gate via `ocx_lib::forge::ForgeCredentials` (the GitLab job-token rung included), `TagSource`, argv (`--fork`/`--forge`/`--transport` only when the spec sets them), one bounded invocation |
 | `pipeline/verify.rs` | Checksum verify |
 | `pipeline/package.rs` | Extract archive, apply metadata, rebundle |
 | `pipeline/push.rs` | Push to registry + cascade tag compute |
@@ -107,7 +107,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `pipeline/dist_sync/upload.rs` | The native HTTP PUT: one implementation (Artifactory generic, Nexus raw, GitLab generic, WebDAV are the same request; Azure differs by a header), HEAD-before-PUT idempotency **only under `Precheck::HeadFirst`** (the content-addressed `dist/<sha256>.json` snapshot); `dist.json` and the archives PUT under `Precheck::Unconditional` (an archive has already been probed by `mirror_row`, so a second HEAD would re-ask a settled question). Four `X-Checksum-*` headers (MD5/SHA-1/SHA-256/SHA-512) computed off the body in one `spawn_blocking`, env-resolved credentials with redacting `Debug`, retry on transport/5xx/429 only — never 4xx — and `Retry-After` clamped to 300 s |
 | `pipeline/dist_sync/report.rs` | The `dist sync` report + its two renderings; same local `OutputFormat` + free `report_*` convention as `registry_sync/report.rs` |
 | `pipeline.rs` | Shared pipeline helpers (e.g. `propagate_exit_code`) |
-| `annotations.rs` | GHA annotation emission for test failures |
+| `annotations.rs` | OCI annotations on every published index: `ocx_lib::ci::annotations::for_flavor` (GitHub + GitLab: source, revision, created — the `--ci-annotations` read set) under the spec's `annotations:` overlay |
 | `discord.rs` | Discord webhook HTTP client |
 | `junit.rs` | JUnit XML parser; produces `TestResult` per `(V, P, C, name)` |
 | `run_summary.rs` | `RunSummary` schema (serialized to run-summary.json) |
@@ -116,7 +116,7 @@ Separate crate: mirror tool standalone binary, own CLI, not part of `ocx` packag
 | `resolver.rs` | `resolve_assets()`: apply regex patterns to asset names |
 | `filter.rs` | `filter_versions()`: apply bounds, prerelease skip, backfill cap. Also `pep440_sort_key()` — the total order over version strings that `plan` and `push` sort by — and `version_cmp()`/`within_bounds()`, the min-inclusive/max-exclusive comparator every bound routes through (`versions.min`/`max`, `select_pypi_candidates`, per-platform windows, `exclude:` ranges): `ocx_lib::Version` first, PEP 440 for the ≥4-component releases it rejects, fail-open when neither parses |
 | `error.rs` | `MirrorError` variants and exit code mappings |
-| `lib.rs` | Library root. Public surface is `Command`, `error`, `spec` and nothing else — a wide surface would silence `dead_code`, which the crate denies on |
+| `lib.rs` | Library root. Public surface is `Command`, `error`, `spec` and `install_extra_roots` (the binary's startup gate — `main` runs it before `Command` dispatch so a bad `OCX_EXTRA_CA_CERTS` bundle exits under `ocx`'s own code) and nothing else — a wide surface would silence `dead_code`, which the crate denies on |
 | `main.rs` | `Cli` + `main()`; everything else lives in the library |
 | `test_support.rs` | `OCX_ENV_LOCK` — the crate-wide guard serialising tests that read or write the process-global `OCX_*` environment |
 
@@ -184,13 +184,15 @@ demands the key and exits **65** — not a retried code — on every push leg.
 and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` step carries the
 same floor and moves with the submodule pointer.
 
-**Three legs raise that floor to ocx ≥ 0.6.0**, each rejected by a 0.5.x binary
-with exit **64**: `pipeline announce` (`pipeline/ocx_cli/announce.rs` spawns
-`--tags-file`, the 0.6 replacement for `--tags-from-file`), `pipeline describe`
-(`pipeline/describe.rs` spawns `package description push`, which did not exist
-as a subcommand), and `pipeline cascade` (`pipeline/cascade.rs` reuses
-`invoke_announce`, so it inherits the same flag). Both `setup-ocx` pins and
-`ocx.toml` are on 0.6.0.
+**Three legs raise that floor**, each rejected by an older binary with exit
+**64**: `pipeline announce` (`pipeline/ocx_cli/announce.rs` spawns the
+positional package, 0.6.1, and `--tags-file`, the 0.6 replacement for
+`--tags-from-file`), `pipeline describe` (`pipeline/describe.rs` spawns
+`package description push`, which did not exist as a subcommand — 0.6.0), and
+`pipeline cascade` (`pipeline/cascade.rs` spawns `cascade repair --tags-file`,
+which replaced `--announce-tags` in **0.6.2** with no window, then reuses
+`invoke_announce`). The effective floor is 0.6.2; `setup-ocx` pins and
+`ocx.toml` move with the submodule pointer.
 
 ## Spec Format (YAML)
 

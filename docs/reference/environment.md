@@ -46,31 +46,34 @@ Discord user ID (snowflake) to mention when a run carries failures. Non-secret �
 
 **Scope:** `pipeline notify`.
 
-### `GITHUB_SERVER_URL` / `GITHUB_REPOSITORY` / `GITHUB_SHA` {#annotation-env}
+### CI annotation variables {#annotation-env}
 
-The [OCI annotations][oci-annotations] recorded on every published image index. [GitHub Actions][github-actions-docs] sets all three as default variables in every step, so the generated workflows pass nothing explicitly:
+The [OCI annotations][oci-annotations] recorded on every published image index. They are read by `ocx_lib`'s CI-annotation reader — the same one `ocx package push --ci-annotations` uses — so a mirror push and a hand push stamp the same keys from the same names. The provider is detected from `GITHUB_ACTIONS` / `GITLAB_CI`; both set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
 
-| Variable | Annotation |
-|----------|------------|
-| `GITHUB_SERVER_URL` + `GITHUB_REPOSITORY` | `org.opencontainers.image.source` = `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` — the mirror repository, which is what [GHCR][ghcr-source] uses to link the package to a repository and inherit its permissions |
-| `GITHUB_SHA` | `org.opencontainers.image.revision` |
+| Annotation | GitHub Actions | GitLab CI |
+|------------|----------------|-----------|
+| `org.opencontainers.image.source` | `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` — the mirror repository, which is what [GHCR][ghcr-source] uses to link the package to a repository and inherit its permissions | `CI_PROJECT_URL` |
+| `org.opencontainers.image.revision` | `GITHUB_SHA` | `CI_COMMIT_SHA` |
+| `org.opencontainers.image.created` | `SOURCE_DATE_EPOCH`, else the wall clock — a re-run stamps a fresh timestamp unless `SOURCE_DATE_EPOCH` is set | `SOURCE_DATE_EPOCH`, else `CI_PIPELINE_CREATED_AT`, else the wall clock — a new pipeline stamps a fresh timestamp unless `SOURCE_DATE_EPOCH` is set (a retried job keeps its pipeline's) |
 
-A missing or blank variable means its annotation is not written; `image.source` needs both halves. Outside CI nothing is emitted and the push leaves the registry's existing annotations alone.
+`SOURCE_DATE_EPOCH` is the reproducibility knob: set it to a fixed epoch to make a content-identical re-push byte-identical. A missing or blank variable means its annotation is not written; `image.source` needs both GitHub halves. Outside either provider nothing is emitted and the push leaves the registry's existing annotations alone.
 
-These three names are the **complete** environment surface for annotations — the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, and its values are taken verbatim from the spec. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
+These names are the **complete** environment surface for annotations — pinned by `ocx_lib`'s own tests — and the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, its values taken verbatim from the spec and winning over an auto-detected key. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
 
-**Scope:** `sync`, `pipeline push`.
+**Scope:** `sync`, `pipeline push`, `pipeline patch`.
 
 ### `OCX_ANNOUNCE_TOKEN` {#ocx-announce-token}
 
-The GitHub credential `ocx package announce` uses to push the fork branch and open the index pull request. Read from the environment and handed to the `ocx` subprocess; `ocx-mirror` never stores it and never logs it.
+The forge credential `ocx package announce` uses to push the index branch and open the pull or merge request — rung 1 of `ocx`'s [forge credential ladder][ocx-env-announce-token]. Read from the environment and handed to the `ocx` subprocess; `ocx-mirror` never stores it and never logs it.
 
-Only mirrors with an [`announce:`][spec-announce] block need it. The commands read it differently:
+Only mirrors with an [`announce:`][spec-announce] block need a credential. Whether one is present is asked of `ocx`'s own ladder, not of this one name: under [`transport: git`][spec-announce] inside a GitLab job (`GITLAB_CI` set) an unset or empty `OCX_ANNOUNCE_TOKEN` falls through to the job's own `CI_JOB_TOKEN`, so a GitLab pipeline needs no secret of its own to announce. Under the default `api` transport it does not fall through — a job token cannot open a merge request through the API.
 
-| Command | Without the token |
+The commands react to a missing credential differently:
+
+| Command | Without a credential |
 |---------|-------------------|
 | [`pipeline push`][cli-push] | Degrades: the run publishes normally, emits a GitHub notice, and records `skipped_no_credential` in `run-summary.json`. A mirror without the secret is a valid configuration. |
-| [`pipeline announce`][cli-announce] | Fails. Opening the index pull request is the only thing this command does — except under `--dry-run`, which writes to a temporary directory and needs no token. |
+| [`pipeline announce`][cli-announce] | Fails: exit 1, the message carrying `ocx`'s own exit 80 (no forge credential). Opening the index request is the only thing this command does — except under `--dry-run`, which writes to a temporary directory and needs no credential. |
 | [`pipeline patch`][cli-patch] | Degrades like `pipeline push`: republished manifests land, the index announce is skipped with a GitHub notice. |
 | [`pipeline cascade`][cli-cascade] | Degrades like `pipeline push`: repaired tags land on the registry, the index announce is skipped with a GitHub notice. |
 
@@ -84,7 +87,21 @@ env:
 
 It is deliberately **not** the workflow's own `GITHUB_TOKEN`: the pull request targets a different repository ([`ocx-sh/index`][index-repo], from a fork), which the run's automatic token cannot reach.
 
+The rest of the ladder is `ocx`'s and passes through untouched, because the child inherits the whole environment: [`OCX_ANNOUNCE_GIT_TOKEN`][ocx-env-announce-git-token] (a push-only credential for the `git` transport's write half, when the identity allowed to push is not the one allowed to call the API) and [`OCX_ANNOUNCE_GIT_USERNAME`][ocx-env-announce-git-username] (the HTTP Basic user half, default `gitlab-ci-token`). See [Announcing from GitLab][spec-announce-gitlab] for the four-line job.
+
 **Scope:** `pipeline push`, `pipeline announce`, `pipeline patch`, `pipeline cascade`.
+
+### `OCX_EXTRA_CA_CERTS` {#ocx-extra-ca-certs}
+
+Extra CA roots — a corporate or private CA the runner's trust store does not carry. The value is either a path to a PEM bundle or the PEM text itself (anything containing `-----BEGIN`), exactly as [`ocx` reads it][ocx-env-extra-ca-certs]; `ocx-mirror` resolves it once at startup through `ocx_lib`'s own ladder and appends the roots, after the bundled Mozilla set, to every HTTP client the mirror builds itself — asset and wheel downloads, the PyPI simple index, index trees, dist uploads, the Discord webhook, remote `url_index` fetches — and the three OCI transports it builds itself — the registry client, the `registry sync` source reader and the `registry copy` legs. The `ocx` children inherit the variable and install the same roots for themselves.
+
+The one standing exception is the GitHub Releases listing client: `github_release` sources list releases through octocrab, which trusts the platform store only — `SSL_CERT_FILE` / `SSL_CERT_DIR` reach it, `OCX_EXTRA_CA_CERTS` does not. Behind a TLS-intercepting proxy, put the interception CA into the platform store (or point `SSL_CERT_FILE` at it) for that one leg.
+
+A value that cannot be used fails the process before any leg runs, under `ocx`'s own exit code for it: 74 for an unreadable file, 65 for a file that is not a certificate bundle, 78 for inline text that is not. An unset or empty variable is no extra roots. The mirror parses no `config.toml`, so `extra_ca_certs` / `extra_ca_certs_pem` there reach only the `ocx` children — set the variable for the mirror's own legs. CI secret stores (GitHub, GitLab masked variables) may strip or fold the newlines of a multi-line PEM value — a parse refusal (exit 78) on an inline value that works locally is usually that; prefer a file path on the runner.
+
+Trust roots are the one half of a corporate network; the other is the proxy. `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are honoured by the same set of clients — again excepting the GitHub Releases listing leg, which dials directly — and the SSRF pre-flights are route-aware: behind a proxy the process resolves and dials only the proxy, so a runner whose resolver cannot answer for external names still fetches what the proxy carries, and a forbidden IP literal is refused textually on that route.
+
+**Scope:** every command except the GitHub Releases listing leg of `github_release` sources.
 
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
@@ -92,15 +109,15 @@ It is deliberately **not** the workflow's own `GITHUB_TOKEN`: the pull request t
 
 Whichever of those three wins must be **ocx 0.5.5 or newer**: an older binary rejects the metadata sidecar `pipeline prepare` writes and fails every push with exit 65. See [Push retry][spec-push-retry] for the full contract.
 
-Since the 0.6 CLI rename **three** legs raise that to **ocx 0.6.0 or newer**, each rejected by a 0.5.x binary with exit 64:
+Since the 0.6 CLI rename three legs raise that — `describe` to **0.6.0**, `announce` to **0.6.1**, `cascade` to **0.6.2** — each rejected by an older binary with exit 64:
 
-| Leg | Spawns | Why 0.5.x refuses it |
-|---|---|---|
-| `pipeline announce` | `ocx package announce --tags-file` | the flag that replaced `--tags-from-file` |
-| `pipeline describe` | `ocx package description push` | `description` did not exist as a subcommand |
-| `pipeline cascade` | `ocx package announce --tags-file` (its closing announce) | same flag as the announce leg |
+| Leg | Spawns | Floor | Why an older binary refuses it |
+|---|---|---|---|
+| `pipeline announce` | `ocx package announce <package> --tags-file` | 0.6.1 | the positional package (0.6.1; `--package` is a hidden alias until 0.7) and `--tags-file` (0.6.0, replaced `--tags-from-file`) |
+| `pipeline describe` | `ocx package description push` | 0.6.0 | `description` did not exist as a subcommand |
+| `pipeline cascade` | `ocx package cascade repair --tags-file` (then its closing announce) | 0.6.2 | `--tags-file` replaced `--announce-tags` with no deprecation window |
 
-The 0.6.0 floor is therefore the effective floor for any mirror repository that describes, announces, or cascades — which is all of them. Only a plan/prepare/push-only run stays on the older 0.5.5 floor.
+The 0.6.2 floor is therefore the effective floor for any mirror repository that announces or cascades — which is all of them. Only a plan/prepare/push-only run stays on the older 0.5.5 floor.
 
 Resolution-affecting `OCX_*` variables present in the environment are forwarded to that subprocess, so offline mode, registry config, and index paths behave identically inside the child:
 
@@ -157,6 +174,10 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [github-actions-secrets]: https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions
 [discord]: https://discord.com/developers/docs/resources/webhook
 [ocx-env]: https://ocx.sh/docs/reference/environment
+[ocx-env-announce-token]: https://ocx.sh/docs/reference/environment#ocx-announce-token
+[ocx-env-announce-git-token]: https://ocx.sh/docs/reference/environment#ocx-announce-git-token
+[ocx-env-announce-git-username]: https://ocx.sh/docs/reference/environment#ocx-announce-git-username
+[ocx-env-extra-ca-certs]: https://ocx.sh/docs/reference/environment#ocx-extra-ca-certs
 [oci-annotations]: https://github.com/opencontainers/image-spec/blob/main/annotations.md
 [ghcr-source]: https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images
 [index-repo]: https://github.com/ocx-sh/index
@@ -170,5 +191,6 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [cli-patch]: ./cli.md#pipeline-patch
 [cli-cascade]: ./cli.md#pipeline-cascade
 [spec-announce]: ./mirror-yml.md#announce
+[spec-announce-gitlab]: ./mirror-yml.md#announce-gitlab
 [spec-push-retry]: ./mirror-yml.md#concurrency-push-retry
 [spec-sign]: ./mirror-yml.md#sign

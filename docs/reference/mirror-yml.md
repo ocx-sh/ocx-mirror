@@ -931,8 +931,10 @@ announce:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `package` | string | Yes | Logical index package as `<namespace>/<package>`. Not derived from [`target.repository`](#target) — the physical path and the logical name are related by convention only. |
-| `fork` | string | Yes | Fork the index pull request is opened from, as `<owner>/<repo>`. |
-| `index_repo` | string | No | Index repository the pull request targets, as `<owner>/<repo>`. Defaults to `ocx-sh/index`. |
+| `fork` | string | No | Fork the index request is opened from, as `[HOST/]NAMESPACE/PROJECT`. Absent, the branch is pushed to `index_repo` itself and the request opened from there — which needs push access on the index repository, and is the only shape a GitLab CI job token can write. |
+| `index_repo` | string | No | Index repository the request targets, as `[HOST/]NAMESPACE/PROJECT`. The host names a self-hosted GitHub Enterprise or GitLab instance; the namespace may be a nested GitLab group path. Defaults to `ocx-sh/index`. |
+| `forge` | string | No | `github` or `gitlab`. Inferred by `ocx` for github.com and gitlab.com; **required** for a self-hosted host, whose name says nothing about what runs there. |
+| `transport` | string | No | `api` (default — the forge's REST API) or `git` (clone, commit, one authenticated push carrying the merge-request options). `git` is GitLab-only and the only transport a CI job token can open a merge request through. See **Announcing from GitLab** below. |
 | `schedule` | string | No | UTC cron putting the generated `announce-from-registry.yml` catch-up workflow on a timer. Absent → that workflow is dispatch-only. See **Catching up an existing mirror** below. |
 
 **Behaviour:**
@@ -1019,10 +1021,38 @@ Its `ocx-mirror` entry point is [`pipeline announce`][cli-announce]; the same co
 
 (`--refresh` on `ocx package announce` solves a different problem — it re-observes the tags already committed, picking up a digest that moved, and never adds one.)
 
+### Announcing from GitLab {#announce-gitlab}
+
+The generated workflows are GitHub Actions, but the announce itself is one command any CI can run — the [product principle](../index.md). On a self-hosted GitLab the index lives in a GitLab project, a job token cannot open a merge request through the API, and there is no fork: the spec names the coordinate, the forge and the git transport, and the job carries nothing but its own identity.
+
+```yaml
+announce:
+  package: bazelbuild/bazelisk
+  index_repo: gitlab.corp.example/tools/ocx/index
+  forge: gitlab
+  transport: git
+```
+
+```yaml
+# .gitlab-ci.yml — the job. ocx and ocx-mirror come from the project
+# toolchain (ocx.toml): install ocx on the runner, then `ocx exec`/PATH
+# activation puts ocx-mirror on PATH — the same shape as the sign job in
+# cli.md#pipeline-sign.
+announce:
+  script:
+    - ocx-mirror package pipeline announce --spec mirror.yml
+```
+
+No `OCX_ANNOUNCE_TOKEN`: under `transport: git` inside a GitLab job, `ocx`'s credential ladder falls through to the job's `CI_JOB_TOKEN`, which may push to the index project **when that project allows job-token pushes and its job-token allowlist admits the publishing project**. The push job's closing announce, `pipeline patch` and `pipeline cascade` use the same ladder, so the same spec announces from all of them. A push-only deploy token for the write half goes in [`OCX_ANNOUNCE_GIT_TOKEN`](./environment.md#ocx-announce-token); a missing capability is `ocx` exit 86, named in the message; [`pipeline announce`][cli-announce] then exits 1, as do push, patch and cascade (push also raises a `::warning` annotation first) — the tags are live and the index is behind, so a rerun, not a reading. Only a *missing credential* degrades to a notice. The `api` transport on GitLab needs a real access token in `OCX_ANNOUNCE_TOKEN` instead — a job token cannot open the merge request there.
+
 **Validation:**
 
 - `package` must be a `<namespace>/<package>` pair of lowercase alphanumerics with `.`, `_` or `-`. A bare tool name is rejected with exit code 65 (`DataError`).
-- `fork` and `index_repo` must each be an `<owner>/<repo>` pair. A pasted URL is rejected the same way.
+- `fork` and `index_repo` must each parse as `[HOST/]NAMESPACE/PROJECT` — the grammar `ocx package announce` applies to `--fork` and `--index-repo`, so a coordinate the spec accepts is one `ocx` accepts. A pasted URL is rejected with exit code 65.
+- `forge` must be `github` or `gitlab`, and is **required** when `index_repo` names a host other than github.com or gitlab.com — anything else is rejected with exit code 65.
+- A coordinate must be valid for the resolved forge: GitHub refuses a nested namespace (`org/sub/index`), rejected with exit code 65.
+- `fork` must live on the same host as `index_repo`; a fork on another host is rejected with exit code 65.
+- `transport` must be `api` or `git`; `git` is GitLab-only and cannot be combined with `fork` — either pairing is rejected with exit code 65. Each of these is the refusal `ocx package announce` itself would make of the same flags, moved to spec validation so it fires before a single tag is pushed.
 - `schedule`, when present, must be non-empty and hold only cron's `0-9 A-Z a-z * / , -` charset. Anything else is rejected before a workflow is written, on the same reasoning as [`cascade.schedule`](#cascade).
 
 ## `catalog` {#catalog}
