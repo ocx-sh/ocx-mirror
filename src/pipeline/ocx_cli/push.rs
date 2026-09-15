@@ -194,7 +194,7 @@ fn push_retry_backoff(attempt: u32) -> Duration {
 /// The clock's nanoseconds are the entropy. The spread only has to be
 /// uncorrelated between processes, which is a far weaker property than
 /// randomness, and it costs no dependency.
-fn jitter(delay: Duration) -> Duration {
+pub(crate) fn jitter(delay: Duration) -> Duration {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.subsec_nanos());

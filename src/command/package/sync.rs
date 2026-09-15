@@ -312,7 +312,7 @@ pub(crate) async fn list_upstream_versions(
             tag_pattern,
         } => {
             let token = ocx_lib::env::var("GITHUB_TOKEN");
-            let mut builder = octocrab::Octocrab::builder();
+            let mut builder = source::github_release::builder();
             if let Some(token) = token {
                 builder = builder.personal_token(token);
             }
@@ -326,7 +326,7 @@ pub(crate) async fn list_upstream_versions(
             log::debug!("Fetching GitHub releases for {}/{}", owner, repo);
             source::github_release::list_versions(&octocrab, owner, repo, &pattern, spec.concurrency.rate_limit_ms)
                 .await
-                .map_err(|e| MirrorError::SourceError(format!("failed to list GitHub releases: {e}")))
+                .map_err(|e| MirrorError::SourceError(format!("failed to list GitHub releases: {e:#}")))
         }
         spec::Source::UrlIndex(url_index_source) => match url_index_source {
             spec::UrlIndexSource::Remote { url } => {

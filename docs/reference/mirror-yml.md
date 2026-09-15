@@ -505,7 +505,7 @@ concurrency:
 |-------|------|---------|--------------|
 | `max_downloads` | integer | `8` | Maximum number of asset downloads running at once, across every `(version, platform)` task the run has in flight. |
 | `max_bundles` | integer | half the host's available CPU cores, minimum 1 (`2` if the core count cannot be detected) | Maximum number of extract-and-compress tasks running at once. Bundling is CPU-bound, so the default scales with the host rather than naming a fixed number — on a 2-core runner it is 1. |
-| `rate_limit_ms` | integer | `0` | Delay, in milliseconds, between paged upstream-listing requests (GitHub Releases pagination). Unrelated to push behaviour — see `max_retries` below for that. `0` means no delay. |
+| `rate_limit_ms` | integer | `0` | Delay, in milliseconds, between paged upstream-listing requests (GitHub Releases pagination). Unrelated to push behaviour — see `max_retries` below for that. `0` means no delay. A page that fails transiently (GitHub 5xx or 429, or a transport fault) is retried up to 5 times with 1s-doubling, 30s-capped, jittered backoff — about half a minute in total, not governed by `max_retries`; a 403 or 404 fails at once with the API's status and message. |
 | `max_retries` | integer | `3` | Extra attempts a *transient* push failure is granted on top of the first — total attempts are `max_retries + 1`. `0` means a single attempt, no retry. See [Push retry](#concurrency-push-retry) below. |
 | `compression_threads` | integer | `0` (auto) | Compression threads per bundle task. `0` splits the host's available cores across the `max_bundles` tasks running concurrently (at least 1 each); a positive value pins every bundle task to that many threads regardless of `max_bundles`. |
 
