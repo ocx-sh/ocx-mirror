@@ -3,66 +3,64 @@
 
 //! OCI annotations recorded on every image index this mirror publishes.
 //!
-//! Two keys are auto-detected from the CI environment — `image.source` (the
-//! mirror's own repository, which is what GHCR uses to link a package to a
-//! repository and inherit its permissions) and `image.revision` (the commit
-//! that produced the build). The spec's `annotations:` block supplies further
-//! keys and overrides any auto-detected one.
+//! The CI half is `ocx_lib`'s: [`ocx_lib::ci::annotations::for_flavor`] reads
+//! the same GitHub Actions / GitLab CI variables `ocx package push
+//! --ci-annotations` does — `image.source` (the mirror's own repository,
+//! which is what GHCR uses to link a package to a repository and inherit its
+//! permissions), `image.revision` (the commit that produced the build) and
+//! `image.created` — so a mirror and a hand push stamp the same keys from the
+//! same names. The spec's `annotations:` block supplies further keys and
+//! overrides any auto-detected one, the precedence `--ci-annotations` itself
+//! promises.
 //!
 //! A published index is public, permanent and readable without
-//! authentication, so the environment surface is a fixed allowlist of three
-//! named variables and nothing else: the `ocx` subprocess inherits the
-//! runner's full environment (including `GH_TOKEN`), and anything resembling
-//! iteration over it would put a live token on the wire.
+//! authentication, so the environment surface is the fixed, pinned read set
+//! `ocx_lib::ci::annotations` tests against and nothing else: the `ocx`
+//! subprocess inherits the runner's full environment (including `GH_TOKEN`),
+//! and anything resembling iteration over it would put a live token on the
+//! wire.
 
 use std::collections::BTreeMap;
 
-use ocx_lib::oci::annotations;
-
-/// Forge base URL, e.g. `https://github.com`.
-const ENV_SERVER_URL: &str = "GITHUB_SERVER_URL";
-/// `owner/repo` of the mirror repository running the publish.
-const ENV_REPOSITORY: &str = "GITHUB_REPOSITORY";
-/// Commit SHA the workflow is running against.
-const ENV_REVISION: &str = "GITHUB_SHA";
+use ocx_lib::ci::CiFlavor;
 
 /// Build the annotation set for a publish, merging CI auto-detection with the
 /// spec's `annotations:` block. A configured key wins over the auto-detected
 /// value for that key; every other auto-detected key still applies.
 ///
-/// Outside CI the variables are absent and their annotations are simply not
-/// emitted — `ocx package push` leaves the index's `annotations` field as it
-/// found it, so a local push never clears a link an earlier CI push made.
+/// Outside CI (`CiFlavor::detect()` finds neither provider) nothing is
+/// auto-detected — `ocx package push` leaves the index's `annotations` field
+/// as it found it, so a local push never clears a link an earlier CI push
+/// made.
+///
+/// No `image.version`: this map is built once per run and reused for every
+/// version the run pushes, and the tag already names the version.
+// ponytail: thread the per-push `Version` through `build_push_args` if an
+// SBOM consumer ever needs the version key on the index.
 pub fn build_annotations(configured: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    assemble(configured, |name| std::env::var(name).ok())
+    build_annotations_for(CiFlavor::detect(), configured)
 }
 
-/// The pure half of [`build_annotations`]: `lookup` resolves an environment
-/// variable name. Split out so tests can record exactly which names are read —
-/// the allowlist is a security boundary, which wants a test rather than a
-/// comment. `pub(crate)` for the argv-boundary test in
-/// `command::package::pipeline::push`, which needs the same seam.
-pub(crate) fn assemble<F>(configured: &BTreeMap<String, String>, mut lookup: F) -> BTreeMap<String, String>
-where
-    F: FnMut(&str) -> Option<String>,
-{
-    let mut nonempty = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
+/// [`build_annotations`] with the CI detection already made — the seam a
+/// test reaches to state which provider's variables the map is read from.
+pub(crate) fn build_annotations_for(
+    flavor: Option<CiFlavor>,
+    configured: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let auto = flavor
+        .map(|flavor| ocx_lib::ci::annotations::for_flavor(flavor, None))
+        .unwrap_or_default();
+    overlay(auto, configured)
+}
 
-    let mut map = BTreeMap::new();
-
-    // Both halves are required: half a URL is not a repository.
-    if let (Some(server), Some(repository)) = (nonempty(ENV_SERVER_URL), nonempty(ENV_REPOSITORY)) {
-        map.insert(
-            annotations::SOURCE.to_string(),
-            format!("{}/{}", server.trim_end_matches('/'), repository),
-        );
-    }
-    if let Some(revision) = nonempty(ENV_REVISION) {
-        map.insert(annotations::REVISION.to_string(), revision);
-    }
-
-    map.extend(configured.iter().map(|(k, v)| (k.clone(), v.clone())));
-    map
+/// The pure half of [`build_annotations`]: the spec's `annotations:` laid over
+/// the auto-detected set, configured winning per key.
+pub(crate) fn overlay(
+    mut auto: BTreeMap<String, String>,
+    configured: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    auto.extend(configured.iter().map(|(k, v)| (k.clone(), v.clone())));
+    auto
 }
 
 /// Render an annotation map as repeated `--annotation KEY=VALUE` arguments.
@@ -92,24 +90,7 @@ pub fn validate(configured: &BTreeMap<String, String>, errors: &mut Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The complete environment surface `assemble` is allowed to read. Pinned
-    /// by `reads_only_the_named_allowlist`: widening it needs a deliberate
-    /// edit here, and the module doc explains why that is a security decision.
-    const ENV_ALLOWLIST: [&str; 3] = [ENV_SERVER_URL, ENV_REPOSITORY, ENV_REVISION];
-
-    /// A runner environment carrying a token, as the generated workflow's push
-    /// job does (`GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}`).
-    const TOKEN: &str = "ghs_liveTokenFromTheRunnerEnvironment";
-
-    fn ci_env(name: &str) -> Option<String> {
-        match name {
-            ENV_SERVER_URL => Some("https://github.com".to_string()),
-            ENV_REPOSITORY => Some("ocx-sh/mirror-shfmt".to_string()),
-            ENV_REVISION => Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2".to_string()),
-            _ => None,
-        }
-    }
+    use ocx_lib::oci::annotations;
 
     fn configured(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -118,79 +99,18 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn full_ci_env_yields_source_and_revision() {
-        let result = assemble(&BTreeMap::new(), ci_env);
-        assert_eq!(result[annotations::SOURCE], "https://github.com/ocx-sh/mirror-shfmt");
-        assert_eq!(
-            result[annotations::REVISION],
-            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-        );
-        assert_eq!(result.len(), 2);
-    }
-
-    #[test]
-    fn server_url_trailing_slash_does_not_double() {
-        let result = assemble(&BTreeMap::new(), |name| match name {
-            ENV_SERVER_URL => Some("https://github.example.com/".to_string()),
-            other => ci_env(other),
-        });
-        assert_eq!(
-            result[annotations::SOURCE],
-            "https://github.example.com/ocx-sh/mirror-shfmt"
-        );
-    }
-
-    #[test]
-    fn missing_server_url_drops_source_but_keeps_revision() {
-        let result = assemble(&BTreeMap::new(), |name| match name {
-            ENV_SERVER_URL => None,
-            other => ci_env(other),
-        });
-        assert!(!result.contains_key(annotations::SOURCE));
-        assert!(result.contains_key(annotations::REVISION));
-    }
-
-    #[test]
-    fn missing_repository_drops_source_but_keeps_revision() {
-        let result = assemble(&BTreeMap::new(), |name| match name {
-            ENV_REPOSITORY => None,
-            other => ci_env(other),
-        });
-        assert!(!result.contains_key(annotations::SOURCE));
-        assert!(result.contains_key(annotations::REVISION));
-    }
-
-    #[test]
-    fn missing_revision_drops_revision_but_keeps_source() {
-        let result = assemble(&BTreeMap::new(), |name| match name {
-            ENV_REVISION => None,
-            other => ci_env(other),
-        });
-        assert!(result.contains_key(annotations::SOURCE));
-        assert!(!result.contains_key(annotations::REVISION));
-    }
-
-    #[test]
-    fn blank_env_value_counts_as_absent() {
-        let result = assemble(&BTreeMap::new(), |name| match name {
-            ENV_REVISION => Some("   ".to_string()),
-            other => ci_env(other),
-        });
-        assert!(!result.contains_key(annotations::REVISION));
-    }
-
-    #[test]
-    fn outside_ci_nothing_is_emitted() {
-        let result = assemble(&BTreeMap::new(), |_| None);
-        assert!(result.is_empty());
+    fn auto() -> BTreeMap<String, String> {
+        configured(&[
+            (annotations::SOURCE, "https://github.com/ocx-sh/mirror-shfmt"),
+            (annotations::REVISION, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
+        ])
     }
 
     #[test]
     fn configured_key_overrides_auto_detected_source() {
-        let result = assemble(
+        let result = overlay(
+            auto(),
             &configured(&[(annotations::SOURCE, "https://github.com/upstream/project")]),
-            ci_env,
         );
         assert_eq!(result[annotations::SOURCE], "https://github.com/upstream/project");
         // The other auto-detected key survives the override.
@@ -202,43 +122,60 @@ mod tests {
 
     #[test]
     fn configured_keys_beyond_the_auto_detected_ones_pass_through() {
-        let result = assemble(&configured(&[(annotations::LICENSES, "Apache-2.0")]), ci_env);
+        let result = overlay(auto(), &configured(&[(annotations::LICENSES, "Apache-2.0")]));
         assert_eq!(result[annotations::LICENSES], "Apache-2.0");
         assert_eq!(result.len(), 3);
     }
 
+    /// The CI read set is `ocx_lib`'s, pinned there (`ci::annotations::tests`):
+    /// GitHub's three names and GitLab's three, nothing that could carry a
+    /// token. Whatever the runner looks like, the configured keys always win
+    /// and always arrive.
     #[test]
-    fn reads_only_the_named_allowlist() {
-        let mut seen: Vec<String> = Vec::new();
-        let _ = assemble(&BTreeMap::new(), |name| {
-            seen.push(name.to_string());
-            None
-        });
-        seen.sort();
-        seen.dedup();
-        let mut expected: Vec<String> = ENV_ALLOWLIST.iter().map(|s| (*s).to_string()).collect();
-        expected.sort();
-        assert_eq!(seen, expected);
+    fn configured_keys_always_reach_the_built_map() {
+        let configured = configured(&[
+            (annotations::LICENSES, "Apache-2.0"),
+            (annotations::SOURCE, "https://github.com/upstream/project"),
+        ]);
+        let result = build_annotations(&configured);
+        for (key, value) in &configured {
+            assert_eq!(result.get(key), Some(value));
+        }
     }
 
+    /// Outside CI nothing is auto-detected: the map is the spec's block and
+    /// nothing else, whatever the developer's own `GITHUB_*` say.
     #[test]
-    fn secret_shaped_env_never_reaches_an_annotation() {
-        // The `ocx` subprocess inherits the runner environment, so a lookup
-        // outside the allowlist is the leak path. Answer every non-allowlisted
-        // name with a token: any that reaches the map is a hole.
-        let result = assemble(&configured(&[("sh.ocx.mirror.note", "no secrets here")]), |name| {
-            if ENV_ALLOWLIST.contains(&name) {
-                ci_env(name)
-            } else {
-                Some(TOKEN.to_string())
-            }
-        });
-        assert!(
-            result.values().all(|value| !value.contains(TOKEN)),
-            "token leaked into annotations: {result:?}"
+    fn outside_ci_the_built_map_is_exactly_the_configured_one() {
+        let configured = configured(&[(annotations::LICENSES, "Apache-2.0")]);
+        assert_eq!(build_annotations_for(None, &configured), configured);
+    }
+
+    /// The GitLab wiring end to end: `for_flavor` reads the three `CI_*`
+    /// names, `created` comes from the pipeline clock, and the configured
+    /// `image.source` still wins over the job's own.
+    #[test]
+    fn a_gitlab_job_stamps_source_revision_and_created_with_configured_source_winning() {
+        let _guard = crate::test_support::ocx_env_lock();
+        let _restore = crate::test_support::EnvRestore::set(&[
+            ("GITLAB_CI", Some("true")),
+            ("CI_PROJECT_URL", Some("https://gitlab.example/tools/mirror-shfmt")),
+            ("CI_COMMIT_SHA", Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")),
+            ("CI_PIPELINE_CREATED_AT", Some("2026-09-15T18:59:14Z")),
+            ("SOURCE_DATE_EPOCH", None),
+        ]);
+        let result = build_annotations_for(
+            Some(CiFlavor::GitLab),
+            &configured(&[(annotations::SOURCE, "https://github.com/upstream/project")]),
         );
-        // Same guarantee on the wire form the subprocess actually receives.
-        assert!(push_args(&result).iter().all(|arg| !arg.contains(TOKEN)));
+
+        assert_eq!(result[annotations::SOURCE], "https://github.com/upstream/project");
+        assert_eq!(
+            result[annotations::REVISION],
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
+        assert_eq!(result[annotations::CREATED], "2026-09-15T18:59:14Z");
+        assert_eq!(result.len(), 3);
     }
 
     #[test]

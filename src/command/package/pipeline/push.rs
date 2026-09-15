@@ -141,8 +141,10 @@ impl Push {
         let newest_version = versions.last().cloned();
 
         // Read-only registry access for the backfill cascade repair below, and
-        // the one annotation set that repair republishes under — the same map
-        // `invoke_push` builds per leg.
+        // the one annotation set every leg of this run publishes under. Once
+        // per run, not per leg: `image.created` is the wall clock when nothing
+        // pins it, and a map built per push dated one version's platforms
+        // seconds apart.
         let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
         let annotations = crate::annotations::build_annotations(&spec.annotations);
@@ -231,7 +233,17 @@ impl Push {
                 // an earlier push in this loop.
                 let cascade = platforms_failed.is_empty();
 
-                match invoke_push(&spec, platform_str, &target_ref, bundle_path, cascade, sign.as_ref()).await {
+                match invoke_push(
+                    &spec,
+                    platform_str,
+                    &target_ref,
+                    bundle_path,
+                    &annotations,
+                    cascade,
+                    sign.as_ref(),
+                )
+                .await
+                {
                     Ok(report) => {
                         let status_str = report.status.as_deref().unwrap_or("pushed");
                         if status_str == "skipped_existing" {
@@ -519,9 +531,9 @@ impl Push {
         let platform_order = spec_platform_order(spec);
         let newest_version = manifests.last().map(|manifest| manifest.version.clone());
 
-        // One assembled annotation set for the whole run — the same map the
-        // archive leg builds per push, hoisted because every env leg and every
-        // wheel registration of this run publishes under it.
+        // One assembled annotation set for the whole run, as in [`execute`]:
+        // every env leg and every wheel registration of this run publishes
+        // under it.
         let annotations = crate::annotations::build_annotations(&spec.annotations);
 
         let mut version_summaries: Vec<VersionSummary> = Vec::new();
@@ -785,6 +797,9 @@ impl Push {
 /// as a subprocess and parse the JSON output, retrying transient failures up to
 /// `concurrency.max_retries` times.
 ///
+/// `annotations` is the run's map, built once by the caller — never assembled
+/// here, so every leg of a version carries the same `image.created`.
+///
 /// Returns the parsed `PushReport` on success, or a descriptive error string
 /// on subprocess failure (caller records as `push_error` without aborting).
 async fn invoke_push(
@@ -792,6 +807,7 @@ async fn invoke_push(
     platform: &str,
     target_ref: &str,
     bundle_path: &Path,
+    annotations: &std::collections::BTreeMap<String, String>,
     cascade: bool,
     sign: Option<&ResolvedSign>,
 ) -> Result<PushReport, String> {
@@ -800,8 +816,7 @@ async fn invoke_push(
     let bundle = bundle_path
         .to_str()
         .ok_or_else(|| format!("bundle path is not valid UTF-8: {}", bundle_path.display()))?;
-    let annotations = crate::annotations::build_annotations(&spec.annotations);
-    let args = build_push_args(platform, target_ref, &[bundle], None, &annotations, cascade, sign)?;
+    let args = build_push_args(platform, target_ref, &[bundle], None, annotations, cascade, sign)?;
 
     push_with_retry(
         &ocx_binary,

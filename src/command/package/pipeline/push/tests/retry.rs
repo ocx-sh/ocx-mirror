@@ -214,6 +214,7 @@ concurrency:
         "linux/amd64",
         "ocx.sh/minimal:1.0.0",
         &dir.path().join("bundle-1.0.0-linux_amd64.tar.xz"),
+        &std::collections::BTreeMap::new(),
         false,
         None,
     ));

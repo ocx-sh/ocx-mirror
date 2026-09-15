@@ -3,10 +3,15 @@
 
 use std::collections::BTreeMap;
 
+use ocx_lib::ci::CiFlavor;
+
 use super::super::*;
+use super::support::*;
+use crate::annotations::build_annotations_for;
 use crate::command::package::pipeline::patch::patch_push_args;
 use crate::pipeline::ocx_cli::push::build_push_args;
 use crate::pipeline::target_registry;
+use crate::test_support::EnvRestore;
 
 // ── Backfill cascade repair (BUG3) ────────────────────────────────────
 
@@ -172,30 +177,27 @@ fn build_push_args_omits_cascade_so_a_platform_can_land_without_moving_an_alias(
     );
 }
 
-/// The `ocx` subprocess inherits the runner environment — the generated
-/// workflow's push step carries `GH_TOKEN` — so the assembled argv must
-/// never carry a value sourced from outside the three-name allowlist.
-///
-/// Same guarantee as `annotations::tests::secret_shaped_env_never_reaches_an_annotation`,
-/// one boundary further out: that one stops at the map, this one at the
-/// argv the subprocess actually receives. Driven through the injected
-/// lookup rather than the real environment — reading `std::env` would make
-/// the assertion depend on where it runs, and CI legitimately carries the
-/// allowlisted values under other names too (`GITHUB_WORKFLOW_SHA` holds
-/// the same SHA as `GITHUB_SHA`), so a real-env read collides on *value*
-/// and no name skip or length threshold can repair it.
+/// The argv boundary: the `ocx` child inherits the runner's whole environment,
+/// so the only way a token reaches a published index is through an
+/// `--annotation` the mirror assembled. Every credential name the runner
+/// could carry answers with a canary here, and none of it may surface —
+/// while the allowlisted GitHub names still do, so the guard cannot pass on
+/// an empty argv.
 #[test]
 fn build_push_args_never_carries_a_non_allowlisted_env_value() {
     const TOKEN: &str = "ghs_liveTokenFromTheRunnerEnvironment";
+    let _guard = job_url_env_lock();
+    let _restore = EnvRestore::set(&[
+        ("GH_TOKEN", Some(TOKEN)),
+        ("GITHUB_TOKEN", Some(TOKEN)),
+        ("OCX_ANNOUNCE_TOKEN", Some(TOKEN)),
+        ("CI_JOB_TOKEN", Some(TOKEN)),
+        ("GITHUB_SERVER_URL", Some("https://github.com")),
+        ("GITHUB_REPOSITORY", Some("ocx-sh/mirror-shfmt")),
+        ("GITHUB_SHA", Some("a1b2c3d4")),
+    ]);
 
-    let annotations = crate::annotations::assemble(&BTreeMap::new(), |name| match name {
-        "GITHUB_SERVER_URL" => Some("https://github.com".to_string()),
-        "GITHUB_REPOSITORY" => Some("ocx-sh/mirror-shfmt".to_string()),
-        "GITHUB_SHA" => Some("a1b2c3d4".to_string()),
-        // Every other name the function might reach for answers with a token.
-        _ => Some(TOKEN.to_string()),
-    });
-
+    let annotations = build_annotations_for(Some(CiFlavor::GitHubActions), &BTreeMap::new());
     let args = build_push_args(
         "linux/amd64",
         "ghcr.io/ocx-sh/shfmt:3.8.0",
@@ -216,5 +218,29 @@ fn build_push_args_never_carries_a_non_allowlisted_env_value() {
         args.contains(&"org.opencontainers.image.source=https://github.com/ocx-sh/mirror-shfmt".to_string())
             && args.contains(&"org.opencontainers.image.revision=a1b2c3d4".to_string()),
         "allowlisted values must still reach the argv: {args:?}"
+    );
+}
+
+/// `image.created` is the wall clock when nothing pins it, so a map built per
+/// leg dates one version's platforms differently. Structural, as
+/// `pipeline::push::tests` pins its signing shape: the property is that the
+/// archive loop hands `invoke_push` the run's map instead of letting it build
+/// its own — once for the archive run, once for the env run, and no third.
+#[test]
+fn the_annotation_map_is_built_once_per_run_and_handed_to_every_leg() {
+    let source: String = include_str!("../../push.rs")
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .flat_map(|line| line.chars().filter(|c| !c.is_whitespace()))
+        .collect();
+
+    assert_eq!(
+        source.matches("build_annotations(").count(),
+        2,
+        "one map per run path; a per-leg build re-stamps `image.created`"
+    );
+    assert!(
+        source.contains("invoke_push(&spec,platform_str,&target_ref,bundle_path,&annotations,cascade,sign.as_ref()"),
+        "the archive loop passes the run's map into every leg"
     );
 }
