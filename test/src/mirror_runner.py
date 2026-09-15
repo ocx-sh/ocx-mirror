@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
-from src.helpers import zot_registry_address
+from src.helpers import PROJECT_ROOT, zot_registry_address
 
 
 class MirrorRunner:
@@ -27,6 +28,20 @@ class MirrorRunner:
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", str(Path.home())),
         }
+        # The `ocx` the mirror spawns is the `ocx` the harness drives: the
+        # mirror resolves `OCX_BINARY_PIN` before PATH, so whatever
+        # `OCX_COMMAND` names (the taskfile resolves it, CI points it at the
+        # submodule build) is what `pipeline push` / `cascade` / `announce`
+        # run — not an older toolchain `ocx` that happens to sit on PATH and
+        # rejects a flag the pinned `ocx_lib` already knows. Resolved to an
+        # absolute path, because the child runs out of `temp_dir` and a
+        # relative `OCX_COMMAND` would dangle there; an empty variable pins
+        # the same `test/bin/ocx` conftest's `ocx_binary` fixture falls back
+        # to, so the harness's ocx and the mirror's child are one binary.
+        ocx_command = Path(os.environ.get("OCX_COMMAND") or PROJECT_ROOT / "test" / "bin" / "ocx")
+        if sys.platform == "win32" and not ocx_command.suffix:
+            ocx_command = ocx_command.with_suffix(".exe")
+        self.env["OCX_BINARY_PIN"] = str(ocx_command.resolve())
         # Mirror-signing harness (WP 5, C-073): the mirror resolves `sign:`
         # refs itself (adr_mirror_signing.md D1), so each variable a signing
         # fixture names under `env://` must be on this constructed whitelist
@@ -34,12 +49,16 @@ class MirrorRunner:
         # scrub or not (ADR F2). Forwarded only when actually set in the
         # parent environment: a blank default would shadow a variable the
         # subprocess's own defaulting logic is supposed to see as absent.
+        # `OCX_EXTRA_CA_CERTS` rides the same whitelist: the mirror's startup
+        # gate resolves it before dispatch, and the extra-CA acceptance test
+        # sets it to observe that gate's exit code.
         for name in (
             "SIGSTORE_FULCIO_URL",
             "SIGSTORE_REKOR_URL",
             "MIRROR_SIGNING_KEY",
             "MIRROR_KEY_PASSPHRASE",
             "OCX_CONFIG",
+            "OCX_EXTRA_CA_CERTS",
         ):
             if name in os.environ:
                 self.env[name] = os.environ[name]

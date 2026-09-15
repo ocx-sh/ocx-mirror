@@ -89,5 +89,6 @@ pub(crate) fn registry_client() -> Result<ocx_lib::oci::Client, MirrorError> {
     Ok(ocx_lib::oci::ClientBuilder::new()
         .plain_http_registries(insecure)
         .mirrors(ocx_lib::oci::MirrorMap::new(resolved.registry))
+        .extra_roots(crate::http::extra_roots().clone())
         .build())
 }

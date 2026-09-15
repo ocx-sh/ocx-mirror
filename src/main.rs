@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use ocx_lib::cli::progress::ProgressManager;
-use ocx_lib::cli::{self, ColorMode, DataInterface, LogLevel, LogSettings, Printer, ProgressMode};
+use ocx_lib::cli::{self, ClassifyExitCode, ColorMode, DataInterface, LogLevel, LogSettings, Printer, ProgressMode};
 
 use ocx_mirror::Command;
 
@@ -65,6 +65,17 @@ async fn main() -> ExitCode {
     {
         eprintln!("Failed to initialize logging: {e}");
         return ExitCode::FAILURE;
+    }
+
+    // Before any leg builds a client: a corporate CA bundle the operator
+    // named that cannot be used fails here, under `ocx`'s own exit code for
+    // it, never as a handshake error mid-run. `{:#}` renders the source
+    // chain — `cannot read OCX_EXTRA_CA_CERTS=<path>` alone says nothing
+    // about why, the OS reason is one level down.
+    if let Err(error) = ocx_mirror::install_extra_roots() {
+        let code = error.classify().unwrap_or(ocx_lib::cli::ExitCode::ConfigError);
+        ocx_lib::log::error!("{:#}", anyhow::Error::from(error));
+        return code.into();
     }
 
     let printer = DataInterface::new(Printer::new(color_config.stdout, color_config.stderr));

@@ -19,6 +19,8 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use hyper_util::client::proxy::matcher::Matcher;
+use ocx_lib::oci::ssrf::ProxyRules;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -30,6 +32,23 @@ pub const FIXTURE_DIGEST: &str = "sha256:111111111111111111111111111111111111111
 /// same escape hatch a corporate index on an RFC1918 address uses.
 pub fn loopback_trusted() -> Vec<String> {
     vec!["127.0.0.1".to_string()]
+}
+
+/// No proxy is configured: every dial takes the direct route and meets the
+/// full resolving floor. Explicit rather than `proxy_rules()` so a developer's
+/// own `HTTPS_PROXY` cannot flip a test's route.
+pub fn direct_rules() -> Arc<ProxyRules> {
+    Arc::new(ProxyRules::new(Matcher::builder().build()))
+}
+
+/// `proxy.invalid` intercepts every scheme, the way `ALL_PROXY` does: the
+/// process resolves nothing but the proxy, so a destination is judged by its
+/// text alone. `.invalid` never resolves (RFC 6761 §6.4), which is what makes
+/// a dial through it observable as a failure rather than a connection.
+pub fn proxied_rules() -> Arc<ProxyRules> {
+    Arc::new(ProxyRules::new(
+        Matcher::builder().all("http://proxy.invalid:3128").build(),
+    ))
 }
 
 /// Install the rustls crypto provider exactly once per process. Reqwest builds

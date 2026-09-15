@@ -24,7 +24,7 @@
 //!
 //! **Two network-trust mechanisms, because there are two trust situations
 //! (C-016).** The index base URL is operator-authored spec config: it gets a
-//! `resolve_and_validate` pre-flight plus `redirect::Policy::none()`, both
+//! `guard_destination` pre-flight plus `redirect::Policy::none()`, both
 //! folded into [`build_source_index_client`] so no client can exist that was
 //! not validated first. A root's `repository` pointer is **foreign data** — an
 //! upstream index naming the host to dial — so it gets the full treatment at
@@ -38,19 +38,34 @@
 //! source authoritative for its own index hostname serves a short-TTL record
 //! and flips it to `169.254.169.254` between validation and connect (CWE-918
 //! via CWE-367). `redirect::Policy::none()` does not touch that path.
-//! `GuardedResolver` — the registry half's resolve → validate → pin hook
-//! (C-046) — is unusable here: it implements **reqwest 0.13**'s `dns::Resolve`,
-//! this crate's reqwest is 0.12, and `CLAUDE.md` forbids forcing the two majors
-//! to match. `resolve_to_addrs` needs neither.
+//! Beneath the pin sits `GuardedResolver` — the registry half's resolve →
+//! validate → pin hook (C-046) — as the client's `dns_resolver`: reqwest
+//! consults the override map first, so a pinned name never reaches it, and
+//! every name that does (a proxied route has no pin; the resolver then admits
+//! the proxy host and nothing else) meets the floor again at connect. Two
+//! layers, so the proxied route no longer rests on the pre-flight's matcher
+//! agreeing with reqwest's alone.
+//!
+//! **Both pre-flights are route-aware** (`guard_destination`, ocx 0.6.1) and
+//! take the [`ProxyRules`] to judge under, so a test can drive either route
+//! without the ambient proxy environment. Behind a configured HTTP proxy the
+//! process resolves and dials only the proxy — the destination is literal text
+//! in a `CONNECT` line — so there is no address to judge or pin, and a runner
+//! whose resolver cannot answer for external names must not fail a fetch the
+//! proxy would have carried. A forbidden IP *literal* is still refused
+//! textually on that route.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ocx_lib::oci::Digest;
 use ocx_lib::oci::index::{
     CatalogDocument, IndexFormatConfig, IndexRoot, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
 };
-use ocx_lib::oci::ssrf::{resolve_and_validate, split_host_port};
+use ocx_lib::oci::ssrf::{
+    DialRoute, DialScheme, GuardedResolver, ProxyRules, guard_destination, proxy_rules, split_host_port,
+};
 use serde::Deserialize;
 use url::{Host, Url};
 
@@ -71,7 +86,7 @@ const INDEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// Build the HTTP client used for this source's index-tree fetches (C-016).
 ///
 /// The `index_base` pre-flight is **part of construction, not a step beside
-/// it**: `resolve_and_validate` runs before the client is built, so there is no
+/// it**: `guard_destination` runs before the client is built, so there is no
 /// way to hold a client for a base URL that was never judged — and its answer
 /// is pinned into the client rather than discarded, so the connect phase cannot
 /// reach an address the floor never saw. A bare `reqwest::get` anywhere on the
@@ -89,15 +104,16 @@ pub async fn build_source_index_client(
     index_base: &str,
     trusted_hosts: &[String],
 ) -> Result<reqwest::Client, MirrorError> {
-    let pin = validate_index_base_host(index_base, trusted_hosts).await?;
-    index_client(pin)
+    let rules = proxy_rules();
+    let pin = validate_index_base_host(index_base, trusted_hosts, &rules).await?;
+    index_client(pin, trusted_hosts, rules)
 }
 
-/// The index base URL's host as `resolve_and_validate` and `trusted_hosts:`
+/// The index base URL's host as `guard_destination` and `trusted_hosts:`
 /// spell it — **unbracketed** for an IPv6 literal.
 ///
 /// [`Url::host_str`] hands back a bracketed `[::1]` for an IPv6 authority,
-/// which `resolve_and_validate` parses as neither an IP literal nor a DNS name:
+/// which `guard_destination` parses as neither an IP literal nor a DNS name:
 /// it would fail closed, but a `trusted_hosts: ["::1"]` entry could never open
 /// it again either. Shared with [`RegistrySpec::validate`]'s transport rule
 /// (C-006) so the host the spec judges is the host the pre-flight judges — two
@@ -116,13 +132,17 @@ pub fn index_host(url: &Url) -> Option<String> {
 /// Resolve and validate the index base URL's host, returning the pin its answer
 /// earns.
 ///
-/// `Some((host, addresses))` for a DNS name: those are the addresses that
-/// passed the floor, and [`index_client`] makes them the only ones the client
-/// will dial. `None` for an IP literal — reqwest resolves nothing for one, so
-/// the address in the URL is already the address that was judged.
+/// `Some((host, addresses))` for a DNS name dialled directly: those are the
+/// addresses that passed the floor, and [`index_client`] makes them the only
+/// ones the client will dial. `None` for an IP literal — reqwest resolves
+/// nothing for one, so the address in the URL is already the address that was
+/// judged — and `None` on a proxied route, where the process resolves nothing
+/// at all. `rules` decides the route; production passes the process-wide
+/// [`proxy_rules`].
 async fn validate_index_base_host(
     index_base: &str,
     trusted_hosts: &[String],
+    rules: &ProxyRules,
 ) -> Result<Option<(String, Vec<SocketAddr>)>, MirrorError> {
     let url = Url::parse(index_base)
         .map_err(|error| MirrorError::SourceError(format!("source index base URL is unparseable: {error}")))?;
@@ -136,21 +156,39 @@ async fn validate_index_base_host(
         )));
     };
 
-    let addresses = resolve_and_validate(&host, url.port_or_known_default().unwrap_or(443), trusted_hosts)
-        .await
-        .map_err(|error| MirrorError::SourceError(format!("source index base URL refused: {error}")))?;
+    let scheme = if url.scheme() == "http" {
+        DialScheme::Http
+    } else {
+        DialScheme::Https
+    };
+    let route = guard_destination(
+        scheme,
+        &host,
+        url.port_or_known_default().unwrap_or(443),
+        trusted_hosts,
+        rules,
+    )
+    .await
+    .map_err(|error| MirrorError::SourceError(format!("source index base URL refused: {error}")))?;
 
-    Ok(matches!(url.host(), Some(Host::Domain(_))).then_some((host, addresses)))
+    Ok(match route {
+        DialRoute::Direct(addresses) => matches!(url.host(), Some(Host::Domain(_))).then_some((host, addresses)),
+        DialRoute::Proxied => None,
+    })
 }
 
 /// The client for a validated base URL, with the pre-flight's own answer pinned
-/// into it.
+/// into it and the SSRF floor installed as its resolver.
 ///
 /// Split out of [`build_source_index_client`] so the pin can be exercised with
 /// a name the resolver cannot answer at all — the only way to observe that the
 /// connect phase never re-resolves, since both the pre-flight and reqwest would
 /// otherwise consult the same resolver and agree.
-fn index_client(pin: Option<(String, Vec<SocketAddr>)>) -> Result<reqwest::Client, MirrorError> {
+fn index_client(
+    pin: Option<(String, Vec<SocketAddr>)>,
+    trusted_hosts: &[String],
+    rules: Arc<ProxyRules>,
+) -> Result<reqwest::Client, MirrorError> {
     let mut builder = crate::http::builder()
         // Not decoration: without it a validated host answers `302` and
         // relocates the fetch to a host the pre-flight never saw, which is the
@@ -159,9 +197,15 @@ fn index_client(pin: Option<(String, Vec<SocketAddr>)>) -> Result<reqwest::Clien
         // no redirects.
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(INDEX_CONNECT_TIMEOUT)
-        .timeout(INDEX_REQUEST_TIMEOUT);
+        .timeout(INDEX_REQUEST_TIMEOUT)
+        // The floor at dial time, beneath the pin: any name that reaches DNS
+        // (none is pinned on a proxied route) is resolved, validated and
+        // pinned here, and the proxy's own host is the one name admitted with
+        // no range judgement (C-046, the same hook `registry_copy` installs).
+        .dns_resolver(Arc::new(GuardedResolver::new(Arc::new(trusted_hosts.to_vec()), rules)));
 
-    // The pre-flight's answer, pinned. Without it reqwest performs a *second*
+    // The pre-flight's answer, pinned — consulted before the resolver above,
+    // so a pinned name never reaches DNS. Without it reqwest performs a *second*
     // DNS lookup when the first socket opens, and nothing carries the verdict
     // from one to the other. The port rides along unused: reqwest documents
     // that the URL's own port always wins over the override's.
@@ -176,7 +220,7 @@ fn index_client(pin: Option<(String, Vec<SocketAddr>)>) -> Result<reqwest::Clien
 
 /// Refuse a source root whose physical host fails the SSRF floor (C-017).
 ///
-/// `split_host_port` the root's physical authority, then `resolve_and_validate`
+/// `split_host_port` the root's physical authority, then `guard_destination`
 /// **before any registry request** — the same "SSRF-before-any-registry-request"
 /// ordering `announce::pipeline`'s `guarded_physical()` states, and there must
 /// not be a second guard written for it.
@@ -193,7 +237,7 @@ fn index_client(pin: Option<(String, Vec<SocketAddr>)>) -> Result<reqwest::Clien
 /// [`MirrorError::SourceError`] (exit 69) for an unparseable `repository`
 /// pointer, a forbidden host, or a host that does not resolve. The
 /// [`SsrfError`](ocx_lib::oci::ssrf::SsrfError) supplies the message text.
-pub async fn validate_root_host(root: &IndexRoot, trusted: &[String]) -> Result<(), MirrorError> {
+pub async fn validate_root_host(root: &IndexRoot, trusted: &[String], rules: &ProxyRules) -> Result<(), MirrorError> {
     let (registry, _repository) = parse_physical_repository(&root.repository).map_err(|error| {
         MirrorError::SourceError(format!("source root has an unusable repository pointer: {error}"))
     })?;
@@ -211,9 +255,17 @@ pub async fn validate_root_host(root: &IndexRoot, trusted: &[String]) -> Result<
         .and_then(|rest| rest.strip_suffix(']'))
         .unwrap_or(host);
 
-    resolve_and_validate(host, port, trusted)
-        .await
-        .map_err(|error| MirrorError::SourceError(format!("source root repository pointer refused: {error}")))?;
+    // The verdict only: the registry client's own `GuardedResolver` re-judges
+    // and pins at dial time (C-046), so nothing here is discarded.
+    guard_destination(
+        DialScheme::for_registry(&ocx_lib::env::insecure_registries(), &registry),
+        host,
+        port,
+        trusted,
+        rules,
+    )
+    .await
+    .map_err(|error| MirrorError::SourceError(format!("source root repository pointer refused: {error}")))?;
     Ok(())
 }
 

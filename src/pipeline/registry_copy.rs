@@ -241,6 +241,20 @@ fn client_config() -> native::ClientConfig {
     if !insecure.is_empty() {
         config.protocol = native::ClientProtocol::HttpsExcept(insecure);
     }
+    // The operator's extra CA roots go after the bundled set, never instead
+    // of it — the same append `ocx_lib`'s own `ClientBuilder` makes. Every
+    // DER already passed `ExtraRoots::parse_pem`, so the fork cannot refuse it.
+    config
+        .extra_root_certificates
+        .extend(
+            crate::http::extra_roots()
+                .der()
+                .iter()
+                .map(|der| native::oci_client::client::Certificate {
+                    encoding: native::oci_client::client::CertificateEncoding::Der,
+                    data: der.to_vec(),
+                }),
+        );
     config
 }
 

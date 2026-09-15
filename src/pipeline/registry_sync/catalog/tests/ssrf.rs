@@ -22,7 +22,7 @@ fn root_pointing_at(repository: &str) -> IndexRoot {
 
 #[tokio::test]
 async fn a_loopback_pointer_is_refused() {
-    let error = validate_root_host(&root_pointing_at("oci://127.0.0.1/ns/pkg"), &[])
+    let error = validate_root_host(&root_pointing_at("oci://127.0.0.1/ns/pkg"), &[], &direct_rules())
         .await
         .expect_err("a root may not steer the mirror at loopback");
 
@@ -37,7 +37,7 @@ async fn a_loopback_pointer_is_refused() {
 async fn a_hostname_resolving_to_loopback_is_refused() {
     // The string check alone would pass this one — the refusal has to come
     // from the resolved address, which is what `resolve_and_validate` does.
-    let error = validate_root_host(&root_pointing_at("oci://localhost:5000/ns/pkg"), &[])
+    let error = validate_root_host(&root_pointing_at("oci://localhost:5000/ns/pkg"), &[], &direct_rules())
         .await
         .expect_err("localhost resolves to loopback and must be refused");
 
@@ -51,7 +51,7 @@ async fn an_rfc1918_pointer_is_refused() {
         "oci://192.168.1.1/ns/pkg",
         "oci://172.16.0.1/ns/pkg",
     ] {
-        let error = validate_root_host(&root_pointing_at(private), &[])
+        let error = validate_root_host(&root_pointing_at(private), &[], &direct_rules())
             .await
             .expect_err("an RFC1918 pointer must be refused");
         assert!(matches!(error, MirrorError::SourceError(_)), "{private}: got {error:?}");
@@ -60,7 +60,7 @@ async fn an_rfc1918_pointer_is_refused() {
 
 #[tokio::test]
 async fn the_link_local_metadata_endpoint_is_refused() {
-    let error = validate_root_host(&root_pointing_at("oci://169.254.169.254/ns/pkg"), &[])
+    let error = validate_root_host(&root_pointing_at("oci://169.254.169.254/ns/pkg"), &[], &direct_rules())
         .await
         .expect_err("the cloud metadata endpoint is the canonical SSRF target");
 
@@ -71,9 +71,13 @@ async fn the_link_local_metadata_endpoint_is_refused() {
 async fn a_trusted_hosts_entry_opens_the_same_pointer() {
     // The green half of the loopback refusal above, on the same input: the
     // guard discriminates, it does not refuse everything.
-    validate_root_host(&root_pointing_at("oci://127.0.0.1/ns/pkg"), &["127.0.0.1".to_string()])
-        .await
-        .expect("a listed host skips the floor");
+    validate_root_host(
+        &root_pointing_at("oci://127.0.0.1/ns/pkg"),
+        &["127.0.0.1".to_string()],
+        &direct_rules(),
+    )
+    .await
+    .expect("a listed host skips the floor");
 }
 
 /// A bracketed IPv6 authority is the one shape `split_host_port` hands back
@@ -88,19 +92,19 @@ async fn a_trusted_hosts_entry_opens_the_same_pointer() {
 async fn a_bracketed_ipv6_pointer_is_judged_on_the_address_inside_the_brackets() {
     let loopback = root_pointing_at("oci://[::1]:5000/ns/pkg");
 
-    let error = validate_root_host(&loopback, &[])
+    let error = validate_root_host(&loopback, &[], &direct_rules())
         .await
         .expect_err("the IPv6 loopback is as forbidden as 127.0.0.1");
     assert!(matches!(error, MirrorError::SourceError(_)), "got {error:?}");
 
-    validate_root_host(&loopback, &["::1".to_string()])
+    validate_root_host(&loopback, &["::1".to_string()], &direct_rules())
         .await
         .expect("the entry an operator would actually write must open it");
 }
 
 #[tokio::test]
 async fn a_public_pointer_passes() {
-    validate_root_host(&root_pointing_at("oci://8.8.8.8/ns/pkg"), &[])
+    validate_root_host(&root_pointing_at("oci://8.8.8.8/ns/pkg"), &[], &direct_rules())
         .await
         .expect("a public address is not an SSRF target");
 }
@@ -113,7 +117,7 @@ async fn a_malformed_pointer_is_refused_without_resolving_anything() {
         "oci:///ns/pkg",            // no host
         "oci://ghcr.io/ns/pkg:1.0", // a smuggled tag
     ] {
-        let error = validate_root_host(&root_pointing_at(malformed), &[])
+        let error = validate_root_host(&root_pointing_at(malformed), &[], &direct_rules())
             .await
             .expect_err("a malformed repository pointer must be refused");
         assert!(matches!(error, MirrorError::SourceError(_)), "got {error:?}");
@@ -134,7 +138,7 @@ async fn the_refusal_lands_before_any_connection_is_opened() {
     assert_eq!(index.connection_count(), 1, "the control connection must be recorded");
 
     let pointer = format!("oci://127.0.0.1:{}/ns/pkg", index.address().port());
-    validate_root_host(&root_pointing_at(&pointer), &[])
+    validate_root_host(&root_pointing_at(&pointer), &[], &direct_rules())
         .await
         .expect_err("loopback is refused");
 
@@ -144,4 +148,52 @@ async fn the_refusal_lands_before_any_connection_is_opened() {
         1,
         "the guard must refuse before anything is dialled"
     );
+}
+
+// ── The route: behind a proxy the process resolves nothing, so the verdict is
+// textual — and the guard must still refuse what the text alone condemns ────
+
+#[tokio::test]
+async fn a_proxied_route_admits_a_name_the_process_cannot_resolve() {
+    // `.invalid` never resolves, so on the direct route this pointer fails
+    // closed (the control below). Behind a proxy the destination is literal
+    // text in a `CONNECT` line and a runner whose resolver cannot answer for
+    // external names must not fail a dial the proxy would have carried.
+    let phantom = root_pointing_at("oci://registry.invalid/ns/pkg");
+
+    validate_root_host(&phantom, &[], &proxied_rules())
+        .await
+        .expect("a proxied route judges the name, not an address it never resolves");
+
+    let error = validate_root_host(&phantom, &[], &direct_rules())
+        .await
+        .expect_err("control: the direct route resolves the name itself, and it does not resolve");
+    assert!(matches!(error, MirrorError::SourceError(_)), "got {error:?}");
+}
+
+#[tokio::test]
+async fn a_proxied_route_still_refuses_a_loopback_name_and_literal() {
+    // The proxy may sit on the caller's own machine, where `CONNECT
+    // localhost:5000` reaches the caller's loopback from foreign index data —
+    // so a loopback name and a forbidden literal are refused by their text.
+    for forbidden in ["oci://localhost:5000/ns/pkg", "oci://127.0.0.1/ns/pkg"] {
+        let error = validate_root_host(&root_pointing_at(forbidden), &[], &proxied_rules())
+            .await
+            .expect_err("a loopback destination is refused on either route");
+        assert!(
+            matches!(error, MirrorError::SourceError(_)),
+            "{forbidden}: got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_proxied_route_honours_a_trusted_hosts_entry() {
+    validate_root_host(
+        &root_pointing_at("oci://127.0.0.1/ns/pkg"),
+        &["127.0.0.1".to_string()],
+        &proxied_rules(),
+    )
+    .await
+    .expect("a listed host skips the textual floor as it skips the resolving one");
 }

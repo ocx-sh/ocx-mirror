@@ -19,6 +19,9 @@
 //! - [`error`] — [`MirrorError`](error::MirrorError) and its exit-code mapping.
 //! - [`spec`] — the mirror spec: parsing, validation, and the types it yields,
 //!   driven by `tests/spec_validation.rs`.
+//! - [`install_extra_roots`] — the `OCX_EXTRA_CA_CERTS` startup gate. Public
+//!   because the binary runs it *before* [`Command`] dispatch and must
+//!   classify the `TlsError` it raises into an exit code itself.
 
 mod annotations;
 mod auth;
@@ -39,3 +42,4 @@ mod test_support;
 mod version_platform_map;
 
 pub use command::Command;
+pub use http::install_extra_roots;

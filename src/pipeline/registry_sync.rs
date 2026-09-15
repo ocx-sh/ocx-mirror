@@ -600,7 +600,7 @@ async fn sync_package(
     let (root_bytes, source_root) =
         catalog::fetch_source_root(&prepared.index_client, &source.index, &package.name).await?;
     // C-017, before any registry request for this package.
-    catalog::validate_root_host(&source_root, &source.trusted_hosts).await?;
+    catalog::validate_root_host(&source_root, &source.trusted_hosts, &ocx_lib::oci::ssrf::proxy_rules()).await?;
 
     // `read_root_uncatalogued`, never `read_root`: the latter opens its own
     // `begin_catalog_transaction` on a straddle, which self-deadlocks against
@@ -1001,6 +1001,7 @@ fn source_read_seam(trusted_hosts: &[String]) -> Index {
     let client = ClientBuilder::new()
         .plain_http_registries(ocx_lib::env::insecure_registries())
         .ssrf_guard(trusted_hosts.to_vec())
+        .extra_roots(crate::http::extra_roots().clone())
         .build();
     Index::from_remote(OciIndex::new(OciIndexConfig { client }))
 }

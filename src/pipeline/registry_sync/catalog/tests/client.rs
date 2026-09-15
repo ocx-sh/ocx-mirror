@@ -106,6 +106,98 @@ async fn a_refused_base_is_never_dialled() {
     assert!(index.paths().is_empty(), "no request may have been issued");
 }
 
+// ── The route: a proxied dial has no address to judge or pin ────────────────
+
+#[tokio::test]
+async fn a_proxied_route_earns_no_pin_and_resolves_nothing() {
+    // `.invalid` never resolves, so the direct route fails closed on this
+    // base (the control). Behind a proxy the process dials only the proxy,
+    // and a runner that cannot resolve external names must not fail a fetch
+    // the proxy would have carried — so the pre-flight passes, with nothing
+    // to pin.
+    let pin = validate_index_base_host("https://index.invalid/", &[], &proxied_rules())
+        .await
+        .expect("a proxied route judges the name, not an address it never resolves");
+    assert!(
+        pin.is_none(),
+        "there is no resolved answer to pin on a proxied route: {pin:?}"
+    );
+
+    let error = validate_index_base_host("https://index.invalid/", &[], &direct_rules())
+        .await
+        .expect_err("control: the direct route resolves the name itself, and it does not resolve");
+    assert!(matches!(error, MirrorError::SourceError(_)), "got {error:?}");
+}
+
+#[tokio::test]
+async fn a_proxied_route_still_refuses_a_forbidden_literal_and_a_loopback_name() {
+    // Textually, since there is no address: a forbidden IP literal, and
+    // `localhost`, which is loopback by definition (RFC 6761 §6.3).
+    for forbidden in ["http://169.254.169.254/", "http://127.0.0.1/", "http://localhost/"] {
+        let error = validate_index_base_host(forbidden, &[], &proxied_rules())
+            .await
+            .expect_err("a forbidden destination is refused on either route");
+        assert!(
+            matches!(error, MirrorError::SourceError(_)),
+            "{forbidden}: got {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_direct_route_hands_back_a_pin_and_refuses_a_forbidden_answer() {
+    let index = TestIndex::start(Vec::new()).await;
+    let base = format!("http://localhost:{}", index.address().port());
+
+    let error = validate_index_base_host(&base, &[], &direct_rules())
+        .await
+        .expect_err("the direct route resolves the name and refuses the loopback it answers");
+    assert!(matches!(error, MirrorError::SourceError(_)), "got {error:?}");
+
+    let (host, addresses) = validate_index_base_host(&base, &["localhost".to_string()], &direct_rules())
+        .await
+        .expect("a trusted host passes the floor")
+        .expect("a DNS name dialled directly earns a pin");
+    assert_eq!(host, "localhost");
+    assert!(
+        addresses.iter().any(|address| address.ip().is_loopback()),
+        "{addresses:?}"
+    );
+}
+
+// ── The resolver: the floor at dial time, not only at pre-flight ────────────
+
+#[tokio::test]
+async fn an_unpinned_client_still_refuses_a_forbidden_answer_at_dial_time() {
+    // The pin carries the pre-flight's answer; the `GuardedResolver` is the
+    // second layer beneath it, so a client that reaches DNS at all (no pin —
+    // the proxied route, or a name the override map does not hold) meets the
+    // floor again at connect. `localhost` resolves to loopback, which is
+    // forbidden unless trusted; the server must see no request either way.
+    let index = TestIndex::start(vec![Route::json("/config.json", r#"{"format_version":1}"#)]).await;
+    let base = format!("http://localhost:{}", index.address().port());
+
+    let guarded = index_client(None, &[], direct_rules()).expect("client builds");
+    let error = fetch_source_config(&guarded, &base)
+        .await
+        .expect_err("the resolver refuses the loopback answer at connect");
+    assert!(matches!(error, MirrorError::SourceError(_)), "got {error:?}");
+    assert!(
+        index.paths().is_empty(),
+        "the refused dial must not have reached the server"
+    );
+
+    // The green half: a `trusted_hosts` entry opens the same name at the
+    // resolver, so the assertion above is the floor and not a client that
+    // cannot dial `localhost` at all.
+    let trusted = index_client(None, &["localhost".to_string()], direct_rules()).expect("client builds");
+    fetch_source_config(&trusted, &base)
+        .await
+        .expect("a trusted name resolves and is dialled")
+        .expect("the document is served");
+    assert_eq!(index.paths(), vec!["/config.json".to_string()]);
+}
+
 // ── The pin: the validated answer is the answer that gets dialled ───────────
 
 #[tokio::test]
@@ -116,7 +208,7 @@ async fn the_pre_flight_hands_back_the_addresses_it_validated() {
     let index = TestIndex::start(Vec::new()).await;
     let base = format!("http://localhost:{}", index.address().port());
 
-    let pin = validate_index_base_host(&base, &["localhost".to_string()])
+    let pin = validate_index_base_host(&base, &["localhost".to_string()], &direct_rules())
         .await
         .expect("a trusted host passes the floor")
         .expect("a DNS name earns a pin");
@@ -135,7 +227,7 @@ async fn an_ip_literal_base_earns_no_pin() {
     // and an override keyed on an IP literal would never be consulted anyway.
     let index = TestIndex::start(Vec::new()).await;
 
-    let pin = validate_index_base_host(&index.base_url(), &loopback_trusted())
+    let pin = validate_index_base_host(&index.base_url(), &loopback_trusted(), &direct_rules())
         .await
         .expect("a trusted loopback host passes the floor");
 
@@ -150,7 +242,12 @@ async fn the_client_dials_the_pinned_address_instead_of_resolving_the_host() {
     let index = TestIndex::start(vec![Route::json("/config.json", r#"{"format_version":1}"#)]).await;
     let base = format!("http://index.invalid:{}", index.address().port());
 
-    let pinned = index_client(Some(("index.invalid".to_string(), vec![index.address()]))).expect("client builds");
+    let pinned = index_client(
+        Some(("index.invalid".to_string(), vec![index.address()])),
+        &[],
+        direct_rules(),
+    )
+    .expect("client builds");
     let config = fetch_source_config(&pinned, &base)
         .await
         .expect("the pinned address is dialled")
@@ -160,7 +257,7 @@ async fn the_client_dials_the_pinned_address_instead_of_resolving_the_host() {
 
     // The RED half, in the same test: without the override the same client has
     // only DNS to go on, and DNS has no answer for `.invalid`.
-    let unpinned = index_client(None).expect("client builds");
+    let unpinned = index_client(None, &[], direct_rules()).expect("client builds");
     let error = fetch_source_config(&unpinned, &base)
         .await
         .expect_err("an unpinned client must resolve the name, and it does not resolve");
@@ -181,7 +278,12 @@ async fn the_pin_does_not_override_the_port_the_url_names() {
     let wrong_port = std::net::SocketAddr::new(index.address().ip(), index.address().port().wrapping_add(1));
     let base = format!("http://index.invalid:{}", index.address().port());
 
-    let client = index_client(Some(("index.invalid".to_string(), vec![wrong_port]))).expect("client builds");
+    let client = index_client(
+        Some(("index.invalid".to_string(), vec![wrong_port])),
+        &[],
+        direct_rules(),
+    )
+    .expect("client builds");
 
     fetch_source_config(&client, &base)
         .await

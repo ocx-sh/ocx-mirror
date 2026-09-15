@@ -82,7 +82,9 @@ pub fn from_inline(versions: &HashMap<String, crate::spec::UrlIndexVersion>) -> 
 /// Fetch versions from a remote JSON URL. The JSON format matches the inline `versions` schema:
 /// `{ "versions": { "<ver>": { "prerelease": bool, "assets": { "<name>": "<url>" } } } }`
 pub async fn from_remote(url: &str) -> anyhow::Result<Vec<VersionInfo>> {
-    let response = reqwest::get(url).await?.error_for_status()?;
+    // Through the factory, not `reqwest::get`: the latter builds a bare
+    // client per call, which is a leg the operator's extra CA never reaches.
+    let response = crate::http::client()?.get(url).send().await?.error_for_status()?;
     let index: RemoteIndex = response.json().await?;
     parse_remote_index(index)
 }
