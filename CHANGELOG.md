@@ -5,11 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-15
+
+### Added
+
+- Parse and validate the sign: block *(spec)*
+- Sign every leg that publishes, and the index above it *(sign)*
+- Sign published subjects that carry no signature *(pipeline)*
+- Carry signatures and attestations across the mirror *(registry-sync)*
+- Render the sign: block into generated workflows *(pipeline)*
+- Give the manifest documents a layout via publish.dist *(dist)*
+- Follow ocx 0.6.2's announce and cascade contract *(pipeline)*
+- Build CI annotations through ocx_lib::ci, once per run *(annotations)*
+- OCX_EXTRA_CA_CERTS and the proxy-aware SSRF floor on every leg *(trust)*
+
+### Documentation
+
+- Document the sign: block, its env surface and the CLI rows *(sign)*
+- Document the ocx 0.6.2 adoption *(reference)*
+
+### Fixed
+
+- Mirror README/logo objects into the index tree *(registry)*
+- Retry transient GitHub release listing with backoff *(source)*
+
+### Deps
+
+- Updated grim artifacts
+
 ## [0.6.0] - 2026-08-31
 
 ### Added
 
 - Adopt ocx 0.6.0 *(ocx)* **BREAKING**
+
+### Release
+
+- V0.6.0
 
 ## [0.5.7] - 2026-08-20
 
@@ -305,6 +337,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.6.1]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.7..v0.6.0
 [0.5.7]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.6..v0.5.7
 [0.5.6]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.5..v0.5.6
