@@ -31,3 +31,43 @@ pub(crate) static OCX_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::con
 pub(crate) fn ocx_env_lock() -> tokio::sync::MutexGuard<'static, ()> {
     OCX_ENV_LOCK.blocking_lock()
 }
+
+/// Puts the named variables back the way they were when dropped.
+///
+/// The env tests run in one process under [`OCX_ENV_LOCK`], and an assertion
+/// that fails between a `set_var("GITLAB_CI", "true")` and its cleanup would
+/// otherwise hand the next lock holder a GitLab job it never asked for.
+/// Declare the guard *after* the lock guard so it drops before it.
+pub(crate) struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+impl EnvRestore {
+    /// Snapshot every name in `vars`, then apply it (`None` removes).
+    pub(crate) fn set(vars: &[(&'static str, Option<&str>)]) -> Self {
+        let saved = vars.iter().map(|(name, _)| (*name, std::env::var(name).ok())).collect();
+        // SAFETY: test-only process env, serialised by the caller's lock.
+        unsafe {
+            for (name, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        Self(saved)
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        // SAFETY: test-only process env, still under the caller's lock — the
+        // guard is declared after the lock, so it drops before it.
+        unsafe {
+            for (name, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}

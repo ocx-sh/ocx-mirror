@@ -51,7 +51,7 @@ use crate::command::package::pipeline::announce;
 use crate::command::package::pipeline::plan::{image_drift, leaf_versions};
 use crate::error::MirrorError;
 use crate::pipeline::ocx_cli::announce::{
-    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, invoke_announce,
+    ANNOUNCE_TIMEOUT, TagSource, announce_credential_present, invoke_announce, missing_credential_hint,
 };
 use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, build_push_args, push_once};
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
@@ -241,17 +241,18 @@ impl Patch {
         // prevent. An absent `announce:` block means there is no index package
         // to announce into, which is not a failure.
         //
-        // No `OCX_ANNOUNCE_TOKEN` is a valid configuration — forks and test
+        // No announce credential is a valid configuration — forks and test
         // repositories — and degrades exactly as the push job's announce does:
         // recorded, not fatal. Failing here would red a run whose manifests
         // already landed, over an announce that was never attempted.
         if republished > 0
             && let Some(config) = spec.announce.as_ref()
         {
-            if announce_token().is_none() {
+            if !announce_credential_present(config) {
                 println!(
-                    "::notice title=Index announce skipped::No {ENV_ANNOUNCE_TOKEN} secret — \
+                    "::notice title=Index announce skipped::No announce credential ({}) — \
                      {} republished {republished} manifest(s) but the index was not updated.",
+                    missing_credential_hint(config),
                     config.package,
                 );
             }

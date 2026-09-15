@@ -1,0 +1,16 @@
+# expect: announce.transport: 'ssh' is not a write transport (must be 'api' or 'git')
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+announce:
+  package: test/test
+  transport: ssh

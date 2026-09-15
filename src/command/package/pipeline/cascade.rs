@@ -25,8 +25,9 @@
 //! `OCX_ANNOUNCE_TOKEN` is a valid configuration and degrades to a notice
 //! exactly as `pipeline push` and `pipeline patch` do.
 //!
-//! Needs **ocx 0.5.4 or newer** on PATH: `package cascade` does not exist
-//! before it, and an older binary rejects the verb as an unknown argument.
+//! Needs **ocx 0.6.2 or newer** on PATH: `package cascade` does not exist
+//! before 0.5.4, and `--tags-file` replaced `--announce-tags` in 0.6.2 with no
+//! window — an older binary rejects one or the other as an unknown argument.
 //!
 //! # Errors
 //!
@@ -46,7 +47,7 @@ use ocx_lib::log;
 use crate::command::package::pipeline::announce;
 use crate::error::MirrorError;
 use crate::pipeline::ocx_cli::announce::{
-    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, invoke_announce,
+    ANNOUNCE_TIMEOUT, TagSource, announce_credential_present, invoke_announce, missing_credential_hint,
 };
 use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};
 use crate::spec;
@@ -97,11 +98,12 @@ impl Cascade {
         let status = invoke_cascade_repair(&ocx_binary, &identifier, self.dry_run, tags_file.as_deref()).await?;
         let unrepaired = status.code() == Some(OCX_FINDINGS_REMAIN);
         if !status.success() && !unrepaired {
-            // Exit 64 is what an `ocx` too old to know the verb answers with
-            // (clap's unrecognized-subcommand exit) — everything else is a real
-            // failure the version hint would only misdirect from.
+            // Exit 64 is what an `ocx` too old for the argv answers with
+            // (clap's unrecognized-argument exit): the verb itself from 0.5.4,
+            // `--tags-file` from 0.6.2 — everything else is a real failure the
+            // version hint would only misdirect from.
             let hint = if status.code() == Some(64) {
-                " (`package cascade` needs ocx 0.5.4 or newer)"
+                " (`package cascade repair --tags-file` needs ocx 0.6.2 or newer)"
             } else {
                 ""
             };
@@ -110,56 +112,54 @@ impl Cascade {
             )]));
         }
 
+        if self.dry_run {
+            log::info!(
+                "[cascade:dry-run] {identifier} — nothing written; re-dispatch with the `dry_run` input \
+                 unticked (it defaults to true), or without --dry-run, to repair for real"
+            );
+        }
+
         let mut failures: Vec<String> = Vec::new();
-        let tags = match tags_file.as_deref() {
-            Some(path) => match recorded_tags(path).await {
-                Ok(tags) => tags,
-                Err(error) => {
-                    failures.push(error);
-                    Vec::new()
-                }
-            },
-            None => Vec::new(),
+        let tags = match tags_to_announce(self.dry_run, tags_file.as_deref()).await {
+            Ok(tags) => tags,
+            Err(error) => {
+                failures.push(error);
+                Vec::new()
+            }
         };
 
         // Runs even when the repair exited 65: the aliases it did move are live
         // under digests the index does not know, and an index left pointing at
         // what they replaced is worse than the unrepaired cascade was.
         //
-        // No `OCX_ANNOUNCE_TOKEN` is a valid configuration — forks and test
+        // No announce credential is a valid configuration — forks and test
         // repositories — and degrades exactly as the push job's announce does:
         // recorded, not fatal. Failing here would red a run whose tags already
         // landed, over an announce that was never attempted.
-        if !tags.is_empty() {
-            if self.dry_run {
-                log::info!(
-                    "[cascade:dry-run] {identifier} — {} tag(s) would be re-pointed and announced; \
-                     re-dispatch with the `dry_run` input unticked (it defaults to true), or without \
-                     `--dry-run`, to repair for real",
+        if let Some(config) = spec.announce.as_ref()
+            && !tags.is_empty()
+        {
+            if !announce_credential_present(config) {
+                println!(
+                    "::notice title=Index announce skipped::No announce credential ({}) — \
+                     {} re-pointed {} tag(s) but the index was not updated.",
+                    missing_credential_hint(config),
+                    config.package,
                     tags.len(),
                 );
-            } else if let Some(config) = spec.announce.as_ref() {
-                if announce_token().is_none() {
-                    println!(
-                        "::notice title=Index announce skipped::No {ENV_ANNOUNCE_TOKEN} secret — \
-                         {} re-pointed {} tag(s) but the index was not updated.",
+            } else {
+                let source = TagSource::File {
+                    path: Path::new(ANNOUNCE_TAGS_FILE),
+                    tags: &tags,
+                };
+                match invoke_announce(config, &source, None, &ocx_binary, ANNOUNCE_TIMEOUT).await {
+                    Ok(report) => announce::log_report(false, &report, config, &identifier),
+                    Err(error) => failures.push(format!(
+                        "index announce for {} failed: {error} — {} re-pointed tag(s) are live and the \
+                         index still points at the digests they replaced",
                         config.package,
                         tags.len(),
-                    );
-                } else {
-                    let source = TagSource::File {
-                        path: Path::new(ANNOUNCE_TAGS_FILE),
-                        tags: &tags,
-                    };
-                    match invoke_announce(config, &source, None, &ocx_binary, ANNOUNCE_TIMEOUT).await {
-                        Ok(report) => announce::log_report(false, &report, config, &identifier),
-                        Err(error) => failures.push(format!(
-                            "index announce for {} failed: {error} — {} re-pointed tag(s) are live and the \
-                             index still points at the digests they replaced",
-                            config.package,
-                            tags.len(),
-                        )),
-                    }
+                    )),
                 }
             }
         }
@@ -180,8 +180,11 @@ impl Cascade {
 /// The `ocx package cascade repair` argv. Pure and unit-testable — locks the
 /// flag set without spawning a subprocess.
 ///
-/// The identifier is positional and goes last, after every flag.
-fn cascade_repair_args(identifier: &str, dry_run: bool, announce_tags: Option<&Path>) -> Vec<String> {
+/// The identifier is positional and goes last, after every flag. `--tags-file`
+/// is the one spelling push, announce and the repair share since ocx 0.6.2
+/// (the earlier `--announce-tags` was dropped without a window): the file
+/// lists the tags the run left present in the registry.
+fn cascade_repair_args(identifier: &str, dry_run: bool, tags_file: Option<&Path>) -> Vec<String> {
     let mut args: Vec<String> = ["package", "cascade", "repair"]
         .iter()
         .map(|s| (*s).to_string())
@@ -189,8 +192,8 @@ fn cascade_repair_args(identifier: &str, dry_run: bool, announce_tags: Option<&P
     if dry_run {
         args.push("--dry-run".to_string());
     }
-    if let Some(path) = announce_tags {
-        args.push("--announce-tags".to_string());
+    if let Some(path) = tags_file {
+        args.push("--tags-file".to_string());
         args.push(path.display().to_string());
     }
     args.push(identifier.to_string());
@@ -206,10 +209,10 @@ async fn invoke_cascade_repair(
     ocx_binary: &Path,
     identifier: &str,
     dry_run: bool,
-    announce_tags: Option<&Path>,
+    tags_file: Option<&Path>,
 ) -> Result<std::process::ExitStatus, MirrorError> {
     let mut cmd = tokio::process::Command::new(ocx_binary);
-    cmd.args(cascade_repair_args(identifier, dry_run, announce_tags));
+    cmd.args(cascade_repair_args(identifier, dry_run, tags_file));
     forward_ocx_env(&mut cmd);
 
     cmd.status()
@@ -234,6 +237,18 @@ async fn prepare_tags_file(path: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("failed to remove {}: {error}", path.display())),
+    }
+}
+
+/// The tags this run has to announce: what the repair recorded, on a real run.
+///
+/// A preview writes no tag, and its own report (inherited stdout) is the
+/// plan; the file then lists only what the index already lacks, and
+/// announcing it would curate aliases the registry never moved.
+async fn tags_to_announce(dry_run: bool, tags_file: Option<&Path>) -> Result<Vec<String>, String> {
+    match tags_file.filter(|_| !dry_run) {
+        Some(path) => recorded_tags(path).await,
+        None => Ok(Vec::new()),
     }
 }
 
@@ -299,28 +314,64 @@ mod tests {
                 "cascade",
                 "repair",
                 "--dry-run",
-                "--announce-tags",
+                "--tags-file",
                 ".ocx-mirror/cascade.announce-tags",
                 "ghcr.io/ocx-sh/cmake",
             ],
         );
     }
 
-    /// Without `--announce-tags` the repair records nothing, and a mirror with
+    /// Without `--tags-file` the repair records nothing, and a mirror with
     /// an `announce:` block would move tags the index never hears about.
     #[test]
-    fn the_announce_tags_file_is_passed_as_a_flag_value() {
+    fn the_tags_file_is_passed_as_a_flag_value() {
         assert_eq!(
             cascade_repair_args("ghcr.io/ocx-sh/cmake", false, Some(Path::new(ANNOUNCE_TAGS_FILE))),
             vec![
                 "package",
                 "cascade",
                 "repair",
-                "--announce-tags",
+                "--tags-file",
                 ".ocx-mirror/cascade.announce-tags",
                 "ghcr.io/ocx-sh/cmake",
             ],
         );
+    }
+
+    /// A preview writes no tag: whatever the file lists is the plan, and
+    /// announcing it would curate aliases the registry never moved. Only a
+    /// real run reads the record.
+    #[tokio::test]
+    async fn a_dry_run_announces_nothing_even_when_the_repair_recorded_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cascade.announce-tags");
+        tokio::fs::write(&path, "3.29\n3\nlatest\n").await.unwrap();
+
+        assert_eq!(tags_to_announce(true, Some(&path)).await, Ok(Vec::new()));
+        assert_eq!(
+            tags_to_announce(false, Some(&path)).await,
+            Ok(vec!["3.29".to_string(), "3".to_string(), "latest".to_string()])
+        );
+    }
+
+    /// No `announce:` block asks the repair to record nothing, so there is
+    /// nothing to read either way.
+    #[tokio::test]
+    async fn without_a_tags_file_there_is_nothing_to_announce() {
+        assert_eq!(tags_to_announce(false, None).await, Ok(Vec::new()));
+    }
+
+    /// A record that exists but cannot be read is reported, never read as
+    /// empty: silently skipping the announce leaves the index stale while
+    /// the run reads green.
+    #[tokio::test]
+    async fn an_unreadable_record_is_an_error_on_a_real_run() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory, not a file: present, and not readable as text.
+        let error = tags_to_announce(false, Some(dir.path()))
+            .await
+            .expect_err("a directory is not a readable record");
+        assert!(error.starts_with("failed to read "), "got: {error}");
     }
 
     /// A blank line reaching `--tags-file` is announced as a tag, so the

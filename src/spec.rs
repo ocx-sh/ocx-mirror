@@ -299,10 +299,6 @@ static GHA_SECRET_NAME_RE: std::sync::LazyLock<regex::Regex> =
 static INDEX_PACKAGE_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$").unwrap());
 
-/// Regex for a GitHub repository slug: `<owner>/<repo>`.
-static GITHUB_REPO_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap());
-
 /// Regex for a Discord user ID (snowflake): 17–20 ASCII digits.
 static DISCORD_USER_ID_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(r"^[0-9]{17,20}$").unwrap());

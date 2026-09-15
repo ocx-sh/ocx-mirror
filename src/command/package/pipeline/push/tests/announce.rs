@@ -142,7 +142,6 @@ fn build_announce_args_uses_additive_tags_file_never_replacing_tags() {
             "json",
             "package",
             "announce",
-            "--package",
             "bazelbuild/bazelisk",
             "--tags-file",
             "/tmp/tags.txt",
@@ -169,7 +168,6 @@ fn build_announce_args_from_registry_is_additive_and_never_replacing_tags() {
             "json",
             "package",
             "announce",
-            "--package",
             "bazelbuild/bazelisk",
             "--tags-from-registry",
             "--fork",
@@ -203,7 +201,6 @@ fn build_announce_args_dry_run_writes_out_instead_of_opening_a_pull_request() {
             "json",
             "package",
             "announce",
-            "--package",
             "bazelbuild/bazelisk",
             "--tags-from-registry",
             "--out",
@@ -216,6 +213,75 @@ fn build_announce_args_dry_run_writes_out_instead_of_opening_a_pull_request() {
         !args.iter().any(|a| a == "--fork"),
         "a dry run must not carry --fork; got: {args:?}",
     );
+}
+
+/// A GitLab job announces from a branch on the index project itself, over
+/// the git transport, against a self-hosted instance: no `--fork`, and the
+/// `--forge` / `--transport` pair spelled out — exactly and only when the
+/// spec names them, so an unset key leaves `ocx`'s own defaults in charge.
+/// An explicit `transport: api` is forwarded as written, not collapsed into
+/// "the default, so say nothing": `ocx` owns the default and may move it,
+/// and a spec that spells the transport out has asked for exactly that one.
+#[test]
+fn build_announce_args_forwards_an_explicit_api_transport_as_written() {
+    let config: AnnounceConfig =
+        serde_yaml_ng::from_str("package: bazelbuild/bazelisk\nindex_repo: ocx-sh/index\ntransport: api\n").unwrap();
+    let args = build_announce_args(&config, &TagSource::FromRegistry, None).unwrap();
+
+    assert_eq!(
+        args,
+        vec![
+            "--format",
+            "json",
+            "package",
+            "announce",
+            "bazelbuild/bazelisk",
+            "--tags-from-registry",
+            "--transport",
+            "api",
+            "--index-repo",
+            "ocx-sh/index",
+        ],
+    );
+}
+
+#[test]
+fn build_announce_args_gitlab_job_token_shape_has_no_fork_and_names_forge_and_transport() {
+    let config: AnnounceConfig = serde_yaml_ng::from_str(
+        "package: bazelbuild/bazelisk\nindex_repo: gitlab.corp.example/tools/ocx/index\nforge: gitlab\ntransport: git\n",
+    )
+    .unwrap();
+    let args = build_announce_args(&config, &TagSource::FromRegistry, None).unwrap();
+
+    assert_eq!(
+        args,
+        vec![
+            "--format",
+            "json",
+            "package",
+            "announce",
+            "bazelbuild/bazelisk",
+            "--tags-from-registry",
+            "--transport",
+            "git",
+            "--index-repo",
+            "gitlab.corp.example/tools/ocx/index",
+            "--forge",
+            "gitlab",
+        ],
+    );
+    assert!(
+        !args.iter().any(|a| a == "--package"),
+        "`--package` is the deprecated spelling, deleted in ocx 0.7; got: {args:?}",
+    );
+
+    // A dry run of the same spec: `ocx` refuses `--transport` beside `--out`
+    // (exit 64 — a local write opens no request), while `--forge` still
+    // decides which API the entry is rebuilt from. Probed against the real
+    // binary; the shape is pinned here so the dry run stays runnable.
+    let dry = build_announce_args(&config, &TagSource::FromRegistry, Some(Path::new("/tmp/announce-out"))).unwrap();
+    assert!(!dry.iter().any(|a| a == "--transport"), "got: {dry:?}");
+    assert!(dry.iter().any(|a| a == "--forge"), "got: {dry:?}");
 }
 
 #[cfg(unix)]
@@ -243,13 +309,7 @@ fn announce_runs_exactly_once_per_run_with_the_union_of_tags() {
     ];
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let outcome = rt.block_on(run_announce(
-        Some(&config),
-        &versions,
-        &tags_file,
-        Some("gh-token"),
-        &ocx,
-    ));
+    let outcome = rt.block_on(run_announce(Some(&config), &versions, &tags_file, true, &ocx));
 
     assert_eq!(
         outcome,
@@ -310,7 +370,7 @@ fn an_announce_that_changed_nothing_is_not_recorded_as_announced() {
         Some(&announce_config()),
         &versions,
         &dir.path().join("tags"),
-        Some("gh-token"),
+        true,
         &ocx,
     ));
 
@@ -354,7 +414,7 @@ fn an_announce_that_opened_a_pull_request_records_it() {
         Some(&announce_config()),
         &versions,
         &dir.path().join("tags"),
-        Some("gh-token"),
+        true,
         &ocx,
     ));
 
@@ -394,7 +454,7 @@ fn an_unchanged_announce_with_an_ensured_pull_request_still_counts() {
         Some(&announce_config()),
         &versions,
         &dir.path().join("tags"),
-        Some("gh-token"),
+        true,
         &ocx,
     ));
 
@@ -423,7 +483,7 @@ fn an_announce_reporting_nothing_readable_is_recorded_as_failed() {
         Some(&announce_config()),
         &versions,
         &dir.path().join("tags"),
-        Some("gh-token"),
+        true,
         &ocx,
     ));
 
@@ -452,7 +512,7 @@ fn announce_skipped_without_token_and_stays_distinguishable_in_the_summary() {
         Some(&config),
         &versions,
         &dir.path().join("tags"),
-        None,
+        false,
         &ocx,
     ));
 
@@ -503,7 +563,7 @@ fn announce_failure_is_recorded_and_does_not_abort_the_run() {
         Some(&announce_config()),
         &versions,
         &dir.path().join("tags"),
-        Some("gh-token"),
+        true,
         &ocx,
     ));
 
@@ -540,7 +600,7 @@ fn nothing_to_announce_stays_distinct_from_never_configured() {
         Some(&announce_config()),
         &barren,
         &dir.path().join("tags"),
-        Some("gh-token"),
+        true,
         &ocx,
     ));
     assert_eq!(
@@ -562,13 +622,7 @@ fn nothing_to_announce_stays_distinct_from_never_configured() {
         &["1.0.0"],
     )];
     assert_eq!(
-        rt.block_on(run_announce(
-            None,
-            &published,
-            &dir.path().join("tags"),
-            Some("t"),
-            &ocx
-        )),
+        rt.block_on(run_announce(None, &published, &dir.path().join("tags"), true, &ocx)),
         None,
     );
 
@@ -599,7 +653,7 @@ fn announce_writes_its_tags_file_into_a_not_yet_existing_directory() {
         Some(&announce_config()),
         &versions,
         &tags_file,
-        Some("gh-token"),
+        true,
         &ocx,
     ));
 

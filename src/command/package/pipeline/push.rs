@@ -28,8 +28,12 @@ use ocx_lib::publisher::Publisher;
 use crate::error::MirrorError;
 use crate::filter::pep440_sort_key;
 use crate::pipeline::ocx_cli::announce::{
-    ANNOUNCE_TIMEOUT, ENV_ANNOUNCE_TOKEN, TagSource, announce_token, invoke_announce,
+    ANNOUNCE_TIMEOUT, TagSource, announce_credential_present, invoke_announce, missing_credential_hint,
 };
+// The `#[path]` test modules reach this through the glob; production code
+// names the variable only through `missing_credential_hint`.
+#[cfg(test)]
+use crate::pipeline::ocx_cli::announce::ENV_ANNOUNCE_TOKEN;
 use crate::pipeline::ocx_cli::push::{PushReport, build_push_args, push_with_retry};
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
 use crate::pipeline::ocx_cli::sign::{ResolvedSign, resolve_sign_from_env, sweep_index_tags};
@@ -402,12 +406,12 @@ impl Push {
         // one per version or per platform. Concurrent announces on the same
         // package are a race the index singleflight exists to survive; there
         // is no reason to generate one from inside a single run.
-        let announce_token = announce_token();
+        let credential_present = spec.announce.as_ref().is_some_and(announce_credential_present);
         summary.announce = run_announce(
             spec.announce.as_ref(),
             &summary.versions,
             &self.write_summary.with_extension("announce-tags"),
-            announce_token.as_deref(),
+            credential_present,
             &resolve_ocx_binary().unwrap_or_else(|_| PathBuf::from("ocx")),
         )
         .await;
@@ -893,7 +897,7 @@ async fn run_announce(
     config: Option<&AnnounceConfig>,
     versions: &[VersionSummary],
     tags_file: &Path,
-    token: Option<&str>,
+    credential_present: bool,
     ocx_binary: &Path,
 ) -> Option<AnnounceOutcome> {
     let config = config?;
@@ -905,13 +909,14 @@ async fn run_announce(
         });
     }
 
-    if token.is_none() {
-        // A mirror repo without the secret is a valid configuration, so this
+    if !credential_present {
+        // A mirror repo without a credential is a valid configuration, so this
         // degrades rather than failing. It must still be visible: a run that
         // pushed and then did not announce cannot read like one that did.
         println!(
-            "::notice title=Index announce skipped::No {ENV_ANNOUNCE_TOKEN} secret — \
+            "::notice title=Index announce skipped::No announce credential ({}) — \
              {} published {} tag(s) but the index was not updated.",
+            missing_credential_hint(config),
             config.package,
             tags.len()
         );

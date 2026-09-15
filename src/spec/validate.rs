@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use ocx_lib::forge::{ForgeKind, RepoCoordinate, WriteTransport};
 use ocx_lib::oci::Platform;
 use ocx_lib::package::version::Version;
 
@@ -20,8 +21,7 @@ use super::{
     PlatformConfig, Ref, SignConfig, TestEntry,
 };
 use super::{
-    CRON_RE, DISCORD_USER_ID_RE, GHA_SECRET_NAME_RE, GIT_REV_RE, GITHUB_REPO_RE, INDEX_PACKAGE_RE, TEST_NAME_RE,
-    applicability_key,
+    CRON_RE, DISCORD_USER_ID_RE, GHA_SECRET_NAME_RE, GIT_REV_RE, INDEX_PACKAGE_RE, TEST_NAME_RE, applicability_key,
 };
 use crate::error::MirrorError;
 
@@ -758,10 +758,17 @@ pub fn validate_notify_config(config: &NotifyConfig, errors: &mut Vec<String>) {
     }
 }
 
-/// Validate the `announce:` block: the logical package and both repository
-/// slugs must be well-formed `<a>/<b>` pairs, and the optional catch-up
-/// schedule must be a cron expression safe to splice into a generated `on:`
-/// block (see [`validate_cron`]).
+/// Validate the `announce:` block: the logical package must be a
+/// `<namespace>/<package>` pair, `index_repo` and the optional `fork` must be
+/// `[HOST/]NAMESPACE/PROJECT` coordinates the resolved forge can express, and
+/// the optional catch-up schedule must be a cron expression safe to splice
+/// into a generated `on:` block (see [`validate_cron`]).
+///
+/// The forge rules are `ocx package announce`'s own, called rather than
+/// re-spelled — `ForgeKind::{resolve, validate_coordinate, same_host,
+/// validate_transport}` — and applied in the order `ocx`'s CLI applies them,
+/// so a spec `plan` refuses is one `ocx` would have refused at exit 64, with
+/// the one message the operator can act on.
 ///
 /// A malformed value is reported as a named field error (contributing to
 /// `SpecInvalid`, exit 65) rather than a serde shape mismatch, so the message
@@ -777,11 +784,104 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
             config.package
         ));
     }
-    for (field, value) in [("fork", &config.fork), ("index_repo", &config.index_repo)] {
-        if !GITHUB_REPO_RE.is_match(value) {
+    // Spellings first: the grammar `ocx` applies to `--fork` and
+    // `--index-repo`, and its `--forge` / `--transport` vocabularies. Every
+    // misspelling is reported; the forge rules below need all four parsed.
+    let fork = match config.fork.as_deref() {
+        None => Some(None),
+        Some(value) => parse_coordinate("fork", value, errors).map(Some),
+    };
+    let index = parse_coordinate("index_repo", &config.index_repo, errors);
+    let forge = match config.forge.as_deref() {
+        None => Ok(None),
+        Some(spelled) => config.forge_kind().map(Some).ok_or(spelled),
+    };
+    let transport = match config.transport.as_deref() {
+        None => Ok(WriteTransport::default()),
+        Some(spelled) => <WriteTransport as clap::ValueEnum>::from_str(spelled, false).map_err(|_| spelled),
+    };
+    if let Err(spelled) = forge {
+        errors.push(format!(
+            "announce.forge: '{spelled}' is not a forge (must be 'github' or 'gitlab')"
+        ));
+    }
+    if let Err(spelled) = transport {
+        errors.push(format!(
+            "announce.transport: '{spelled}' is not a write transport (must be 'api' or 'git')"
+        ));
+    }
+    let (Some(fork), Some(index), Ok(forge), Ok(transport)) = (fork, index, forge, transport) else {
+        return;
+    };
+
+    // `ocx`'s own order (`ForgeWriteOptions::validate`): the key pair first —
+    // on the default github.com index `transport: git` also trips
+    // `validate_transport`, whose message names the forge, not the second key.
+    if transport == WriteTransport::Git && fork.is_some() {
+        errors.push(
+            "announce.transport: 'git' pushes the branch to announce.index_repo itself — drop announce.fork"
+                .to_string(),
+        );
+        return;
+    }
+    // Resolved from the index coordinate, never from the fork: a fork lives
+    // on the instance it forks from. A self-hosted host says nothing about
+    // what runs there, so `ocx` makes the publisher declare it.
+    let Ok(kind) = ForgeKind::resolve(forge, &index) else {
+        errors.push(format!(
+            "announce.index_repo: cannot tell which forge '{}' is — set announce.forge to 'github' or 'gitlab'",
+            index.host.as_deref().unwrap_or_default()
+        ));
+        return;
+    };
+    for (field, coordinate) in [("index_repo", Some(&index)), ("fork", fork.as_ref())] {
+        if let Some(coordinate) = coordinate
+            && let Err(error) = kind.validate_coordinate(coordinate)
+        {
+            errors.push(format!("announce.{field}: {error}"));
+            return;
+        }
+    }
+    // Through `same_host`, never `Option` equality: an omitted host MEANS the
+    // forge's canonical host, so `ocx-sh/index` with `fork: github.com/me/index`
+    // names one instance twice and is accepted.
+    if let Some(fork) = &fork
+        && !kind.same_host(fork, &index)
+    {
+        let named = |coordinate: &RepoCoordinate| {
+            coordinate
+                .host
+                .clone()
+                .unwrap_or_else(|| kind.canonical_host().to_string())
+        };
+        errors.push(format!(
+            "announce.fork is on '{}' but announce.index_repo is on '{}' — a fork lives on the same instance as \
+             its upstream",
+            named(fork),
+            named(&index)
+        ));
+        return;
+    }
+    if kind.validate_transport(transport).is_err() {
+        errors.push(
+            "announce.transport: 'git' is GitLab-only — drop it, or point announce.index_repo at a GitLab \
+             instance and set announce.forge to 'gitlab'"
+                .to_string(),
+        );
+    }
+}
+
+/// Parse one announce coordinate, reporting a grammar failure under its key.
+/// `ocx_lib`'s only parse error already restates the value and the grammar,
+/// so the message spells the grammar once.
+fn parse_coordinate(field: &str, value: &str, errors: &mut Vec<String>) -> Option<RepoCoordinate> {
+    match value.parse::<RepoCoordinate>() {
+        Ok(coordinate) => Some(coordinate),
+        Err(_) => {
             errors.push(format!(
-                "announce.{field}: '{value}' is not a valid GitHub repository (must be '<owner>/<repo>')"
+                "announce.{field}: '{value}' is not a valid repository (must be '[HOST/]NAMESPACE/PROJECT')"
             ));
+            None
         }
     }
 }

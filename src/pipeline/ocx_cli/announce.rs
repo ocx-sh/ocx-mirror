@@ -15,18 +15,59 @@ use std::time::Duration;
 use super::forward_ocx_env;
 use crate::spec::AnnounceConfig;
 
-/// GitHub Actions secret carrying the token `ocx package announce` uses to
-/// push the fork branch and open the index pull request.
-pub(crate) const ENV_ANNOUNCE_TOKEN: &str = "OCX_ANNOUNCE_TOKEN";
+/// The operator's own announce credential — rung 1 of `ocx`'s forge
+/// credential ladder, and the name the skip notice tells them to set.
+pub(crate) const ENV_ANNOUNCE_TOKEN: &str = ocx_lib::env::keys::OCX_ANNOUNCE_TOKEN;
 
-/// The configured announce token, or `None` when the secret is absent or blank.
+/// Whether `ocx package announce` would find a credential for `config`.
 ///
-/// A repository without it is a valid configuration — forks and test repos —
-/// so every caller degrades on `None` rather than failing: the packages are in
-/// the registry either way, and an announce that was never attempted must not
-/// red a run that published exactly what it was asked to.
-pub(crate) fn announce_token() -> Option<String> {
-    std::env::var(ENV_ANNOUNCE_TOKEN).ok().filter(|t| !t.trim().is_empty())
+/// Asked of `ocx_lib`'s own ladder rather than of one variable: under
+/// `transport: git` inside a GitLab job the ladder falls through from an
+/// unset `OCX_ANNOUNCE_TOKEN` to the job's `CI_JOB_TOKEN`, and a gate that
+/// only knew the first name would skip the announce a job token can make.
+///
+/// A repository with no credential is a valid configuration — forks and test
+/// repos — so every caller degrades on `false` rather than failing: the
+/// packages are in the registry either way, and an announce that was never
+/// attempted must not red a run that published exactly what it was asked to.
+pub(crate) fn announce_credential_present(config: &AnnounceConfig) -> bool {
+    ocx_lib::forge::ForgeCredentials::resolve(config.transport()).api_is_present()
+}
+
+/// What the skip notice tells the operator to do about a missing credential.
+///
+/// Per transport and per forge, because the fix is: a GitLab job under
+/// `transport: api` already carries a `CI_JOB_TOKEN` the ladder refuses
+/// there, and "set `OCX_ANNOUNCE_TOKEN`" alone would hide the one-line spec
+/// change that lets its job token through. On GitHub — the default index —
+/// that spec change is one `validate_announce_config` refuses (`transport:
+/// git` is GitLab-only), so the clause is offered only when the index
+/// resolves to GitLab, the way `validate_announce_config` resolves it. An
+/// index that does not resolve (`plan` already refused it) gets the plain
+/// hint rather than a clause for a forge nobody can name.
+pub(crate) fn missing_credential_hint(config: &AnnounceConfig) -> String {
+    match config.transport() {
+        ocx_lib::forge::WriteTransport::Api if index_is_gitlab(config) => format!(
+            "set {ENV_ANNOUNCE_TOKEN} — a GitLab CI_JOB_TOKEN cannot open a merge request over the api transport; \
+             use `transport: git` to announce with it"
+        ),
+        ocx_lib::forge::WriteTransport::Api => format!("set {ENV_ANNOUNCE_TOKEN}"),
+        ocx_lib::forge::WriteTransport::Git => {
+            format!("set {ENV_ANNOUNCE_TOKEN}, or run inside a GitLab job (GITLAB_CI + CI_JOB_TOKEN)")
+        }
+    }
+}
+
+/// Whether `index_repo` resolves to GitLab — declared `forge` first, then
+/// the index host, exactly as `ForgeKind::resolve` is applied in
+/// `validate_announce_config`. Unparsable or unresolvable is `false`.
+fn index_is_gitlab(config: &AnnounceConfig) -> bool {
+    config
+        .index_repo
+        .parse::<ocx_lib::forge::RepoCoordinate>()
+        .ok()
+        .and_then(|index| ocx_lib::forge::ForgeKind::resolve(config.forge_kind(), &index).ok())
+        == Some(ocx_lib::forge::ForgeKind::GitLab)
 }
 
 /// Where `ocx package announce` takes its tag set from.
@@ -50,17 +91,24 @@ pub(crate) enum TagSource<'a> {
 /// Build the `ocx package announce` argv. Pure and unit-testable — locks the
 /// flag set without spawning a subprocess.
 ///
-/// `out` writes the rebuilt entry to a directory instead of opening a pull
-/// request — `--out` and `--fork` are mutually exclusive on the `ocx` side, so
-/// exactly one of them is emitted.
+/// `out` writes the rebuilt entry to a directory instead of opening a
+/// request — `--out` excludes both `--fork` and `--transport` on the `ocx`
+/// side (a local write opens no request, so it has no fork to open from and
+/// no transport to open it through), so those two are emitted only without
+/// `out`, and `--fork` only when the spec names one: no fork means the branch
+/// goes to `--index-repo` itself. `--forge` rides along in both modes and,
+/// like `--transport`, only when the spec sets it, so an unset key leaves
+/// `ocx`'s own default (host inference, `api`) in charge.
 pub(crate) fn build_announce_args(
     config: &AnnounceConfig,
     source: &TagSource<'_>,
     out: Option<&Path>,
 ) -> Result<Vec<String>, String> {
     // Global flags precede the subcommand. JSON because the caller has to
-    // read what the announce *did* — its exit code is 0 either way.
-    let mut args: Vec<String> = ["--format", "json", "package", "announce", "--package", &config.package]
+    // read what the announce *did* — its exit code is 0 either way. The
+    // package is positional since ocx 0.6.1; `--package` is a hidden alias
+    // that warns and is deleted in 0.7.
+    let mut args: Vec<String> = ["--format", "json", "package", "announce", &config.package]
         .iter()
         .map(|s| (*s).to_string())
         .collect();
@@ -85,21 +133,31 @@ pub(crate) fn build_announce_args(
             args.push(dir.to_string());
         }
         None => {
-            args.push("--fork".to_string());
-            args.push(config.fork.clone());
+            if let Some(fork) = &config.fork {
+                args.push("--fork".to_string());
+                args.push(fork.clone());
+            }
+            if let Some(transport) = &config.transport {
+                args.push("--transport".to_string());
+                args.push(transport.clone());
+            }
         }
     }
 
     args.push("--index-repo".to_string());
     args.push(config.index_repo.clone());
+    if let Some(forge) = &config.forge {
+        args.push("--forge".to_string());
+        args.push(forge.clone());
+    }
 
     Ok(args)
 }
 
 /// How long the announce subprocess may run before it is killed.
 ///
-/// It pushes a fork branch, calls the pull-request API and observes the
-/// registry — network work with no bound of its own. Unbounded, one stalled
+/// It pushes a branch, calls the request API and observes the registry —
+/// network work with no bound of its own. Unbounded, one stalled
 /// call (a registry 429 retry loop is enough) takes the whole job down with it
 /// on the runner timeout, and everything the run published downstream of the
 /// summary write goes unreported.

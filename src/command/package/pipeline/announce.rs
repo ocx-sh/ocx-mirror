@@ -244,8 +244,10 @@ mod tests {
     fn config() -> spec::AnnounceConfig {
         spec::AnnounceConfig {
             package: "bazelbuild/buildifier".to_string(),
-            fork: "ocx-contrib/index".to_string(),
+            fork: Some("ocx-contrib/index".to_string()),
             index_repo: "ocx-sh/index".to_string(),
+            forge: None,
+            transport: None,
             schedule: None,
         }
     }

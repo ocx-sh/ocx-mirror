@@ -1,0 +1,17 @@
+# expect: announce.index_repo: 
+# expect: nested
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+  tag_pattern: "^v(?P<version>\\d+)$"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+announce:
+  package: test/test
+  index_repo: github.com/acme/platform/index
