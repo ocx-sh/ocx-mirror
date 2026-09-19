@@ -83,6 +83,11 @@ jobs:
         id: clippy
         run: task rust:clippy:check
         continue-on-error: true
+      - name: Check jsonschema feature
+        # The `schema` command and every `schemars` derive are feature-gated,
+        # so nothing else here compiles them — a broken derive stayed green
+        # until someone ran `ocx-mirror schema` by hand.
+        run: task rust:jsonschema:check
       - name: Build
         run: task rust:build
       - name: Test

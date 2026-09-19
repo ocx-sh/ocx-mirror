@@ -58,7 +58,7 @@ tasks:
     desc: Full quality gate
     summary: |
       Phase 1 (parallel): format, clippy
-      Phase 2 (sequential): license, build, unit tests, acceptance tests
+      Phase 2 (sequential): license, jsonschema feature, build, unit tests, acceptance tests
       Use `task --force verify` to bypass caching.
       Use `task --status verify` to check freshness without running.
     cmds:
@@ -76,6 +76,7 @@ tasks:
     cmds:
       - task: rust:license:check
       - task: rust:license:deps
+      - task: rust:jsonschema:check
       - task: rust:build
       - task: rust:test:unit
       - task: test:parallel
