@@ -6,7 +6,7 @@ Upstream projects publish their releases as loose archives on [GitHub Releases][
 
 ## What it does
 
-- **Sources** — [GitHub Releases][github-releases] or URL indexes (remote JSON, inline versions, or a generator command).
+- **Sources** — [GitHub Releases][github-releases] or URL indexes (remote JSON, inline versions, or a generator command). Either can publish a per-asset `sha256` that every download is checked against, and either can send downloads through a corporate proxy with [`source.url_rewrite`][spec-url-rewrite] while discovery stays upstream.
 - **YAML spec** — one [`mirror.yml`][ref-mirror-yml] per tool: source, per-platform asset regexes, target registry, version bounds.
 - **Two-phase pipeline** — prepare (download, verify, bundle) runs concurrently; push runs sequentially by version so cascade tags (`X.Y.Z` → `X.Y` → `X` → `latest`) always land in semver order.
 - **Generated CI pipelines** — [`pipeline generate ci`][cli-generate-ci] renders complete [GitHub Actions][github-actions] workflows that discover new versions on a schedule, smoke-test every `(version, platform)` pair before publishing, and report results to [Discord][discord].
@@ -42,6 +42,7 @@ ocx --global add ocx.sh/ocx/mirror
 <!-- internal -->
 [getting-started]: ./getting-started.md
 [ref-mirror-yml]: ./reference/mirror-yml.md
+[spec-url-rewrite]: ./reference/mirror-yml.md#url-rewrite
 [ref-registry-yml]: ./reference/registry-yml.md
 [ref-dist-yml]: ./reference/dist-yml.md
 [ref-cli]: ./reference/cli.md
