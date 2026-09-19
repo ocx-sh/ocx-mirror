@@ -1,0 +1,11 @@
+# expect: not supported for source.type 'pylock'
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+  url_rewrite:
+    from: "https://files.pythonhosted.org/"
+    to: "https://mirror.internal/pypi/"

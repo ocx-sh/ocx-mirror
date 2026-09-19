@@ -31,5 +31,7 @@ mod pipeline_schema;
 mod schema;
 #[path = "tests/test_entries.rs"]
 mod test_entries;
+#[path = "tests/url_rewrite.rs"]
+mod url_rewrite;
 #[path = "tests/variants.rs"]
 mod variants;

@@ -127,6 +127,36 @@ The digest is normalised at crawl time — a bare hex string becomes `sha256:<he
 
 The same two forms apply to the inline `versions:` map, which is the identical shape written directly in `mirror.yml`.
 
+### `source.url_rewrite` {#url-rewrite}
+
+A prefix substitution applied to every upstream asset URL the source produces. **Discovery stays where it is; only the download host moves.**
+
+```yaml
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  url_rewrite:
+    from: "https://github.com/"
+    to: "https://artifactory.example.com/artifactory/githubcom-remote/"
+```
+
+A release asset at `https://github.com/Kitware/CMake/releases/download/v3.29.0/cmake.tar.gz` is then fetched from `https://artifactory.example.com/artifactory/githubcom-remote/Kitware/CMake/releases/download/v3.29.0/cmake.tar.gz`. The GitHub API call that *found* that release still goes to GitHub — the rewrite is purely a download-side substitution.
+
+A URL that does not start with `from` comes back unchanged, so a release hosting one asset on a CDN the proxy does not front still mirrors.
+
+Both halves must be `http(s)` URL prefixes and neither may be empty. Neither may embed credentials (`https://user:pass@…`) — that is refused, not stripped, for the same reason [`source.indexes`](#pypi-source) refuses it: a `mirror.yml` is committed.
+
+Both halves are normalised before matching, so `https://GitHub.com/`, `HTTPS://github.com/`, `https://github.com:443/` and `https://github.com` all name the same prefix and all match. Write whichever you like; the rewrite will not quietly go inert because a host was capitalised or a default port spelled out.
+
+**Credentials follow the request host, not the source type.** The mirror resolves a credential from the URL it is actually requesting, so a rewritten host receives *that host's* own `OCX_AUTH_<slug>_*` variables or `netrc` entry — never GitHub's. An operator pointing downloads at Artifactory configures the Artifactory credential separately.
+
+Supported on `github_release` and `url_index`. On `pylock`/`pypi` it is **refused by name**: an env source resolves wheels, not per-platform archives, so a proxy index belongs in [`source.indexes`](#pypi-source) instead.
+
+[`extends:`](#inheritance) is a shallow top-level merge, so a shared base cannot contribute `source.url_rewrite` alone — a child spec that declares `source:` replaces the whole block. That is what [`OCX_MIRROR_URL_REWRITE`][env-url-rewrite] is for: it overrides this block entirely from the environment, keeping one spec byte-identical between a public repository and an internal fork.
+
+TLS note: the GitHub Releases *listing* client is the one leg [`OCX_EXTRA_CA_CERTS`][env-extra-ca-certs] does not reach. The same API-here / downloads-there split applies — downloads through the rewritten host use the mirror's own client and do honour it.
+
 ## `assets` {#assets}
 
 Maps a **platform key** to an ordered list of regexes. Each regex is matched against upstream asset filenames; the first platform with exactly one distinct match resolves to that asset (zero matches = platform absent for that version, two or more = ambiguous error).
@@ -781,6 +811,10 @@ URL of a `sha256sum`-format sidecar (`HASH  FILENAME` per line, `#` comments and
 ### Env sources ignore both digest policies
 
 `source.type: pylock` and `pypi` verify every wheel against the PEP 751 lock's own hashes during preparation. `VersionInfo.assets` is empty for them by construction, so a digest policy there would describe a check that never runs.
+
+A rewritten download host does not weaken any of this: the digest is compared against the bytes on local disk and never consults the URL, which is exactly what makes it the proof that a proxy served what the publisher declared. See [`source.url_rewrite`](#url-rewrite).
+
+A resumed run — a work directory that already holds `bundle.tar.xz` — re-checks the declared digest against the archive beside it, so tightening a policy to `require` or correcting an upstream digest does reach an existing work directory. If the archive is gone the bundle is refused rather than adopted: delete it to re-download and re-verify.
 
 ## `tests` {#tests}
 
@@ -1491,6 +1525,8 @@ notify:
 ```
 
 [env-github-token]: ./environment.md#github-token
+[env-url-rewrite]: ./environment.md#ocx-mirror-url-rewrite
+[env-extra-ca-certs]: ./environment.md#ocx-extra-ca-certs
 [spec-ocx-forwarding]: ./environment.md#ocx-forwarding
 [spec-env-signing-scrub]: ./environment.md#plugin-dispatch-scrub
 

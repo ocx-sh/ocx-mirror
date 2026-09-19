@@ -65,7 +65,7 @@ pub use registry::{OnError, RegistryConcurrency, RegistrySource, RegistrySpec};
 // `sign:` — the mirror's own signing identity (D1). `validate_sign_config`
 // rides along through the existing `pub(crate) use validate::*;` glob below.
 pub use sign_config::{KeyConfig, KeyFullConfig, KeylessConfig, Ref, SignConfig};
-pub use source::{GeneratorConfig, Source, UrlIndexSource, UrlIndexVersion};
+pub use source::{GeneratorConfig, Source, URL_REWRITE_ENV, UrlIndexMode, UrlIndexSource, UrlIndexVersion, UrlRewrite};
 pub use strip_components_config::StripComponentsConfig;
 pub use target::Target;
 pub use tests_config::{TestEntry, TestKind};

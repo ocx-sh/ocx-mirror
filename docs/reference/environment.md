@@ -46,6 +46,25 @@ Discord user ID (snowflake) to mention when a run carries failures. Non-secret �
 
 **Scope:** `pipeline notify`.
 
+### `OCX_MIRROR_URL_REWRITE` {#ocx-mirror-url-rewrite}
+
+Overrides [`source.url_rewrite`][spec-url-rewrite] for every spec the invocation touches — the download-host substitution, spelled `<from>=<to>` and split at the first `=`:
+
+```sh
+OCX_MIRROR_URL_REWRITE='https://github.com/=https://artifactory.example.com/artifactory/githubcom-remote/' \
+  ocx-mirror package sync mirror.yml
+```
+
+Operator-set, never spec-named. It **replaces** the spec's block entirely rather than merging with it, which is the point: [`extends:`][spec-inheritance] is a shallow top-level merge and cannot contribute `source.url_rewrite` alone, so this variable is what keeps one `mirror.yml` byte-identical between a public contrib repository and an internal fork.
+
+Both halves are checked by the same rules as the spec form — non-empty, `http(s)` prefixes, no embedded credentials in either — and normalised the same way, so a capitalised host or a spelled-out default port still matches. A malformed value exits **64** with a message naming the variable and never its value.
+
+The rewritten host receives its own `OCX_AUTH_<slug>_*` or `netrc` credential, never the origin's; see [`source.url_rewrite`][spec-url-rewrite].
+
+It does **not** apply to `source.type: pylock` or `pypi` — an env source downloads through its index, so point [`source.indexes`][spec-pypi-source] at the proxy instead. A run that sets the variable against such a spec logs a warning saying so rather than silently doing nothing.
+
+**Scope:** every command that crawls a source — `sync`, `check`, `pipeline plan`, and `pipeline prepare` without `--plan`. With `--plan`, the URLs in `plan.json` were already rewritten by the `discover` job that wrote it, so the variable is not consulted — set it on `discover`, not on the prepare matrix.
+
 ### CI annotation variables {#annotation-env}
 
 The [OCI annotations][oci-annotations] recorded on every published image index. They are read by `ocx_shell`'s CI-annotation reader — the same one `ocx package push --ci-annotations` uses — so a mirror push and a hand push stamp the same keys from the same names. The provider is detected from `GITHUB_ACTIONS` / `GITLAB_CI`; both set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
@@ -191,6 +210,9 @@ Conventional name for the secret holding the Discord webhook URL. `mirror.yml`'s
 [cli-patch]: ./cli.md#pipeline-patch
 [cli-cascade]: ./cli.md#pipeline-cascade
 [spec-announce]: ./mirror-yml.md#announce
+[spec-url-rewrite]: ./mirror-yml.md#url-rewrite
+[spec-pypi-source]: ./mirror-yml.md#pypi-source
+[spec-inheritance]: ./mirror-yml.md#inheritance
 [spec-announce-gitlab]: ./mirror-yml.md#announce-gitlab
 [spec-push-retry]: ./mirror-yml.md#concurrency-push-retry
 [spec-sign]: ./mirror-yml.md#sign

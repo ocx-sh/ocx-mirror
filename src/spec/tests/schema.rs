@@ -75,7 +75,11 @@ assets:
 "#;
 
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    if let Source::UrlIndex(UrlIndexSource::Generator { generator }) = &spec.source {
+    if let Source::UrlIndex(UrlIndexSource {
+        mode: UrlIndexMode::Generator { generator },
+        ..
+    }) = &spec.source
+    {
         assert_eq!(generator.command, vec!["uv", "run", "generate.py"]);
         assert_eq!(generator.working_directory.as_deref(), Some("scripts"));
     } else {
@@ -100,7 +104,11 @@ assets:
 "#;
 
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    if let Source::UrlIndex(UrlIndexSource::Generator { generator }) = &spec.source {
+    if let Source::UrlIndex(UrlIndexSource {
+        mode: UrlIndexMode::Generator { generator },
+        ..
+    }) = &spec.source
+    {
         assert!(generator.working_directory.is_none());
         let resolved = generator.resolve_working_directory(Path::new("/mirrors/nodejs"));
         assert_eq!(resolved, Path::new("/mirrors/nodejs"));
