@@ -72,7 +72,7 @@ pub use tests_config::{TestEntry, TestKind};
 pub(crate) use validate::*;
 pub use value_source::ValueSource;
 pub use variant::{EffectiveVariant, VariantSpec};
-pub use verify_config::VerifyConfig;
+pub use verify_config::{DigestPolicy, VerifyConfig};
 pub(crate) use versions_config::BackfillOrder;
 pub(crate) use versions_config::resolve_version_bounds;
 pub use versions_config::{Bound, BoundOrigin, ResolvedBounds, VersionsConfig};
@@ -445,6 +445,22 @@ impl MirrorSpec {
             return false;
         }
         !config.exclude.iter().any(|entry| entry.matches(&key))
+    }
+
+    /// The digest policy governing this spec's source type. `verify:` absent
+    /// means the default on both axes (`if_present`).
+    ///
+    /// Env sources are `Off` outright: their wheels are verified against the
+    /// PEP 751 lock's own hashes in `python_prepare`, and `VersionInfo.assets`
+    /// is empty by construction, so there is no second digest to police.
+    pub fn digest_policy(&self) -> DigestPolicy {
+        let verify = self.verify.as_ref();
+        match &self.source {
+            Source::GithubRelease { .. } => verify.map(|v| v.github_asset_digest),
+            Source::UrlIndex(_) => verify.map(|v| v.url_index_digest),
+            Source::Pylock { .. } | Source::Pypi { .. } => Some(DigestPolicy::Off),
+        }
+        .unwrap_or_default()
     }
 
     /// Returns the `exclude` entry matching `(version, platform)`, if any.

@@ -17,3 +17,5 @@ mod support;
 mod bin_scan;
 #[path = "tests/libc_lint.rs"]
 mod libc_lint;
+#[path = "tests/resume_digest.rs"]
+mod resume_digest;

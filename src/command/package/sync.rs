@@ -173,6 +173,9 @@ impl Sync {
         }
 
         // Build mirror tasks — find variant context for each resolved version
+        // `off` is expressed by dropping the digest, so `verify` needs no
+        // policy of its own.
+        let policy = spec.digest_policy();
         let mut tasks = Vec::new();
         for rv in &filtered {
             // Find matching effective variant for metadata/asset_type inheritance
@@ -200,8 +203,8 @@ impl Sync {
                     bin_scan: eff_variant.bin_scan,
                     libc_lint: eff_variant.libc_lint,
                     verify_config: spec.verify.clone(),
-                    asset_digest: platform_asset.digest.clone(),
-                    require_digest: false,
+                    asset_digest: policy.apply(platform_asset.digest.as_ref()),
+                    require_digest: policy.requires_digest(),
                     cascade: spec.cascade.enabled,
                     spec_dir: spec_dir.to_path_buf(),
                     asset_type,

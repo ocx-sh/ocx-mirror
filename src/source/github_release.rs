@@ -127,14 +127,21 @@ fn parse_release(tag_pattern: &Regex, release: &octocrab::models::repos::Release
     };
 
     let mut assets = HashMap::new();
+    let mut asset_digests = HashMap::new();
     for asset in &release.assets {
         assets.insert(asset.name.clone(), asset.browser_download_url.clone());
+        // GitHub returns `sha256:<hex>` and omits the key on releases
+        // published before it added the field; serde resolves the absence to
+        // `None`, so an older release simply declares nothing.
+        if let Some(digest) = &asset.digest {
+            asset_digests.insert(asset.name.clone(), digest.clone());
+        }
     }
 
     Some(VersionInfo {
         version: full_version,
         assets,
-        asset_digests: HashMap::new(),
+        asset_digests,
         is_prerelease: release.prerelease,
     })
 }
@@ -215,11 +222,26 @@ mod tests {
         prerelease: bool,
         asset_names: &[&str],
     ) -> octocrab::models::repos::Release {
+        make_release_with_digests(
+            tag,
+            draft,
+            prerelease,
+            &asset_names.iter().map(|n| (*n, None)).collect::<Vec<_>>(),
+        )
+    }
+
+    /// `make_release`, with each asset's optional GitHub-declared digest.
+    fn make_release_with_digests(
+        tag: &str,
+        draft: bool,
+        prerelease: bool,
+        asset_names: &[(&str, Option<&str>)],
+    ) -> octocrab::models::repos::Release {
         let author = author_json();
 
         let assets: Vec<serde_json::Value> = asset_names
             .iter()
-            .map(|name| {
+            .map(|(name, digest)| {
                 serde_json::json!({
                     "url": "https://api.github.com/repos/test/test/releases/assets/1",
                     "id": 1,
@@ -233,6 +255,7 @@ mod tests {
                     "created_at": "2026-01-01T00:00:00Z",
                     "updated_at": "2026-01-01T00:00:00Z",
                     "browser_download_url": format!("https://github.com/test/test/releases/download/{tag}/{name}"),
+                    "digest": digest,
                     "uploader": author,
                 })
             })
@@ -354,6 +377,32 @@ mod tests {
             served.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a 404 is not retried"
+        );
+    }
+
+    #[test]
+    fn release_asset_digest_is_carried() {
+        // `verify.github_asset_digest` verified nothing before #76 — the field
+        // the policy reads is this one, so its capture is the whole feature.
+        let pattern = make_pattern(r"^v(?P<version>\d+\.\d+\.\d+)$");
+        let hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+        let release = make_release_with_digests(
+            "v1.0.0",
+            false,
+            false,
+            &[
+                ("tool-linux-amd64.tar.gz", Some(&format!("sha256:{hex}"))),
+                // An older release: GitHub omits the key entirely.
+                ("tool-darwin-arm64.tar.gz", None),
+            ],
+        );
+
+        let info = parse_release(&pattern, &release).unwrap();
+        assert_eq!(info.assets.len(), 2);
+        assert_eq!(info.asset_digests["tool-linux-amd64.tar.gz"], format!("sha256:{hex}"));
+        assert!(
+            !info.asset_digests.contains_key("tool-darwin-arm64.tar.gz"),
+            "an asset with no declared digest must be absent, not empty"
         );
     }
 

@@ -65,8 +65,67 @@ Declaring any permission sets every unnamed scope to `none`, so the generated bl
 
 ## `source` {#source}
 
-<!-- Filled in by the source reference (upstream types, `url_rewrite`). -->
-Documented below.
+Where upstream versions and their download URLs come from. `source.type` picks one of four discovery models; every other key under `source:` belongs to exactly one of them, and an unrecognised key is a hard parse failure rather than a silent no-op.
+
+| `type` | Discovery | Asset selection |
+|--------|-----------|-----------------|
+| `github_release` | [GitHub Releases][github-releases] API for `owner/repo` | [`assets`](#assets) regexes over release asset names |
+| `url_index` | A JSON index document — fetched, inline, or generated | [`assets`](#assets) regexes over the index's asset names |
+| `pylock` | A committed [PEP 751](https://peps.python.org/pep-0751/) `pylock.toml` | [`wheels`](#wheels) — see [Python apps](#pylock) |
+| `pypi` | A Simple Repository API index | [`wheels`](#wheels) — see [`source.type: pypi`](#pypi-source) |
+
+### `source.type: github_release` {#github-release-source}
+
+```yaml
+source:
+  type: github_release
+  owner: Kitware
+  repo: CMake
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+```
+
+`tag_pattern` is a regex matched against each release's tag. It **must** contain a named capture group `(?P<version>...)`, whose text becomes the mirrored version; an optional `(?P<prerelease>...)` group is appended as `-<suffix>` and marks the version as a pre-release. Drafts and non-matching tags are skipped. The default pattern is `^v?(?P<version>\d+\.\d+\.\d+)(?:-(?P<prerelease>[0-9a-zA-Z]+))?$`.
+
+Release listing uses [`GITHUB_TOKEN`][env-github-token] when set — without it, the unauthenticated 60-requests/hour quota applies, which a release-heavy backfill exhausts.
+
+### `source.type: url_index` {#url-index-source}
+
+Exactly one of `url`, `versions`, or `generator` — never two, never none:
+
+```yaml
+source:
+  type: url_index
+  url: "https://example.com/versions.json"       # fetch the document
+# versions: { ... }                               # or write it inline
+# generator: { command: [...] }                   # or produce it on stdout
+```
+
+`generator` runs a command whose stdout must be the same JSON document: `command` (a non-empty argv list), optional `working_directory` (relative to the spec directory), and `timeout_seconds` (default 60). Empty output and a non-zero exit are both hard errors.
+
+The document is **url-index v1** (`https://ocx.sh/schemas/url-index/v1.json`, emitted by `ocx-mirror schema url-index`):
+
+```json
+{
+  "versions": {
+    "1.0.0": {
+      "prerelease": false,
+      "assets": {
+        "tool-1.0.0-linux-amd64.tar.gz": "https://example.com/tool-1.0.0-linux-amd64.tar.gz",
+        "tool-1.0.0-darwin-arm64.tar.gz": {
+          "url": "https://example.com/tool-1.0.0-darwin-arm64.tar.gz",
+          "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        }
+      }
+    }
+  }
+}
+```
+
+An asset value is **either** a bare URL string **or** an object carrying the URL plus the publisher's `sha256` (which is required in the object form — an object without it is a verbose string). The two forms mix freely inside one version. This is additive: the schema renders them as alternatives, so the document stays url-index **v1** under the same `$id` and every existing generator keeps validating.
+
+The digest is normalised at crawl time — a bare hex string becomes `sha256:<hex>`, an already-prefixed value passes through — and validated there, so a malformed one fails before any bytes move rather than per platform after the download. What it then obliges the download to do is [`verify.url_index_digest`](#verify).
+
+The same two forms apply to the inline `versions:` map, which is the identical shape written directly in `mirror.yml`.
 
 ## `assets` {#assets}
 
@@ -677,8 +736,51 @@ Pre-releases keep their identifier: `3.28.0-rc1` → `3.28.0-rc1_20260310142359`
 
 ## `verify` {#verify}
 
-<!-- Filled in by the verification reference (digest policies, checksums file). -->
-Documented below.
+Integrity checks run against every downloaded asset, before it is unpacked or published.
+
+```yaml
+verify:
+  github_asset_digest: require       # off | if_present (default) | require, or true/false
+  url_index_digest: if_present
+  checksums_file: "https://example.com/SHA256SUMS"
+```
+
+An unrecognised key here is a parse error, not a silent ignore: a `sha265_file:` that parsed would leave a spec verifying nothing while reading as if it did.
+
+### Digest policies
+
+Both digest keys take the same three-state value, describing what a **publisher-declared** digest obliges the download to do:
+
+| Value | Meaning |
+|-------|---------|
+| `off` | Ignore any declared digest. Also spelled `false`. |
+| `if_present` | Verify when the source declared one; a source that declares none is fine. **Default.** Also spelled `true`. |
+| `require` | Verify, and fail the asset when the source declared none. |
+
+`true` and `false` keep their exact pre-existing meaning, so a spec already carrying `github_asset_digest: false` behaves identically.
+
+A mismatch fails that `(version, platform)` and reds the run (exit 1); nothing is published for it. A `require` failure fires *after* the download — the policy lives in one place, which costs one wasted fetch and makes the refusal loud rather than a silent skip.
+
+### `verify.github_asset_digest`
+
+The digest the [GitHub Releases][github-releases] API declares per asset. GitHub omits it on releases published before it added the field, which `if_present` tolerates and `require` does not.
+
+!!! warning "This verified nothing before ocx-mirror 0.6.2"
+    The field has existed and defaulted to on since the first release, but the digest never reached the download leg — the check was dead code. It is live now. A mirror whose bytes differ from GitHub's declared digest — a mutating proxy, a re-uploaded asset — starts failing. That is the intent; set `off` for a source where it is known not to hold.
+
+### `verify.url_index_digest`
+
+The digest a [url_index](#url-index-source) document declares per asset, in the object asset form `{url, sha256}`.
+
+`require` is the guard against silent degradation: a `sha265:` typo in a generator turns the object form back into a plain string, which `if_present` accepts as "this asset declares no digest". Under `require` it fails instead.
+
+### `verify.checksums_file`
+
+URL of a `sha256sum`-format sidecar (`HASH  FILENAME` per line, `#` comments and blank lines skipped) listing the release's assets. The downloaded file is matched by asset name; an asset absent from the file fails. Independent of the digest policies — both run when both are configured.
+
+### Env sources ignore both digest policies
+
+`source.type: pylock` and `pypi` verify every wheel against the PEP 751 lock's own hashes during preparation. `VersionInfo.assets` is empty for them by construction, so a digest policy there would describe a check that never runs.
 
 ## `tests` {#tests}
 
@@ -1388,6 +1490,7 @@ notify:
     user_id: "123456789012345678"
 ```
 
+[env-github-token]: ./environment.md#github-token
 [spec-ocx-forwarding]: ./environment.md#ocx-forwarding
 [spec-env-signing-scrub]: ./environment.md#plugin-dispatch-scrub
 

@@ -184,9 +184,10 @@ allow_manual_edits: true
     assert!(spec.allow_manual_edits, "allow_manual_edits: true must parse");
 }
 
-#[test]
-fn default_verify_values() {
-    let yaml = r#"
+/// A `github_release` spec whose only varying lines are the `verify:` block.
+fn spec_with_verify(verify: &str) -> Result<MirrorSpec, serde_yaml_ng::Error> {
+    serde_yaml_ng::from_str(&format!(
+        r#"
 name: test
 target:
   registry: ocx.sh
@@ -198,14 +199,110 @@ source:
 assets:
   linux/amd64:
     - "test\\.tar\\.gz"
-verify:
-  github_asset_digest: false
-"#;
+{verify}
+"#
+    ))
+}
 
-    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    let verify = spec.verify.unwrap();
-    assert!(!verify.github_asset_digest);
+fn verify_of(verify: &str) -> VerifyConfig {
+    spec_with_verify(verify)
+        .expect("spec must parse")
+        .verify
+        .expect("verify:")
+}
+
+#[test]
+fn default_verify_values() {
+    let verify = verify_of("verify:\n  github_asset_digest: false");
+    assert_eq!(verify.github_asset_digest, DigestPolicy::Off);
     assert!(verify.checksums_file.is_none());
+}
+
+#[test]
+fn verify_digest_policy_defaults_to_if_present() {
+    // No `verify:` at all, and a `verify:` that names only the other axis:
+    // both resolve to the same default, which is what `digest_policy` leans on.
+    let spec = spec_with_verify("").expect("spec must parse");
+    assert!(spec.verify.is_none());
+    assert_eq!(spec.digest_policy(), DigestPolicy::IfPresent);
+
+    let verify = verify_of("verify:\n  checksums_file: https://example.com/SHA256SUMS");
+    assert_eq!(verify.github_asset_digest, DigestPolicy::IfPresent);
+    assert_eq!(verify.url_index_digest, DigestPolicy::IfPresent);
+}
+
+#[test]
+fn verify_github_asset_digest_bool_still_parses() {
+    // 98 contrib specs are on the bool spelling; `true`/`false` must keep
+    // their exact pre-#76 meaning or the fleet changes behaviour on upgrade.
+    assert_eq!(
+        verify_of("verify:\n  github_asset_digest: true").github_asset_digest,
+        DigestPolicy::IfPresent
+    );
+    assert_eq!(
+        verify_of("verify:\n  github_asset_digest: false").github_asset_digest,
+        DigestPolicy::Off
+    );
+}
+
+#[test]
+fn verify_url_index_digest_require_parses() {
+    let verify = verify_of("verify:\n  url_index_digest: require");
+    assert_eq!(verify.url_index_digest, DigestPolicy::Require);
+    assert_eq!(
+        verify.github_asset_digest,
+        DigestPolicy::IfPresent,
+        "axes are independent"
+    );
+}
+
+#[test]
+fn verify_rejects_unknown_key() {
+    // A `sha265_file:` in a committed spec would otherwise verify nothing,
+    // silently, which is the failure this block exists to prevent.
+    let err = spec_with_verify("verify:\n  sha265_file: x")
+        .expect_err("an unknown verify key must be refused")
+        .to_string();
+    assert!(err.contains("unknown field `sha265_file`"), "{err}");
+    assert!(err.contains("checksums_file"), "{err}");
+}
+
+#[test]
+fn verify_rejects_unknown_policy_name() {
+    let err = spec_with_verify("verify:\n  url_index_digest: required")
+        .expect_err("a misspelled policy must be refused")
+        .to_string();
+    assert!(err.contains("unknown variant `required`"), "{err}");
+    assert!(err.contains("require"), "{err}");
+}
+
+#[test]
+fn digest_policy_is_off_for_env_sources() {
+    // Wheels verify against the lock's own hashes in `python_prepare`; a
+    // second digest path there would be a lie, `VersionInfo.assets` being
+    // empty by construction.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(
+        r#"
+name: acme-app
+target:
+  registry: ocx.sh
+  repository: acme-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.12.8"
+  abi: cp312
+  interpreter_package: ocx.sh/python
+wheels:
+  linux/amd64: ~
+verify:
+  github_asset_digest: require
+  url_index_digest: require
+"#,
+    )
+    .expect("spec must parse");
+    assert_eq!(spec.digest_policy(), DigestPolicy::Off);
 }
 
 #[test]

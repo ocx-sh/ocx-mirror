@@ -136,3 +136,66 @@ assets:
         panic!("Expected UrlIndex Remote source, got: {:?}", spec.source);
     }
 }
+
+#[test]
+fn parse_url_index_inline_object_asset() {
+    let yaml = r#"
+name: test-tool
+target:
+  registry: localhost:5000
+  repository: test-tool
+source:
+  type: url_index
+  versions:
+    "1.0.0":
+      assets:
+        test-tool.tar.gz:
+          url: "https://example.com/test-tool.tar.gz"
+          sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+assets:
+  linux/amd64:
+    - "test-tool\\.tar\\.gz"
+"#;
+
+    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+    let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source else {
+        panic!("Expected UrlIndex Inline source, got: {:?}", spec.source);
+    };
+    let asset = &versions["1.0.0"].assets["test-tool.tar.gz"];
+    assert_eq!(asset.url(), "https://example.com/test-tool.tar.gz");
+    assert_eq!(
+        asset.digest(),
+        Some("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08")
+    );
+}
+
+#[test]
+fn parse_url_index_inline_mixed_asset_forms() {
+    // Additive, so a v1 document that digests one asset keeps the rest bare.
+    let yaml = r#"
+name: test-tool
+target:
+  registry: localhost:5000
+  repository: test-tool
+source:
+  type: url_index
+  versions:
+    "1.0.0":
+      assets:
+        bare.tar.gz: "https://example.com/bare.tar.gz"
+        checked.tar.gz:
+          url: "https://example.com/checked.tar.gz"
+          sha256: "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+assets:
+  linux/amd64:
+    - ".*\\.tar\\.gz"
+"#;
+
+    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+    let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source else {
+        panic!("Expected UrlIndex Inline source, got: {:?}", spec.source);
+    };
+    let assets = &versions["1.0.0"].assets;
+    assert_eq!(assets["bare.tar.gz"].digest(), None);
+    assert!(assets["checked.tar.gz"].digest().is_some());
+}

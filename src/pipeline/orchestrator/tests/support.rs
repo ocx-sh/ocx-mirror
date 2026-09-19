@@ -19,7 +19,15 @@ pub async fn prepare_offline(
     bin_scan: BinScanMode,
     libc_lint: bool,
 ) -> Result<Metadata> {
-    let task = MirrorTask {
+    let task = offline_task(spec_dir, bin_scan, libc_lint);
+    run_prepare(&task, task_dir).await
+}
+
+/// The task [`prepare_offline`] runs, built separately so a test can vary a
+/// field the eleven callers above never do — the declared digest, say.
+#[cfg(unix)]
+pub fn offline_task(spec_dir: &Path, bin_scan: BinScanMode, libc_lint: bool) -> MirrorTask {
+    MirrorTask {
         version: "1.0.0".into(),
         normalized_version: "1.0.0".into(),
         platform: platform("linux/amd64"),
@@ -42,14 +50,25 @@ pub async fn prepare_offline(
         spec_dir: spec_dir.to_path_buf(),
         asset_type: crate::spec::AssetType::Archive { strip_components: None },
         variant: None,
-    };
+    }
+}
 
+/// Runs the real prepare phase against a staged asset, so no request is made.
+#[cfg(unix)]
+pub async fn run_prepare(task: &MirrorTask, task_dir: &Path) -> Result<Metadata> {
     tokio::fs::create_dir_all(task_dir).await.expect("create task dir");
     let asset = task_dir.join(&task.asset_name);
     if !asset.exists() {
         staged_asset(&asset).await;
     }
+    prepare_as_is(task, task_dir).await
+}
 
+/// [`run_prepare`] without staging the asset — the work dir is run exactly as
+/// the caller left it, which is the only way to reach a resume whose archive
+/// is gone.
+#[cfg(unix)]
+pub async fn prepare_as_is(task: &MirrorTask, task_dir: &Path) -> Result<Metadata> {
     // Reqwest builds its TLS stack lazily on first `Client::new` and panics
     // with "No provider set" if none is registered — even though the staged
     // asset means no request is ever made. Without this the test is green
@@ -63,7 +82,7 @@ pub async fn prepare_offline(
     let progress = ProgressManager::hidden();
     let spinner = progress.spinner("test".to_string());
     let (_bundle, metadata) = prepare_task(
-        &task,
+        task,
         task_dir,
         &reqwest::Client::new(),
         &spinner,

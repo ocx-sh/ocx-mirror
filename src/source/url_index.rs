@@ -27,28 +27,102 @@ pub struct RemoteVersionEntry {
     /// Whether this is a pre-release version.
     #[serde(default)]
     pub prerelease: bool,
-    /// Map of asset filename to download URL.
-    pub assets: HashMap<String, String>,
+    /// Map of asset filename to its download URL, bare or digest-carrying.
+    pub assets: HashMap<String, IndexAsset>,
+}
+
+/// One asset in a url_index document: a bare download URL, or an object
+/// carrying the URL plus the publisher's sha256.
+///
+/// Untagged, so the schema renders the two forms as alternatives and every
+/// generator written against v1 keeps validating — additive, so the document
+/// stays url-index **v1** under the same `$id`.
+///
+/// ```json
+/// "assets": {
+///   "tool-linux-amd64.tar.gz": "https://example.com/tool-linux-amd64.tar.gz",
+///   "tool-darwin-arm64.tar.gz": { "url": "https://…", "sha256": "9f86d081…" }
+/// }
+/// ```
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum IndexAsset {
+    /// `"<name>": "<url>"`
+    Url(String),
+    /// `"<name>": { "url": "<url>", "sha256": "<hex>" }`
+    ///
+    /// `sha256` is required: an object without it is a verbose string.
+    Verified { url: String, sha256: String },
+}
+
+impl IndexAsset {
+    /// The download URL, whichever form declared it.
+    pub fn url(&self) -> &str {
+        match self {
+            Self::Url(url) => url,
+            Self::Verified { url, .. } => url,
+        }
+    }
+
+    /// The digest exactly as the document spelled it, before normalisation.
+    pub fn digest(&self) -> Option<&str> {
+        match self {
+            Self::Url(_) => None,
+            Self::Verified { sha256, .. } => Some(sha256),
+        }
+    }
+}
+
+/// A declared digest as `verify_digest` will re-parse it at download time.
+///
+/// A bare hex string is the common spelling in a hand-written index, so it is
+/// promoted to `sha256:<hex>`; an already-prefixed value passes through, which
+/// is what keeps a stronger algorithm expressible without a schema change.
+/// `ocx_oci`'s own parser is the check — the grammar has to be the one the
+/// download leg applies, not a second hex test that agrees with it by luck.
+fn normalized_digest(raw: &str) -> anyhow::Result<String> {
+    let candidate = match raw.contains(':') {
+        true => raw.to_string(),
+        false => format!("sha256:{raw}"),
+    };
+    ocx_oci::Digest::try_from(candidate.as_str())?;
+    Ok(candidate)
+}
+
+/// Split one version's asset map into its URLs and its declared digests.
+///
+/// Both are validated here, at crawl time: malformed foreign input fails
+/// before a gigabyte moves, and never becomes control flow downstream.
+fn split_assets(
+    assets: &HashMap<String, IndexAsset>,
+    version: &str,
+) -> anyhow::Result<(HashMap<String, Url>, HashMap<String, String>)> {
+    let mut urls = HashMap::with_capacity(assets.len());
+    let mut digests = HashMap::new();
+    for (name, asset) in assets {
+        let url = Url::parse(asset.url())
+            .map_err(|e| anyhow::anyhow!("invalid URL for asset '{name}' in version '{version}': {e}"))?;
+        if let Some(raw) = asset.digest() {
+            let digest = normalized_digest(raw)
+                .map_err(|e| anyhow::anyhow!("invalid sha256 for asset '{name}' in version '{version}': {e}"))?;
+            digests.insert(name.clone(), digest);
+        }
+        urls.insert(name.clone(), url);
+    }
+    Ok((urls, digests))
 }
 
 /// Parse a `RemoteIndex` into a list of `VersionInfo` entries.
 fn parse_remote_index(index: RemoteIndex) -> anyhow::Result<Vec<VersionInfo>> {
     let mut versions = Vec::with_capacity(index.versions.len());
-    for (version, entry) in index.versions {
-        let assets = entry
-            .assets
-            .into_iter()
-            .map(|(name, url_str)| {
-                let url = Url::parse(&url_str)
-                    .map_err(|e| anyhow::anyhow!("invalid URL for asset '{name}' in version '{version}': {e}"))?;
-                Ok((name, url))
-            })
-            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+    for (version, entry) in &index.versions {
+        let (assets, asset_digests) = split_assets(&entry.assets, version)?;
 
         versions.push(VersionInfo {
-            version,
+            version: version.clone(),
             assets,
-            asset_digests: HashMap::new(),
+            asset_digests,
             is_prerelease: entry.prerelease,
         });
     }
@@ -59,20 +133,12 @@ fn parse_remote_index(index: RemoteIndex) -> anyhow::Result<Vec<VersionInfo>> {
 pub fn from_inline(versions: &HashMap<String, crate::spec::UrlIndexVersion>) -> anyhow::Result<Vec<VersionInfo>> {
     let mut result = Vec::with_capacity(versions.len());
     for (version, entry) in versions {
-        let assets = entry
-            .assets
-            .iter()
-            .map(|(name, url_str)| {
-                let url = Url::parse(url_str)
-                    .map_err(|e| anyhow::anyhow!("invalid URL for asset '{name}' in version '{version}': {e}"))?;
-                Ok((name.clone(), url))
-            })
-            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        let (assets, asset_digests) = split_assets(&entry.assets, version)?;
 
         result.push(VersionInfo {
             version: version.clone(),
             assets,
-            asset_digests: HashMap::new(),
+            asset_digests,
             is_prerelease: entry.prerelease,
         });
     }
@@ -108,7 +174,7 @@ mod tests {
         let mut assets = HashMap::new();
         assets.insert(
             "tool-1.0.0-linux-amd64.tar.gz".to_string(),
-            "https://example.com/tool-1.0.0-linux-amd64.tar.gz".to_string(),
+            IndexAsset::Url("https://example.com/tool-1.0.0-linux-amd64.tar.gz".to_string()),
         );
         versions.insert(
             "1.0.0".to_string(),
@@ -156,7 +222,7 @@ mod tests {
                 prerelease: false,
                 assets: HashMap::from([(
                     "tool-linux.tar.gz".to_string(),
-                    "https://example.com/tool-linux.tar.gz".to_string(),
+                    IndexAsset::Url("https://example.com/tool-linux.tar.gz".to_string()),
                 )]),
             },
         );
@@ -166,7 +232,7 @@ mod tests {
                 prerelease: true,
                 assets: HashMap::from([(
                     "tool-linux.tar.gz".to_string(),
-                    "https://example.com/tool-2-linux.tar.gz".to_string(),
+                    IndexAsset::Url("https://example.com/tool-2-linux.tar.gz".to_string()),
                 )]),
             },
         );
@@ -268,6 +334,102 @@ mod tests {
         assert!(msg.contains("failed to run"), "Expected spawn failure, got: {msg}");
     }
 
+    /// A url_index document with one asset per named form.
+    fn index_json(asset: &str) -> RemoteIndex {
+        serde_json::from_str(&format!(
+            r#"{{"versions":{{"1.0.0":{{"assets":{{"tool.tar.gz":{asset}}}}}}}}}"#
+        ))
+        .expect("document must parse")
+    }
+
+    const HEX: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+    #[test]
+    fn object_asset_carries_digest() {
+        let index = index_json(&format!(
+            r#"{{"url":"https://example.com/tool.tar.gz","sha256":"{HEX}"}}"#
+        ));
+        let result = parse_remote_index(index).unwrap();
+
+        assert_eq!(
+            result[0].assets["tool.tar.gz"].as_str(),
+            "https://example.com/tool.tar.gz"
+        );
+        assert_eq!(result[0].asset_digests["tool.tar.gz"], format!("sha256:{HEX}"));
+    }
+
+    #[test]
+    fn bare_hex_digest_is_normalised_to_sha256_prefix() {
+        // The hand-written spelling: `sha256sum` output pasted verbatim. It
+        // has to reach `verify_digest` as an OCI digest or the download leg
+        // rejects the operator's own correct value.
+        let index = index_json(&format!(
+            r#"{{"url":"https://example.com/tool.tar.gz","sha256":"{HEX}"}}"#
+        ));
+        let result = parse_remote_index(index).unwrap();
+        assert_eq!(result[0].asset_digests["tool.tar.gz"], format!("sha256:{HEX}"));
+    }
+
+    #[test]
+    fn prefixed_digest_passes_through() {
+        let index = index_json(&format!(
+            r#"{{"url":"https://example.com/tool.tar.gz","sha256":"sha256:{HEX}"}}"#
+        ));
+        let result = parse_remote_index(index).unwrap();
+        assert_eq!(result[0].asset_digests["tool.tar.gz"], format!("sha256:{HEX}"));
+    }
+
+    #[test]
+    fn malformed_digest_is_refused() {
+        // Fail closed at crawl: a truncated hex that reached the download leg
+        // would fail there too, but only after the bytes moved, and per
+        // platform rather than once.
+        let index = index_json(r#"{"url":"https://example.com/tool.tar.gz","sha256":"deadbeef"}"#);
+        let err = parse_remote_index(index).unwrap_err().to_string();
+        assert!(err.contains("invalid sha256 for asset 'tool.tar.gz'"), "{err}");
+        assert!(err.contains("in version '1.0.0'"), "{err}");
+    }
+
+    #[test]
+    fn string_and_object_assets_coexist_in_one_version() {
+        // The untagged enum's regression guard: a v1 document that gained one
+        // object asset must keep the rest of its bare strings working.
+        let index: RemoteIndex = serde_json::from_str(&format!(
+            r#"{{"versions":{{"1.0.0":{{"assets":{{
+                 "bare.tar.gz":"https://example.com/bare.tar.gz",
+                 "checked.tar.gz":{{"url":"https://example.com/checked.tar.gz","sha256":"{HEX}"}}
+               }}}}}}}}"#
+        ))
+        .unwrap();
+
+        let result = parse_remote_index(index).unwrap();
+        assert_eq!(result[0].assets.len(), 2);
+        assert_eq!(result[0].asset_digests.len(), 1, "only the object form declares one");
+        assert!(result[0].asset_digests.contains_key("checked.tar.gz"));
+    }
+
+    #[test]
+    fn inline_object_asset_carries_digest() {
+        // The same two forms reaching `VersionInfo` through the spec's inline
+        // twin rather than a fetched document.
+        let versions = HashMap::from([(
+            "1.0.0".to_string(),
+            UrlIndexVersion {
+                prerelease: false,
+                assets: HashMap::from([(
+                    "tool.tar.gz".to_string(),
+                    IndexAsset::Verified {
+                        url: "https://example.com/tool.tar.gz".to_string(),
+                        sha256: HEX.to_string(),
+                    },
+                )]),
+            },
+        )]);
+
+        let result = from_inline(&versions).unwrap();
+        assert_eq!(result[0].asset_digests["tool.tar.gz"], format!("sha256:{HEX}"));
+    }
+
     #[test]
     fn parse_remote_index_invalid_url() {
         let mut versions = HashMap::new();
@@ -275,7 +437,7 @@ mod tests {
             "1.0.0".to_string(),
             RemoteVersionEntry {
                 prerelease: false,
-                assets: HashMap::from([("tool.tar.gz".to_string(), "not-a-url".to_string())]),
+                assets: HashMap::from([("tool.tar.gz".to_string(), IndexAsset::Url("not-a-url".to_string()))]),
             },
         );
 
