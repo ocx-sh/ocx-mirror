@@ -149,12 +149,14 @@ fn drift_entry_survives_the_discover_projection() {
     // kind}]` into the job matrix (generate/templates/workflow.yml). An
     // added kind must keep every projected field present and non-null.
     let report = PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: false,
         has_drift: true,
         versions: vec![drift_entry("3.29.0", None, vec!["linux/amd64".to_string()])],
         target: "ocx.sh/cmake".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     };
 
     let value: serde_json::Value = serde_json::to_value(&report).expect("report serializes");

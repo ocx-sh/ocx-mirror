@@ -134,6 +134,7 @@ fn parse_release(tag_pattern: &Regex, release: &octocrab::models::repos::Release
     Some(VersionInfo {
         version: full_version,
         assets,
+        asset_digests: HashMap::new(),
         is_prerelease: release.prerelease,
     })
 }

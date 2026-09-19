@@ -671,8 +671,8 @@ pub(crate) async fn prepare_task(
                 http_client,
                 &archive_path,
                 &task.asset_name,
-                &HashMap::new(),
-                &task.download_url,
+                task.asset_digest.as_deref(),
+                task.require_digest,
             )
             .await?;
         }

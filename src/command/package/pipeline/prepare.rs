@@ -711,6 +711,8 @@ fn build_tasks_from_plan(
             bin_scan: variant.bin_scan,
             libc_lint: variant.libc_lint,
             verify_config: spec.verify.clone(),
+            asset_digest: asset.digest.clone(),
+            require_digest: false,
             cascade: spec.cascade.enabled,
             spec_dir: spec_dir.to_path_buf(),
             asset_type,
@@ -766,7 +768,7 @@ async fn build_tasks_for_version(
                 continue;
             }
 
-            match resolver::resolve_assets(&version_info.assets, &patterns) {
+            match resolver::resolve_assets(version_info, &patterns) {
                 AssetResolution::Resolved(platforms) => {
                     for platform_asset in &platforms {
                         let platform_str = platform_asset.platform.to_string();
@@ -794,6 +796,8 @@ async fn build_tasks_for_version(
                             bin_scan: variant.bin_scan,
                             libc_lint: variant.libc_lint,
                             verify_config: spec.verify.clone(),
+                            asset_digest: platform_asset.digest.clone(),
+                            require_digest: false,
                             cascade: spec.cascade.enabled,
                             spec_dir: spec_dir.to_path_buf(),
                             asset_type,

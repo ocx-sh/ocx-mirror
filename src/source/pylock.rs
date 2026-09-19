@@ -79,6 +79,7 @@ pub async fn list_versions(spec_dir: &Path, path: &str, app_name: &str) -> anyho
     Ok(vec![VersionInfo {
         version,
         assets: HashMap::new(),
+        asset_digests: HashMap::new(),
         is_prerelease,
     }])
 }

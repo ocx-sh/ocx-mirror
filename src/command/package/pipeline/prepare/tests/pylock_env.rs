@@ -178,12 +178,14 @@ fn plan_entry_lookup_accepts_the_bare_version_of_a_stamped_entry() {
         pylock: None,
     };
     let plan = PlanReport {
-        schema_version: 3,
+        schema_version: crate::command::package::pipeline::plan::PLAN_SCHEMA_VERSION,
         has_new: true,
         has_drift: false,
         versions: vec![entry],
         target: "ocx.sh/acme".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     };
 
     for requested in ["1.0.0", "1.0.0_20260808", "1.0.0_20260809120000"] {

@@ -8,7 +8,7 @@
 |-----|------|----------|---------|
 | `name` | string | Yes | Tool name, used in log output and notify messages |
 | `target` | object | Yes | OCI registry and repository to push to |
-| `source` | object | Yes | Upstream release source: [GitHub Releases][github-releases], URL index, a committed [PEP 751 `pylock.toml`](#pylock), or an [index-discovered PyPI package](#pypi-source) |
+| [`source`](#source) | object | Yes | Upstream release source: [GitHub Releases][github-releases], URL index, a committed [PEP 751 `pylock.toml`](#pylock), or an [index-discovered PyPI package](#pypi-source) |
 | `assets` | object | Yes* | Platform → regex list mapping for selecting upstream release archives. *Mutually exclusive with `variants` — exactly one of the two required for `github_release`/`url_index` sources. Not used by `source.type: pylock`/`pypi` (see `wheels`). |
 | `variants` | array | No* | Alternate asset sets for the same tool (per-variant `assets`/`metadata`/`asset_type`), each producing its own version-tag prefix. *Mutually exclusive with `assets` — exactly one of the two required for `github_release`/`url_index` sources; rejected for env sources (`pylock`/`pypi`). See [`variants`](#variants). |
 | `metadata` | object | No | Path(s) to the package metadata JSON, with optional per-platform overrides. See [`metadata`](#metadata). |
@@ -20,8 +20,8 @@
 | `wheel_scope` | string | No | Repo-naming scope prefix for [shared wheel layers](#shared-wheel-layers) (`source.type: pylock`/`pypi`). Default `pip-packages`. |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean or object | No | Cascade rolling tags on push (`true` by default), and optionally put the generated repair workflow on a timer. See [`cascade`](#cascade). |
-| `versions` | object | No | Version filter (min/max bounds, `new_per_run`, backfill order) |
-| `verify` | object | No | Checksum verification options |
+| [`versions`](#versions) | object | No | Version filter (min/max bounds, `new_per_run`, backfill order). See [`versions`](#versions). |
+| [`verify`](#verify) | object | No | Checksum verification options. See [`verify`](#verify). |
 | `concurrency` | object | No | Parallel download limits, source rate limiting, push retry policy. See [`concurrency`](#concurrency). |
 | `tests` | array | No* | Commands to run against each installed bundle. Required when `pipeline generate ci` is used. |
 | `platforms` | object | No* | GHA runner and container matrix. Required when `pipeline generate ci` is used. |
@@ -62,6 +62,11 @@ Declaring any permission sets every unnamed scope to `none`, so the generated bl
       checks: write           # test-result check run
       pull-requests: write    # test-result pull-request comment
 ```
+
+## `source` {#source}
+
+<!-- Filled in by the source reference (upstream types, `url_rewrite`). -->
+Documented below.
 
 ## `assets` {#assets}
 
@@ -552,6 +557,11 @@ The repair shares the push workflow's `concurrency` group, so neither one ever r
 
 Cascading interacts with [`build_timestamp`](#build-timestamp): re-pointing a rolling tag leaves the digest it used to name untagged, which is a GC hazard when `build_timestamp: none`.
 
+## `versions` {#versions}
+
+<!-- Filled in by the version-window reference (`min`/`max`, resolved bounds). -->
+Documented below.
+
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
 `build_timestamp` controls the tag a mirrored version is published under. Each `(version, platform)` push writes a **primary tag** for that version; with `cascade: true` (the default) it also re-points the **rolling tags** `X.Y`, `X`, and `latest` to the newest build.
@@ -576,6 +586,11 @@ Pre-releases keep their identifier: `3.28.0-rc1` → `3.28.0-rc1_20260310142359`
 - **`none`** — bare tags only. Use exclusively when the target registry protects referenced digests from GC: a retention policy that keeps untagged manifests still referenced by consumers, an OCI referrers/lock guard, or a guarantee that a version is never re-published (each `X.Y.Z` treated as immutable upstream).
 
 `ocx-mirror` emits a parse-time warning when `build_timestamp: none` is combined with `cascade`, so the hazard surfaces on every `validate`, `check`, `sync`, and `pipeline` run. It is advisory, not fatal — a registry with retention configured can use `none` safely.
+
+## `verify` {#verify}
+
+<!-- Filled in by the verification reference (digest policies, checksums file). -->
+Documented below.
 
 ## `tests` {#tests}
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+pub mod generator;
 pub mod github_release;
 pub mod pylock;
 pub mod pypi;
@@ -15,5 +16,8 @@ use url::Url;
 pub struct VersionInfo {
     pub version: String,
     pub assets: HashMap<String, Url>,
+    /// Publisher-declared content digests keyed by asset name, normalised to
+    /// `sha256:<hex>`. Sparse — an asset whose source declares none is absent.
+    pub asset_digests: HashMap<String, String>,
     pub is_prerelease: bool,
 }

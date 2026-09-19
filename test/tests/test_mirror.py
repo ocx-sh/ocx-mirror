@@ -49,13 +49,25 @@ def _write_spec_yaml(
     cascade: bool = True,
     skip_prereleases: bool = False,
     versions_config: dict | None = None,
+    asset_digests: dict[str, str] | None = None,
+    verify: dict | None = None,
 ) -> None:
     """Write a mirror spec YAML file.
 
     versions: list of dicts with keys "version", "assets" (dict), optional "prerelease".
     The YAML source.versions is a map keyed by version string.
+
+    asset_digests: asset name -> sha256 digest. A named asset is emitted in the
+    object form (``{url, sha256}``) instead of the bare URL string.
+
+    verify: emitted verbatim as the spec's ``verify:`` block (scalar values only).
+
+    versions_config: ``min``/``max`` accept a plain string (the shorthand) or a
+    dict. A dict emits the nested object form -- ``{"version": "1.0.0",
+    "inclusive": True}``, ``{"url": ...}`` or ``{"generator": {...}}``.
     """
     plat = current_platform()
+    digests = asset_digests or {}
     lines = [
         f"name: {name}",
         "source:",
@@ -67,7 +79,12 @@ def _write_spec_yaml(
         lines.append(f"    \"{ver}\":")
         lines.append("      assets:")
         for asset_name, url in v["assets"].items():
-            lines.append(f"        \"{asset_name}\": \"{url}\"")
+            if asset_name in digests:
+                lines.append(f"        \"{asset_name}\":")
+                lines.append(f"          url: \"{url}\"")
+                lines.append(f"          sha256: \"{digests[asset_name]}\"")
+            else:
+                lines.append(f"        \"{asset_name}\": \"{url}\"")
         if v.get("prerelease"):
             lines.append("      prerelease: true")
 
@@ -85,16 +102,54 @@ def _write_spec_yaml(
     ]
     if skip_prereleases:
         lines.append("skip_prereleases: true")
+    if verify:
+        lines.append("verify:")
+        for key, value in verify.items():
+            lines.append(f"  {key}: {_yaml_scalar(value)}")
     if versions_config:
         lines.append("versions:")
-        if "min" in versions_config:
-            lines.append(f"  min: \"{versions_config['min']}\"")
-        if "max" in versions_config:
-            lines.append(f"  max: \"{versions_config['max']}\"")
+        for edge in ("min", "max"):
+            if edge in versions_config:
+                lines.extend(_bound_lines(edge, versions_config[edge]))
         if "new_per_run" in versions_config:
             lines.append(f"  new_per_run: {versions_config['new_per_run']}")
 
     path.write_text("\n".join(lines) + "\n")
+
+
+def _yaml_scalar(value) -> str:
+    """Render a Python scalar as the YAML the spec parser expects."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    return f"\"{value}\""
+
+
+def _bound_lines(edge: str, bound) -> list[str]:
+    """Render one `versions.<edge>` bound: shorthand string or object form."""
+    if not isinstance(bound, dict):
+        return [f"  {edge}: \"{bound}\""]
+
+    lines = [f"  {edge}:"]
+    if "version" in bound:
+        lines.append(f"    version: \"{bound['version']}\"")
+    elif "url" in bound:
+        lines.append("    version:")
+        lines.append(f"      url: \"{bound['url']}\"")
+    elif "generator" in bound:
+        generator = bound["generator"]
+        lines.append("    version:")
+        lines.append("      generator:")
+        lines.append("        command:")
+        for arg in generator["command"]:
+            lines.append(f"          - \"{arg}\"")
+        for key in ("working_directory", "timeout_seconds"):
+            if key in generator:
+                lines.append(f"        {key}: {_yaml_scalar(generator[key])}")
+    if "inclusive" in bound:
+        lines.append(f"    inclusive: {_yaml_scalar(bound['inclusive'])}")
+    return lines
 
 
 # ---------------------------------------------------------------------------

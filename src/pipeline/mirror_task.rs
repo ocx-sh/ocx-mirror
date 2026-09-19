@@ -39,6 +39,11 @@ pub struct MirrorTask {
     /// tree, so it lives in the same window between extraction and compression.
     pub libc_lint: bool,
     pub verify_config: Option<VerifyConfig>,
+    /// Digest the download must match, when the source declared one.
+    pub asset_digest: Option<String>,
+    /// Whether a *missing* declared digest fails this asset
+    /// (`verify.<source>_digest: require`).
+    pub require_digest: bool,
     pub cascade: bool,
     pub spec_dir: PathBuf,
     pub asset_type: AssetType,

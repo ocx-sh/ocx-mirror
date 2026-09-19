@@ -11,21 +11,27 @@ use super::support::*;
 // exercised via integration tests once execute() is implemented.
 
 #[test]
-fn plan_report_serializes_schema_version_3() {
+fn plan_report_serializes_schema_version_4() {
     // §3.5: JSON output format matches design spec §2.2 schema.
-    // schema_version 3 since the plan carries the metadata-drift kind and
-    // the has_drift gate beside has_new.
+    // schema_version 4 since the plan carries a per-asset digest, the
+    // per-platform legs map and the resolved version window, on top of v3's
+    // metadata-drift kind and has_drift gate.
     let report = PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: true,
         has_drift: false,
         versions: vec![entry("3.29.0", &["linux/amd64", "darwin/arm64"], PlanVersionKind::New)],
         target: "ocx.sh/cmake".to_string(),
         ocx_mirror_rev: Some("abc123def456".to_string()),
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     };
 
     let value: serde_json::Value = serde_json::to_value(&report).unwrap();
-    assert_eq!(value["schema_version"].as_u64().unwrap(), 3);
+    assert_eq!(
+        value["schema_version"].as_u64().unwrap(),
+        u64::from(PLAN_SCHEMA_VERSION)
+    );
     assert!(value["has_new"].as_bool().unwrap());
     assert!(!value["has_drift"].as_bool().unwrap());
     assert_eq!(value["target"].as_str().unwrap(), "ocx.sh/cmake");
@@ -36,12 +42,14 @@ fn plan_report_serializes_schema_version_3() {
 fn plan_report_has_new_false_when_no_versions() {
     // §3.5: Empty source + empty target → has_new: false, versions: []
     let report = PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: false,
         has_drift: false,
         versions: vec![],
         target: "ocx.sh/cmake".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     };
 
     let value: serde_json::Value = serde_json::to_value(&report).unwrap();
@@ -71,7 +79,7 @@ fn plan_report_mixed_new_and_backfill_versions() {
     // §3.5: Mixed: 2 versions present in target, 1 new → only 1 in versions[]
     // This test verifies the schema shape for the mixed case.
     let report = PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: true,
         has_drift: false,
         versions: vec![
@@ -80,6 +88,8 @@ fn plan_report_mixed_new_and_backfill_versions() {
         ],
         target: "ocx.sh/cmake".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     };
 
     let value: serde_json::Value = serde_json::to_value(&report).unwrap();
@@ -108,6 +118,7 @@ fn build_version_entries_emits_variant_prefixed_tag() {
         platform: platform.clone(),
         asset_name: "cpython.tar.gz".to_string(),
         url: url::Url::parse("https://example.com/cpython.tar.gz").unwrap(),
+        digest: None,
     };
 
     let filtered = vec![
@@ -155,6 +166,7 @@ fn build_version_entries_carries_resolved_assets() {
             platform: platform.clone(),
             asset_name: "cpython-slim.tar.gz".to_string(),
             url: url::Url::parse("https://example.com/cpython-slim.tar.gz").unwrap(),
+            digest: None,
         }],
         is_prerelease: false,
     }];
@@ -171,12 +183,14 @@ fn build_version_entries_carries_resolved_assets() {
 
     // Round-trip: prepare deserializes what plan serialized.
     let json = serde_json::to_string(&PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: true,
         has_drift: false,
         versions: entries,
         target: "ocx.sh/cpython".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     })
     .unwrap();
     let parsed: PlanReport = serde_json::from_str(&json).unwrap();

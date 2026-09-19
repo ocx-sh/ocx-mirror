@@ -6,6 +6,7 @@
 
 mod drift;
 mod env;
+mod legs;
 
 // Glob, as elsewhere in this refactor: the `#[path]` test modules resolve
 // through `use super::super::*;`. `pub(crate)` because `patch` and
@@ -13,6 +14,7 @@ mod env;
 // is not meant to change.
 pub(crate) use drift::*;
 pub(crate) use env::*;
+pub(crate) use legs::*;
 
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -54,6 +56,16 @@ use crate::version_platform_map::VersionPlatformMap;
 /// place.
 pub(crate) const DEFAULT_LOCKS_DIR: &str = "locks";
 
+/// `plan.json`'s wire version. One constant, not a literal per construction
+/// site: v3 lived at two (`build_plan_report` and `env_plan_report`) and
+/// nothing tied them together.
+///
+/// Deliberately a `u32` and not a `serde_repr` enum (quality-rust.md,
+/// "Version Enum via serde_repr"): that pattern rejects unrecognised versions
+/// on read, and the plan.json contract promises the opposite — a consumer
+/// reads the fields it knows and ignores the rest.
+pub const PLAN_SCHEMA_VERSION: u32 = 4;
+
 /// Maximum number of published tags read concurrently by the drift scan.
 ///
 /// Each tile is a small, latency-bound registry round trip (an image index, a
@@ -66,6 +78,7 @@ const DRIFT_SCAN_CONCURRENCY: usize = 64;
 /// `new` | `backfill-partial` | `metadata-drift` — what kind of work is needed
 /// for this version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum PlanVersionKind {
     /// Version not yet present in the target registry.
@@ -98,17 +111,28 @@ impl PlanVersionKind {
 /// build tasks without re-crawling the source (issue #160 — one crawl per
 /// pipeline run instead of N+1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct PlanAssetEntry {
     /// Platform slug (e.g. `linux/amd64`).
     pub platform: String,
     /// Upstream asset file name (drives archive-type detection downstream).
     pub asset_name: String,
     /// Direct download URL resolved by discover's single source crawl.
+    // `with = "String"`, not schemars' own `url2` feature — the `spec/dist.rs`
+    // precedent: `schemars` is shared with ocx and its feature list is
+    // copied verbatim from ocx's `[workspace.dependencies]`, so a local
+    // addition is dropped by the next submodule re-sync.
+    #[cfg_attr(feature = "jsonschema", schemars(with = "String"))]
     pub url: url::Url,
+    /// Publisher-declared digest (`sha256:<hex>`) for this asset. Absent when
+    /// the source declared none — `prepare --plan` then skips the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
 }
 
 /// A single version entry in the plan output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct PlanVersionEntry {
     /// Normalized tag the pipeline publishes — including the
     /// `build_timestamp` stamp, on every source type. Archive sources may
@@ -147,21 +171,26 @@ pub struct PlanVersionEntry {
 
 /// Structured output of `ocx-mirror package pipeline plan`.
 ///
-/// JSON shape (schema_version 3 — v3 adds the `metadata-drift` kind and the
-/// `has_drift` gate; v2 added `source_version`, `variant`, and resolved
-/// `assets` per version entry so `prepare --plan` consumes the discover crawl
-/// instead of re-crawling, issue #160):
+/// JSON shape (schema_version 4 — v4 adds a per-asset `digest`, the
+/// per-platform `legs` map, and the resolved `versions_resolved` window;
+/// v3 added the `metadata-drift` kind and the `has_drift` gate; v2 added
+/// `source_version`, `variant`, and resolved `assets` per version entry so
+/// `prepare --plan` consumes the discover crawl instead of re-crawling,
+/// issue #160):
 /// ```json
 /// {
-///   "schema_version": 3,
+///   "schema_version": 4,
 ///   "has_new": true,
 ///   "has_drift": false,
 ///   "versions": [...],
 ///   "target": "ocx.sh/cmake",
-///   "ocx_mirror_rev": "abc123..."
+///   "ocx_mirror_rev": "abc123...",
+///   "legs": {},
+///   "versions_resolved": { "min_inclusive": true, "max_inclusive": false }
 /// }
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 pub struct PlanReport {
     /// Schema version for forward-compat detection.
     pub schema_version: u32,
@@ -180,6 +209,19 @@ pub struct PlanReport {
     pub target: String,
     /// The git SHA of `ocx-mirror` used when generating this plan.
     pub ocx_mirror_rev: Option<String>,
+    /// Per-platform CI legs — the spec's test matrix, resolved. Keyed by the
+    /// `platforms:` key verbatim, including any `+libc.*` suffix. Empty when
+    /// the spec declares no `platforms:`.
+    ///
+    /// `BTreeMap` so the key order is the sorted order `build_matrix` already
+    /// emits; a hash order here would rewrite the document on every run.
+    #[serde(default)]
+    pub legs: BTreeMap<String, PlanLeg>,
+    /// The version window this run actually filtered by, both edges resolved.
+    ///
+    /// `default` keeps schema-3 plans readable by `prepare`.
+    #[serde(default)]
+    pub versions_resolved: spec::ResolvedBounds,
 }
 
 /// `ocx-mirror package pipeline plan` subcommand.
@@ -296,6 +338,11 @@ async fn build_plan_report(
     // error into an availability one.
     let upstream_versions = list_upstream_versions(spec, spec_dir).await?;
 
+    // Resolve the `versions:` window once per run, before the env dispatch:
+    // both seams below (the env candidate selector and `filter_versions`)
+    // filter by the same resolved edges, and `plan.json` reports them.
+    let bounds = spec::resolve_version_bounds(spec.versions.as_ref(), spec_dir).await?;
+
     // Build timestamp (reuse existing normalizer).
     let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
 
@@ -323,7 +370,7 @@ async fn build_plan_report(
                 &build_ts,
             )
             .await?;
-            return Ok(env_plan_report(spec, versions));
+            return Ok(env_plan_report(spec, versions, &bounds));
         }
         // Discovery already ran above via `list_upstream_versions` (dispatches
         // to `source::pypi::list_versions`); per-version lock derivation
@@ -332,10 +379,17 @@ async fn build_plan_report(
         // `build_env_plan_entries` the `pylock` branch above calls, once a
         // lock has been derived for a candidate version.
         Source::Pypi { .. } => {
-            let versions =
-                build_pypi_plan_entries(spec, &upstream_versions, &all_tags, &version_map, locks_dir, &build_ts)
-                    .await?;
-            return Ok(env_plan_report(spec, versions));
+            let versions = build_pypi_plan_entries(
+                spec,
+                &upstream_versions,
+                &bounds,
+                &all_tags,
+                &version_map,
+                locks_dir,
+                &build_ts,
+            )
+            .await?;
+            return Ok(env_plan_report(spec, versions, &bounds));
         }
         _ => {}
     }
@@ -351,7 +405,7 @@ async fn build_plan_report(
             .map_err(|e| MirrorError::SpecInvalid(vec![e]))?;
 
         for version_info in &upstream_versions {
-            if let AssetResolution::Resolved(platforms) = resolver::resolve_assets(&version_info.assets, &patterns)
+            if let AssetResolution::Resolved(platforms) = resolver::resolve_assets(version_info, &patterns)
                 && let Ok(normalized) = normalizer::normalize_version(&version_info.version, &build_ts)
             {
                 // Drop `(version, platform)` pairs the platform does not apply to
@@ -384,6 +438,7 @@ async fn build_plan_report(
         &[], // no exact-version pin
         spec.skip_prereleases,
         spec.versions.as_ref(),
+        &bounds,
         &version_map,
         false, // latest
     );
@@ -416,12 +471,14 @@ async fn build_plan_report(
     let ocx_mirror_rev = spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone());
 
     Ok(PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new,
         has_drift,
         versions: version_entries,
         target,
         ocx_mirror_rev,
+        legs: BTreeMap::new(),
+        versions_resolved: bounds,
     })
 }
 
@@ -463,6 +520,7 @@ fn build_version_entries(
                     platform: pa.platform.to_string(),
                     asset_name: pa.asset_name.clone(),
                     url: pa.url.clone(),
+                    digest: pa.digest.clone(),
                 })
                 .collect();
 

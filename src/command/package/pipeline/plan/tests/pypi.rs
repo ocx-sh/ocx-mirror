@@ -82,10 +82,21 @@ platforms:
     serde_yaml_ng::from_str(yaml).unwrap()
 }
 
+/// The window `resolve_version_bounds` produces for a spec — built inline
+/// rather than awaited, so the async tests below do not nest runtimes.
+fn bounds(spec: &MirrorSpec) -> crate::spec::ResolvedBounds {
+    crate::spec::ResolvedBounds {
+        min: spec.versions.as_ref().and_then(|v| v.min.clone()),
+        max: spec.versions.as_ref().and_then(|v| v.max.clone()),
+        ..Default::default()
+    }
+}
+
 fn version_info(version: &str, is_prerelease: bool) -> source::VersionInfo {
     source::VersionInfo {
         version: version.to_string(),
         assets: std::collections::HashMap::new(),
+        asset_digests: std::collections::HashMap::new(),
         is_prerelease,
     }
 }
@@ -109,7 +120,7 @@ fn select_pypi_candidates_orders_oldest_first_and_applies_new_per_run() {
     ];
     let version_map = VersionPlatformMap::default();
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &version_map);
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &version_map);
     let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
     // Default backfill (newest_first) with cap=2: oldest-first order among the
     // two highest surviving versions.
@@ -133,7 +144,7 @@ fn select_pypi_candidates_bounds_four_segment_pep440_versions() {
         version_info("1.16.6", false),
     ];
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &VersionPlatformMap::default());
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &VersionPlatformMap::default());
     let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
     assert_eq!(versions, vec!["1.16.6"], "sub-min PEP 440 releases must be dropped");
 }
@@ -145,7 +156,7 @@ fn select_pypi_candidates_skips_fully_published_version() {
     let mut version_map = VersionPlatformMap::default();
     version_map.add(Version::parse("1.0.0").unwrap(), "linux/amd64".parse().unwrap());
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &version_map);
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &version_map);
     let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
     assert_eq!(versions, vec!["2.0.0"], "already-published version must be dropped");
 }
@@ -160,7 +171,7 @@ fn select_pypi_candidates_never_panics_on_unparseable_version() {
     let upstream = vec![version_info("2024.1.1.1", false)];
     let version_map = VersionPlatformMap::default();
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &version_map);
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &version_map);
     assert_eq!(candidates.len(), 1, "unparseable version kept as outstanding work");
 }
 
@@ -229,6 +240,7 @@ fn build_pypi_plan_entries_writes_lock_and_references_it_in_the_entry() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
+        &bounds(&spec),
         &[],
         &version_map,
         &locks_dir,
@@ -252,12 +264,14 @@ fn build_pypi_plan_entries_writes_lock_and_references_it_in_the_entry() {
 
     // Round-trip through JSON exactly as `plan.json` would carry it.
     let report = PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: true,
         has_drift: false,
         versions: entries,
         target: "ocx.sh/pycowsay".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     };
     let json = serde_json::to_string(&report).unwrap();
     let parsed: PlanReport = serde_json::from_str(&json).unwrap();
@@ -282,6 +296,7 @@ fn build_pypi_plan_entries_reparse_failure_maps_to_data_error_exit_65() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
+        &bounds(&spec),
         &[],
         &version_map,
         &locks_dir,
@@ -327,6 +342,7 @@ fn build_pypi_plan_entries_universal_mode_never_invokes_ocx() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
+        &bounds(&spec),
         &[],
         &version_map,
         &locks_dir,
@@ -386,6 +402,7 @@ fn build_pypi_plan_entries_derived_lock_filename_follows_uv_naming_rule() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
+        &bounds(&spec),
         &[],
         &version_map,
         &locks_dir,
@@ -432,6 +449,7 @@ fn build_pypi_plan_entries_uv_resolution_failure_maps_to_data_error_exit_65() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
+        &bounds(&spec),
         &[],
         &version_map,
         &locks_dir,
@@ -460,7 +478,7 @@ async fn build_pypi_plan_entries_skips_derivation_when_no_candidates() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let entries = build_pypi_plan_entries(&spec, &upstream, &[], &version_map, &locks_dir, &None)
+    let entries = build_pypi_plan_entries(&spec, &upstream, &bounds(&spec), &[], &version_map, &locks_dir, &None)
         .await
         .expect("no candidates means no subprocess spawns, so this never touches uv/ocx");
     assert!(entries.is_empty());

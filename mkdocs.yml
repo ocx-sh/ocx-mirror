@@ -54,5 +54,6 @@ nav:
       - registry.yml: reference/registry-yml.md
       - dist.yml: reference/dist-yml.md
       - CLI: reference/cli.md
+      - plan.json: reference/plan-json.md
       - Environment: reference/environment.md
   - Changelog: changelog.md

@@ -39,6 +39,8 @@ fn plan_with(versions: Vec<PlanVersionEntry>) -> PlanReport {
         versions,
         target: "ocx.sh/testtool".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     }
 }
 
@@ -47,6 +49,7 @@ fn asset_entry(platform: &str, name: &str) -> PlanAssetEntry {
         platform: platform.to_string(),
         asset_name: name.to_string(),
         url: url::Url::parse(&format!("https://example.com/{name}")).unwrap(),
+        digest: None,
     }
 }
 

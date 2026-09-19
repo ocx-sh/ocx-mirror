@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -77,17 +76,24 @@ fn parse_checksums(content: &str, asset_name: &str) -> Result<String> {
 }
 
 /// Run all configured verification steps on a downloaded file.
+///
+/// `declared_digest` is what the source published for this asset, and
+/// `require_digest` whether its absence is itself a failure. The download URL
+/// is deliberately not a parameter: the check is host-independent, which is
+/// what makes rewriting the download host safe.
 pub async fn verify(
     config: &VerifyConfig,
     client: &reqwest::Client,
     file: &Path,
     asset_name: &str,
-    asset_digests: &HashMap<String, String>,
-    _download_url: &url::Url,
+    declared_digest: Option<&str>,
+    // Carried, not yet read: the policy that gives a *missing* digest meaning
+    // lands with `DigestPolicy` (#76). Every construction site passes `false`.
+    _require_digest: bool,
 ) -> Result<()> {
-    // 1. Verify against GitHub asset digest if configured and available
+    // 1. Verify against the source-declared digest if configured and available
     if config.github_asset_digest
-        && let Some(expected) = asset_digests.get(asset_name)
+        && let Some(expected) = declared_digest
     {
         verify_digest(file, expected).await?;
     }

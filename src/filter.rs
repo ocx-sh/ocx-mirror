@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use ocx_package::version::Version;
 
 use crate::resolver::asset_resolution::ResolvedPlatformAsset;
-use crate::spec::{BackfillOrder, VersionsConfig};
+use crate::spec::{BackfillOrder, ResolvedBounds, VersionsConfig};
 use crate::version_platform_map::VersionPlatformMap;
 
 /// A version with its resolved platform assets, ready for filtering.
@@ -25,7 +25,7 @@ pub struct ResolvedVersion {
 /// Filters applied in order:
 /// 1. Exact version match (if `exact_version` is set)
 /// 2. Skip prereleases (if `skip_prereleases` is true)
-/// 3. Apply min/max version bounds
+/// 3. Apply the resolved min/max version window (`bounds`)
 /// 4. Skip versions with no resolved platform assets
 /// 5. Sort by version
 /// 6. Keep only the latest (highest) version (if `latest` is true)
@@ -42,6 +42,7 @@ pub fn filter_versions(
     exact_versions: &[String],
     skip_prereleases: bool,
     versions_config: Option<&VersionsConfig>,
+    bounds: &ResolvedBounds,
     existing: &VersionPlatformMap,
     latest: bool,
 ) -> Vec<ResolvedVersion> {
@@ -66,10 +67,10 @@ pub fn filter_versions(
         versions.retain(|v| !v.is_prerelease);
     }
 
-    // 2. Apply min/max bounds
-    if let Some(config) = versions_config {
-        versions.retain(|v| within_bounds(&v.version, config.min.as_deref(), config.max.as_deref()));
-    }
+    // 2. Apply the resolved min/max window. Unconditional: a default
+    // `ResolvedBounds` admits everything, which is what a spec with no
+    // `versions:` block resolves to.
+    versions.retain(|v| bounds.admits(&v.version));
 
     // 3. Skip versions with no resolved platform assets
     versions.retain(|v| !v.platforms.is_empty());
@@ -163,25 +164,59 @@ pub(crate) fn version_cmp(candidate: &str, bound: &str) -> Option<Ordering> {
     Some(candidate.cmp(&bound))
 }
 
+/// [`within_bounds`] with each edge's inclusivity chosen by the caller.
+///
+/// Only `versions:` needs this: per-platform `min_version`/`max_version` and
+/// `exclude:` ranges keep the fixed min-inclusive / max-exclusive convention
+/// and go through the 3-arg wrapper below.
+///
+/// Fail-open, unchanged: a bound [`version_cmp`] cannot relate to `candidate`
+/// does not constrain it, so an unrecognisable upstream tag is surfaced as work
+/// rather than silently skipped.
+// ponytail: two adjacent booleans is the shape `quality-rust.md` flags. It is
+// tolerable only because the sole production caller is `ResolvedBounds::admits`,
+// which names each one from a struct field. A second caller passing bare
+// `true, false` literals is the signal to move the predicate onto
+// `ResolvedBounds` instead.
+pub(crate) fn within_bounds_ex(
+    candidate: &str,
+    min: Option<&str>,
+    min_inclusive: bool,
+    max: Option<&str>,
+    max_inclusive: bool,
+) -> bool {
+    if let Some(min) = min {
+        let below = match version_cmp(candidate, min) {
+            Some(Ordering::Less) => true,
+            Some(Ordering::Equal) => !min_inclusive,
+            _ => false,
+        };
+        if below {
+            return false;
+        }
+    }
+    if let Some(max) = max {
+        let above = match version_cmp(candidate, max) {
+            Some(Ordering::Greater) => true,
+            Some(Ordering::Equal) => !max_inclusive,
+            _ => false,
+        };
+        if above {
+            return false;
+        }
+    }
+    true
+}
+
 /// Whether `candidate` falls in the half-open window `[min, max)` — the
-/// min-inclusive / max-exclusive convention shared by `versions:`, per-platform
-/// `min_version`/`max_version`, and `exclude:` ranges.
+/// min-inclusive / max-exclusive convention per-platform `min_version` /
+/// `max_version` and `exclude:` ranges keep.
 ///
 /// Fail-open: a bound [`version_cmp`] cannot relate to `candidate` does not
 /// constrain it, so an unrecognisable upstream tag is surfaced as work rather
 /// than silently skipped.
 pub(crate) fn within_bounds(candidate: &str, min: Option<&str>, max: Option<&str>) -> bool {
-    if let Some(min) = min
-        && version_cmp(candidate, min) == Some(Ordering::Less)
-    {
-        return false;
-    }
-    if let Some(max) = max
-        && matches!(version_cmp(candidate, max), Some(Ordering::Greater | Ordering::Equal))
-    {
-        return false;
-    }
-    true
+    within_bounds_ex(candidate, min, true, max, false)
 }
 
 /// Total-order sort key for a PEP 440 version string:
@@ -342,6 +377,7 @@ mod tests {
                 platform: platform("linux/amd64"),
                 asset_name: "test.tar.gz".to_string(),
                 url: Url::parse("https://example.com/test.tar.gz").unwrap(),
+                digest: None,
             }],
             is_prerelease: prerelease,
         }
@@ -356,6 +392,7 @@ mod tests {
                 platform: platform("linux/amd64"),
                 asset_name: "test.tar.gz".to_string(),
                 url: Url::parse("https://example.com/test.tar.gz").unwrap(),
+                digest: None,
             }],
             is_prerelease: false,
         }
@@ -372,6 +409,7 @@ mod tests {
                     platform: platform(p),
                     asset_name: "test.tar.gz".to_string(),
                     url: Url::parse("https://example.com/test.tar.gz").unwrap(),
+                    digest: None,
                 })
                 .collect(),
             is_prerelease: false,
@@ -391,6 +429,16 @@ mod tests {
         VersionPlatformMap::default()
     }
 
+    /// The window `resolve_version_bounds` produces for a spec's literal
+    /// `versions.min`/`max` — today's min-inclusive / max-exclusive edges.
+    fn bounds(min: Option<&str>, max: Option<&str>) -> ResolvedBounds {
+        ResolvedBounds {
+            min: min.map(str::to_string),
+            max: max.map(str::to_string),
+            ..ResolvedBounds::default()
+        }
+    }
+
     #[test]
     fn skip_prereleases_when_configured() {
         let versions = vec![
@@ -399,7 +447,7 @@ mod tests {
             rv("2.0.0", "2.0.0+ts", false),
         ];
 
-        let result = filter_versions(versions, &[], true, None, &empty(), false);
+        let result = filter_versions(versions, &[], true, None, &bounds(None, None), &empty(), false);
         assert_eq!(result.len(), 2);
         assert!(result.iter().all(|v| !v.is_prerelease));
     }
@@ -408,7 +456,7 @@ mod tests {
     fn keep_prereleases_when_not_configured() {
         let versions = vec![rv("1.0.0", "1.0.0+ts", false), rv("1.1.0-rc1", "1.1.0-rc1+ts", true)];
 
-        let result = filter_versions(versions, &[], false, None, &empty(), false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &empty(), false);
         assert_eq!(result.len(), 2);
     }
 
@@ -425,7 +473,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(Some("2.0.0"), None),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].version, "2.0.0");
         assert_eq!(result[1].version, "3.0.0");
@@ -445,7 +501,15 @@ mod tests {
         };
 
         // max is exclusive: 2.0.0 itself is excluded
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, Some("2.0.0")),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "1.0.0");
     }
@@ -466,7 +530,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(Some("1.16.0"), None),
+            &empty(),
+            false,
+        );
         let kept: Vec<&str> = result.iter().map(|v| v.version.as_str()).collect();
         assert_eq!(kept, ["1.16.6"]);
     }
@@ -485,7 +557,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, Some("1.0.0")),
+            &empty(),
+            false,
+        );
         let kept: Vec<&str> = result.iter().map(|v| v.version.as_str()).collect();
         assert_eq!(kept, ["0.9.0"]);
     }
@@ -501,7 +581,7 @@ mod tests {
         // 1.0.0 and 3.0.0 already pushed for linux/amd64
         let existing = existing(&[("1.0.0", "linux/amd64"), ("3.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -516,7 +596,7 @@ mod tests {
         // "1.0.0+build1" normalizes to "1.0.0_build1" — already pushed
         let existing = existing(&[("1.0.0_build1", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -535,7 +615,15 @@ mod tests {
         };
 
         // Default (newest_first): picks the highest version
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, None),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "3.0.0");
     }
@@ -554,7 +642,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, None),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "1.0.0");
     }
@@ -574,7 +670,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, None),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].version, "3.0.0");
         assert_eq!(result[1].version, "4.0.0");
@@ -597,14 +701,30 @@ mod tests {
         };
 
         // Day 1: nothing mirrored yet → get [3.0.0, 4.0.0]
-        let result = filter_versions(all_versions.clone(), &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            all_versions.clone(),
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, None),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].version, "3.0.0");
         assert_eq!(result[1].version, "4.0.0");
 
         // Day 2: 3.0.0 and 4.0.0 already mirrored → get [1.0.0, 2.0.0]
         let existing = existing(&[("3.0.0", "linux/amd64"), ("4.0.0", "linux/amd64")]);
-        let result = filter_versions(all_versions, &[], false, Some(&config), &existing, false);
+        let result = filter_versions(
+            all_versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(None, None),
+            &existing,
+            false,
+        );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].version, "1.0.0");
         assert_eq!(result[1].version, "2.0.0");
@@ -630,7 +750,15 @@ mod tests {
 
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], true, Some(&config), &existing, false);
+        let result = filter_versions(
+            versions,
+            &[],
+            true,
+            Some(&config),
+            &bounds(Some("1.0.0"), Some("3.0.0")),
+            &existing,
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -642,7 +770,7 @@ mod tests {
 
         let versions = vec![no_platforms, rv("2.0.0", "2.0.0+ts", false)];
 
-        let result = filter_versions(versions, &[], false, None, &empty(), false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &empty(), false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -656,7 +784,7 @@ mod tests {
 
         let existing = existing(&[("1.0.0-rc1", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -669,7 +797,15 @@ mod tests {
             rv("3.0.0", "3.0.0+ts", false),
         ];
 
-        let result = filter_versions(versions, &["2.0.0".to_string()], false, None, &empty(), false);
+        let result = filter_versions(
+            versions,
+            &["2.0.0".to_string()],
+            false,
+            None,
+            &bounds(None, None),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
     }
@@ -687,6 +823,7 @@ mod tests {
             &["3.12.13_20260310".to_string()],
             false,
             None,
+            &bounds(None, None),
             &empty(),
             false,
         );
@@ -698,7 +835,15 @@ mod tests {
     fn exact_version_no_match() {
         let versions = vec![rv("1.0.0", "1.0.0+ts", false), rv("2.0.0", "2.0.0+ts", false)];
 
-        let result = filter_versions(versions, &["9.9.9".to_string()], false, None, &empty(), false);
+        let result = filter_versions(
+            versions,
+            &["9.9.9".to_string()],
+            false,
+            None,
+            &bounds(None, None),
+            &empty(),
+            false,
+        );
         assert!(result.is_empty());
     }
 
@@ -707,7 +852,15 @@ mod tests {
         let versions = vec![rv("2.0.0", "2.0.0_20260313150000", false)];
         let existing = existing(&[("2.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &["2.0.0".to_string()], false, None, &existing, false);
+        let result = filter_versions(
+            versions,
+            &["2.0.0".to_string()],
+            false,
+            None,
+            &bounds(None, None),
+            &existing,
+            false,
+        );
         assert!(result.is_empty());
     }
 
@@ -724,6 +877,7 @@ mod tests {
             &["1.0.0".to_string(), "3.0.0".to_string()],
             false,
             None,
+            &bounds(None, None),
             &empty(),
             false,
         );
@@ -734,7 +888,7 @@ mod tests {
 
     #[test]
     fn empty_input() {
-        let result = filter_versions(vec![], &[], false, None, &empty(), false);
+        let result = filter_versions(vec![], &[], false, None, &bounds(None, None), &empty(), false);
         assert!(result.is_empty());
     }
 
@@ -743,7 +897,7 @@ mod tests {
         let versions = vec![rv("1.0.0", "1.0.0_20260313150000", false)];
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert!(result.is_empty());
     }
 
@@ -753,7 +907,7 @@ mod tests {
         let versions = vec![rv_multi("1.0.0", "1.0.0_ts", &["linux/amd64", "darwin/arm64"])];
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].platforms.len(), 1);
         assert_eq!(result[0].platforms[0].platform, platform("darwin/arm64"));
@@ -764,7 +918,7 @@ mod tests {
         let versions = vec![rv_multi("1.0.0", "1.0.0_ts", &["linux/amd64", "darwin/arm64"])];
         let existing = existing(&[("1.0.0", "linux/amd64"), ("1.0.0", "darwin/arm64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert!(result.is_empty());
     }
 
@@ -772,7 +926,7 @@ mod tests {
     fn no_platforms_pushed_keeps_all() {
         let versions = vec![rv_multi("1.0.0", "1.0.0_ts", &["linux/amd64", "darwin/arm64"])];
 
-        let result = filter_versions(versions, &[], false, None, &empty(), false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &empty(), false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].platforms.len(), 2);
     }
@@ -785,14 +939,14 @@ mod tests {
             rv("3.0.0", "3.0.0+ts", false),
         ];
 
-        let result = filter_versions(versions, &[], false, None, &empty(), true);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &empty(), true);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "3.0.0");
     }
 
     #[test]
     fn latest_with_empty_input() {
-        let result = filter_versions(vec![], &[], false, None, &empty(), true);
+        let result = filter_versions(vec![], &[], false, None, &bounds(None, None), &empty(), true);
         assert!(result.is_empty());
     }
 
@@ -813,7 +967,7 @@ mod tests {
 
         // Without --latest, new_per_run=2 keeps [1.0.0, 2.0.0]
         // With --latest, should get 5.0.0 (the true highest), not 2.0.0
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), true);
+        let result = filter_versions(versions, &[], false, Some(&config), &bounds(None, None), &empty(), true);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "5.0.0");
     }
@@ -831,6 +985,7 @@ mod tests {
             &["1.0.0".to_string(), "2.0.0".to_string()],
             false,
             None,
+            &bounds(None, None),
             &empty(),
             true,
         );
@@ -850,7 +1005,7 @@ mod tests {
 
         let existing = existing(&[("3.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, true);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, true);
         assert!(
             result.is_empty(),
             "should be empty when latest is already mirrored, got: {:?}",
@@ -868,7 +1023,7 @@ mod tests {
 
         let existing = existing(&[("2.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, true);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, true);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "2.0.0");
         assert_eq!(result[0].platforms.len(), 1);
@@ -901,7 +1056,7 @@ mod tests {
         let versions = vec![rv_variant("1.0.0", "debug-1.0.0_ts", "debug")];
         let existing = existing(&[("debug-1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert!(
             result.is_empty(),
             "variant version should be detected as already mirrored"
@@ -914,7 +1069,7 @@ mod tests {
         let versions = vec![rv_variant("1.0.0", "debug-1.0.0_ts", "debug")];
         let existing = existing(&[("1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1, "debug variant should not be confused with default");
     }
 
@@ -927,7 +1082,7 @@ mod tests {
         ];
         let existing = existing(&[("debug-1.0.0", "linux/amd64")]);
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].variant.as_deref(), Some("pgo.lto"));
     }
@@ -941,7 +1096,7 @@ mod tests {
         ];
         let existing = existing(&[("1.0.0", "linux/amd64")]); // only default is on registry
 
-        let result = filter_versions(versions, &[], false, None, &existing, false);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &existing, false);
         assert_eq!(result.len(), 1, "slim variant should still be uploaded");
         assert_eq!(result[0].variant.as_deref(), Some("slim"));
     }
@@ -961,7 +1116,15 @@ mod tests {
             rv_variant("5.0.0", "debug-5.0.0_ts", "debug"),
         ];
 
-        let result = filter_versions(versions, &[], false, Some(&config), &empty(), false);
+        let result = filter_versions(
+            versions,
+            &[],
+            false,
+            Some(&config),
+            &bounds(Some("2.0.0"), Some("4.0.0")),
+            &empty(),
+            false,
+        );
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].version, "3.0.0");
     }
@@ -976,7 +1139,7 @@ mod tests {
             rv_variant("3.12.5", "pgo.lto-3.12.5_ts", "pgo.lto"),
         ];
 
-        let result = filter_versions(versions, &[], false, None, &empty(), true);
+        let result = filter_versions(versions, &[], false, None, &bounds(None, None), &empty(), true);
         assert_eq!(result.len(), 2, "both variants of 3.12.5 should be kept");
         assert_eq!(result[0].version, "3.12.5");
         assert_eq!(result[0].variant.as_deref(), Some("debug"));

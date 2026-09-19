@@ -36,6 +36,8 @@ pub async fn prepare_offline(
         bin_scan,
         libc_lint,
         verify_config: None,
+        asset_digest: None,
+        require_digest: false,
         cascade: false,
         spec_dir: spec_dir.to_path_buf(),
         asset_type: crate::spec::AssetType::Archive { strip_components: None },
