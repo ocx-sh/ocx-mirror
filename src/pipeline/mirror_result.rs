@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 use serde::Serialize;
 
 /// Outcome of processing a single mirror task.

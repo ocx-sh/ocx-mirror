@@ -4,11 +4,11 @@
 use std::path::Path;
 
 use anyhow::Result;
-use ocx_lib::archive::{Archive, ExtractOptions};
-use ocx_lib::oci::Platform;
-use ocx_lib::package::bundle::BundleBuilder;
-use ocx_lib::package::metadata::authoring::AuthoringMetadata;
-use ocx_lib::package::metadata::binary::Binaries;
+use ocx_oci::Platform;
+use ocx_package::bundle::BundleBuilder;
+use ocx_package::metadata::authoring::AuthoringMetadata;
+use ocx_package::metadata::binary::Binaries;
+use ocx_util::archive::{Archive, ExtractOptions};
 
 use crate::spec::{AssetType, MetadataConfig};
 
@@ -46,7 +46,7 @@ pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetTy
 /// `0` = auto-detect, `1` = single-threaded, `n` = use n threads.
 pub async fn bundle(content_dir: &Path, bundle_path: &Path, compression_threads: u32) -> Result<()> {
     BundleBuilder::from_path(content_dir)
-        .with_compression(ocx_lib::compression::CompressionOptions::default().with_threads(compression_threads))
+        .with_compression(ocx_util::compression::CompressionOptions::default().with_threads(compression_threads))
         .create(bundle_path)
         .await?;
     Ok(())
@@ -105,8 +105,8 @@ pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         use anyhow::Context;
-        use ocx_lib::package::bin_scan;
-        use ocx_lib::utility::fs::{DirWalker, WalkDecision};
+        use ocx_package::bin_scan;
+        use ocx_util::fs::{DirWalker, WalkDecision};
 
         let declared: BTreeSet<&str> = binaries.iter().map(|name| name.as_str()).collect();
         let directories = DirWalker::new(content_dir, |directory: &Path, _depth| {
@@ -445,7 +445,7 @@ mod tests {
     }
 
     /// An intermediate path component being a symlink is a whole escape class
-    /// this module does not defend against itself: `ocx_lib`'s `DirWalker`
+    /// this module does not defend against itself: `ocx_util`'s `DirWalker`
     /// classifies with `DirEntry::file_type()`, which does not follow links, so
     /// a symlinked directory is never descended into and its contents are never
     /// scanned. That property lives in another repository and nothing here pins
@@ -482,7 +482,7 @@ mod tests {
 
     #[tokio::test]
     async fn extract_and_bundle_excludes_metadata_from_content() {
-        use ocx_lib::archive::Archive;
+        use ocx_util::archive::Archive;
 
         let dir = tempfile::TempDir::new().unwrap();
 

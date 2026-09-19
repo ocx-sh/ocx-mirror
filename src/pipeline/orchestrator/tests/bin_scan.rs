@@ -339,7 +339,7 @@ async fn a_declared_binary_shipped_without_an_exec_bit_is_published_executable()
         .expect("prepare succeeds");
 
     let published = work.path().join("published");
-    ocx_lib::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
+    ocx_util::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
         .await
         .expect("the produced bundle extracts");
 
@@ -395,7 +395,7 @@ async fn an_auto_scan_with_no_declared_list_leaves_a_non_executable_binary_unfix
     );
 
     let published = work.path().join("published");
-    ocx_lib::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
+    ocx_util::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
         .await
         .expect("the produced bundle extracts");
     let mode = |relative: &str| {

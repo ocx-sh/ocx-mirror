@@ -151,7 +151,7 @@ impl ExcludeEntry {
     ///
     /// `version` is the caller's applicability key (build stamp and variant
     /// prefix already stripped), compared through `filter::version_cmp` so a
-    /// PEP 440 release `ocx_lib::Version` rejects is still measurable.
+    /// PEP 440 release `ocx_package::version::Version` rejects is still measurable.
     pub fn matches(&self, version: &str) -> bool {
         if let Some(raw) = &self.version {
             return crate::filter::version_cmp(version, raw) == Some(std::cmp::Ordering::Equal);
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn range_measures_four_segment_pep440_versions() {
-        // `ocx_lib::Version` rejects these; PEP 440 places them, so an env
+        // `ocx_package::version::Version` rejects these; PEP 440 places them, so an env
         // source's releases are excluded on the same boundary as any other.
         let e = entry("min_version: \"9.0.0\"\nmax_version: \"11.1.0\"");
         assert!(!e.matches("8.9.9.9"));

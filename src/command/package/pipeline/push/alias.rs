@@ -13,8 +13,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ocx_lib::log;
-use ocx_lib::publisher::Publisher;
+use ocx_package::publisher::Publisher;
 
 use crate::command::package::pipeline::patch::patch_push_args;
 use crate::command::package::pipeline::plan;
@@ -97,7 +96,7 @@ pub async fn alias_newest_as_latest(
 /// corrects it. Nothing here may fail the push job — the packages are already
 /// published either way.
 pub async fn run_newest_is_registry_newest(publisher: &Publisher, spec: &MirrorSpec, version: &str) -> bool {
-    let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
     let tags = match fetch_published_tags(publisher, &identifier).await {
         Ok(tags) => tags,
         Err(error) => {
@@ -131,7 +130,7 @@ pub async fn run_newest_is_registry_newest(publisher: &Publisher, spec: &MirrorS
 /// other process-global test knob.
 pub async fn fetch_published_tags(
     publisher: &Publisher,
-    identifier: &ocx_lib::oci::Identifier,
+    identifier: &ocx_oci::Identifier,
 ) -> Result<Vec<String>, MirrorError> {
     #[cfg(test)]
     if let Some(tags) = LATEST_TAGS_OVERRIDE
@@ -163,7 +162,7 @@ pub fn registry_tag_newer_than<'a>(tags: &'a [String], version: &str) -> Option<
     let own_key = pep440_sort_key(version);
     tags.iter()
         .map(String::as_str)
-        .filter(|tag| *tag != "latest" && !ocx_lib::package::tag::Tag::is_reserved_str(tag))
+        .filter(|tag| *tag != "latest" && !ocx_package::tag::Tag::is_reserved_str(tag))
         .find(|tag| {
             let key = pep440_sort_key(tag);
             key.0.is_some() && key > own_key
@@ -191,7 +190,7 @@ pub fn entries_awaiting_cascade<'a>(
     published: &'a [target_registry::PublishedImage],
     platforms_pushed: &[String],
 ) -> Vec<&'a target_registry::PublishedImage> {
-    let pushed: Vec<ocx_lib::oci::Platform> = platforms_pushed
+    let pushed: Vec<ocx_oci::Platform> = platforms_pushed
         .iter()
         .filter_map(|platform| platform.parse().ok())
         .collect();
@@ -230,7 +229,7 @@ pub async fn cascade_backfilled_entries(
     platforms_pushed: &[String],
     annotations: &BTreeMap<String, String>,
 ) -> Vec<String> {
-    let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
     let published = match published_images_for(publisher, &identifier, version).await {
         Ok(images) => images,
         Err(error) => {
@@ -307,7 +306,7 @@ pub async fn cascade_backfilled_entries(
 #[cfg(not(test))]
 pub async fn published_images_for(
     publisher: &Publisher,
-    identifier: &ocx_lib::oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     version: &str,
 ) -> Result<Vec<target_registry::PublishedImage>, MirrorError> {
     target_registry::fetch_published_images(publisher, identifier, &[version]).await
@@ -317,7 +316,7 @@ pub async fn published_images_for(
 #[cfg(test)]
 pub async fn published_images_for(
     _publisher: &Publisher,
-    _identifier: &ocx_lib::oci::Identifier,
+    _identifier: &ocx_oci::Identifier,
     _version: &str,
 ) -> Result<Vec<target_registry::PublishedImage>, MirrorError> {
     Ok(Vec::new())
@@ -329,7 +328,7 @@ pub async fn published_images_for(
 /// published state.
 pub async fn re_cascade_entry(
     publisher: &Publisher,
-    identifier: &ocx_lib::oci::Identifier,
+    identifier: &ocx_oci::Identifier,
     spec: &MirrorSpec,
     image: &target_registry::PublishedImage,
     annotations: &BTreeMap<String, String>,

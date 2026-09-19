@@ -7,14 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ocx_lib::cli::progress::{ProgressManager, Spinner};
-use ocx_lib::log;
-use ocx_lib::oci::Platform;
-use ocx_lib::package::metadata::Metadata;
-use ocx_lib::package::metadata::authoring::AuthoringMetadata;
-use ocx_lib::package::version::Version;
-use ocx_lib::package::{bin_scan, libc_lint};
-use ocx_lib::publisher::Publisher;
+use ocx_console::progress::{ProgressManager, Spinner};
+use ocx_oci::Platform;
+use ocx_package::metadata::Metadata;
+use ocx_package::metadata::authoring::AuthoringMetadata;
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
+use ocx_package::{bin_scan, libc_lint};
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
@@ -556,7 +555,7 @@ pub async fn execute_mirror(
         {
             results.push(MirrorResult::Failed {
                 version: version_keys[range_idx].clone(),
-                platform: ocx_lib::oci::Platform::default(),
+                platform: ocx_oci::Platform::default(),
                 error: format!("{error}"),
             });
             if fail_fast {
@@ -574,7 +573,7 @@ pub async fn execute_mirror(
 /// renderer stamps into `bundle-{V}-{slug}.tar.xz` and `pipeline push` reads
 /// back. Computing it locally is how a libc-bearing platform's bundle became
 /// invisible to the leg that was supposed to test it.
-pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_lib::oci::Platform) -> PathBuf {
+pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_oci::Platform) -> PathBuf {
     work_dir.join(version).join(crate::spec::platform_slug(platform))
 }
 
@@ -802,7 +801,7 @@ fn reject_empty_scan(scanned: &AuthoringMetadata, task: &MirrorTask) -> Result<(
 /// The context names the repository the run publishes to (one spec per target,
 /// so it names which of a repo's specs to fix), the version and the platform;
 /// the offending file, its dynamic loader, the libc it needs and the corrected
-/// platform key all come from [`LibcLintError`](ocx_lib::package::libc_lint::LibcLintError).
+/// platform key all come from [`LibcLintError`](ocx_package::libc_lint::LibcLintError).
 async fn check_declared_libc(content_dir: &Path, metadata: &AuthoringMetadata, task: &MirrorTask) -> Result<()> {
     if !task.libc_lint {
         // Gated on the lint's own scope predicate, not the key alone: the check
@@ -879,10 +878,10 @@ async fn push_task(
     annotations: &std::collections::BTreeMap<String, String>,
     sign: Option<&ResolvedSign>,
 ) -> Result<MirrorResult> {
-    let identifier = ocx_lib::oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
+    let identifier = ocx_oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
         .clone_with_tag(&task.normalized_version);
 
-    let info = ocx_lib::package::info::Info {
+    let info = ocx_package::info::Info {
         identifier,
         metadata: metadata.clone(),
         platform: task.platform.clone(),

@@ -10,7 +10,7 @@
 //!
 //! `container_id` is the same contract one level down, for the per-image leg.
 
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 
 /// The repository basename of a container image, with the registry prefix and
 /// the tag stripped (`docker.io/library/alpine:3.20` → `alpine`).
@@ -94,7 +94,7 @@ pub fn libc_family_feature(family: &str) -> &'static str {
 /// what keeps them apart. Every producer and consumer must call this one
 /// function or a libc-bearing platform's artifacts become invisible downstream.
 pub fn platform_slug(platform: &Platform) -> String {
-    use ocx_lib::utility::string_ext::StringExt as _;
+    use ocx_util::string_ext::StringExt as _;
 
     let mut slug = platform.ascii_segments().join("_");
 

@@ -40,7 +40,7 @@ pub fn run_push_cmd(
     bundles_dir: std::path::PathBuf,
     summary_path: std::path::PathBuf,
 ) -> Result<(), MirrorError> {
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     let cmd = Push {
         spec,
         bundles_dir,

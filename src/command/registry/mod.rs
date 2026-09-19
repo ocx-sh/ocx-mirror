@@ -16,7 +16,7 @@
 pub(crate) mod options;
 mod sync;
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use crate::error::MirrorError;
 

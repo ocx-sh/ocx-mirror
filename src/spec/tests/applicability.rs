@@ -94,7 +94,7 @@ fn platform_applies_strips_build_metadata() {
 #[test]
 fn platform_applies_bounds_four_segment_pep440_versions() {
     // Env sources (`pylock`/`pypi`) feed this predicate raw PEP 440 releases,
-    // which `ocx_lib::Version` rejects — the same defect as `versions.min`:
+    // which `ocx_package::version::Version` rejects — the same defect as `versions.min`:
     // an unparseable candidate satisfied every window and every exclude.
     let spec = spec_with_platform_windows();
 

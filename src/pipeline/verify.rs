@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use ocx_lib::oci::Digest as OciDigest;
+use ocx_oci::Digest as OciDigest;
 use sha2::{Digest, Sha256};
 
 use crate::spec::VerifyConfig;

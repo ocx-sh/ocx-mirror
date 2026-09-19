@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use super::options::DistSyncOptions;
 use crate::error::MirrorError;

@@ -1,7 +1,7 @@
 # Conventions
 
 ## Code style / quality
-- Follow `.claude/rules/quality-core.md` (SOLID/DRY/KISS/YAGNI) + `quality-rust.md` (ownership, async/Tokio, error handling, edition-2024 patterns). Grep for existing helpers before writing new (`pipeline.rs`, `spec/`, `ocx_lib`).
+- Follow `.claude/rules/quality-core.md` (SOLID/DRY/KISS/YAGNI) + `quality-rust.md` (ownership, async/Tokio, error handling, edition-2024 patterns). Grep for existing helpers before writing new (`pipeline.rs`, `spec/`, ocx's `ocx_*` crates under `external/ocx/crates/`).
 - Every source file carries a **license header** — `task rust:license:check` enforces; `rust:license:format` adds.
 - Errors: one `MirrorError` enum, each variant maps to a sysexits exit code (`error.rs::kind_exit_code`; table in `mem:core` docs). Propagate with context, don't swallow.
 

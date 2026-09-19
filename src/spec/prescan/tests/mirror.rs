@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::super::*;
 use super::support::*;

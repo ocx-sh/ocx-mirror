@@ -27,8 +27,6 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use ocx_lib::log;
-
 use super::{forward_ocx_env, resolve_ocx_binary};
 use crate::error::MirrorError;
 use crate::spec::{KeyConfig, KeylessConfig, Ref, SignConfig};
@@ -461,7 +459,7 @@ pub(crate) async fn invoke_sign_sweep(
         .to_str()
         .ok_or_else(|| MirrorError::SignFailed {
             target: reference.to_string(),
-            code: ocx_lib::cli::ExitCode::DataError as i32,
+            code: ocx_exit::ExitCode::DataError as i32,
         })
         .inspect_err(|_| {
             log::warn!("[sign] tags file path is not valid UTF-8: {}", tags_file.display());
@@ -517,7 +515,8 @@ pub(crate) async fn sweep_index_tags(
 /// Sign one reference, optionally narrowed into one platform (C-059).
 ///
 /// The in-process `Publisher` leg's counterpart to `push --sign`: that leg
-/// writes manifests through `ocx_lib` rather than a subprocess, so there is no
+/// writes manifests through `ocx_package`'s `Publisher` rather than a
+/// subprocess, so there is no
 /// `--sign` to pass and the signature is attached afterwards.
 ///
 /// # Errors
@@ -556,7 +555,7 @@ async fn run_sign(
         log::warn!("[sign] {e}");
         MirrorError::SignFailed {
             target: reference.to_string(),
-            code: ocx_lib::cli::ExitCode::Unavailable as i32,
+            code: ocx_exit::ExitCode::Unavailable as i32,
         }
     })?;
 
@@ -575,14 +574,14 @@ async fn run_sign(
             // pipeline already retries on.
             return Err(MirrorError::SignFailed {
                 target: reference.to_string(),
-                code: ocx_lib::cli::ExitCode::TempFail as i32,
+                code: ocx_exit::ExitCode::TempFail as i32,
             });
         }
         Ok(Err(e)) => {
             log::warn!("[sign] failed to spawn ocx: {e}");
             return Err(MirrorError::SignFailed {
                 target: reference.to_string(),
-                code: ocx_lib::cli::ExitCode::Unavailable as i32,
+                code: ocx_exit::ExitCode::Unavailable as i32,
             });
         }
         Ok(Ok(output)) => output,
@@ -604,7 +603,7 @@ async fn run_sign(
             target: reference.to_string(),
             // `None` (signal-killed) classifies as `Failure` like any
             // unrecognised code — the run did not sign either way.
-            code: output.status.code().unwrap_or(ocx_lib::cli::ExitCode::Failure as i32),
+            code: output.status.code().unwrap_or(ocx_exit::ExitCode::Failure as i32),
         });
     }
 

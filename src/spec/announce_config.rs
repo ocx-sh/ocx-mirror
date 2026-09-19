@@ -17,7 +17,7 @@
 //! string-stripped off the target.
 
 use clap::ValueEnum;
-use ocx_lib::forge::{ForgeKind, WriteTransport};
+use ocx_announce::forge::{ForgeKind, WriteTransport};
 use serde::Deserialize;
 
 /// Default index repository the pull request targets — also `ocx package

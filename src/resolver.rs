@@ -5,7 +5,7 @@ pub mod asset_resolution;
 
 use std::collections::{HashMap, HashSet};
 
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 use regex::Regex;
 use url::Url;
 

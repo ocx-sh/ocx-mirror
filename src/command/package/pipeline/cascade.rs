@@ -41,8 +41,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::log;
+use ocx_console::DataInterface;
 
 use crate::command::package::pipeline::announce;
 use crate::error::MirrorError;

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::super::*;
 use super::support::*;

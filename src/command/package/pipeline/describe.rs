@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use crate::error::MirrorError;
 use crate::pipeline::ocx_cli::{forward_ocx_env, resolve_ocx_binary};

@@ -31,7 +31,7 @@ Cross-check against the module map in `.claude/rules/subsystem-mirror.md`. Each 
 Feature area being designed:
 - Grep `use crate::` in module → find dependencies
 - Grep `use crate::{module}` across crate → find dependents
-- Note `ocx_lib` usage (path dep into `external/ocx`) — what the vendored lib already provides
+- Note `ocx_*` usage (path deps into `external/ocx`) — what the vendored crates already provide
 - Map dependency graph for subsystem
 
 ### 3. Design Pattern Detection
@@ -47,7 +47,7 @@ Patterns new feature should follow:
 Before design new code, find what exist:
 - Public functions in related modules reusable
 - Shared pipeline helpers (`src/pipeline.rs`)
-- What `ocx_lib` (path dep) already provides before writing OCI/packaging code
+- What ocx's `ocx_*` crates (path deps) already provide before writing OCI/packaging code
 - Test helpers in `test/src/` and `test/conftest.py`; renderer/spec fixtures in `tests/fixtures/`
 - Existing subcommand implementations similar to new feature
 

@@ -13,8 +13,8 @@
 //!
 //! # Target-agnostic
 //!
-//! The composition is **not** a fully-formed [`Info`](ocx_lib::package::info::Info):
-//! `Info` requires a concrete [`Identifier`](ocx_lib::oci::Identifier) carrying
+//! The composition is **not** a fully-formed [`Info`](ocx_package::info::Info):
+//! `Info` requires a concrete [`Identifier`](ocx_oci::Identifier) carrying
 //! a registry host, which this crate never knows. Instead it emits the two
 //! target-agnostic thirds of an `Info` — the composed [`Metadata`] and the base
 //! os/arch [`Platform`] — and [`EnvComposition::into_info`] assembles the final `Info`
@@ -49,14 +49,14 @@ use std::path::PathBuf;
 use serde_json::json;
 use uv_distribution_filename::WheelFilename;
 
-use ocx_lib::oci::{LayerLayoutSpec, Platform};
-use ocx_lib::package::metadata::Metadata;
-use ocx_lib::package::metadata::binary::Binaries;
-use ocx_lib::package::metadata::bundle::{Bundle, Version as BundleVersion};
-use ocx_lib::package::metadata::dependency::Dependencies;
-use ocx_lib::package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
-use ocx_lib::package::metadata::env::EnvBuilder;
-use ocx_lib::package::metadata::integrations::Integrations;
+use ocx_oci::{LayerLayoutSpec, Platform};
+use ocx_package::metadata::Metadata;
+use ocx_package::metadata::binary::Binaries;
+use ocx_package::metadata::bundle::{Bundle, Version as BundleVersion};
+use ocx_package::metadata::dependency::Dependencies;
+use ocx_package::metadata::entrypoint::{Entrypoint, EntrypointName, Entrypoints};
+use ocx_package::metadata::env::EnvBuilder;
+use ocx_package::metadata::integrations::Integrations;
 
 use crate::naming::normalize_package_name;
 use crate::platform::{PythonTarget, TargetArchitecture, TargetOperatingSystem, TargetPlatform};
@@ -129,7 +129,7 @@ pub struct EnvSpec {
     /// The private interpreter dependency, pinned by the consumer
     /// (python-build-standalone package). Its `python` on the composed `PATH`
     /// is the dispatch target for every synthesized entrypoint.
-    pub interpreter: ocx_lib::package::metadata::dependency::Dependency,
+    pub interpreter: ocx_package::metadata::dependency::Dependency,
     /// The selection target — supplies the base os/arch platform and the ABI
     /// the wheel set is checked against.
     pub target: PythonTarget,
@@ -148,7 +148,7 @@ pub struct WheelLayer {
     /// The per-layer strip + output prefix. Defaults **empty**: `repack` emits
     /// the final relocated tree (a wheel spans `lib/site-packages/`, `bin/`, and
     /// `share/…`, which a single layer prefix cannot express), so each wheel
-    /// applies at the content root. The field exists because ocx_lib's layer-ref
+    /// applies at the content root. The field exists because ocx_oci's layer-ref
     /// requires a [`LayerLayoutSpec`] and to leave room for a future
     /// strip/prefix edge case — not to relocate wheels.
     pub layout: LayerLayoutSpec,
@@ -157,9 +157,9 @@ pub struct WheelLayer {
 /// The target-agnostic composition of an env package.
 ///
 /// Carries the two registry-independent thirds of an
-/// [`Info`](ocx_lib::package::info::Info) — [`metadata`](Self::metadata) and
+/// [`Info`](ocx_package::info::Info) — [`metadata`](Self::metadata) and
 /// [`platform`](Self::platform) — plus the layer descriptors. The consumer
-/// supplies the registry-bearing [`Identifier`](ocx_lib::oci::Identifier) and
+/// supplies the registry-bearing [`Identifier`](ocx_oci::Identifier) and
 /// calls [`into_info`](Self::into_info) to obtain the final `Info`.
 #[derive(Debug, Clone)]
 pub struct EnvComposition {
@@ -175,13 +175,13 @@ pub struct EnvComposition {
 }
 
 impl EnvComposition {
-    /// Assembles the final [`Info`](ocx_lib::package::info::Info) by attaching a
-    /// consumer-supplied [`Identifier`](ocx_lib::oci::Identifier).
+    /// Assembles the final [`Info`](ocx_package::info::Info) by attaching a
+    /// consumer-supplied [`Identifier`](ocx_oci::Identifier).
     ///
     /// This is the single seam where the registry host enters: the crate stays
     /// target-agnostic; the consumer (the mirror) owns the identifier.
-    pub fn into_info(self, identifier: ocx_lib::oci::Identifier) -> ocx_lib::package::info::Info {
-        ocx_lib::package::info::Info {
+    pub fn into_info(self, identifier: ocx_oci::Identifier) -> ocx_package::info::Info {
+        ocx_package::info::Info {
             identifier,
             metadata: self.metadata,
             platform: self.platform,
@@ -550,7 +550,7 @@ pub enum ComposeError {
 /// target-agnostic default carried in the composed metadata; the mirror's push
 /// `-p` flag owns the published (possibly `+libc.*`-suffixed) platform.
 fn base_platform(platform: &TargetPlatform) -> Platform {
-    use ocx_lib::oci::{Architecture, OperatingSystem};
+    use ocx_oci::{Architecture, OperatingSystem};
 
     let os = match platform.operating_system {
         TargetOperatingSystem::Linux => OperatingSystem::Linux,
@@ -572,7 +572,7 @@ fn base_platform(platform: &TargetPlatform) -> Platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::package::metadata::dependency::Dependency;
+    use ocx_package::metadata::dependency::Dependency;
 
     use crate::platform::{
         Implementation, InterpreterPin, TargetArchitecture, TargetOperatingSystem, TargetPlatform, VariantConstraints,

@@ -3,7 +3,7 @@
 """S-052 — signing survives the `ocx mirror …` plugin-dispatch shape.
 
 `ocx` scrubs its bearer credentials from a dispatched plugin's environment
-(`crates/ocx_lib/src/env.rs:238` names the set; `crates/ocx_cli/src/app/
+(`crates/ocx_config/src/env.rs` names the set; `crates/ocx_cli/src/app/
 plugin_dispatch.rs:192` is where the removal reaches the child), so a mirror
 run as a plugin sees `OCX_IDENTITY_TOKEN`, `OCX_KEY_PASSWORD` and
 `OCX_SIGNING_KEY` unset no matter what the operator exported.

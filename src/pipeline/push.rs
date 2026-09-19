@@ -5,10 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
-use ocx_lib::oci::LayerLayoutSpec;
-use ocx_lib::package::info::Info;
-use ocx_lib::package::version::Version;
-use ocx_lib::publisher::{LayerRef, Publisher};
+use ocx_oci::LayerLayoutSpec;
+use ocx_oci::LayerRef;
+use ocx_package::info::Info;
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
 
 use super::mirror_result::MirrorResult;
 use super::mirror_task::VariantContext;
@@ -29,7 +30,7 @@ use super::ocx_cli::sign::{ResolvedSign, invoke_sign_reference};
 /// written onto the image index of every tag the push touches.
 ///
 /// `sign` is the run's resolved `sign:` block. This leg publishes through
-/// `ocx_lib`'s [`Publisher`] rather than an `ocx package push` subprocess, so
+/// `ocx_package`'s [`Publisher`] rather than an `ocx package push` subprocess, so
 /// there is no `--sign` to pass: the platform manifest is signed afterwards,
 /// by `ocx package sign -p` (C-059). The enclosing index is signed once the
 /// version's last platform has landed — by `orchestrator::execute_mirror`,

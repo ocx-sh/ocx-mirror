@@ -61,9 +61,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::{StreamExt as _, TryStreamExt as _};
-use ocx_lib::file_structure::IndexStore;
-use ocx_lib::oci::index::{CatalogIndex, OciIndex, OciIndexConfig, parse_physical_repository, serialize_root};
-use ocx_lib::oci::{Algorithm, ClientBuilder, Digest, Index, Reference};
+use ocx_index::Index;
+use ocx_index::IndexStore;
+use ocx_index::{CatalogIndex, OciIndex, OciIndexConfig, parse_physical_repository, serialize_root};
+use ocx_oci::{Algorithm, ClientBuilder, Digest, Reference};
 use tokio::sync::Semaphore;
 
 use self::plan::{PackageWork, PlannedDestination, SourcePlan};
@@ -331,7 +332,7 @@ async fn copy_sources(
     // One credential resolver for the run: clones share the `Arc<RwLock>` cache
     // (`ensure_source_auth`), so a physical host resolved once is not resolved
     // again by a later package naming the same host.
-    let source_auth = ocx_lib::auth::Auth::new();
+    let source_auth = ocx_oci::auth::Auth::new();
     // One destination client for the run: `native::Client` clones share the
     // token cache, so per-source clones re-use the destination's bearer token
     // instead of re-running the challenge per source.
@@ -368,9 +369,9 @@ async fn copy_sources(
             // Over the same client the rest of the destination goes through,
             // so it inherits the timeouts and the plain-HTTP policy
             // `build_destination_client` resolved rather than picking its own.
-            destination_transport: ocx_lib::oci::client::native_transport(
+            destination_transport: ocx_oci::client::native_transport(
                 destination_client.clone(),
-                ocx_lib::auth::Auth::new(),
+                ocx_oci::auth::Auth::new(),
             ),
             // Per source rather than per run only because `CopyContext` is:
             // one destination registry per run, so every source's probe would
@@ -600,7 +601,7 @@ async fn sync_package(
     let (root_bytes, source_root) =
         catalog::fetch_source_root(&prepared.index_client, &source.index, &package.name).await?;
     // C-017, before any registry request for this package.
-    catalog::validate_root_host(&source_root, &source.trusted_hosts, &ocx_lib::oci::ssrf::proxy_rules()).await?;
+    catalog::validate_root_host(&source_root, &source.trusted_hosts, &ocx_oci::ssrf::proxy_rules()).await?;
 
     // `read_root_uncatalogued`, never `read_root`: the latter opens its own
     // `begin_catalog_transaction` on a straddle, which self-deadlocks against
@@ -999,7 +1000,7 @@ async fn write_package(
 /// address cannot rebind before the socket opens either.
 fn source_read_seam(trusted_hosts: &[String]) -> Index {
     let client = ClientBuilder::new()
-        .plain_http_registries(ocx_lib::env::insecure_registries())
+        .plain_http_registries(ocx_config::env::insecure_registries())
         .ssrf_guard(trusted_hosts.to_vec())
         .extra_roots(crate::http::extra_roots().clone())
         .build();

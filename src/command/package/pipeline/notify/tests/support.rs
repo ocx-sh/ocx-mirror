@@ -123,7 +123,7 @@ pub struct WebhookEnvGuard {
 
 pub fn run_notify_sync(summary: &RunSummary) -> Result<(), MirrorError> {
     let f = write_run_summary(summary);
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     let cmd = Notify {
         run_summary: f.path().to_path_buf(),
     };

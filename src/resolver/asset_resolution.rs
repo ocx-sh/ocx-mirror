@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 use url::Url;
 
 /// Result of resolving assets for a version across all platforms.

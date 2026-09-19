@@ -3,7 +3,7 @@
 
 //! OCI annotations recorded on every image index this mirror publishes.
 //!
-//! The CI half is `ocx_lib`'s: [`ocx_lib::ci::annotations::for_flavor`] reads
+//! The CI half is `ocx_shell`'s: [`ocx_shell::ci::annotations::for_flavor`] reads
 //! the same GitHub Actions / GitLab CI variables `ocx package push
 //! --ci-annotations` does — `image.source` (the mirror's own repository,
 //! which is what GHCR uses to link a package to a repository and inherit its
@@ -15,14 +15,14 @@
 //!
 //! A published index is public, permanent and readable without
 //! authentication, so the environment surface is the fixed, pinned read set
-//! `ocx_lib::ci::annotations` tests against and nothing else: the `ocx`
+//! `ocx_shell::ci::annotations` tests against and nothing else: the `ocx`
 //! subprocess inherits the runner's full environment (including `GH_TOKEN`),
 //! and anything resembling iteration over it would put a live token on the
 //! wire.
 
 use std::collections::BTreeMap;
 
-use ocx_lib::ci::CiFlavor;
+use ocx_shell::ci::CiFlavor;
 
 /// Build the annotation set for a publish, merging CI auto-detection with the
 /// spec's `annotations:` block. A configured key wins over the auto-detected
@@ -48,7 +48,7 @@ pub(crate) fn build_annotations_for(
     configured: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
     let auto = flavor
-        .map(|flavor| ocx_lib::ci::annotations::for_flavor(flavor, None))
+        .map(|flavor| ocx_shell::ci::annotations::for_flavor(flavor, None))
         .unwrap_or_default();
     overlay(auto, configured)
 }
@@ -90,7 +90,7 @@ pub fn validate(configured: &BTreeMap<String, String>, errors: &mut Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::oci::annotations;
+    use ocx_oci::annotations;
 
     fn configured(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -127,7 +127,7 @@ mod tests {
         assert_eq!(result.len(), 3);
     }
 
-    /// The CI read set is `ocx_lib`'s, pinned there (`ci::annotations::tests`):
+    /// The CI read set is `ocx_shell`'s, pinned there (`ci::annotations::tests`):
     /// GitHub's three names and GitLab's three, nothing that could carry a
     /// token. Whatever the runner looks like, the configured keys always win
     /// and always arrive.

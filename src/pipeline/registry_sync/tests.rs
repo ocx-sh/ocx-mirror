@@ -175,11 +175,11 @@ async fn bootstrap_reports_an_output_path_it_cannot_create() {
 
 #[test]
 fn every_aggregating_copy_failure_fails_only_its_package() {
-    let digest = ocx_lib::oci::Algorithm::Sha256.hash(b"content");
+    let digest = ocx_oci::Algorithm::Sha256.hash(b"content");
     let aggregating = vec![
         CopyError::DigestMismatch {
             expected: digest.clone(),
-            actual: ocx_lib::oci::Algorithm::Sha256.hash(b"other"),
+            actual: ocx_oci::Algorithm::Sha256.hash(b"other"),
         },
         CopyError::SourceUnavailable("connection reset".to_string()),
         CopyError::MalformedManifest("descriptor digest 'x' is not a digest".to_string()),
@@ -400,7 +400,7 @@ fn a_short_circuited_source_contributes_no_rows_and_no_counts() {
 fn tag_plan(tag: &str, seed: &[u8]) -> registry_copy::TagCopyPlan {
     registry_copy::TagCopyPlan {
         tag: tag.to_string(),
-        content: ocx_lib::oci::Algorithm::Sha256.hash(seed),
+        content: ocx_oci::Algorithm::Sha256.hash(seed),
     }
 }
 
@@ -446,7 +446,7 @@ fn a_failed_tag_never_reaches_the_confirmed_set() {
         CopyError::PushRejected("507 insufficient storage".to_string()),
         CopyError::DigestMismatch {
             expected: entry.content.clone(),
-            actual: ocx_lib::oci::Algorithm::Sha256.hash(b"tampered"),
+            actual: ocx_oci::Algorithm::Sha256.hash(b"tampered"),
         },
     ] {
         let mut confirmed = BTreeSet::new();
@@ -499,7 +499,7 @@ fn an_abort_during_a_tag_copy_stops_the_run_without_recording_anything() {
 
 #[test]
 fn two_tags_sharing_a_dispatch_object_write_it_once() {
-    let content = ocx_lib::oci::Algorithm::Sha256.hash(b"shared index");
+    let content = ocx_oci::Algorithm::Sha256.hash(b"shared index");
     let mut confirmed = BTreeSet::new();
     let mut objects = BTreeMap::new();
     let mut failures = Vec::new();

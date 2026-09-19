@@ -4,7 +4,7 @@
 //! Fixtures shared by more than one `patch` test module.
 
 use super::super::*;
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 
 pub fn descriptor(media_type: &str) -> Descriptor {
     Descriptor {
@@ -21,7 +21,7 @@ pub fn image(layers: Vec<Descriptor>) -> PublishedImage {
     PublishedImage {
         version: version("3.29.0"),
         platform: "linux/amd64".parse::<Platform>().expect("valid platform"),
-        manifest_digest: ocx_lib::oci::Digest::Sha256("b".repeat(64)),
+        manifest_digest: ocx_oci::Digest::Sha256("b".repeat(64)),
         config: descriptor("application/vnd.ocx.package.metadata.v1+json"),
         layers,
     }

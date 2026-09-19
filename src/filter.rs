@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use ocx_lib::package::version::Version;
+use ocx_package::version::Version;
 
 use crate::resolver::asset_resolution::ResolvedPlatformAsset;
 use crate::spec::{BackfillOrder, VersionsConfig};
@@ -134,7 +134,7 @@ pub fn filter_versions(
 /// platform's `min_version`/`max_version`, an `exclude` range or an `exclude`
 /// single version).
 ///
-/// `ocx_lib::Version` first: every bound is validated against that parser
+/// `ocx_package::version::Version` first: every bound is validated against that parser
 /// (`VersionsConfig::validate`, `validate_platforms`), and it disagrees with
 /// PEP 440 on strings both accept — `1.0.0+build1 < 1.0.0` here versus `>`
 /// there (build metadata versus a PEP 440 local version), and `1.2 > 1.2.0`
@@ -196,12 +196,12 @@ pub(crate) fn within_bounds(candidate: &str, min: Option<&str>, max: Option<&str
 /// `match (parse(a), parse(b)) { (Some, Some) => semver, _ => text }`, which is
 /// not transitive and therefore not a valid `sort_by` predicate: with
 /// `"10.0.0"`, `"3.0.0"` and `"2.0rc1"` (the last unparseable by
-/// `ocx_lib::Version`) it yields `10.0.0 > 3.0.0 > 2.0rc1 > 10.0.0` — a cycle,
+/// `ocx_package::version::Version`) it yields `10.0.0 > 3.0.0 > 2.0rc1 > 10.0.0` — a cycle,
 /// for which `slice::sort_by` documents an unspecified order and permits a
 /// panic. Here that order decides push order and which version `:latest`
 /// lands on.
 ///
-/// `uv_pep440` rather than `ocx_lib::package::version::Version`: upstream
+/// `uv_pep440` rather than `ocx_package::version::Version`: upstream
 /// Python versions are PEP 440 (`0.0.0.2`, `2.0.0.dev0`), which the ≤3-component
 /// OCX parser rejects. The `Version::parse` check that decides `--cascade`
 /// stays as it is — that one asks a different question ("can ocx derive
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn pep440_sort_key_is_a_total_order_over_versions_the_ocx_parser_rejects() {
         // The replaced comparator was `(Some, Some) => semver, _ => text`, which
-        // on this exact triple cycles: `ocx_lib::Version` rejects `2.0rc1`, so
+        // on this exact triple cycles: `ocx_package::version::Version` rejects `2.0rc1`, so
         // 10.0.0 > 3.0.0 (semver), 3.0.0 > 2.0rc1 (text) and 2.0rc1 > 10.0.0
         // (text). `sort_by` leaves the result unspecified for such a predicate.
         let mut versions = vec![
@@ -300,7 +300,7 @@ mod tests {
         );
     }
 
-    use ocx_lib::oci::Platform;
+    use ocx_oci::Platform;
     use url::Url;
 
     use super::*;
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn min_bound_drops_four_segment_pep440_versions() {
-        // Live regression (pipx, `min: "1.16.0"`): `ocx_lib::Version` rejects a
+        // Live regression (pipx, `min: "1.16.0"`): `ocx_package::version::Version` rejects a
         // 4-segment PEP 440 release, and the bounds filter kept every version it
         // could not parse — so seven sub-1.0 releases planned as new work.
         let versions = vec![

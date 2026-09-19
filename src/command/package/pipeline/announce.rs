@@ -26,8 +26,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::log;
+use ocx_console::DataInterface;
 
 use crate::error::MirrorError;
 use crate::pipeline::ocx_cli::announce::{ANNOUNCE_TIMEOUT, AnnounceReport, TagSource, invoke_announce};
@@ -217,7 +216,7 @@ pub(crate) fn report_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     /// A mirror without `announce:` has no index package to announce into.
     /// Exit 64 (usage), not 65 — the spec is valid, the command is wrong for it.
@@ -235,7 +234,7 @@ mod tests {
             spec: spec_path,
             dry_run: true,
         };
-        let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+        let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
         let error = cmd.execute(&printer).await.expect_err("no announce block must fail");
 
         assert_eq!(error.kind_exit_code(), ExitCode::UsageError, "got: {error}");

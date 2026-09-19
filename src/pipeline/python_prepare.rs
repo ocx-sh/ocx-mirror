@@ -21,10 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ocx_lib::cli::progress::{ProgressManager, Spinner};
-use ocx_lib::log;
-use ocx_lib::oci::Platform;
-use ocx_lib::package::metadata::dependency::Dependency;
+use ocx_console::progress::{ProgressManager, Spinner};
+use ocx_oci::Platform;
+use ocx_package::metadata::dependency::Dependency;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
@@ -351,12 +350,12 @@ async fn prepare_env_task(
         .map_err(|e| MirrorError::PylockError(format!("env composition failed: {e}")))?;
 
     // The tag identifier — the registry host enters here (D: single seam).
-    let identifier = ocx_lib::oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
+    let identifier = ocx_oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
         .clone_with_tag(&task.normalized_version);
     let info = composition.into_info(identifier);
 
     // No libc lint on this leg — deliberately, not by omission. The archive
-    // path runs `ocx_lib::package::libc_lint::check_declared_libc` between
+    // path runs `ocx_package::libc_lint::check_declared_libc` between
     // extraction and compression; nothing equivalent is reachable here, and
     // wiring it would ship a check that can only ever be green:
     //
@@ -628,7 +627,7 @@ mod tests {
             .expect_err("a corrupt wheel must fail closed");
 
         assert!(matches!(error, MirrorError::PylockError(_)), "got {error:?}");
-        assert_eq!(error.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::DataError);
         assert!(
             !task_dir.join("layers").exists(),
             "no layer may be written when verification fails (verify precedes repack)"

@@ -4,8 +4,8 @@
 //! C-039 — the short-circuit's two conditions, and the per-root fallback that
 //! runs when it does not fire.
 
-use ocx_lib::file_structure::{CatalogEntryStatus, IndexStore, RootReadResult};
-use ocx_lib::oci::index::{IndexRoot, serialize_root};
+use ocx_index::{CatalogEntryStatus, IndexStore, RootReadResult};
+use ocx_index::{IndexRoot, serialize_root};
 use serde_json::{Value, json};
 
 use super::super::*;
@@ -160,7 +160,7 @@ fn an_empty_filter_set_short_circuits_against_any_local_catalog() {
 // ── The per-root fallback ────────────────────────────────────────────────────
 
 /// A root document carrying `tag → content` pointers.
-fn root_document(repository: &str, tags: &[(&str, &ocx_lib::oci::Digest)]) -> Vec<u8> {
+fn root_document(repository: &str, tags: &[(&str, &ocx_oci::Digest)]) -> Vec<u8> {
     let mut document = serde_json::Map::new();
     document.insert("repository".to_string(), json!(repository));
     let mut tag_map = serde_json::Map::new();

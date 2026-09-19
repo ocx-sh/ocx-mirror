@@ -45,7 +45,7 @@ announce:
     let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
     let announce = spec.announce.as_ref().expect("announce block parsed");
     assert_eq!(announce.fork, None);
-    assert_eq!(announce.transport(), ocx_lib::forge::WriteTransport::Git);
+    assert_eq!(announce.transport(), ocx_announce::forge::WriteTransport::Git);
     let errors = spec.validate(Path::new("test.yml"));
     assert!(
         errors.is_empty(),

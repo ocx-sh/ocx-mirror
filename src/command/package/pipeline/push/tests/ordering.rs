@@ -40,7 +40,7 @@ fn registry_tag_newer_than_ignores_rolling_and_canonical_tags() {
 ///
 /// `registry_copy::push_canonical_tag` deliberately keeps writing the frozen
 /// legacy `<alg>.<hex>` form rather than following ocx 0.6.0's rename to
-/// `__ocx.keep.<alg>-<hex>`. That is only safe while `ocx_lib` still classifies
+/// `__ocx.keep.<alg>-<hex>`. That is only safe while `ocx_package` still classifies
 /// the legacy spelling as reserved — otherwise the mirror's own deletion
 /// safety-net tags would start reading back as versions at every consumer.
 ///
@@ -49,7 +49,7 @@ fn registry_tag_newer_than_ignores_rolling_and_canonical_tags() {
 /// otherwise be a silent divergence between two binaries at one registry.
 #[test]
 fn ocx_still_classifies_the_legacy_keep_tag_spelling_as_reserved() {
-    use ocx_lib::package::tag::Tag;
+    use ocx_package::tag::Tag;
     let hex = "a".repeat(64);
 
     // The spelling `push_canonical_tag` writes.

@@ -873,7 +873,7 @@ fn the_rendered_slug_is_the_one_prepare_writes_the_bundle_under() {
         let prepared = crate::pipeline::orchestrator::task_dir(
             Path::new("/work"),
             "3.7.0",
-            &key.parse::<ocx_lib::oci::Platform>().expect("valid platform"),
+            &key.parse::<ocx_oci::Platform>().expect("valid platform"),
         );
         assert_eq!(
             rendered,

@@ -15,7 +15,7 @@ use tempfile::tempdir;
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 fn make_printer() -> DataInterface {
-    DataInterface::new(ocx_lib::cli::Printer::new(false, false))
+    DataInterface::new(ocx_console::Printer::new(false, false))
 }
 
 fn run_prepare(cmd: Prepare) -> Result<(), MirrorError> {
@@ -137,7 +137,7 @@ fn prepare_exits_65_on_checksum_mismatch() {
     // §3.6: Checksum mismatch → exit 65 (DataError).
     // Uses a fake version string to trigger failure.
     // Until implementation: expect unimplemented!() panic.
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     let work_dir = tempdir().unwrap();
     let spec_path = Path::new(FIXTURE_DIR).join("mirror-minimal.yml");

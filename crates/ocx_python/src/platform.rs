@@ -20,7 +20,7 @@
 
 /// The operating-system axis of a Python target.
 ///
-/// Mirrors [`ocx_lib::oci::OperatingSystem`]'s supported set; kept as an
+/// Mirrors [`ocx_oci::OperatingSystem`]'s supported set; kept as an
 /// `ocx_python`-owned enum so the L1 fact table does not depend on OCX's
 /// serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -87,7 +87,7 @@ fn an_exact_version_composes_with_a_range_as_a_union() {
 /// while the run reports success.
 #[test]
 fn an_unpublished_exact_version_is_a_usage_error() {
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     let selection = Selection::parse(&["9.9.9".to_string()], None, None).expect("bounds parse");
     let error = selection.apply(&tag_list(&["3.29.0"])).expect_err("must reject");
@@ -97,7 +97,7 @@ fn an_unpublished_exact_version_is_a_usage_error() {
 
 #[test]
 fn an_unparseable_bound_is_a_usage_error() {
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     let error = Selection::parse(&[], Some("three"), None).expect_err("must reject");
     assert_eq!(error.kind_exit_code(), ExitCode::UsageError, "got: {error}");

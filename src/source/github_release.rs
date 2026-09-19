@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ocx_lib::log;
 use regex::Regex;
 
 use super::VersionInfo;

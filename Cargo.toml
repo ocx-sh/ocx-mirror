@@ -29,10 +29,31 @@ default = []
 jsonschema = ["dep:schemars"]
 
 [dependencies]
-# ocx_lib is consumed as a path dependency into the ocx git submodule —
-# the same easy-to-maintain pattern ocx itself uses for its vendored forks.
-# Bumping ocx_lib = bumping the external/ocx submodule pointer.
-ocx_lib = { path = "external/ocx/crates/ocx_lib" }
+# ocx is consumed as path dependencies into the ocx git submodule — the same
+# easy-to-maintain pattern ocx itself uses for its vendored forks. Bumping ocx
+# is still exactly one thing: bumping the external/ocx submodule pointer. What
+# changed upstream is the shape of the surface — the single `ocx_lib` crate was
+# dissolved into responsibility-derived crates, so the pointer bump now lands
+# across the ten rows below instead of one. Each row is a surface this
+# binary names directly; a crate the code stops using is a row to delete, not a
+# convenience to keep.
+#
+# Deliberately absent: `ocx` itself (`external/ocx/crates/ocx_cli`), the CLI
+# *application*. Its `tracing_init` and its error -> exit-code ladder are the
+# only two things this binary ever wanted from it, and the row cost 160
+# packages — the whole Starlark host plus an LSP/DAP/REPL stack and the gix
+# family — for them. Both now live here: `src/tracing_init.rs` (a verbatim copy)
+# and `error::tls_exit_code`.
+ocx_announce = { path = "external/ocx/crates/ocx_announce" }
+ocx_config = { path = "external/ocx/crates/ocx_config" }
+ocx_console = { path = "external/ocx/crates/ocx_console" }
+ocx_exit = { path = "external/ocx/crates/ocx_exit" }
+ocx_index = { path = "external/ocx/crates/ocx_index" }
+ocx_oci = { path = "external/ocx/crates/ocx_oci" }
+ocx_package = { path = "external/ocx/crates/ocx_package" }
+ocx_shell = { path = "external/ocx/crates/ocx_shell" }
+ocx_sign = { path = "external/ocx/crates/ocx_sign" }
+ocx_util = { path = "external/ocx/crates/ocx_util" }
 # ocx_python is an in-workspace path dep (crates/ocx_python) — the pylock
 # translation library the `source.type: pylock`/`pypi` adapters and the env
 # pipeline call into. A path dep inside the workspace directory is a workspace
@@ -52,13 +73,13 @@ anyhow = "1.0.102"
 bytes = "1.11.1"
 futures = "0.3.32"
 serde = { version = "1.0.228", features = ["derive"] }
-# `preserve_order` is necessary, not belt-and-braces: `ocx_lib`'s
-# `wire_writer::serialize_root` is a pass-through with no ordering enforcement
-# of its own, so without the feature `serde_json::Map` reverts to `BTreeMap`,
-# every rewritten index root re-emits in alphabetical key order, and
+# `preserve_order` is necessary, not belt-and-braces:
+# `ocx_index::wire_writer::serialize_root` is a pass-through with no ordering
+# enforcement of its own, so without the feature `serde_json::Map` reverts to
+# `BTreeMap`, every rewritten index root re-emits in alphabetical key order, and
 # `sha256(root bytes)` changes for documents that did not semantically change —
 # with no compile error anywhere. Inherited today only through Cargo feature
-# unification with `ocx_lib`; declared here so it survives an upstream change.
+# unification with `ocx_index`; declared here so it survives an upstream change.
 serde_json = { version = "1.0.150", features = ["preserve_order"] }
 serde_yaml_ng = "0.10.0"
 schemars = { version = "1.2.1", optional = true }
@@ -76,12 +97,12 @@ octocrab = { version = "0.51", default-features = false, features = [
     "tracing",
 ] }
 quick-junit = "0.6"
-# Same major as ocx's (`external/ocx/Cargo.toml`), so `ocx_lib`'s own reqwest
+# Same major as ocx's (`external/ocx/Cargo.toml`), so `ocx_oci`'s own reqwest
 # types cross the path dependency and one copy of the crate is linked. `rustls`
 # resolves to the platform verifier, which reads the host trust store and
 # therefore `SSL_CERT_FILE` / `SSL_CERT_DIR`; `src/http.rs` seeds the bundled
 # Mozilla roots on top so an empty store is still usable. `json` is ours —
-# `ocx_lib` does not need it. `system-proxy` is copied from ocx (0.6.1+): its
+# ocx does not need it. `system-proxy` is copied from ocx (0.6.1+): its
 # SSRF guard asks reqwest's own proxy matcher which route a dial takes, and the
 # matcher must read the same Windows/macOS system settings the client does.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "system-proxy"] }
@@ -95,6 +116,21 @@ sha1 = "0.11.0"
 md-5 = "0.11.0"
 hex = "0.4.3"
 tracing = "0.1.44"
+# The subscriber `src/tracing_init.rs` installs — a direct row since the mirror
+# stopped linking `ocx_cli` for its `tracing_init`. Version and features copied
+# EXACTLY from ocx's `[workspace.dependencies]`, and they must keep tracking
+# it: the copied module is verbatim ocx code, so a feature ocx relies on and
+# this row drops breaks it here and nowhere upstream. `tracing-log` is the
+# `LogTracer` bridge that carries `log::error!` records into the subscriber —
+# a default, named anyway so it survives a future `default-features = false`.
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "std", "fmt", "json", "registry", "tracing-log"] }
+# The `log` facade ocx's library crates emit through, and the one the mirror's
+# own `log::warn!`/`log::debug!` call sites use. Named directly because the
+# pre-split `ocx_lib::log` — a `pub use tracing_log::log::*` re-export — has no
+# successor in the split crates; records still reach the subscriber through the
+# `LogTracer` `tracing-subscriber`'s `tracing-log` feature installs. Version and
+# features copied from ocx's `[workspace.dependencies]`.
+log = { version = "0.4", features = ["std"] }
 tempfile = "3.27.0"
 
 [dev-dependencies]
@@ -104,18 +140,18 @@ tokio = { version = "1.52", features = ["full", "test-util"] }
 # emits (`is_rate_limited`) — reqwest exposes no other constructor for an
 # `Error` carrying a status.
 http = "1.5"
-# The test seam for `ocx_lib::oci::ssrf::ProxyRules::new` (an explicit
+# The test seam for `ocx_oci::ssrf::ProxyRules::new` (an explicit
 # `Matcher` instead of the ambient proxy environment); copied exactly from
 # ocx's `[workspace.dependencies]`.
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 
-# ocx_lib is developed against the ocx-sh forks of oci-client and
+# ocx is developed against the ocx-sh forks of oci-client and
 # docker_credential via [patch.crates-io] in the ocx workspace. Patch tables
 # only apply at the consuming workspace root — they do NOT travel with path or
 # git dependencies — so they are re-declared here, pointing into the nested
 # submodules of external/ocx. Requires `git submodule update --init --recursive`.
 #
-# Invariant: the fork versions must keep satisfying ocx_lib's requirements
+# Invariant: the fork versions must keep satisfying ocx's requirements
 # (oci-client "0.17", docker_credential "1.3", sigstore "0.14"). A drift surfaces as a hard
 # resolution error at `cargo update`. WARNING: dropping this table does NOT
 # error — cargo would silently resolve the unpatched crates.io releases.

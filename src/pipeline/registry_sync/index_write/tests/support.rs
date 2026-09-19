@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::oci::Algorithm;
+use ocx_oci::Algorithm;
 use serde_json::{Value, json};
 
 use super::super::*;
@@ -127,7 +127,7 @@ pub fn read_result(raw: &[u8]) -> RootReadResult {
     RootReadResult {
         bytes: raw.to_vec(),
         root: parse_root(raw),
-        catalog_status: ocx_lib::file_structure::CatalogEntryStatus::NoCatalog,
+        catalog_status: ocx_index::CatalogEntryStatus::NoCatalog,
     }
 }
 

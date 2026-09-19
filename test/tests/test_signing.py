@@ -526,7 +526,7 @@ def test_package_sync_signs_the_leg_it_publishes_in_process(
     unique_mirror_repo: str,
     tmp_path: Path,
 ) -> None:
-    """D2's third leg: `package sync` publishes through `ocx_lib`, not a subprocess.
+    """D2's third leg: `package sync` publishes through `ocx_package`, not a subprocess.
 
     `ocx-mirror package sync` is the only command that reaches
     `push_and_cascade`, and it writes its manifests through the in-process
@@ -576,7 +576,7 @@ def test_a_second_push_adds_one_signature_not_one_per_tag(
     tags of a version — all resolving to this one index digest — cost one
     referrer, not five.
 
-    Two, not one, and that is deliberate: `sign` appends. `ocx_lib`'s
+    Two, not one, and that is deliberate: `sign` appends. `ocx_sign`'s
     `pipeline.rs` asserts verbatim that a pre-existing signature survives a
     second run, because multi-signature — a second identity joining the first —
     depends on it. Skipping an already-signed subject would break that tested

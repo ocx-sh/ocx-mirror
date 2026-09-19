@@ -15,8 +15,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use ocx_lib::oci::Platform;
-use ocx_lib::package::version::Version;
+use ocx_oci::Platform;
+use ocx_package::version::Version;
 
 /// Tracks which `(Version, Platform)` pairs exist on the registry.
 ///

@@ -17,11 +17,11 @@ use crate::spec::AnnounceConfig;
 
 /// The operator's own announce credential — rung 1 of `ocx`'s forge
 /// credential ladder, and the name the skip notice tells them to set.
-pub(crate) const ENV_ANNOUNCE_TOKEN: &str = ocx_lib::env::keys::OCX_ANNOUNCE_TOKEN;
+pub(crate) const ENV_ANNOUNCE_TOKEN: &str = ocx_config::env::keys::OCX_ANNOUNCE_TOKEN;
 
 /// Whether `ocx package announce` would find a credential for `config`.
 ///
-/// Asked of `ocx_lib`'s own ladder rather than of one variable: under
+/// Asked of `ocx_announce`'s own ladder rather than of one variable: under
 /// `transport: git` inside a GitLab job the ladder falls through from an
 /// unset `OCX_ANNOUNCE_TOKEN` to the job's `CI_JOB_TOKEN`, and a gate that
 /// only knew the first name would skip the announce a job token can make.
@@ -31,7 +31,7 @@ pub(crate) const ENV_ANNOUNCE_TOKEN: &str = ocx_lib::env::keys::OCX_ANNOUNCE_TOK
 /// packages are in the registry either way, and an announce that was never
 /// attempted must not red a run that published exactly what it was asked to.
 pub(crate) fn announce_credential_present(config: &AnnounceConfig) -> bool {
-    ocx_lib::forge::ForgeCredentials::resolve(config.transport()).api_is_present()
+    ocx_announce::forge::ForgeCredentials::resolve(config.transport()).api_is_present()
 }
 
 /// What the skip notice tells the operator to do about a missing credential.
@@ -47,12 +47,12 @@ pub(crate) fn announce_credential_present(config: &AnnounceConfig) -> bool {
 /// hint rather than a clause for a forge nobody can name.
 pub(crate) fn missing_credential_hint(config: &AnnounceConfig) -> String {
     match config.transport() {
-        ocx_lib::forge::WriteTransport::Api if index_is_gitlab(config) => format!(
+        ocx_announce::forge::WriteTransport::Api if index_is_gitlab(config) => format!(
             "set {ENV_ANNOUNCE_TOKEN} — a GitLab CI_JOB_TOKEN cannot open a merge request over the api transport; \
              use `transport: git` to announce with it"
         ),
-        ocx_lib::forge::WriteTransport::Api => format!("set {ENV_ANNOUNCE_TOKEN}"),
-        ocx_lib::forge::WriteTransport::Git => {
+        ocx_announce::forge::WriteTransport::Api => format!("set {ENV_ANNOUNCE_TOKEN}"),
+        ocx_announce::forge::WriteTransport::Git => {
             format!("set {ENV_ANNOUNCE_TOKEN}, or run inside a GitLab job (GITLAB_CI + CI_JOB_TOKEN)")
         }
     }
@@ -64,10 +64,10 @@ pub(crate) fn missing_credential_hint(config: &AnnounceConfig) -> String {
 fn index_is_gitlab(config: &AnnounceConfig) -> bool {
     config
         .index_repo
-        .parse::<ocx_lib::forge::RepoCoordinate>()
+        .parse::<ocx_announce::forge::RepoCoordinate>()
         .ok()
-        .and_then(|index| ocx_lib::forge::ForgeKind::resolve(config.forge_kind(), &index).ok())
-        == Some(ocx_lib::forge::ForgeKind::GitLab)
+        .and_then(|index| ocx_announce::forge::ForgeKind::resolve(config.forge_kind(), &index).ok())
+        == Some(ocx_announce::forge::ForgeKind::GitLab)
 }
 
 /// Where `ocx package announce` takes its tag set from.

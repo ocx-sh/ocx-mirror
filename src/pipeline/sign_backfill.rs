@@ -32,10 +32,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ocx_lib::cli::{ErrorCategory, ExitCode};
-use ocx_lib::oci::client::OciTransport;
-use ocx_lib::oci::verify::{DiscoveryMethod, SignerCandidate, list_signature_candidates};
-use ocx_lib::oci::{Digest, Platform, native};
+use ocx_exit::{ErrorCategory, ExitCode};
+use ocx_oci::client::OciTransport;
+use ocx_oci::{Digest, Platform, native};
+use ocx_sign::verify::{DiscoveryMethod, SignerCandidate, list_signature_candidates};
 use serde::Serialize;
 
 use crate::error::{MirrorError, sign_exit_code};
@@ -45,7 +45,7 @@ use crate::spec::Target;
 
 /// One signature attached to a subject, as a *listing* reports it.
 ///
-/// Mirror-owned rather than `ocx_lib`'s [`SignerCandidate`]: that type is
+/// Mirror-owned rather than `ocx_sign`'s [`SignerCandidate`]: that type is
 /// `#[non_exhaustive]`, so a later identity field would be free to add
 /// upstream and impossible to construct in a test here.
 ///
@@ -242,7 +242,7 @@ fn severity_rank(code: ExitCode) -> u8 {
         | ExitCode::IoError
         | ExitCode::PolicyBlocked
         | ExitCode::DirtyRcBlock => 6,
-        // `ExitCode` is `#[non_exhaustive]`: a code a newer `ocx_lib` adds
+        // `ExitCode` is `#[non_exhaustive]`: a code a newer `ocx_exit` adds
         // ranks last rather than failing this build, the same direction
         // `sign_exit_code` already degrades in.
         _ => 6,
@@ -435,12 +435,12 @@ impl BatchReport {
 ///
 /// **C-074's mirror-local presence-only producer is superseded and must not be
 /// restored.** It was specified because the upstream seam did not exist when
-/// the plan was written; `ocx_lib::oci::verify::list_signature_candidates`
+/// the plan was written; `ocx_sign::verify::list_signature_candidates`
 /// exists at the pin this builds against and does the same job. Re-adding a
 /// local producer would fork referrer discovery in two places that diverge on
 /// the first bug fix.
 ///
-/// A thin adapter over `ocx_lib`'s own listing rather than a second
+/// A thin adapter over `ocx_sign`'s own listing rather than a second
 /// implementation of it (IDIOM-11). That function already does exactly what
 /// C-074 specifies — one referrers page with the `sha256-<hex>` fallback, both
 /// filtered to the two signature artifact types, plus the `.sig` sidecar tag —
@@ -727,7 +727,7 @@ impl Backfill<'_> {
             if attempt == self.max_retries || !push_exit_is_transient(Some(exit)) {
                 return Err(exit);
             }
-            ocx_lib::log::warn!(
+            log::warn!(
                 "signing {reference} failed with exit {exit}; retrying (attempt {} of {})",
                 attempt.saturating_add(2),
                 self.max_retries.saturating_add(1),

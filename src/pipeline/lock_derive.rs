@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ocx_lib::utility::string_ext::StringExt as _;
+use ocx_util::string_ext::StringExt as _;
 
 use ocx_python::Pylock;
 

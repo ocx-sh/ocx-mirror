@@ -5,7 +5,7 @@
 //! data: an upstream index telling the mirror which host to dial. It is
 //! validated **before any registry request**, and a refusal aborts the run.
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::super::*;
 use super::support::*;

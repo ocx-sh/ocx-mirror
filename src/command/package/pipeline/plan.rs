@@ -20,12 +20,11 @@ use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use futures::stream::{self, StreamExt, TryStreamExt};
-use ocx_lib::cli::DataInterface;
-use ocx_lib::log;
-use ocx_lib::oci::{Algorithm, Architecture, Identifier, OperatingSystem, Platform};
-use ocx_lib::package::metadata::Metadata;
-use ocx_lib::package::version::Version;
-use ocx_lib::publisher::Publisher;
+use ocx_console::DataInterface;
+use ocx_oci::{Algorithm, Architecture, Identifier, OperatingSystem, Platform};
+use ocx_package::metadata::Metadata;
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
 use ocx_python::{
     Implementation, InterpreterPin, LibcFamily, Pylock, PythonTarget, TargetArchitecture, TargetOperatingSystem,
     TargetPlatform, VariantConstraints,
@@ -59,7 +58,7 @@ pub(crate) const DEFAULT_LOCKS_DIR: &str = "locks";
 ///
 /// Each tile is a small, latency-bound registry round trip (an image index, a
 /// child manifest, sometimes a config blob) — not a bulk transfer. Same bound
-/// and same reasoning as `LocalIndex::refresh_tags` in `ocx_lib`: enough to
+/// and same reasoning as `LocalIndex::refresh_tags` in `ocx_index`: enough to
 /// resolve a thousand-version mirror in a handful of rounds while capping the
 /// simultaneous burst a registry might answer with `429`.
 const DRIFT_SCAN_CONCURRENCY: usize = 64;
@@ -255,7 +254,7 @@ async fn build_plan_report(
     // Build target identifier for registry queries.
     let client = crate::command::package::registry_client()?;
     let publisher = Publisher::new(client);
-    let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
 
     // Fetch existing tags from the target registry to build the platform map.
     // Fail-safe (issue #157): only an authoritative "repository not found"

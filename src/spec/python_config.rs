@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::package::version::Version;
+use ocx_package::version::Version;
 use serde::Deserialize;
 
 /// Interpreter configuration for `source.type: pylock` mirrors.

@@ -42,14 +42,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use ocx_lib::file_structure::{CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
-use ocx_lib::log;
-use ocx_lib::oci::index::{
+use ocx_index::{
     CatalogIndex, IndexFormatConfig, IndexRoot, RegenerateOutcome, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
     regenerate_catalog, serialize_config, serialize_root,
 };
-use ocx_lib::oci::manifest::validate_image_index;
-use ocx_lib::oci::{Digest, ImageIndex};
+use ocx_index::{CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
+use ocx_oci::manifest::validate_image_index;
+use ocx_oci::{Digest, ImageIndex};
 
 use super::catalog::DescriptionObject;
 use crate::error::MirrorError;
@@ -429,7 +428,7 @@ async fn publish_atomically(
         let mut temporary = tempfile::NamedTempFile::new_in(&parent)?;
         std::io::Write::write_all(&mut temporary, &bytes)?;
         temporary.as_file().sync_data()?;
-        ocx_lib::utility::fs::persist_temp_file(temporary, &target)
+        ocx_util::fs::persist_temp_file(temporary, &target)
     })
     .await
     .map_err(|error| MirrorError::IndexWriteError(format!("the {what} write task panicked: {error}")))
@@ -575,7 +574,7 @@ pub async fn write_config_json(store: &IndexStore, as_name: &str) -> Result<(), 
     // Post-lock probe: `lock_source` created the source directory, so no other
     // lock-taking writer can land a config between this and the rename below.
     let target = store.source_config_path(as_name);
-    if ocx_lib::utility::fs::path_exists_lossy(&target).await {
+    if ocx_util::fs::path_exists_lossy(&target).await {
         return Ok(());
     }
 

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::{Cell, DataInterface};
+use ocx_console::{Cell, DataInterface};
 
 use crate::pipeline::mirror_result::MirrorResult;
 

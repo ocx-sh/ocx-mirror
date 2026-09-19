@@ -5,7 +5,7 @@ use super::super::*;
 use super::support::*;
 use crate::pipeline::orchestrator::ExpectedMetadata;
 use crate::spec::BinScanMode;
-use ocx_lib::oci::Algorithm;
+use ocx_oci::Algorithm;
 
 // ── skip gate ─────────────────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ fn offline_publisher() -> Publisher {
 /// drifted, and patching them would have shipped exactly that.
 #[test]
 fn a_strip_components_change_is_a_layout_change_not_a_metadata_fix() {
-    let strip = |n: Option<u8>| -> ocx_lib::package::metadata::Metadata {
+    let strip = |n: Option<u8>| -> ocx_package::metadata::Metadata {
         let field = n.map(|n| format!(r#","strip_components":{n}"#)).unwrap_or_default();
         serde_json::from_str(&format!(r#"{{"type":"bundle","version":1{field},"env":[]}}"#))
             .expect("metadata fixture parses")

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::cli::ExitCode;
+use ocx_config::tls::TlsError;
+use ocx_exit::ExitCode;
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -74,7 +75,7 @@ pub enum MirrorError {
     /// would make the message lie about what failed.
     IndexWriteError(String),
     /// A source index declared a `config.json` `format_version` above the one
-    /// `ocx_lib` supports; carries the version the source declared.
+    /// `ocx_index` supports; carries the version the source declared.
     ///
     /// Its own variant because the outcome is not transient: a source on a
     /// newer format stays on it, so classifying this as `SourceError` (69)
@@ -177,6 +178,45 @@ pub(crate) fn sign_exit_code(code: i32) -> ExitCode {
         c if c == ExitCode::ReferrersUnsupported as i32 => ExitCode::ReferrersUnsupported,
         c if c == ExitCode::UnsupportedKeyBackend as i32 => ExitCode::UnsupportedKeyBackend,
         _ => ExitCode::Failure,
+    }
+}
+
+/// Classify the one error [`crate::install_extra_roots`] can raise, under
+/// `ocx`'s own C-010 codes.
+///
+/// A copy of `impl ClassifyExitCode for TlsError`
+/// (`external/ocx/crates/ocx_cli/src/exit/ocx_config.rs`), not a call into it:
+/// classification is a CLI concern upstream, so the impl lives in the `ocx`
+/// *application* crate and linking it for this one call dragged the whole
+/// Starlark host into this binary. The upstream impl is total — every arm
+/// returns `Some` — so this reproduces it exactly on every input.
+///
+/// C-010: a file the operator named that this process could not use as given
+/// is 74 (`Unreadable`, and `TooLarge` from a file — parity with
+/// `[trust.sigstore]`'s `trust_resolve.rs`); content refused from a file is
+/// the file's data being wrong, 65; the same refusal from inline text (the env
+/// value, `extra_ca_certs_pem`) is the configuration itself being wrong, 78.
+///
+/// Exhaustive with no wildcard on purpose: `TlsError` is not
+/// `#[non_exhaustive]`, so an upstream variant added at the next submodule
+/// bump is a compile error here rather than a silent fallthrough. A *changed
+/// code* on an existing arm is what the compiler cannot catch — that is what
+/// `tls_error_codes_match_ocx` below is for.
+pub fn tls_exit_code(error: &TlsError) -> ExitCode {
+    match error {
+        TlsError::Unreadable { .. } => ExitCode::IoError,
+        TlsError::TooLarge { origin, .. } if origin.is_file() => ExitCode::IoError,
+        TlsError::TooLarge { .. } => ExitCode::ConfigError,
+        TlsError::NotACertificate { origin, .. }
+        | TlsError::Empty { origin }
+        | TlsError::Malformed { origin, .. }
+        | TlsError::Truncated { origin, .. } => {
+            if origin.is_file() {
+                ExitCode::DataError
+            } else {
+                ExitCode::ConfigError
+            }
+        }
     }
 }
 
@@ -396,5 +436,93 @@ mod tests {
         // failed; the plan aborts instead of re-flagging published versions.
         let err = MirrorError::TargetError("registry returned 503".into());
         assert_eq!(err.kind_exit_code(), ExitCode::Unavailable);
+    }
+
+    /// The drift alarm for [`tls_exit_code`], which duplicates
+    /// `impl ClassifyExitCode for TlsError` upstream.
+    ///
+    /// A *new* upstream variant is already a compile error (the match has no
+    /// wildcard and `TlsError` is not `#[non_exhaustive]`). A *changed code*
+    /// on an existing arm is not, and this table is the only thing that would
+    /// notice it at the next submodule bump. Every variant is constructed, and
+    /// the two whose code turns on the origin are constructed both ways.
+    #[test]
+    fn tls_error_codes_match_ocx() {
+        use ocx_config::tls::ExtraRootsSource;
+
+        let file = || ExtraRootsSource::EnvPath("/etc/ocx/ca.pem".into());
+        let inline = || ExtraRootsSource::Env;
+
+        let cases: Vec<(TlsError, ExitCode)> = vec![
+            (
+                TlsError::Unreadable {
+                    origin: file(),
+                    io: std::io::Error::from(std::io::ErrorKind::NotFound),
+                },
+                ExitCode::IoError,
+            ),
+            (
+                TlsError::TooLarge {
+                    origin: file(),
+                    bytes: 1,
+                },
+                ExitCode::IoError,
+            ),
+            (
+                TlsError::TooLarge {
+                    origin: inline(),
+                    bytes: 1,
+                },
+                ExitCode::ConfigError,
+            ),
+            (
+                TlsError::NotACertificate {
+                    origin: file(),
+                    tag: "PRIVATE KEY".into(),
+                },
+                ExitCode::DataError,
+            ),
+            (
+                TlsError::NotACertificate {
+                    origin: inline(),
+                    tag: "PRIVATE KEY".into(),
+                },
+                ExitCode::ConfigError,
+            ),
+            (TlsError::Empty { origin: file() }, ExitCode::DataError),
+            (TlsError::Empty { origin: inline() }, ExitCode::ConfigError),
+            (
+                TlsError::Malformed {
+                    origin: file(),
+                    index: Some(0),
+                },
+                ExitCode::DataError,
+            ),
+            (
+                TlsError::Malformed {
+                    origin: inline(),
+                    index: None,
+                },
+                ExitCode::ConfigError,
+            ),
+            (
+                TlsError::Truncated {
+                    origin: file(),
+                    index: 0,
+                },
+                ExitCode::DataError,
+            ),
+            (
+                TlsError::Truncated {
+                    origin: inline(),
+                    index: 0,
+                },
+                ExitCode::ConfigError,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(tls_exit_code(&error), expected, "{error:?}");
+        }
     }
 }

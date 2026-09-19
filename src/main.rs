@@ -4,10 +4,15 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
-use ocx_lib::cli::progress::ProgressManager;
-use ocx_lib::cli::{self, ClassifyExitCode, ColorMode, DataInterface, LogLevel, LogSettings, Printer, ProgressMode};
+use ocx_console::progress::ProgressManager;
+use ocx_console::{ColorMode, DataInterface, Printer, ProgressMode, clap_styles};
 
 use ocx_mirror::Command;
+use ocx_mirror::error::tls_exit_code;
+
+mod tracing_init;
+
+use tracing_init::{LogLevel, LogSettings};
 
 #[derive(Parser)]
 #[command(name = "ocx-mirror", about = "Mirror upstream binary releases into OCI registries")]
@@ -32,11 +37,11 @@ async fn main() -> ExitCode {
         .install_default()
         .expect("Failed to install default crypto provider");
 
-    let color_mode = cli::ColorMode::from_args();
+    let color_mode = ColorMode::from_args();
     let color_config = color_mode.config();
     color_config.apply();
 
-    let styles = cli::clap_styles(color_config.stdout);
+    let styles = clap_styles(color_config.stdout);
     let matches = Cli::command().color(color_mode.into()).styles(styles).get_matches();
     let cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
@@ -73,8 +78,8 @@ async fn main() -> ExitCode {
     // chain — `cannot read OCX_EXTRA_CA_CERTS=<path>` alone says nothing
     // about why, the OS reason is one level down.
     if let Err(error) = ocx_mirror::install_extra_roots() {
-        let code = error.classify().unwrap_or(ocx_lib::cli::ExitCode::ConfigError);
-        ocx_lib::log::error!("{:#}", anyhow::Error::from(error));
+        let code = tls_exit_code(&error);
+        log::error!("{:#}", anyhow::Error::from(error));
         return code.into();
     }
 
@@ -82,7 +87,7 @@ async fn main() -> ExitCode {
     match cli.command.execute(&printer, &progress).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            ocx_lib::log::error!("{err:#}");
+            log::error!("{err:#}");
             err.kind_exit_code().into()
         }
     }

@@ -1,7 +1,7 @@
 """Hand-authored, published-shape ocx-index trees for `registry sync` fixtures.
 
 Ground truth for the wire shapes: `IndexRoot`, `RootTag`, `CatalogDocument`,
-`IndexFormatConfig` in ocx's `crates/ocx_lib/src/oci/index/wire.rs` (vendored
+`IndexFormatConfig` in ocx's `crates/ocx_index/src/wire.rs` (vendored
 at `external/ocx`). Only the "published" shapes are written here:
 
     config.json                        {"format_version": 1}

@@ -26,7 +26,7 @@
 //!
 //! The mirror wraps each public error in a `MirrorError` variant with a
 //! `#[source]` chain and an exit-code mapping. This crate never imports
-//! `MirrorError` or `ocx_lib::cli::ExitCode` — the mapping lives entirely on the
+//! `MirrorError` or `ocx_exit::ExitCode` — the mapping lives entirely on the
 //! consumer side:
 //!
 //! | This crate | Exit | Rationale |

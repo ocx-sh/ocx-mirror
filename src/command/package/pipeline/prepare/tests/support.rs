@@ -51,10 +51,10 @@ platforms:
 /// A stand-in interpreter candidate set with a fixed digest, so
 /// `build_env_tasks` runs without resolving a real registry manifest.
 /// The single `any`-platform candidate is compatible with every leg.
-pub fn fake_interpreter_candidates() -> Vec<(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)> {
+pub fn fake_interpreter_candidates() -> Vec<(ocx_oci::Identifier, ocx_oci::Platform)> {
     let reference = format!("ocx.sh/cpython:3.13@sha256:{}", "a".repeat(64));
-    let identifier = ocx_lib::oci::Identifier::parse(&reference).expect("interpreter reference parses");
-    vec![(identifier, ocx_lib::oci::Platform::Any)]
+    let identifier = ocx_oci::Identifier::parse(&reference).expect("interpreter reference parses");
+    vec![(identifier, ocx_oci::Platform::Any)]
 }
 
 pub fn platforms_of(tasks: &[MirrorTask]) -> Vec<String> {

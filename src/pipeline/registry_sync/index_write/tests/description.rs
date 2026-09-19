@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::oci::Algorithm;
+use ocx_oci::Algorithm;
 
 use super::super::*;
 use super::support::*;

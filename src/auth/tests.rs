@@ -133,7 +133,7 @@ fn strips_quotes_from_a_quoted_value() {
 // ── environment rung ───────────────────────────────────────────────────────
 
 /// `USER` + `TOKEN` with no declared type is Basic; a lone `TOKEN` is Bearer.
-/// Same inference as `ocx_lib::auth::get_env_auth`, so one convention covers
+/// Same inference as `ocx_oci::auth::get_env_auth`, so one convention covers
 /// registries and package indexes alike.
 #[test]
 fn env_pair_is_basic_and_a_lone_token_is_bearer() {

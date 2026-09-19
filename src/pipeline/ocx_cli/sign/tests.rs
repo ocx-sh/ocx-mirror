@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::*;
 use crate::spec::{KeyFullConfig, SignConfig};

@@ -168,7 +168,7 @@ platforms:
     .expect_err("a windows-only wheel must fail selection for a linux/amd64 target");
 
     assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
-    assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
 }
 
 #[tokio::test]
@@ -176,7 +176,7 @@ async fn build_pylock_plan_entries_accepts_pep440_version_beyond_three_component
     // Regression (W3.2 first-green-loop blocker): a PyPI app version with
     // more than three numeric components — pycowsay's real `0.0.0.2`, or a
     // calendar version like `2024.1.1.1` — is a valid PEP 440 string but is
-    // NOT a parseable `ocx_lib::Version` (a ≤3-component tool-release-tag
+    // NOT a parseable `ocx_package::version::Version` (a ≤3-component tool-release-tag
     // semver parser). The plan phase must not panic on it: an unparseable
     // tag cannot be in the `Version`-keyed publish map, so it is simply
     // treated as outstanding work.
@@ -401,7 +401,7 @@ fn build_env_plan_entries_keeps_the_bare_tag_without_a_build_timestamp() {
 
 #[test]
 fn build_env_plan_entries_keeps_a_stamp_off_a_version_ocx_cannot_parse() {
-    // A >3-component PEP 440 release (`0.0.0.2`) is not an `ocx_lib::Version`,
+    // A >3-component PEP 440 release (`0.0.0.2`) is not an `ocx_package::version::Version`,
     // so no build stamp can be appended to it. It must keep its bare tag
     // rather than be dropped the way the archive path drops an unnormalizable
     // version — PyPI publishes these routinely, and push already treats such a

@@ -7,7 +7,7 @@
 //! `registry sync` report already uses — no `Printable` trait is reachable
 //! from this crate.
 
-use ocx_lib::cli::{Cell, DataInterface};
+use ocx_console::{Cell, DataInterface};
 use serde::Serialize;
 
 use super::upload::UploadOutcome;

@@ -295,7 +295,7 @@ fn generate_inferring_root(specs: &[PathBuf], check: bool) -> Result<(), MirrorE
         format: None,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     rt.block_on(async { cmd.execute(&printer).await })
 }
 
@@ -382,7 +382,7 @@ fn the_repo_root_defaults_to_the_directory_the_specs_share() {
         format: None,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     rt.block_on(async { cmd.execute(&printer).await }).unwrap();
 
     assert!(

@@ -199,7 +199,7 @@ fn plan_cmd_execute_returns_ok_or_err_not_panic() {
         format: None,
         locks_dir: None,
     };
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _ = rt.block_on(async { cmd.execute(&printer).await });

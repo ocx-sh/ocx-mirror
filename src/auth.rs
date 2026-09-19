@@ -35,7 +35,7 @@
 //!    leaving for whatever host a hostile index named.
 //! 3. Anonymous — the common case, and the only one a public index needs.
 //!
-//! The OCI legs are **not** served from here: `ocx_lib::auth` owns that ladder
+//! The OCI legs are **not** served from here: `ocx_oci::auth` owns that ladder
 //! (env → Docker credential store → anonymous), and netrc is deliberately not
 //! part of it. One Artifactory host commonly serves a PyPI repo and an OCI
 //! repo under different tokens; a netrc line written for one must not silently
@@ -43,8 +43,8 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::auth::AuthType;
-use ocx_lib::utility::string_ext::StringExt as _;
+use ocx_oci::auth::AuthType;
+use ocx_util::string_ext::StringExt as _;
 use url::Url;
 
 use crate::error::MirrorError;
@@ -129,12 +129,12 @@ fn from_env(host: &str) -> Result<Option<Credential>, MirrorError> {
     let user_env = format!("OCX_AUTH_{slug}_USER");
     let token_env = format!("OCX_AUTH_{slug}_TOKEN");
 
-    let user = ocx_lib::env::var(&user_env);
-    let token = ocx_lib::env::var(&token_env);
+    let user = ocx_util::env::var(&user_env);
+    let token = ocx_util::env::var(&token_env);
 
-    let Some(declared) = ocx_lib::env::var(&type_env) else {
+    let Some(declared) = ocx_util::env::var(&type_env) else {
         // No declared type: the pair means Basic, a lone token means Bearer.
-        // Same inference as `ocx_lib::auth::get_env_auth`.
+        // Same inference as `ocx_oci::auth::get_env_auth`.
         return Ok(match (user, token) {
             (Some(user), Some(secret)) => Some(Credential::Basic { user, secret }),
             (None, Some(token)) => Some(Credential::Bearer(token)),
@@ -171,7 +171,7 @@ fn from_netrc(host: &str) -> Option<Credential> {
 
 /// `$NETRC` when set, else the conventional per-user file.
 fn netrc_path() -> Option<PathBuf> {
-    if let Some(explicit) = ocx_lib::env::var("NETRC").filter(|value| !value.is_empty()) {
+    if let Some(explicit) = ocx_util::env::var("NETRC").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(explicit));
     }
     let home = std::env::var_os("HOME")

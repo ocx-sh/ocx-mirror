@@ -767,7 +767,7 @@ fn a_landing_path_that_does_not_end_in_the_upstream_repository_is_refused() {
 /// Every refusal in this module is plan-time, malformed-input, exit 65.
 #[test]
 fn every_destination_refusal_is_a_data_error() {
-    use ocx_lib::cli::ExitCode;
+    use ocx_exit::ExitCode;
 
     let grammar = physical_repository(&target("mirror"), "foo/..").expect_err("a traversal is refused");
     let pointer = wire_pointer(&target("mirror"), "mirror/cmake:latest").expect_err("a tagged pointer is refused");
