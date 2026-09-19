@@ -73,6 +73,7 @@ const NATIVE_FIXTURES: &[&str] = &[
     "mirror-two-platform-announce.yml",
     "mirror-windows-arm64.yml",
     "mirror-all-test-kinds.yml",
+    "mirror-runner-labels.yml",
     "mirror-variants.yml",
     "mirror-pylock.yml",
     "mirror-pypi.yml",

@@ -285,8 +285,12 @@ pub fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &
             ));
         }
 
-        if config.runner.trim().is_empty() {
+        // Two arms, not one: an empty list and a list carrying a blank label
+        // are different mistakes, and `runner: ""` is the second one.
+        if config.runner.is_empty() {
             errors.push(format!("platforms: '{key}': runner must not be empty"));
+        } else if config.runner.iter().any(|label| label.trim().is_empty()) {
+            errors.push(format!("platforms: '{key}': runner labels must not be empty"));
         }
 
         for (field, value) in [

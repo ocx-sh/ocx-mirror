@@ -9,7 +9,7 @@
 //! keyed by, and `pipeline push` looks results back up by exactly that key.
 
 use super::WORKFLOW_TEMPLATE;
-use crate::spec::{self, MirrorSpec, PlatformConfig, TestEntry};
+use crate::spec::{self, MirrorSpec, TestEntry};
 
 /// The kind of a rendered test entry — mirrors [`spec::TestKind`] but owns its
 /// payload so it can outlive the spec borrow in `MatrixLeg`.
@@ -38,7 +38,9 @@ pub struct RenderedTest {
 pub struct MatrixLeg {
     platform: String,
     platform_slug: String,
-    runner: String,
+    /// Runner label set — the leg runs on a runner carrying all of these.
+    /// Always a list, even where the spec spelled a single label.
+    runner: Vec<String>,
     container_id: String,
     /// Container image reference; empty for a native leg.
     container_image: String,
@@ -138,19 +140,11 @@ pub fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
             Some(containers) => {
                 for container in containers {
                     // Same slug `pipeline push` uses to find this leg's JUnit
-                    // file. Diverging here loses every container result.
-                    let container_id = container
-                        .id
-                        .clone()
-                        .unwrap_or_else(|| spec::image_to_container_id(&container.image));
-                    // Validation guarantees an explicit shell whenever the image
-                    // has no known default, so the fallback is unreachable for a
-                    // validated spec; POSIX `sh` is the safest thing to guess.
-                    let shell = container.shell.clone().unwrap_or_else(|| {
-                        spec::infer_shell_from_image(&container.image)
-                            .unwrap_or("sh")
-                            .to_string()
-                    });
+                    // file. Diverging here loses every container result — which
+                    // is why both derivations live on the spec type and
+                    // `plan.json`'s `legs` calls the very same ones.
+                    let container_id = container.resolved_id();
+                    let shell = container.resolved_shell();
                     // Validation rejects an empty `setup:`, so the filter only
                     // guards against a spec that skipped it — an empty list
                     // must render as "no setup", never as a bare `FROM`.
@@ -175,7 +169,7 @@ pub fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                 }
             }
             None => {
-                let shell = native_shell_for_platform(platform_key, config);
+                let shell = config.native_shell(platform_key);
                 legs.push(MatrixLeg {
                     platform: platform_key.clone(),
                     platform_slug: platform_slug.clone(),
@@ -194,18 +188,6 @@ pub fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
     legs
 }
 
-/// Determine the shell for a native test leg.
-pub fn native_shell_for_platform<'a>(platform: &str, config: &'a PlatformConfig) -> &'a str {
-    if let Some(shell) = &config.shell {
-        return shell.as_str();
-    }
-    if platform.starts_with("windows") {
-        "pwsh"
-    } else {
-        "bash"
-    }
-}
-
 /// Render the YAML matrix `include:` entries for the test job.
 ///
 /// Test commands are inlined as a YAML list so the workflow references them
@@ -215,9 +197,26 @@ pub fn native_shell_for_platform<'a>(platform: &str, config: &'a PlatformConfig)
 pub fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
     let mut out = String::new();
     for leg in legs {
+        // One label renders as the bare scalar it always did, so the pinned
+        // mirror corpus stays byte-identical. Two or more render as a YAML flow
+        // sequence, which `runs-on: ${{ matrix.runner }}` resolves to a label
+        // set. `{label:?}` is the JSON-quoted form already used for
+        // `container_image` below. An empty set is unreachable (validation) and
+        // would render `[]` — loud, not silent.
+        let runner = match leg.runner.as_slice() {
+            [single] => single.clone(),
+            labels => format!(
+                "[{}]",
+                labels
+                    .iter()
+                    .map(|label| format!("{label:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
         out.push_str(&format!(
             "          - platform: {}\n            platform_slug: {}\n            runner: {}\n            container_id: {}\n",
-            leg.platform, leg.platform_slug, leg.runner, leg.container_id,
+            leg.platform, leg.platform_slug, runner, leg.container_id,
         ));
         // Emitted only for container legs, so a native-only workflow keeps the
         // exact key set it had before container mode existed (zero drift for the

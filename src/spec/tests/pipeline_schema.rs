@@ -62,7 +62,7 @@ notify:
     assert!(platforms.contains_key("windows/amd64"));
 
     let linux = &platforms["linux/amd64"];
-    assert_eq!(linux.runner, "ubuntu-latest");
+    assert_eq!(linux.runner, vec!["ubuntu-latest"]);
     let containers = linux.containers.as_ref().unwrap();
     assert_eq!(containers.len(), 2);
     assert_eq!(containers[0].image, "ubuntu:24.04");
@@ -785,4 +785,69 @@ sign:
     // The neighbouring blocks are untouched by the addition.
     assert!(spec.notify.is_some());
     assert!(spec.platforms.is_some_and(|platforms| !platforms.is_empty()));
+}
+
+// ── #77: `runner` is a forge-neutral label set ────────────────────────────
+
+/// A spec whose single platform declares `runner: {runner}`, nothing else.
+fn spec_with_runner(runner: &str) -> Result<MirrorSpec, serde_yaml_ng::Error> {
+    serde_yaml_ng::from_str(&format!(
+        r#"{base}
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64:
+    runner: {runner}
+"#,
+        base = MINIMAL_BASE_YAML
+    ))
+}
+
+#[test]
+fn runner_accepts_a_single_label_and_a_label_list() {
+    // Both spellings normalise to the same shape, so every consumer — the
+    // renderer, `plan.json`'s legs, validation — sees one type.
+    let single = spec_with_runner("ubuntu-latest").expect("scalar runner must parse");
+    assert_eq!(single.platforms.unwrap()["linux/amd64"].runner, vec!["ubuntu-latest"]);
+
+    let list = spec_with_runner("[self-hosted, linux, arm64]").expect("list runner must parse");
+    assert_eq!(
+        list.platforms.unwrap()["linux/amd64"].runner,
+        vec!["self-hosted", "linux", "arm64"],
+        "list order is the order a forge must match all of"
+    );
+}
+
+#[test]
+fn runner_of_a_wrong_type_names_both_spellings() {
+    // The reason this is a hand-rolled visitor and not `#[serde(untagged)]`:
+    // untagged collapses every failure into "data did not match any variant",
+    // which never tells the operator what they should have written.
+    for wrong in ["3", "{a: b}", "true"] {
+        let error = spec_with_runner(wrong).expect_err("a non-label runner must be rejected");
+        assert!(
+            error.to_string().contains("a runner label, or a list of runner labels"),
+            "`runner: {wrong}` must name both spellings, got: {error}"
+        );
+    }
+}
+
+#[test]
+fn runner_rejects_an_empty_set_and_a_blank_label() {
+    // Two arms, two diagnostics: nothing to run on, versus a label that is
+    // whitespace. Both are validation, not parse — the key is present.
+    let cases = [
+        ("[]", "runner must not be empty"),
+        (r#""""#, "runner labels must not be empty"),
+        (r#"[ubuntu-latest, "  "]"#, "runner labels must not be empty"),
+    ];
+    for (runner, expected) in cases {
+        let spec = spec_with_runner(runner).unwrap_or_else(|e| panic!("`runner: {runner}` must parse: {e}"));
+        let errors = spec.validate(Path::new("test.yml"));
+        assert!(
+            errors.iter().any(|e| e.contains(expected)),
+            "`runner: {runner}` must report {expected:?}, got: {errors:?}"
+        );
+    }
 }
