@@ -20,7 +20,7 @@
 | `wheel_scope` | string | No | Repo-naming scope prefix for [shared wheel layers](#shared-wheel-layers) (`source.type: pylock`/`pypi`). Default `pip-packages`. |
 | `build_timestamp` | string | No | Per-build tag suffix: `datetime` (default), `date`, or `none`. See [build_timestamp & GC-safe publishing](#build-timestamp). |
 | `cascade` | boolean or object | No | Cascade rolling tags on push (`true` by default), and optionally put the generated repair workflow on a timer. See [`cascade`](#cascade). |
-| [`versions`](#versions) | object | No | Version filter (min/max bounds, `new_per_run`, backfill order). See [`versions`](#versions). |
+| [`versions`](#versions) | object | No | Version filter (min/max bounds, `new_per_run`, backfill order). Bounds may be resolved at run time from a URL or a command. See [`versions`](#versions). |
 | [`verify`](#verify) | object | No | Checksum verification options. See [`verify`](#verify). |
 | `concurrency` | object | No | Parallel download limits, source rate limiting, push retry policy. See [`concurrency`](#concurrency). |
 | `tests` | array | No* | Commands to run against each installed bundle. Required when `pipeline generate ci` is used. |
@@ -545,7 +545,7 @@ cascade:
   schedule: "17 4 * * 1"   # optional; UTC cron, GitHub's syntax
 ```
 
-A map always means enabled — `cascade: {}` is `cascade: true`. The cron string is passed through verbatim, exactly as [`versions.poll_interval`](#top-level) is: a spec is rejected (exit 65) when the expression is empty or holds a character outside cron's `0-9 A-Z a-z * / , -` charset, and GitHub validates everything beyond that. Give it a cron of its own — a `cascade.schedule` equal to `versions.poll_interval` collides in the shared concurrency group on every cycle, by construction.
+A map always means enabled — `cascade: {}` is `cascade: true`. The cron string is passed through verbatim, exactly as [`versions.poll_interval`](#versions) is: a spec is rejected (exit 65) when the expression is empty or holds a character outside cron's `0-9 A-Z a-z * / , -` charset, and GitHub validates everything beyond that. Give it a cron of its own — a `cascade.schedule` equal to `versions.poll_interval` collides in the shared concurrency group on every cycle, by construction.
 
 **Without a schedule** (the default) `cascade.yml` is `workflow_dispatch` only, and its `dry_run` input defaults to true — a dispatch that names nothing audits.
 
@@ -559,8 +559,96 @@ Cascading interacts with [`build_timestamp`](#build-timestamp): re-pointing a ro
 
 ## `versions` {#versions}
 
-<!-- Filled in by the version-window reference (`min`/`max`, resolved bounds). -->
-Documented below.
+The global version window and rate limiter. It decides which upstream releases a
+run is allowed to mirror at all; per-platform holes — a platform introduced late,
+dropped, or broken at one release — belong in
+[`platforms.<p>`](#platform-version-applicability), not here.
+
+```yaml
+versions:
+  min: "1.0.0"
+  max: "3.0.0"
+  new_per_run: 5
+  backfill: newest_first
+  poll_interval: "0 */6 * * *"
+```
+
+| Key | Type | Required | Purpose |
+|-----|------|----------|---------|
+| `min` | string or object | No | Lower bound. A bare string is **inclusive**. See [Resolved bounds](#versions-bounds). |
+| `max` | string or object | No | Upper bound. A bare string is **exclusive**. See [Resolved bounds](#versions-bounds). |
+| `new_per_run` | integer | No | Cap on how many not-yet-mirrored versions one run publishes. Unset = no cap. |
+| `backfill` | string | No | `newest_first` (default) or `oldest_first` — which end of the outstanding set `new_per_run` takes from. |
+| `poll_interval` | string | No | Cron expression for the generated workflow's `schedule:` trigger. Without it the workflow is `workflow_dispatch` + `push:` only. |
+
+An unknown key under `versions:` is rejected with exit 65, not dropped.
+
+### Resolved bounds {#versions-bounds}
+
+Either edge may be written as an object instead of a string, which is what lets
+it come from somewhere other than the spec file — a vendor's channel pointer, or
+a command:
+
+```yaml
+versions:
+  min: "2.1.267"
+  max:
+    version:
+      url: https://downloads.claude.ai/claude-code-releases/stable
+    inclusive: true
+```
+
+| Key | Type | Required | Purpose |
+|-----|------|----------|---------|
+| `version` | string or object | **Yes** | The edge's value: a literal, or where to get one. |
+| `inclusive` | boolean | **Yes** | Whether a candidate equal to the edge is inside the window. No default in this form. |
+
+`version` takes the same three spellings `source.url_index` does:
+
+| Form | Meaning |
+|------|---------|
+| `version: "3.0.0"` | A literal, identical to the shorthand except that `inclusive` is stated. |
+| `version: {url: <https url>}` | The response body, fetched once per run. |
+| `version: {generator: {command: [...], working_directory: ..., timeout_seconds: 60}}` | The command's stdout, run once per run. `command` is required; `working_directory` resolves from the spec directory; `timeout_seconds` defaults to 60. |
+
+**Semantics:**
+
+- A bare string keeps the meaning it always had: **`min` inclusive, `max`
+  exclusive** — the convention shared with per-platform
+  `min_version`/`max_version` and [`exclude`](#platform-version-applicability)
+  ranges. The object form has **no default**: `inclusive` is required there,
+  because an operator who reached for the long spelling is changing the edge's
+  behaviour and should not inherit one they did not write.
+- `inclusive: true` on `max` exists because a vendor channel pointer names the
+  version it *wants* mirrored, not the first one it does not.
+- Both edges accept `url:`/`generator:`, and both resolve **once per run**, in
+  every crawling command — `package sync`, `package check`,
+  [`package pipeline plan`](./cli.md#pipeline-plan). Not at spec load: the value
+  would otherwise be fetched by `validate` too.
+- **Fail-closed.** An unreachable URL, a non-2xx status, a body over 64 KiB, a
+  generator that exits non-zero or times out, or a value that is not a version
+  aborts the command with exit 69. There is no fallback to an unbounded window.
+- The resolved value is **one version string**, trimmed. Empty output is an
+  error. A generator inherits the runner's environment and runs in the spec
+  directory unless `working_directory` says otherwise.
+- Reported: `pipeline plan --format json` carries `versions_resolved` with
+  `{min?, min_inclusive, max?, max_inclusive}` — an edge the spec does not set
+  emits no version key, while its inclusivity flag always travels and carries
+  the shorthand default. The plain renderer prints
+  `resolved max: 3.0.0 (inclusive, from url)` above the table, including on a
+  "nothing to do" run, and a non-literal bound is logged at `info` once per run.
+- A resolvable `min` is a **widening** knob as well as a narrowing one: a floor
+  that moves down re-opens the backfill. The window is still bounded by what
+  upstream actually published and `new_per_run` still caps the batch, but a
+  downward move means work, not a no-op.
+- `new_per_run` throttles the **rate**, the bounds cap the **target** — with
+  both set, the backfill walks toward the pointer instead of toward newest.
+- `url:` authenticates through the host-keyed ladder documented under
+  [Authentication and TLS](#pypi-authentication) (`OCX_AUTH_<slug>_*`, then
+  `netrc`). Nothing in `mirror.yml` names a variable, and a URL carrying
+  userinfo is refused (exit 65).
+- [`extends:`](#inheritance) merges shallowly: a child `versions:` replaces the
+  parent's **whole** block, resolved bounds included.
 
 ## `build_timestamp` & GC-safe publishing {#build-timestamp}
 
@@ -776,9 +864,9 @@ missing `runner:` is a parse error — there is no default.
 
 ### Version applicability {#platform-version-applicability}
 
-Not every platform applies to every release. A platform may be **introduced late** upstream (its first binary ships at some `0.11.7`), **dropped** at a later release (the upstream stops shipping that OS/arch), or carry a **known-broken build** for one specific version. Without a per-platform lever, the only knob is the global `versions.min`/`max`, which moves the window for *all* platforms at once — so a single broken `(version, platform)` either reds the run forever or forces a global version bump that strands the other platforms.
+Not every platform applies to every release. A platform may be **introduced late** upstream (its first binary ships at some `0.11.7`), **dropped** at a later release (the upstream stops shipping that OS/arch), or carry a **known-broken build** for one specific version. Without a per-platform lever, the only knob is the global [`versions.min`/`max`](#versions), which moves the window for *all* platforms at once — so a single broken `(version, platform)` either reds the run forever or forces a global version bump that strands the other platforms.
 
-`min_version`, `max_version`, and `exclude` constrain *which versions a platform applies to*. A `(version, platform)` pair outside a platform's window — or matched by an `exclude` entry — is never resolved, scheduled, built, tested, or pushed, and never reds the run. This supersedes the old workaround of bumping the global `versions.min` to dodge a late-added or dropped platform.
+`min_version`, `max_version`, and `exclude` constrain *which versions a platform applies to*. A `(version, platform)` pair outside a platform's window — or matched by an `exclude` entry — is never resolved, scheduled, built, tested, or pushed, and never reds the run. This supersedes the old workaround of bumping the global [`versions.min`](#versions) to dodge a late-added or dropped platform.
 
 ```yaml
 platforms:
@@ -811,7 +899,7 @@ platforms:
 
 **Semantics:**
 
-- `min_version` is inclusive, `max_version` is exclusive — the same convention as the top-level `versions` bounds.
+- `min_version` is inclusive, `max_version` is exclusive — the same convention as the top-level [`versions`](#versions) bounds' shorthand. There is no per-platform opt-out: only `versions.min`/`max` take the object form that states its own inclusivity.
 - An `exclude` entry must set either a single `version` **or** a `min_version`/`max_version` range, not both.
 - To re-enable a previously-excluded pair, delete the entry — the next clean run backfills it.
 - Validation rejects unparseable bounds and conflicting `exclude` shapes with exit code 65 (`DataError`).
@@ -1051,7 +1139,7 @@ The cron string is passed through verbatim, exactly as [`cascade.schedule`](#cas
 
 Green is not proof an announce ran, though: on a target other than `ghcr.io` — whose credential probe is constant — the announce step is skipped when the registry credentials are missing, and a skipped step keeps the job green. A repo whose `OCX_MIRROR_REGISTRY_TOKEN` was never set or has since been rotated therefore produces the same silent green forever. Read the run's `::notice::` once after enabling the schedule, and again after every token rotation.
 
-The workflow keeps a `concurrency` group of its own rather than joining the push workflow's the way [`cascade.yml`](#cascade) does: it writes index pull requests only, never registry tags, so concurrent announce writers contend on a per-package index branch rather than on tags — the fast-forward path is compare-and-swap with a retry, and the spent-branch reset path can drop a racing branch commit, which the next full from-registry run re-adds. Joining the publish group would instead let a queued push cancel the pending catch-up. Give `announce.schedule` a cron of its own all the same: sharing one with [`versions.poll_interval`](#top-level) schedules the catch-up against the push job's own closing announce.
+The workflow keeps a `concurrency` group of its own rather than joining the push workflow's the way [`cascade.yml`](#cascade) does: it writes index pull requests only, never registry tags, so concurrent announce writers contend on a per-package index branch rather than on tags — the fast-forward path is compare-and-swap with a retry, and the spent-branch reset path can drop a racing branch commit, which the next full from-registry run re-adds. Joining the publish group would instead let a queued push cancel the pending catch-up. Give `announce.schedule` a cron of its own all the same: sharing one with [`versions.poll_interval`](#versions) schedules the catch-up against the push job's own closing announce.
 
 The catch-up is **additive**, on the same footing as the push job's `--tags-file`: it cannot drop a tag the index already commits, and yank markers survive. Running it against a mirror that is already current is a no-op, so it is safe to dispatch on suspicion.
 

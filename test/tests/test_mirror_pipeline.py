@@ -285,6 +285,49 @@ def test_pipeline_plan_reports_the_unmirrored_version(
     assert leg["tests"][0]["command"] == "shfmt --version"
 
 
+def test_pipeline_plan_reports_the_resolved_bounds(
+    mirror: MirrorRunner, pipeline_spec: Path, asset_server
+) -> None:
+    """`plan.json` carries the window the run filtered by, resolved.
+
+    A moving vendor pointer makes the spec alone insufficient to reproduce a
+    run, so the resolved edges travel in the plan. An edge the spec does not
+    set emits no version key while its inclusivity flag still does — the D4
+    wire contract.
+    """
+    (asset_server.dir / "stable").write_text("3.7.0\n")
+    # The fixture's own `versions:` block is replaced, not appended to: one
+    # edge set and one unset is what pins the absent-when-unset contract.
+    spec = pipeline_spec.read_text()
+    floor = 'versions:\n  min: "3.7.0"\n'
+    assert floor in spec, "the shfmt fixture no longer declares the floor this test replaces"
+    pipeline_spec.write_text(
+        spec.replace(
+            floor,
+            "versions:\n"
+            "  max:\n"
+            "    version:\n"
+            f"      url: {asset_server.url('stable')}\n"
+            "    inclusive: true\n",
+        )
+    )
+
+    result = mirror.run(
+        "package", "pipeline", "plan", "--spec", str(pipeline_spec), "--format", "json"
+    )
+
+    plan = json.loads(result.stdout)
+    assert plan["schema_version"] == 4, plan
+    assert plan["versions_resolved"] == {
+        "min_inclusive": True,
+        "max": "3.7.0",
+        "max_inclusive": True,
+    }, plan
+    assert [v["source_version"] for v in plan["versions"]] == ["3.7.0"], (
+        f"an inclusive ceiling keeps the version it names: {plan}"
+    )
+
+
 def test_pipeline_prepare_bundles_the_declared_platform(
     mirror: MirrorRunner, pipeline_spec: Path, mirror_work_dir: Path
 ) -> None:

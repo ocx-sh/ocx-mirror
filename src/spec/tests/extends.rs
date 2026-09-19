@@ -91,6 +91,10 @@ assets:
     - "base-darwin\\.tar\\.gz"
 versions:
   min: "1.0.0"
+  max:
+    version:
+      url: https://example.com/stable
+    inclusive: true
   new_per_run: 5
 "#,
     )
@@ -116,7 +120,18 @@ versions:
     let spec = load_spec(&dir.path().join("child.yml")).await.unwrap();
     // versions should be entirely replaced, not deep-merged
     let versions = spec.versions.unwrap();
-    assert_eq!(versions.min.as_deref(), Some("8.0.0"));
+    assert!(
+        matches!(
+            versions.min.as_ref().map(|b| &b.version),
+            Some(crate::spec::ValueSource::Literal(v)) if v == "8.0.0"
+        ),
+        "got: {:?}",
+        versions.min
+    );
+    assert!(
+        versions.max.is_none(),
+        "a child `versions:` replaces the parent's whole block, resolved bounds included"
+    );
     assert_eq!(versions.new_per_run, Some(10));
     // assets should still come from base (not overridden)
     assert!(matches!(spec.source, Source::GithubRelease { .. }));

@@ -474,3 +474,153 @@ def test_sync_new_per_run_cap(
     # Second run should still have work to do
     result2 = mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
     assert "nothing to mirror" not in result2.stderr.lower()
+
+
+def test_sync_resolved_max_from_url_is_inclusive(
+    mirror: MirrorRunner, ocx: OcxRunner, tmp_path: Path,
+    registry: str, unique_mirror_repo: str, asset_server,
+):
+    """A `max` fetched from a vendor pointer keeps the version it names.
+
+    `inclusive: true` is the whole point of the object form: a channel pointer
+    names the release it wants mirrored, not the first one it does not.
+    """
+    tarball = _make_tarball(tmp_path, "test-tool", "marker-url-max")
+    shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
+    (asset_server.dir / "stable").write_text("2.0.0\n")
+
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
+    spec_path = tmp_path / "mirror-test.yaml"
+    _write_spec_yaml(
+        spec_path,
+        name="test-tool",
+        registry=registry,
+        repo=unique_mirror_repo,
+        versions=[
+            {"version": "2.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+            {"version": "3.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+        ],
+        metadata_path=metadata_path,
+        versions_config={"max": {"url": asset_server.url("stable"), "inclusive": True}},
+        cascade=False,
+    )
+
+    mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+
+    ocx.plain("index", "update", f"{unique_mirror_repo}:2.0.0")
+    tags = ocx.json("index", "list", unique_mirror_repo)[unique_mirror_repo]
+    assert "2.0.0" in tags, f"an inclusive ceiling mirrors the version it names: {tags}"
+    assert "3.0.0" not in tags, f"nothing above the ceiling: {tags}"
+
+
+def test_sync_resolved_max_from_generator_is_exclusive_when_declared(
+    mirror: MirrorRunner, ocx: OcxRunner, tmp_path: Path,
+    registry: str, unique_mirror_repo: str, asset_server,
+):
+    """A generated `max` with `inclusive: false` drops the version it names."""
+    tarball = _make_tarball(tmp_path, "test-tool", "marker-gen-max")
+    shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
+
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
+    spec_path = tmp_path / "mirror-test.yaml"
+    _write_spec_yaml(
+        spec_path,
+        name="test-tool",
+        registry=registry,
+        repo=unique_mirror_repo,
+        versions=[
+            {"version": "1.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+            {"version": "2.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+        ],
+        metadata_path=metadata_path,
+        versions_config={
+            "max": {"generator": {"command": ["sh", "-c", "echo 2.0.0"]}, "inclusive": False},
+        },
+        cascade=False,
+    )
+
+    mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+
+    ocx.plain("index", "update", f"{unique_mirror_repo}:1.0.0")
+    tags = ocx.json("index", "list", unique_mirror_repo)[unique_mirror_repo]
+    assert "1.0.0" in tags, f"everything below the ceiling is mirrored: {tags}"
+    assert "2.0.0" not in tags, f"an exclusive ceiling drops the version it names: {tags}"
+
+
+def test_sync_resolved_min_from_url_is_exclusive_when_declared(
+    mirror: MirrorRunner, ocx: OcxRunner, tmp_path: Path,
+    registry: str, unique_mirror_repo: str, asset_server,
+):
+    """The lower edge's new degree of freedom, end to end.
+
+    Before the object form, a `min` was always inclusive; `inclusive: false`
+    is only expressible through the long spelling.
+    """
+    tarball = _make_tarball(tmp_path, "test-tool", "marker-url-min")
+    shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
+    (asset_server.dir / "floor").write_text("1.0.0\n")
+
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
+    spec_path = tmp_path / "mirror-test.yaml"
+    _write_spec_yaml(
+        spec_path,
+        name="test-tool",
+        registry=registry,
+        repo=unique_mirror_repo,
+        versions=[
+            {"version": "1.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+            {"version": "2.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+        ],
+        metadata_path=metadata_path,
+        versions_config={"min": {"url": asset_server.url("floor"), "inclusive": False}},
+        cascade=False,
+    )
+
+    mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
+
+    ocx.plain("index", "update", f"{unique_mirror_repo}:2.0.0")
+    tags = ocx.json("index", "list", unique_mirror_repo)[unique_mirror_repo]
+    assert "2.0.0" in tags, f"above an exclusive floor is mirrored: {tags}"
+    assert "1.0.0" not in tags, f"an exclusive floor drops the version it names: {tags}"
+
+
+def test_sync_unreachable_max_url_fails_the_run(
+    mirror: MirrorRunner, tmp_path: Path,
+    registry: str, unique_mirror_repo: str, asset_server,
+):
+    """Fail-closed: a ceiling that cannot be resolved aborts, never widens.
+
+    The alternative — falling back to an unbounded window — mirrors every
+    release the pointer exists to hold back. The asset server's request log is
+    what makes "nothing was published" an assertion: the run never reached a
+    download, so the target was never written to.
+    """
+    tarball = _make_tarball(tmp_path, "test-tool", "marker-unreachable")
+    shutil.copy(tarball, asset_server.dir / "test-tool.tar.gz")
+
+    metadata_path = str(FIXTURES_DIR / "metadata.json")
+    spec_path = tmp_path / "mirror-test.yaml"
+    _write_spec_yaml(
+        spec_path,
+        name="test-tool",
+        registry=registry,
+        repo=unique_mirror_repo,
+        versions=[
+            {"version": "1.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+            {"version": "2.0.0", "assets": {"test-tool.tar.gz": asset_server.url("test-tool.tar.gz")}},
+        ],
+        metadata_path=metadata_path,
+        versions_config={"max": {"url": asset_server.url("missing"), "inclusive": True}},
+        cascade=False,
+    )
+
+    result = mirror.run(
+        "package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir), check=False
+    )
+
+    assert result.returncode == 69, (
+        f"an unresolvable bound is an unusable source (69), got {result.returncode}\n{result.stderr}"
+    )
+    assert "versions.max" in result.stderr, f"the message must name the edge: {result.stderr}"
+    downloads = [r for r in asset_server.requests if "test-tool.tar.gz" in r]
+    assert downloads == [], f"a failed resolve must publish nothing: {asset_server.requests}"

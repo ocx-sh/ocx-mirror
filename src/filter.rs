@@ -364,6 +364,50 @@ mod tests {
         assert!(within_bounds("1.5.0", None, None));
     }
 
+    #[test]
+    fn max_bound_inclusive_keeps_the_boundary_version() {
+        // `max: {version: "3.0.0", inclusive: true}` — the vendor pointer case:
+        // a channel names the version it wants mirrored, not the first one it
+        // does not.
+        assert!(within_bounds_ex("3.0.0", None, true, Some("3.0.0"), true));
+        assert!(!within_bounds_ex("3.0.1", None, true, Some("3.0.0"), true));
+    }
+
+    #[test]
+    fn max_bound_shorthand_stays_exclusive() {
+        // Pins the shorthand default against a future flip.
+        assert!(!within_bounds_ex("3.0.0", None, true, Some("3.0.0"), false));
+        assert!(within_bounds_ex("2.9.9", None, true, Some("3.0.0"), false));
+    }
+
+    #[test]
+    fn min_bound_exclusive_drops_the_boundary_version() {
+        // The new degree of freedom on the lower edge.
+        assert!(!within_bounds_ex("1.0.0", Some("1.0.0"), false, None, false));
+        assert!(within_bounds_ex("1.0.1", Some("1.0.0"), false, None, false));
+    }
+
+    #[test]
+    fn min_bound_shorthand_stays_inclusive() {
+        assert!(within_bounds_ex("1.0.0", Some("1.0.0"), true, None, false));
+    }
+
+    #[test]
+    fn within_bounds_keeps_its_convention_for_platform_windows() {
+        // Per-platform `min_version`/`max_version` and `exclude:` ranges did
+        // not move: min admits the boundary, max refuses it.
+        assert!(!within_bounds("3.0.0", Some("3.0.0"), Some("3.0.0")));
+        assert!(within_bounds("3.0.0", Some("3.0.0"), Some("3.0.1")));
+    }
+
+    #[test]
+    fn either_edge_stays_fail_open_on_an_unrelatable_tag() {
+        // An inclusive edge does not change the fail-open convention: a tag
+        // neither parser understands is still surfaced as work.
+        assert!(within_bounds_ex("nightly", Some("1.0.0"), true, Some("2.0.0"), true));
+        assert!(within_bounds_ex("nightly", Some("1.0.0"), false, Some("2.0.0"), false));
+    }
+
     fn platform(s: &str) -> Platform {
         s.parse().unwrap()
     }
@@ -468,16 +512,11 @@ mod tests {
             rv("3.0.0", "3.0.0+ts", false),
         ];
 
-        let config = VersionsConfig {
-            min: Some("2.0.0".to_string()),
-            ..Default::default()
-        };
-
         let result = filter_versions(
             versions,
             &[],
             false,
-            Some(&config),
+            None,
             &bounds(Some("2.0.0"), None),
             &empty(),
             false,
@@ -495,17 +534,12 @@ mod tests {
             rv("3.0.0", "3.0.0+ts", false),
         ];
 
-        let config = VersionsConfig {
-            max: Some("2.0.0".to_string()),
-            ..Default::default()
-        };
-
         // max is exclusive: 2.0.0 itself is excluded
         let result = filter_versions(
             versions,
             &[],
             false,
-            Some(&config),
+            None,
             &bounds(None, Some("2.0.0")),
             &empty(),
             false,
@@ -525,16 +559,11 @@ mod tests {
             rv("1.16.6", "1.16.6+ts", false),
         ];
 
-        let config = VersionsConfig {
-            min: Some("1.16.0".to_string()),
-            ..Default::default()
-        };
-
         let result = filter_versions(
             versions,
             &[],
             false,
-            Some(&config),
+            None,
             &bounds(Some("1.16.0"), None),
             &empty(),
             false,
@@ -552,16 +581,11 @@ mod tests {
             rv("1.2.3.4", "1.2.3.4+ts", false),
         ];
 
-        let config = VersionsConfig {
-            max: Some("1.0.0".to_string()),
-            ..Default::default()
-        };
-
         let result = filter_versions(
             versions,
             &[],
             false,
-            Some(&config),
+            None,
             &bounds(None, Some("1.0.0")),
             &empty(),
             false,
@@ -742,8 +766,6 @@ mod tests {
 
         // max is exclusive, so 3.0.0 is excluded; prerelease 1.1.0-rc1 also skipped
         let config = VersionsConfig {
-            min: Some("1.0.0".to_string()),
-            max: Some("3.0.0".to_string()),
             new_per_run: Some(2),
             ..Default::default()
         };
@@ -1104,12 +1126,6 @@ mod tests {
     #[test]
     fn variant_min_max_uses_bare_version() {
         // Min/max bounds should apply to the bare source version, not variant-prefixed
-        let config = VersionsConfig {
-            min: Some("2.0.0".to_string()),
-            max: Some("4.0.0".to_string()),
-            ..Default::default()
-        };
-
         let versions = vec![
             rv_variant("1.0.0", "debug-1.0.0_ts", "debug"),
             rv_variant("3.0.0", "debug-3.0.0_ts", "debug"),
@@ -1120,7 +1136,7 @@ mod tests {
             versions,
             &[],
             false,
-            Some(&config),
+            None,
             &bounds(Some("2.0.0"), Some("4.0.0")),
             &empty(),
             false,

@@ -1,0 +1,17 @@
+# expect: versions.min.version.url 'ftp://example.com/floor' must be an http(s) URL
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+versions:
+  min:
+    version:
+      url: ftp://example.com/floor
+    inclusive: true

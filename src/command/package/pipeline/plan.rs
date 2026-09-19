@@ -539,6 +539,20 @@ fn build_version_entries(
 
 /// Plain-text rendering of `PlanReport` — one row per version.
 fn print_plan_plain(report: &PlanReport) {
+    // One line per set edge, above the early return on purpose: a run the
+    // ceiling held back is exactly the run whose ceiling the operator needs
+    // printed, and a resolved bound is not in the spec to read back.
+    let window = &report.versions_resolved;
+    for (edge, value, inclusive, origin) in [
+        ("min", &window.min, window.min_inclusive, window.min_origin),
+        ("max", &window.max, window.max_inclusive, window.max_origin),
+    ] {
+        if let Some(value) = value {
+            let edge_kind = if inclusive { "inclusive" } else { "exclusive" };
+            println!("resolved {edge}: {value} ({edge_kind}, from {origin})");
+        }
+    }
+
     if report.versions.is_empty() {
         println!("nothing to do — target is up to date");
         return;
