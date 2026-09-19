@@ -57,7 +57,13 @@ ocx-mirror schema <TARGET>
 
 | Argument | Values | Description |
 |----------|--------|-------------|
-| `<TARGET>` | `url-index` | Schema to generate (the `url_index` source document format) |
+| `<TARGET>` | `url-index` \| `dist` \| `plan` | Which schema to generate |
+
+| Target | Document | `$id` |
+|--------|----------|-------|
+| `url-index` | The [`url_index`](./mirror-yml.md#source) source document | `https://ocx.sh/schemas/url-index/v1.json` |
+| `dist` | [`dist.yml`](./dist-yml.md) | `https://ocx.sh/schemas/dist/v1.json` |
+| `plan` | [`plan.json`](./plan-json.md) — the document [`pipeline plan`](#pipeline-plan) writes | `https://ocx.sh/schemas/plan/v4.json` |
 
 ## `package pipeline` {#pipeline}
 
@@ -130,10 +136,13 @@ The JSON document is `schema_version: 4` and adds a `has_drift` flag alongside `
 ```
 
 An asset's `digest` is present only when the upstream source declared one.
-`legs` is the resolved per-platform test matrix — filled in by the
-[`plan.json` contract](./plan-json.md). `versions_resolved` is the version
-window the run actually filtered by — filled in by the resolved `versions:`
-bounds.
+`legs` is the resolved per-platform test matrix, keyed by the
+[`platforms:`](./mirror-yml.md#platforms) key verbatim: where the job runs, what
+it runs in, and which tests it runs. It is what lets a renderer for a forge the
+GitHub templates do not cover build the whole test fan-out without ever reading
+`mirror.yml` — the full contract, field by field, is
+[`plan.json`](./plan-json.md). `versions_resolved` is the version window the run
+actually filtered by — filled in by the resolved `versions:` bounds.
 
 `has_new` deliberately ignores drift-only versions — the generated workflow's `discover` job gates the download-and-build jobs on it, and a drift fix has nothing to download. The `discover` job also drops every `metadata-drift` entry before building the `prepare` matrix: a drift entry carries no resolved assets, so a `prepare` leg for one would abort looking for a bundle nothing wrote. `has_drift` surfaces the finding for a human to act on with [`pipeline patch`](#pipeline-patch).
 

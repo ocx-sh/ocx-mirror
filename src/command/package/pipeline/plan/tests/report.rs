@@ -224,3 +224,144 @@ fn plan_cmd_execute_returns_ok_or_err_not_panic() {
         "PlanCmd::execute must not panic after implementation; got panic instead of Result"
     );
 }
+
+// ── #77: the `legs` map ───────────────────────────────────────────────────
+
+/// A spec with one container platform and one native platform, plus a
+/// per-platform `tests:` override on the native one.
+const LEGS_SPEC_YAML: &str = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64+libc.musl:
+    - "shfmt_v.*_linux_amd64$"
+  darwin/arm64:
+    - "shfmt_v.*_darwin_arm64$"
+asset_type:
+  type: binary
+  name: shfmt
+tests:
+  - name: version
+    command: shfmt --version
+platforms:
+  linux/amd64+libc.musl:
+    runner: [self-hosted, linux, x64]
+    containers:
+      - image: alpine:3.20
+        setup:
+          - apk add --no-cache libstdc++
+  darwin/arm64:
+    runner: macos-latest
+    tests:
+      - name: smoke
+        script_inline: |
+          ocx_assert(True)
+"#;
+
+#[test]
+fn build_legs_resolves_the_spec_matrix_per_platform_key() {
+    let spec: MirrorSpec = serde_yaml_ng::from_str(LEGS_SPEC_YAML).expect("legs spec must parse");
+    let legs = build_legs(&spec);
+
+    assert_eq!(
+        legs.keys().collect::<Vec<_>>(),
+        vec!["darwin/arm64", "linux/amd64+libc.musl"],
+        "keys are the `platforms:` keys verbatim, in the sorted order the renderer emits"
+    );
+
+    let container = &legs["linux/amd64+libc.musl"];
+    assert_eq!(container.runner, vec!["self-hosted", "linux", "x64"]);
+    // The slug `pipeline prepare` writes the bundle under — not `/` → `_`.
+    assert_eq!(container.platform_slug, "linux_amd64_libc.musl");
+    // What `docker run --platform` accepts: the libc suffix is stripped.
+    assert_eq!(container.docker_platform, "linux/amd64");
+    assert_eq!(container.containers.len(), 1);
+    let image = &container.containers[0];
+    assert_eq!(image.id, "alpine_3_20", "id defaults to the slugified image");
+    assert_eq!(image.image.as_deref(), Some("alpine:3.20"));
+    assert_eq!(image.shell, "sh", "inferred from the alpine basename");
+    assert_eq!(image.libc.as_deref(), Some("musl"));
+    assert_eq!(
+        image.setup.as_deref(),
+        Some(["apk add --no-cache libstdc++".to_owned()].as_slice())
+    );
+    // No per-platform override → the top-level list.
+    assert_eq!(
+        container.tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["version"]
+    );
+
+    let native = &legs["darwin/arm64"];
+    assert_eq!(native.runner, vec!["macos-latest"], "a single label is still a list");
+    assert_eq!(native.docker_platform, "darwin/arm64");
+    assert_eq!(
+        native.containers.len(),
+        1,
+        "a container-less platform gets the sentinel"
+    );
+    assert_eq!(native.containers[0].id, "_native_");
+    assert_eq!(native.containers[0].shell, "bash");
+    // The per-platform `tests:` REPLACES the top-level list, never merges.
+    assert_eq!(
+        native.tests.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["smoke"]
+    );
+}
+
+#[test]
+fn the_native_leg_omits_image_and_libc_on_the_wire() {
+    // A consumer reads "absent" as native. Serialising `null` there would make
+    // every renderer test for two things instead of one.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(LEGS_SPEC_YAML).expect("legs spec must parse");
+    let report = PlanReport {
+        schema_version: PLAN_SCHEMA_VERSION,
+        has_new: false,
+        has_drift: false,
+        versions: vec![],
+        target: "ocx.sh/shfmt".to_string(),
+        ocx_mirror_rev: None,
+        legs: build_legs(&spec),
+        versions_resolved: Default::default(),
+    };
+
+    let json = serde_json::to_string(&report).expect("plan report serialises");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("and parses back");
+    let native = &value["legs"]["darwin/arm64"]["containers"][0];
+    for absent in ["image", "libc", "setup"] {
+        assert!(
+            native.get(absent).is_none(),
+            "the native leg must omit `{absent}`, got: {native}"
+        );
+    }
+    assert_eq!(
+        value["legs"]["darwin/arm64"]["runner"],
+        serde_json::json!(["macos-latest"])
+    );
+
+    let round_tripped: PlanReport = serde_json::from_str(&json).expect("plan report round trips");
+    assert_eq!(
+        serde_json::to_value(&round_tripped).unwrap(),
+        value,
+        "the legs survive a serialise → deserialise round trip unchanged"
+    );
+}
+
+#[test]
+fn build_legs_is_empty_without_a_platforms_block() {
+    // An env or archive spec that never declares `platforms:` has no matrix,
+    // and `{}` is what the contract promises there — not a missing key.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(
+        &LEGS_SPEC_YAML[..LEGS_SPEC_YAML
+            .find("platforms:")
+            .expect("fixture has a platforms block")],
+    )
+    .expect("spec without platforms must parse");
+    assert!(build_legs(&spec).is_empty());
+}

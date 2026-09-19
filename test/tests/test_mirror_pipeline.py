@@ -268,6 +268,22 @@ def test_pipeline_plan_reports_the_unmirrored_version(
     assert plan["versions"][0]["platforms"] == ["linux/amd64"]
     assert plan["versions"][0]["assets"][0]["asset_name"] == "shfmt_v3.7.0_linux_amd64"
 
+    # v4: the legs carry the spec's resolved test matrix, so a renderer for a
+    # forge the GitHub templates do not cover needs no mirror.yml at all.
+    assert plan["schema_version"] == 4
+    leg = plan["legs"]["linux/amd64"]
+    assert leg["runner"] == ["ubuntu-22.04"], leg
+    assert leg["platform_slug"] == "linux_amd64"
+    assert leg["docker_platform"] == "linux/amd64"
+    # `id`, `shell` and `libc` are inferred from the image; `pipeline push`
+    # looks JUnit files up by `id`, so a renderer must not re-derive it.
+    assert leg["containers"] == [
+        {"id": "ubuntu_24_04", "image": "ubuntu:24.04", "shell": "bash", "libc": "gnu"}
+    ]
+    # The per-platform `tests:` override, not the top-level list.
+    assert [t["name"] for t in leg["tests"]] == ["version"]
+    assert leg["tests"][0]["command"] == "shfmt --version"
+
 
 def test_pipeline_prepare_bundles_the_declared_platform(
     mirror: MirrorRunner, pipeline_spec: Path, mirror_work_dir: Path

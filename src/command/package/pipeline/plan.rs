@@ -477,7 +477,7 @@ async fn build_plan_report(
         versions: version_entries,
         target,
         ocx_mirror_rev,
-        legs: BTreeMap::new(),
+        legs: build_legs(spec),
         versions_resolved: bounds,
     })
 }

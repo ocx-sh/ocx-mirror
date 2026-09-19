@@ -27,7 +27,7 @@ pub fn env_plan_report(
         versions,
         target: format!("{}/{}", spec.target.registry, spec.target.repository),
         ocx_mirror_rev: spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone()),
-        legs: BTreeMap::new(),
+        legs: build_legs(spec),
         versions_resolved: bounds.clone(),
     }
 }

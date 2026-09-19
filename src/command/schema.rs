@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use crate::command::package::pipeline::plan::PlanReport;
 use crate::error::MirrorError;
 use crate::source::url_index::RemoteIndex;
 use crate::spec::DistSpec;
@@ -20,6 +21,10 @@ pub enum SchemaTarget {
     /// editor offers `token_env` under `bearer` and the two `*_env` names
     /// under `basic` — the invalid combinations never autocomplete.
     Dist,
+    /// `plan.json`, the document `pipeline plan --format json` writes — the
+    /// contract a non-GitHub renderer builds against. See
+    /// `docs/reference/plan-json.md`.
+    Plan,
 }
 
 impl Schema {
@@ -31,6 +36,10 @@ impl Schema {
             }
             SchemaTarget::Dist => {
                 let json = generate_schema::<DistSpec>("https://ocx.sh/schemas/dist/v1.json");
+                println!("{json}");
+            }
+            SchemaTarget::Plan => {
+                let json = generate_schema::<PlanReport>("https://ocx.sh/schemas/plan/v4.json");
                 println!("{json}");
             }
         }
