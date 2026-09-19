@@ -1,0 +1,15 @@
+# expect: source.url_rewrite.from must not be empty
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: github_release
+  owner: o
+  repo: r
+  url_rewrite:
+    from: ""
+    to: "https://artifactory.example.com/artifactory/githubcom-remote/"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"

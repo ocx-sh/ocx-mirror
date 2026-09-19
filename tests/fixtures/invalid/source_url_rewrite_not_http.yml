@@ -1,0 +1,15 @@
+# expect: must be an http(s) URL prefix
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: github_release
+  owner: o
+  repo: r
+  url_rewrite:
+    from: "https://github.com/"
+    to: "file:///srv/mirror/"
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"

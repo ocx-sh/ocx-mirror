@@ -313,11 +313,44 @@ pub(crate) async fn list_upstream_versions(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
 ) -> Result<Vec<source::VersionInfo>, MirrorError> {
+    let mut versions = crawl_source(spec, spec_dir).await?;
+
+    // One seam, four callers: `sync`, `check`, `pipeline plan` and a
+    // `--plan`-less `prepare` all see rewritten URLs, and `plan.json` carries
+    // them — so `prepare --plan` inherits the rewrite without knowing it
+    // exists. Env sources are structurally unaffected: their `assets` map is
+    // empty by construction.
+    if let Some(rewrite) = spec::UrlRewrite::resolve(spec.source.url_rewrite())? {
+        // The spec form is refused *by name* on an env source, precisely so an
+        // accepted-but-inert field cannot lie. The environment form cannot be
+        // refused — one variable covers a whole CI run, and most of that run is
+        // archive sources it does apply to — so it says so instead. Named, not
+        // valued: this line reaches a durable CI log.
+        if let Some(source_type) = spec.source.env_type_name()
+            && ocx_util::env::var(spec::URL_REWRITE_ENV).is_some_and(|value| !value.is_empty())
+        {
+            log::warn!(
+                "{} does not apply to source.type '{source_type}' — point source.indexes at the proxy instead",
+                spec::URL_REWRITE_ENV,
+            );
+        }
+        for info in &mut versions {
+            for url in info.assets.values_mut() {
+                *url = rewrite.apply(url)?;
+            }
+        }
+    }
+    Ok(versions)
+}
+
+/// The source crawl itself, before any download-host rewrite.
+async fn crawl_source(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Result<Vec<source::VersionInfo>, MirrorError> {
     match &spec.source {
         spec::Source::GithubRelease {
             owner,
             repo,
             tag_pattern,
+            ..
         } => {
             let token = ocx_util::env::var("GITHUB_TOKEN");
             let mut builder = source::github_release::builder();
@@ -336,19 +369,19 @@ pub(crate) async fn list_upstream_versions(
                 .await
                 .map_err(|e| MirrorError::SourceError(format!("failed to list GitHub releases: {e:#}")))
         }
-        spec::Source::UrlIndex(url_index_source) => match url_index_source {
-            spec::UrlIndexSource::Remote { url } => {
+        spec::Source::UrlIndex(url_index_source) => match &url_index_source.mode {
+            spec::UrlIndexMode::Remote { url } => {
                 log::debug!("Fetching remote URL index from {}", url);
                 source::url_index::from_remote(url)
                     .await
                     .map_err(|e| MirrorError::SourceError(format!("failed to fetch url_index: {e}")))
             }
-            spec::UrlIndexSource::Inline { versions } => {
+            spec::UrlIndexMode::Inline { versions } => {
                 log::debug!("Loading {} inline versions", versions.len());
                 source::url_index::from_inline(versions)
                     .map_err(|e| MirrorError::SourceError(format!("invalid url_index versions: {e}")))
             }
-            spec::UrlIndexSource::Generator { generator } => {
+            spec::UrlIndexMode::Generator { generator } => {
                 log::debug!("Running generator: {}", generator.command.join(" "));
                 source::url_index::from_generator(generator, spec_dir)
                     .await

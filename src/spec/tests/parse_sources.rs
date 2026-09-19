@@ -106,7 +106,11 @@ skip_prereleases: true
     assert!(!spec.cascade.enabled);
     assert!(spec.skip_prereleases);
 
-    if let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source {
+    if let Source::UrlIndex(UrlIndexSource {
+        mode: UrlIndexMode::Inline { versions },
+        ..
+    }) = &spec.source
+    {
         assert_eq!(versions.len(), 2);
         assert!(versions["1.1.0"].prerelease);
     } else {
@@ -130,11 +134,41 @@ assets:
 "#;
 
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    if let Source::UrlIndex(UrlIndexSource::Remote { url }) = &spec.source {
+    if let Source::UrlIndex(UrlIndexSource {
+        mode: UrlIndexMode::Remote { url },
+        ..
+    }) = &spec.source
+    {
         assert_eq!(url, "https://example.com/versions.json");
     } else {
         panic!("Expected UrlIndex Remote source, got: {:?}", spec.source);
     }
+}
+
+#[test]
+fn unknown_key_under_source_is_refused() {
+    // Before `deny_unknown_fields`, a stray key under `source:` was ignored
+    // outright — which is how a spec can crawl the wrong thing for months
+    // while its author reads the key they meant to set.
+    let yaml = r#"
+name: test-tool
+target:
+  registry: ocx.sh
+  repository: test-tool
+source:
+  type: github_release
+  owner: o
+  repo: r
+  download_base: "https://artifactory.example.com/"
+assets:
+  linux/amd64:
+    - "x\\.tar\\.gz"
+"#;
+
+    let err = serde_yaml_ng::from_str::<MirrorSpec>(yaml)
+        .expect_err("an unknown source key must be refused")
+        .to_string();
+    assert!(err.contains("unknown field `download_base`"), "{err}");
 }
 
 #[test]
@@ -158,7 +192,11 @@ assets:
 "#;
 
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source else {
+    let Source::UrlIndex(UrlIndexSource {
+        mode: UrlIndexMode::Inline { versions },
+        ..
+    }) = &spec.source
+    else {
         panic!("Expected UrlIndex Inline source, got: {:?}", spec.source);
     };
     let asset = &versions["1.0.0"].assets["test-tool.tar.gz"];
@@ -192,7 +230,11 @@ assets:
 "#;
 
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
-    let Source::UrlIndex(UrlIndexSource::Inline { versions }) = &spec.source else {
+    let Source::UrlIndex(UrlIndexSource {
+        mode: UrlIndexMode::Inline { versions },
+        ..
+    }) = &spec.source
+    else {
         panic!("Expected UrlIndex Inline source, got: {:?}", spec.source);
     };
     let assets = &versions["1.0.0"].assets;
