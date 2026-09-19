@@ -74,7 +74,7 @@ No pre-commit hooks in this repo — verification is on you. Every branch must p
 
 ## Submodule (`external/ocx`)
 
-`external/ocx` is a **vendored read-only submodule** — never commit inside it. Bumping `ocx_lib` = bumping the submodule pointer (procedure in README.md); the pointer change commits in this repo as `build:`.
+`external/ocx` is a **vendored read-only submodule** — never commit inside it. Bumping ocx = bumping the submodule pointer (procedure in README.md); the pointer change commits in this repo as `build:`.
 
 ## References
 

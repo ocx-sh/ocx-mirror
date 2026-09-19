@@ -10,7 +10,7 @@
 //! `lib/site-packages/`, `.data/scripts` → `bin/`, `.data/data` → the content
 //! root (`share/…`). Because one wheel spans three destination prefixes — which
 //! a single layer prefix cannot express — the layer applies at the content root
-//! with an empty [`LayerLayoutSpec`](ocx_lib::oci::LayerLayoutSpec); the tar
+//! with an empty [`LayerLayoutSpec`](ocx_oci::LayerLayoutSpec); the tar
 //! already carries the final paths.
 //!
 //! Extracts the RAW `[console_scripts]` object references from entry-point
@@ -30,7 +30,7 @@ pub const REPACK_VERSION: &str = "repack-v1";
 
 /// Pinned zstd compression level for the deterministic `tar.zst` layer
 /// (Convention #2) — matches the codebase-wide default pinned elsewhere
-/// (`ocx_lib::compression::CompressionLevel::Default`).
+/// (`ocx_util::compression::CompressionLevel::Default`).
 const ZSTD_LEVEL: i32 = 3;
 
 /// Unix mode for a regular file in the relocated tree.

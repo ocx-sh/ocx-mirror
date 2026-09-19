@@ -3,7 +3,7 @@
 
 //! Fixtures shared by more than one `plan` test module.
 
-use ocx_lib::oci::Algorithm;
+use ocx_oci::Algorithm;
 
 use super::super::*;
 use crate::spec::{OnError, RegistryConcurrency, Target};
@@ -68,7 +68,7 @@ pub fn catalog(names: &[&str]) -> CatalogIndex {
 }
 
 /// `sha256` of a short unique string.
-pub fn digest(seed: &str) -> ocx_lib::oci::Digest {
+pub fn digest(seed: &str) -> ocx_oci::Digest {
     Algorithm::Sha256.hash(seed.as_bytes())
 }
 

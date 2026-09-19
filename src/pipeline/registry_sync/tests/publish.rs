@@ -24,9 +24,9 @@
 
 use std::path::Path;
 
-use ocx_lib::cli::ExitCode;
-use ocx_lib::file_structure::IndexStore;
-use ocx_lib::oci::Algorithm;
+use ocx_exit::ExitCode;
+use ocx_index::IndexStore;
+use ocx_oci::Algorithm;
 use serde_json::{Value, json};
 
 use super::super::*;
@@ -650,8 +650,7 @@ async fn an_unchanged_source_is_skipped_right_after_its_own_publish() {
         .await
         .expect("read the catalog")
         .expect("the catalog exists");
-    let source_root: ocx_lib::oci::index::IndexRoot =
-        serde_json::from_slice(&source_bytes).expect("parse the source root");
+    let source_root: ocx_index::IndexRoot = serde_json::from_slice(&source_bytes).expect("parse the source root");
 
     assert!(
         index_write::should_skip(PACKAGE, &source_bytes, &source_root, Some(&local), &catalog),
@@ -663,7 +662,7 @@ async fn an_unchanged_source_is_skipped_right_after_its_own_publish() {
         root_document(&[("3.28.1", &release)]),
         &readme("# cmake, revised\n").digest,
     );
-    let moved_root: ocx_lib::oci::index::IndexRoot = serde_json::from_slice(&moved).expect("parse");
+    let moved_root: ocx_index::IndexRoot = serde_json::from_slice(&moved).expect("parse");
     assert!(
         !index_write::should_skip(PACKAGE, &moved, &moved_root, Some(&local), &catalog),
         "a description-only change must re-sync (ocx-mirror#70)"

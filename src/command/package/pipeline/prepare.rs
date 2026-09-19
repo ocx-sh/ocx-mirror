@@ -7,8 +7,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::log;
+use ocx_console::DataInterface;
 
 use crate::command::package::pipeline::plan::{
     PlanReport, PlanVersionEntry, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin,
@@ -270,7 +269,7 @@ async fn build_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    interpreter_candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
     let path = match &spec.source {
@@ -314,7 +313,7 @@ fn build_env_tasks_from_lock(
     version: &str,
     lock: &ocx_python::Pylock,
     app_version: &str,
-    interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    interpreter_candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
     // `--version` names either the bare source version — the standalone path,
@@ -442,7 +441,7 @@ async fn build_pypi_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
+    interpreter_candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
     plan_path: Option<&std::path::Path>,
     work_dir: &std::path::Path,
@@ -524,13 +523,13 @@ fn plan_entry_for_version<'a>(plan: &'a PlanReport, version: &str) -> Option<&'a
 /// the tag `normalizer::env_version_tag` would have produced for it in some
 /// earlier run of this pipeline.
 ///
-/// Compared through `ocx_lib::Version` rather than by string prefix so the
+/// Compared through `ocx_package::version::Version` rather than by string prefix so the
 /// build separator (`+` on the wire, `_` in a tag) is normalised on both
 /// sides, the same way `spec::strip_build` decides platform applicability.
 fn is_build_stamp_of(tag: &str, source_version: &str) -> bool {
     match (
-        ocx_lib::package::version::Version::parse(tag),
-        ocx_lib::package::version::Version::parse(source_version),
+        ocx_package::version::Version::parse(tag),
+        ocx_package::version::Version::parse(source_version),
     ) {
         (Some(tagged), Some(source)) => tagged.has_build() && spec::strip_build(&tagged) == source,
         _ => false,
@@ -570,18 +569,18 @@ async fn resolve_pypi_app_version(
 /// is rejected by the publish gate at push time.
 async fn fetch_interpreter_candidates(
     interpreter_package: &str,
-    client: &ocx_lib::oci::Client,
-) -> Result<Vec<(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)>, MirrorError> {
-    let identifier = ocx_lib::oci::Identifier::parse(interpreter_package).map_err(|e| {
+    client: &ocx_oci::Client,
+) -> Result<Vec<(ocx_oci::Identifier, ocx_oci::Platform)>, MirrorError> {
+    let identifier = ocx_oci::Identifier::parse(interpreter_package).map_err(|e| {
         MirrorError::PylockError(format!(
             "invalid interpreter package reference '{interpreter_package}': {e}"
         ))
     })?;
-    let index = ocx_lib::oci::index::Index::from_remote(ocx_lib::oci::index::OciIndex::new(
-        ocx_lib::oci::index::OciIndexConfig { client: client.clone() },
-    ));
+    let index = ocx_index::Index::from_remote(ocx_index::OciIndex::new(ocx_index::OciIndexConfig {
+        client: client.clone(),
+    }));
     let candidates = index
-        .fetch_candidates(&identifier, ocx_lib::oci::index::IndexOperation::Resolve)
+        .fetch_candidates(&identifier, ocx_index::IndexOperation::Resolve)
         .await
         .map_err(|e| {
             MirrorError::TargetError(format!(
@@ -599,24 +598,24 @@ async fn fetch_interpreter_candidates(
 /// Selects the interpreter's platform-leaf pin for one env leg and wraps it
 /// as the composed package's `PRIVATE` dependency. Pure local selection over
 /// [`fetch_interpreter_candidates`]' result, using the same
-/// [`ocx_lib::oci::select_best`] relation `ocx package create` pins with (D1
+/// [`ocx_oci::select_best`] relation `ocx package create` pins with (D1
 /// parity) — the mirror and a hand-run `create` cannot disagree on which
 /// leaf a leg depends on.
 fn select_interpreter_pin(
     interpreter_package: &str,
-    candidates: &[(ocx_lib::oci::Identifier, ocx_lib::oci::Platform)],
-    platform: &ocx_lib::oci::Platform,
-) -> Result<ocx_lib::package::metadata::dependency::Dependency, MirrorError> {
-    let winner = match ocx_lib::oci::select_best(platform, candidates) {
-        ocx_lib::oci::Selection::Found(identifier) => identifier,
-        ocx_lib::oci::Selection::None => {
+    candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
+    platform: &ocx_oci::Platform,
+) -> Result<ocx_package::metadata::dependency::Dependency, MirrorError> {
+    let winner = match ocx_oci::select_best(platform, candidates) {
+        ocx_oci::Selection::Found(identifier) => identifier,
+        ocx_oci::Selection::None => {
             let available: Vec<String> = candidates.iter().map(|(_, p)| p.to_string()).collect();
             return Err(MirrorError::PylockError(format!(
                 "interpreter package '{interpreter_package}' has no entry compatible with platform '{platform}' (available: {})",
                 available.join(", ")
             )));
         }
-        ocx_lib::oci::Selection::Ambiguous(tied) => {
+        ocx_oci::Selection::Ambiguous(tied) => {
             let tied: Vec<String> = tied.iter().map(|id| id.to_string()).collect();
             return Err(MirrorError::PylockError(format!(
                 "interpreter package '{interpreter_package}' has {} entries tied for platform '{platform}': {}",
@@ -625,11 +624,11 @@ fn select_interpreter_pin(
             )));
         }
     };
-    let pinned = ocx_lib::oci::PinnedIdentifier::try_from(winner)
+    let pinned = ocx_oci::PinnedIdentifier::try_from(winner)
         .map_err(|e| MirrorError::TargetError(format!("interpreter identifier not pinnable: {e}")))?;
-    Ok(ocx_lib::package::metadata::dependency::Dependency {
+    Ok(ocx_package::metadata::dependency::Dependency {
         identifier: pinned,
-        visibility: ocx_lib::package::metadata::visibility::Visibility::PRIVATE,
+        visibility: ocx_package::metadata::visibility::Visibility::PRIVATE,
         name: None,
     })
 }

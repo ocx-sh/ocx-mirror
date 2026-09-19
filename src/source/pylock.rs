@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::Context;
-use ocx_lib::package::version::Version;
+use ocx_package::version::Version;
 use ocx_python::normalize_package_name;
 use ocx_python::{LockError, LockedPackage, Pylock};
 

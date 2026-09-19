@@ -13,8 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use ocx_lib::cli::ExitCode;
-use ocx_lib::log;
+use ocx_exit::ExitCode;
 
 use super::forward_ocx_env;
 use super::sign::{ResolvedSign, ocx_child_env, sign_push_args};

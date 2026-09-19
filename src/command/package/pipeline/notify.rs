@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use crate::discord::{
     self, AllowedMentions, DiscordEmbed, DiscordEmbedAuthor, DiscordEmbedField, DiscordEmbedThumbnail,

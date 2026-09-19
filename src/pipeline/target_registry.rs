@@ -14,18 +14,19 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use ocx_lib::oci::client::error::ClientError;
-use ocx_lib::oci::{Descriptor, Digest, Identifier, ImageManifest, PinnedIdentifier, Platform};
-use ocx_lib::package::metadata::Metadata;
-use ocx_lib::package::version::Version;
-use ocx_lib::publisher::Publisher;
+use ocx_oci::client::error::ClientError;
+use ocx_oci::{Descriptor, Digest, Identifier, ImageManifest, PinnedIdentifier, Platform};
+use ocx_package::error::Error as PackageError;
+use ocx_package::metadata::Metadata;
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
 
 use crate::error::MirrorError;
 
 /// Extract platform entries from an OCI manifest.
-pub(crate) fn extract_platforms(manifest: &ocx_lib::oci::Manifest) -> Vec<Platform> {
+pub(crate) fn extract_platforms(manifest: &ocx_oci::Manifest) -> Vec<Platform> {
     match manifest {
-        ocx_lib::oci::Manifest::ImageIndex(index) => index
+        ocx_oci::Manifest::ImageIndex(index) => index
             .manifests
             .iter()
             .filter_map(|entry| entry.platform.as_ref().and_then(|p| Platform::try_from(p.clone()).ok()))
@@ -171,11 +172,11 @@ fn pinned(identifier: &Identifier, digest: Digest) -> Result<PinnedIdentifier, M
 /// direction; only a *read failure* aborts.
 fn index_children(
     tag: &str,
-    result: ocx_lib::Result<(Digest, ocx_lib::oci::Manifest)>,
+    result: std::result::Result<(Digest, ocx_oci::Manifest), ClientError>,
 ) -> Result<Vec<(Version, Platform, Digest)>, MirrorError> {
     let manifest = match result {
         Ok((_, manifest)) => manifest,
-        Err(ocx_lib::Error::OciClient(ClientError::ManifestNotFound(_))) => return Ok(Vec::new()),
+        Err(ClientError::ManifestNotFound(_)) => return Ok(Vec::new()),
         Err(error) => {
             return Err(MirrorError::TargetError(format!(
                 "failed to fetch manifest for tag '{tag}': {error}"
@@ -183,7 +184,7 @@ fn index_children(
         }
     };
 
-    let (Some(version), ocx_lib::oci::Manifest::ImageIndex(index)) = (Version::parse(tag), &manifest) else {
+    let (Some(version), ocx_oci::Manifest::ImageIndex(index)) = (Version::parse(tag), &manifest) else {
         return Ok(Vec::new());
     };
 
@@ -234,10 +235,13 @@ fn parse_metadata(
 }
 
 /// Classifies a `list_tags` result — fail-safe (issue #157).
-fn tags_from_result(result: ocx_lib::Result<Vec<String>>, identifier: &Identifier) -> Result<Vec<String>, MirrorError> {
+fn tags_from_result(
+    result: std::result::Result<Vec<String>, PackageError>,
+    identifier: &Identifier,
+) -> Result<Vec<String>, MirrorError> {
     match result {
         Ok(tags) => Ok(tags),
-        Err(ocx_lib::Error::OciClient(ClientError::RepositoryNotFound(_))) => Ok(Vec::new()),
+        Err(PackageError::OciClient(ClientError::RepositoryNotFound(_))) => Ok(Vec::new()),
         Err(error) => Err(MirrorError::TargetError(format!(
             "failed to list tags for {identifier}: {error}"
         ))),
@@ -247,7 +251,7 @@ fn tags_from_result(result: ocx_lib::Result<Vec<String>>, identifier: &Identifie
 /// Classifies a per-tag `fetch_manifest` result — fail-safe (issue #157).
 fn merge_manifest_result(
     tag: &str,
-    result: ocx_lib::Result<(ocx_lib::oci::Digest, ocx_lib::oci::Manifest)>,
+    result: std::result::Result<(ocx_oci::Digest, ocx_oci::Manifest), ClientError>,
     platform_info: &mut BTreeMap<Version, HashSet<Platform>>,
 ) -> Result<(), MirrorError> {
     match result {
@@ -260,7 +264,7 @@ fn merge_manifest_result(
             }
             Ok(())
         }
-        Err(ocx_lib::Error::OciClient(ClientError::ManifestNotFound(_))) => Ok(()),
+        Err(ClientError::ManifestNotFound(_)) => Ok(()),
         Err(error) => Err(MirrorError::TargetError(format!(
             "failed to fetch manifest for tag '{tag}': {error}"
         ))),
@@ -320,7 +324,7 @@ pub(crate) async fn fetch_signing_subjects(
 fn signing_tags<'a>(tags: &[&'a str]) -> Vec<&'a str> {
     tags.iter()
         .copied()
-        .filter(|tag| !ocx_lib::package::tag::Tag::is_reserved_str(tag))
+        .filter(|tag| !ocx_package::tag::Tag::is_reserved_str(tag))
         .collect()
 }
 
@@ -334,11 +338,11 @@ fn signing_tags<'a>(tags: &[&'a str]) -> Vec<&'a str> {
 /// it. A bare manifest yields no children and is itself the only subject.
 fn signing_subject(
     tag: &str,
-    result: ocx_lib::Result<(Digest, ocx_lib::oci::Manifest)>,
+    result: std::result::Result<(Digest, ocx_oci::Manifest), ClientError>,
 ) -> Result<Option<crate::pipeline::sign_backfill::PublishedTag>, MirrorError> {
     let (digest, manifest) = match result {
         Ok(fetched) => fetched,
-        Err(ocx_lib::Error::OciClient(ClientError::ManifestNotFound(_))) => return Ok(None),
+        Err(ClientError::ManifestNotFound(_)) => return Ok(None),
         Err(error) => {
             return Err(MirrorError::TargetError(format!(
                 "failed to fetch manifest for tag '{tag}': {error}"
@@ -347,7 +351,7 @@ fn signing_subject(
     };
 
     let children = match &manifest {
-        ocx_lib::oci::Manifest::ImageIndex(index) => index
+        ocx_oci::Manifest::ImageIndex(index) => index
             .manifests
             .iter()
             .filter_map(|entry| {
@@ -356,7 +360,7 @@ fn signing_subject(
                 Some((platform, child))
             })
             .collect(),
-        ocx_lib::oci::Manifest::Image(_) => Vec::new(),
+        ocx_oci::Manifest::Image(_) => Vec::new(),
     };
 
     Ok(Some(crate::pipeline::sign_backfill::PublishedTag {
@@ -396,8 +400,8 @@ mod tests {
         Identifier::new_registry("mirror/cmake", "registry.test")
     }
 
-    fn transient_error() -> ocx_lib::Error {
-        ClientError::Registry("registry returned 503".into()).into()
+    fn transient_error() -> ClientError {
+        ClientError::Registry("registry returned 503".into())
     }
 
     // ── list_tags classification ──────────────────────────────────────────
@@ -406,7 +410,7 @@ mod tests {
     fn transient_list_tags_error_aborts() {
         // Fail-open would return an empty tag list here — every published
         // version would classify as New.
-        let result = tags_from_result(Err(transient_error()), &identifier());
+        let result = tags_from_result(Err(transient_error().into()), &identifier());
         assert!(
             matches!(result, Err(MirrorError::TargetError(_))),
             "transient list_tags failure must abort, got {result:?}"
@@ -461,7 +465,7 @@ mod tests {
         // safe to treat as not published.
         let error = ClientError::ManifestNotFound("registry.test/mirror/cmake:4.3.3".to_string());
         let mut platform_info = BTreeMap::new();
-        let result = merge_manifest_result("4.3.3", Err(error.into()), &mut platform_info);
+        let result = merge_manifest_result("4.3.3", Err(error), &mut platform_info);
         result.expect("manifest-absent is not an error");
         assert!(platform_info.is_empty());
     }
@@ -473,19 +477,19 @@ mod tests {
     // must not read as "this version's metadata is fine" (missed patch) nor as
     // "it differs" (fleet-wide republish).
 
-    fn image_index(platform_digest: &str) -> ocx_lib::oci::Manifest {
-        ocx_lib::oci::Manifest::ImageIndex(ocx_lib::oci::native::ImageIndex {
+    fn image_index(platform_digest: &str) -> ocx_oci::Manifest {
+        ocx_oci::Manifest::ImageIndex(ocx_oci::native::ImageIndex {
             schema_version: 2,
             media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
             artifact_type: None,
-            manifests: vec![ocx_lib::oci::native::ImageIndexEntry {
+            manifests: vec![ocx_oci::native::ImageIndexEntry {
                 media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                 artifact_type: None,
                 digest: platform_digest.to_string(),
                 size: 1,
-                platform: Some(ocx_lib::oci::native::Platform {
-                    architecture: ocx_lib::oci::native::Arch::Amd64,
-                    os: ocx_lib::oci::native::Os::Linux,
+                platform: Some(ocx_oci::native::Platform {
+                    architecture: ocx_oci::native::Arch::Amd64,
+                    os: ocx_oci::native::Os::Linux,
                     os_version: None,
                     os_features: None,
                     variant: None,
@@ -526,7 +530,7 @@ mod tests {
     #[test]
     fn index_manifest_not_found_skips_tag_for_images() {
         let error = ClientError::ManifestNotFound("registry.test/mirror/cmake:4.3.3".to_string());
-        let children = index_children("4.3.3", Err(error.into())).expect("manifest-absent is not an error");
+        let children = index_children("4.3.3", Err(error)).expect("manifest-absent is not an error");
         assert!(children.is_empty());
     }
 
@@ -591,18 +595,18 @@ mod tests {
 
     #[test]
     fn fetched_manifest_extends_platform_info() {
-        let index = ocx_lib::oci::native::ImageIndex {
+        let index = ocx_oci::native::ImageIndex {
             schema_version: 2,
             media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
             artifact_type: None,
-            manifests: vec![ocx_lib::oci::native::ImageIndexEntry {
+            manifests: vec![ocx_oci::native::ImageIndexEntry {
                 media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
                 artifact_type: None,
                 digest: format!("sha256:{}", "a".repeat(64)),
                 size: 1,
-                platform: Some(ocx_lib::oci::native::Platform {
-                    architecture: ocx_lib::oci::native::Arch::Amd64,
-                    os: ocx_lib::oci::native::Os::Linux,
+                platform: Some(ocx_oci::native::Platform {
+                    architecture: ocx_oci::native::Arch::Amd64,
+                    os: ocx_oci::native::Os::Linux,
                     os_version: None,
                     os_features: None,
                     variant: None,
@@ -612,8 +616,8 @@ mod tests {
             }],
             annotations: None,
         };
-        let manifest = ocx_lib::oci::Manifest::ImageIndex(index);
-        let digest = ocx_lib::oci::Digest::Sha256("b".repeat(64));
+        let manifest = ocx_oci::Manifest::ImageIndex(index);
+        let digest = ocx_oci::Digest::Sha256("b".repeat(64));
 
         let mut platform_info = BTreeMap::new();
         merge_manifest_result("4.3.3", Ok((digest, manifest)), &mut platform_info).expect("manifest merges");

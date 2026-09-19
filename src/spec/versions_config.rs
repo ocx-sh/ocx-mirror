@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use ocx_lib::package::version::Version;
+use ocx_package::version::Version;
 use serde::Deserialize;
 
 /// Controls the order in which non-mirrored versions are selected when

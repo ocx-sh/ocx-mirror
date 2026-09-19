@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::progress::ProgressManager;
+use ocx_console::progress::ProgressManager;
 
 use super::options::SyncOptions;
 use crate::error::MirrorError;
@@ -18,7 +18,7 @@ pub struct Check {
 }
 
 impl Check {
-    pub async fn execute(&self, printer: &ocx_lib::cli::DataInterface) -> Result<(), MirrorError> {
+    pub async fn execute(&self, printer: &ocx_console::DataInterface) -> Result<(), MirrorError> {
         let mut options = self.options.clone();
         options.dry_run = true;
         let sync = super::sync::Sync {

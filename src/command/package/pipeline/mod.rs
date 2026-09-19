@@ -29,7 +29,7 @@ pub mod prepare;
 pub mod push;
 pub mod sign;
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use crate::error::MirrorError;
 

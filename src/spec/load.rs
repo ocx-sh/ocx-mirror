@@ -10,8 +10,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use ocx_lib::log;
-
 use super::validate::{policy_check_notify, refuse_raw_sign_shapes, validate_sign_config};
 use super::{DIST_KIND, DistSpec, KIND_KEY, MirrorSpec, REGISTRY_KIND, RegistrySpec, pre_scan};
 use crate::error::MirrorError;

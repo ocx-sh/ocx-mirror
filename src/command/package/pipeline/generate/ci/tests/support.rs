@@ -82,7 +82,7 @@ pub fn generate(repo_root: &Path, specs: &[PathBuf], check: bool) -> Result<(), 
         format: None,
     };
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     rt.block_on(async { cmd.execute(&printer).await })
 }
 

@@ -40,8 +40,8 @@
 
 use std::collections::BTreeSet;
 
-use ocx_lib::oci::Digest;
-use ocx_lib::oci::index::CatalogIndex;
+use ocx_index::CatalogIndex;
+use ocx_oci::Digest;
 use sha2::{Digest as _, Sha256};
 
 use super::destination::{DestinationTemplate, Expansion, Upstream, physical_repository, wire_pointer};

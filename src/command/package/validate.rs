@@ -3,8 +3,6 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::log;
-
 use crate::error::MirrorError;
 use crate::spec;
 

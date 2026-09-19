@@ -25,7 +25,7 @@
       "semanticCommitScope": "deps"
     },
     {
-      "description": "external/ocx submodule bump — ocx_lib advances with it; chore(deps) prefix",
+      "description": "external/ocx submodule bump — the ocx_* path deps advance with it; chore(deps) prefix",
       "matchManagers": ["git-submodules"],
       "semanticCommitType": "chore",
       "semanticCommitScope": "deps"

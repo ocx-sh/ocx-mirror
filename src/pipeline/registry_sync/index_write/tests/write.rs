@@ -113,7 +113,7 @@ async fn a_semantically_invalid_image_index_is_refused() {
     let directory = tempfile::tempdir().expect("temp dir");
     let (store, _output) = store(directory.path());
     let bytes = serde_json::to_vec(&json!({ "schemaVersion": 1, "manifests": [] })).expect("serialize");
-    let claimed = ocx_lib::oci::Algorithm::Sha256.hash(&bytes);
+    let claimed = ocx_oci::Algorithm::Sha256.hash(&bytes);
 
     let error = write_dispatch_objects(
         &store,
@@ -189,11 +189,7 @@ async fn the_two_error_classes_carry_the_exit_codes_c040_assigns_them() {
     )
     .await
     .expect_err("a bare image manifest is refused");
-    assert_eq!(
-        upstream.kind_exit_code(),
-        ocx_lib::cli::ExitCode::Failure,
-        "{upstream:?}"
-    );
+    assert_eq!(upstream.kind_exit_code(), ocx_exit::ExitCode::Failure, "{upstream:?}");
 
     // A local filesystem write that cannot succeed → whole-run abort, exit 74.
     // A plain file where the source subtree must be is a tree that cannot be
@@ -204,7 +200,7 @@ async fn the_two_error_classes_carry_the_exit_codes_c040_assigns_them() {
         .await
         .expect_err("the source subtree cannot be created");
     assert!(matches!(local, MirrorError::IndexWriteError(_)), "{local:?}");
-    assert_eq!(local.kind_exit_code(), ocx_lib::cli::ExitCode::IoError, "{local:?}");
+    assert_eq!(local.kind_exit_code(), ocx_exit::ExitCode::IoError, "{local:?}");
 }
 
 #[tokio::test]

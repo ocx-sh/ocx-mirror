@@ -129,5 +129,5 @@ async fn build_pypi_env_tasks_errors_on_unparseable_plan_provided_lock() {
     .expect_err("an unparseable plan-provided lock must fail, not silently succeed");
 
     assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
-    assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
 }

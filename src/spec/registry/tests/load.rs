@@ -13,7 +13,7 @@
 //! beside `MirrorSpec`: it exists to prove *this* work left the package-mirror
 //! loader alone.
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::support::*;
 use crate::error::MirrorError;

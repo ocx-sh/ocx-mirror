@@ -7,8 +7,8 @@ pub(crate) mod registry;
 #[cfg(feature = "jsonschema")]
 mod schema;
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::cli::progress::ProgressManager;
+use ocx_console::DataInterface;
+use ocx_console::progress::ProgressManager;
 
 use crate::error::MirrorError;
 

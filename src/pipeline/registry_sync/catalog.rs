@@ -59,11 +59,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ocx_lib::oci::Digest;
-use ocx_lib::oci::index::{
-    CatalogDocument, IndexFormatConfig, IndexRoot, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
-};
-use ocx_lib::oci::ssrf::{
+use ocx_index::{CatalogDocument, IndexFormatConfig, IndexRoot, SUPPORTED_FORMAT_VERSION, parse_physical_repository};
+use ocx_oci::Digest;
+use ocx_oci::ssrf::{
     DialRoute, DialScheme, GuardedResolver, ProxyRules, guard_destination, proxy_rules, split_host_port,
 };
 use serde::Deserialize;
@@ -236,7 +234,7 @@ fn index_client(
 ///
 /// [`MirrorError::SourceError`] (exit 69) for an unparseable `repository`
 /// pointer, a forbidden host, or a host that does not resolve. The
-/// [`SsrfError`](ocx_lib::oci::ssrf::SsrfError) supplies the message text.
+/// [`SsrfError`](ocx_oci::ssrf::SsrfError) supplies the message text.
 pub async fn validate_root_host(root: &IndexRoot, trusted: &[String], rules: &ProxyRules) -> Result<(), MirrorError> {
     let (registry, _repository) = parse_physical_repository(&root.repository).map_err(|error| {
         MirrorError::SourceError(format!("source root has an unusable repository pointer: {error}"))
@@ -258,7 +256,7 @@ pub async fn validate_root_host(root: &IndexRoot, trusted: &[String], rules: &Pr
     // The verdict only: the registry client's own `GuardedResolver` re-judges
     // and pins at dial time (C-046), so nothing here is discarded.
     guard_destination(
-        DialScheme::for_registry(&ocx_lib::env::insecure_registries(), &registry),
+        DialScheme::for_registry(&ocx_config::env::insecure_registries(), &registry),
         host,
         port,
         trusted,
@@ -504,7 +502,7 @@ fn refused(message: String) -> MirrorError {
 /// Fail-closed and exact: **any** version other than the supported one is
 /// refused, not just a higher one. A `format_version: 0` is no more readable
 /// than a `2`, and "parse it anyway because the number looks small" is how
-/// foreign data becomes control flow. Mirrors `ocx_lib`'s own
+/// foreign data becomes control flow. Mirrors `ocx_index`'s own
 /// `gate_format_version`, which is `pub(crate)` upstream.
 fn gate_format_version(version: u64) -> Result<(), MirrorError> {
     if version == SUPPORTED_FORMAT_VERSION {

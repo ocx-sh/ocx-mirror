@@ -119,7 +119,7 @@ fn select_pypi_candidates_orders_oldest_first_and_applies_new_per_run() {
 #[test]
 fn select_pypi_candidates_bounds_four_segment_pep440_versions() {
     // Live regression (pipx, `min: "1.16.0"`): PyPI publishes 4-segment PEP 440
-    // releases, `ocx_lib::Version` rejects them, and this filter kept whatever it
+    // releases, `ocx_package::version::Version` rejects them, and this filter kept whatever it
     // could not parse — so `0.15.5.1`/`0.16.2.0` planned as new work under a
     // 1.16 floor.
     let mut spec = pypi_fixture_spec();
@@ -152,7 +152,7 @@ fn select_pypi_candidates_skips_fully_published_version() {
 
 #[test]
 fn select_pypi_candidates_never_panics_on_unparseable_version() {
-    // Regression: a PEP 440 version beyond ocx_lib::Version's 3-component
+    // Regression: a PEP 440 version beyond ocx_package::version::Version's 3-component
     // parser (e.g. a calendar version) must never panic filter::filter_versions
     // would (its dedup step `.expect()`s a parseable tag) — this is exactly why
     // select_pypi_candidates doesn't reuse it.
@@ -291,7 +291,7 @@ fn build_pypi_plan_entries_reparse_failure_maps_to_data_error_exit_65() {
 
     let err = result.expect_err("an unparseable derived lock must fail, not silently succeed");
     assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
-    assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn build_pypi_plan_entries_uv_resolution_failure_maps_to_data_error_exit_65() {
 
     let err = result.expect_err("a nonzero uv exit must fail the plan");
     assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
-    assert_eq!(err.kind_exit_code(), ocx_lib::cli::ExitCode::DataError);
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
     assert!(
         err.to_string().contains("no solution found"),
         "the error must carry uv's stderr, got: {err}"

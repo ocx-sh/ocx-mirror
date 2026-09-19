@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use ocx_lib::oci::Identifier;
-use ocx_lib::oci::ssrf::host_is_trusted;
+use ocx_oci::Identifier;
+use ocx_oci::ssrf::host_is_trusted;
 use serde::Deserialize;
 use url::Url;
 
@@ -113,7 +113,7 @@ pub struct RegistrySpec {
 
     /// Whether every copied manifest also gets its own `sha256.<hex>` tag at
     /// the destination — the frozen legacy spelling of ocx's keep tag, which
-    /// `ocx_lib` still classifies as reserved. See `push_canonical_tag` for why
+    /// `ocx_package` still classifies as reserved. See `push_canonical_tag` for why
     /// the mirror does not follow ocx 0.6.0's `__ocx.keep.<alg>-<hex>` rename.
     ///
     /// **Default `true`.** These are ocx's registry-side deletion safety net:

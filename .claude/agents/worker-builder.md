@@ -36,7 +36,7 @@ Fire at attention even when rules don't auto-load:
 
 ## Before Any Writes
 
-1. Grep existing helpers (`src/pipeline.rs`, `src/spec/`, `src/source/`) and check what `ocx_lib` (path dep into `external/ocx`) already provides before new code. Extend existing utilities; no workarounds.
+1. Grep existing helpers (`src/pipeline.rs`, `src/spec/`, `src/source/`) and check what ocx's `ocx_*` crates (path deps into `external/ocx`) already provide before new code. Extend existing utilities; no workarounds.
 2. Never edit files under `external/ocx` — vendored read-only submodule.
 
 ## Task Runner

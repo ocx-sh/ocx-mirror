@@ -4,7 +4,7 @@
 //! C-018…C-020 — the three index-tree fetches: the `config.json` format gate,
 //! the catalog, the per-package root, and the body cap every one of them rides.
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::super::*;
 use super::support::*;

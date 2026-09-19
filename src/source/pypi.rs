@@ -33,7 +33,6 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
-use ocx_lib::log;
 use regex::Regex;
 use serde::Deserialize;
 

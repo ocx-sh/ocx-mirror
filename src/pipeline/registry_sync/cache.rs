@@ -80,7 +80,7 @@ pub async fn digest_file(cache_root: &Path, output: &Path, as_name: &str) -> Res
 }
 
 /// `<cache-root>/registry-sync/locks/<sha256(canonicalized output path)>/`
-/// (C-038) — the `locks_root` every [`IndexStore`](ocx_lib::file_structure::IndexStore)
+/// (C-038) — the `locks_root` every [`IndexStore`](ocx_index::IndexStore)
 /// for this tree is redirected to.
 ///
 /// **Stable per output tree, never per run.** A per-run lock directory would

@@ -3,7 +3,7 @@
 
 use super::super::*;
 use super::support::*;
-use ocx_lib::oci::Algorithm;
+use ocx_oci::Algorithm;
 
 // ── metadata drift (ocx-mirror#9) ─────────────────────────────────────
 //
@@ -70,7 +70,7 @@ fn published_image(blob: &str) -> PublishedImage {
         version: Version::parse("3.29.0").expect("valid version"),
         platform: "linux/amd64".parse().expect("valid platform"),
         manifest_digest: Algorithm::Sha256.hash(b"manifest"),
-        config: ocx_lib::oci::Descriptor {
+        config: ocx_oci::Descriptor {
             media_type: "application/vnd.sh.ocx.package.v1+json".to_string(),
             digest: Algorithm::Sha256.hash(blob.as_bytes()).to_string(),
             size: blob.len() as i64,

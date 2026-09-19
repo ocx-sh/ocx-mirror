@@ -158,7 +158,7 @@ fn a_run_with_per_package_failures_names_each_one_and_exits_one() {
     );
     assert_eq!(
         MirrorError::ExecutionFailed(errors).kind_exit_code(),
-        ocx_lib::cli::ExitCode::Failure
+        ocx_exit::ExitCode::Failure
     );
 }
 
@@ -192,12 +192,12 @@ async fn a_whole_run_abort_keeps_its_own_exit_code() {
     // `load_registry_spec`, so this drives the real `execute` without a source
     // or a destination — and without reaching WP-14's orchestrator.
     let sync = parse(&["ocx-mirror", "registry", "sync", MISSING_SPEC]);
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
 
     let error = sync.execute(&printer).await.expect_err("the spec does not exist");
 
     assert!(matches!(error, MirrorError::SpecNotFound(_)), "got {error:?}");
-    assert_eq!(error.kind_exit_code(), ocx_lib::cli::ExitCode::NotFound);
+    assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::NotFound);
 }
 
 #[test]

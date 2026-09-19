@@ -12,8 +12,8 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ocx_lib::oci::native::oci_client::errors::{OciEnvelope, OciError};
-use ocx_lib::oci::{Descriptor, ImageIndex, ImageIndexEntry, ImageManifest};
+use ocx_oci::native::oci_client::errors::{OciEnvelope, OciError};
+use ocx_oci::{Descriptor, ImageIndex, ImageIndexEntry, ImageManifest};
 
 use super::*;
 
@@ -54,7 +54,7 @@ fn function_body<'a>(module: &'a str, name: &str) -> &'a str {
 }
 
 fn sha256_of(bytes: &[u8]) -> Digest {
-    ocx_lib::oci::Algorithm::Sha256.hash(bytes)
+    ocx_oci::Algorithm::Sha256.hash(bytes)
 }
 
 fn digest_of(seed: u8) -> Digest {
@@ -502,7 +502,7 @@ fn bytes_that_do_not_hash_to_their_digest_are_refused_and_both_digests_are_named
 #[test]
 fn verification_uses_the_algorithm_the_digest_names() {
     let bytes = b"content addressed under sha512";
-    let expected = ocx_lib::oci::Algorithm::Sha512.hash(bytes);
+    let expected = ocx_oci::Algorithm::Sha512.hash(bytes);
 
     assert!(verify_digest(&expected, bytes).is_ok());
     assert!(verify_digest(&expected, b"different bytes").is_err());
@@ -821,7 +821,7 @@ fn a_carried_referrer_descriptor_keeps_what_a_reader_filters_on() {
 #[test]
 fn a_sidecar_tag_extends_the_referrers_fallback_tag() {
     let subject = digest_of(4);
-    let fallback = ocx_lib::package::tag::referrer_fallback_tag(&subject);
+    let fallback = ocx_oci::tag::referrer_fallback_tag(&subject);
 
     for suffix in SIDECAR_SUFFIXES {
         let tag = sidecar_tag(&subject, suffix);
@@ -849,7 +849,7 @@ fn a_sidecar_tag_extends_the_referrers_fallback_tag() {
 /// one.
 #[test]
 fn a_destination_without_a_referrers_api_routes_to_the_fallback_tag() {
-    let empty_listing = ocx_lib::oci::ImageIndex {
+    let empty_listing = ocx_oci::ImageIndex {
         schema_version: 2,
         media_type: Some("application/vnd.oci.image.index.v1+json".to_string()),
         manifests: Vec::new(),
@@ -1152,7 +1152,7 @@ fn every_client_is_built_from_the_one_config() {
 // silent. They are tripwires for the likely accident, not the contract itself
 // — the contract is the doc comment beside each call site.
 
-/// The destination probe must never route through `ocx_lib::oci::Client`.
+/// The destination probe must never route through `ocx_oci::Client`.
 ///
 /// `Client::head_blob` opens with `transport_reference`, the `[mirrors]` seam.
 /// With `OCX_MIRRORS` set, HEAD answers "present" from mirror host M, the
@@ -1377,7 +1377,8 @@ fn the_dry_run_measurement_walks_referrers_and_sidecars() {
 /// the same digest.
 ///
 /// Structural, and for the same reason as the guard below: the seam is
-/// `OciTransport`, ocx_lib's own double for it is `pub(crate)` there, and this
+/// `OciTransport`, ocx_oci's own double for it is behind a `__testing`
+/// feature there, and this
 /// crate has no `async-trait` dependency to write one against — so there is no
 /// call ordering to observe. Anchored on the two sweep calls by name rather
 /// than an ordinal, so adding a third call site cannot silently re-point it.
@@ -1461,8 +1462,8 @@ fn a_failed_referrer_carry_gives_its_claim_back() {
 /// [`CopyError::SubjectRejected`] case, where a destination refusing the
 /// `subject` shape must not then be handed a fallback pointer to nothing.
 ///
-/// Structural, and it has to be: the seam is `OciTransport`, ocx_lib's own
-/// double for it is crate-private there, and this crate has no `async_trait`
+/// Structural, and it has to be: the seam is `OciTransport`, ocx_oci's own
+/// double for it is feature-gated there, and this crate has no `async_trait`
 /// dependency to write one against — so there is nothing to call.
 #[test]
 fn a_fallback_entry_is_appended_only_after_its_referrer_landed() {

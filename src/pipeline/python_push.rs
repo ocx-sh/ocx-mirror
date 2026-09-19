@@ -22,9 +22,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use ocx_lib::log;
-use ocx_lib::oci::Identifier;
-use ocx_lib::publisher::Publisher;
+use ocx_oci::Identifier;
+use ocx_package::publisher::Publisher;
 
 use super::python_prepare::{EnvLayer, EnvManifest};
 use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, push_once};
@@ -394,7 +393,7 @@ async fn push_wheel_layer(
 /// ponytail: no explicit cleanup — the layer directory is this run's own work
 /// dir and goes away with it.
 async fn write_wheel_registration_metadata(layer: &EnvLayer, platform: &str) -> Result<PathBuf, String> {
-    use ocx_lib::package::metadata::{Metadata, bundle};
+    use ocx_package::metadata::{Metadata, bundle};
 
     // `binaries: None` — undeclared, not `Some([])`. This package exists only
     // as a cross-repo mount source; it is never installed, never composed, and

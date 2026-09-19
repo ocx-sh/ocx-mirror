@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use super::super::*;
-use ocx_lib::oci::{Algorithm, Descriptor, Digest, Platform};
+use ocx_oci::{Algorithm, Descriptor, Digest, Platform};
 
 // ── bin_scan: the drift comparison against a claim it cannot recompute ──
 //
@@ -80,7 +80,7 @@ fn only_an_incomplete_bin_scan_tile_skips_its_config_digest() {
     // download-free, scanning or not — mirror-kitware is exactly this. Making
     // it skip the digest anyway costs a config-blob GET per tile per cron run
     // and turns one unparseable blob into an aborted discover job.
-    let declared: ocx_lib::package::metadata::authoring::AuthoringMetadata = serde_json::from_slice(
+    let declared: ocx_package::metadata::authoring::AuthoringMetadata = serde_json::from_slice(
         br#"{"type":"bundle","version":1,"strip_components":1,"env":[],"binaries":["cmake","ctest"]}"#,
     )
     .expect("declared fixture parses");
@@ -159,7 +159,7 @@ fn a_tile_differing_only_by_its_scanned_binaries_is_current() {
 /// which checks the declaration against the tree rather than replacing it.
 #[test]
 fn a_spec_declared_binaries_claim_is_never_adopted_away() {
-    let declared: ocx_lib::package::metadata::authoring::AuthoringMetadata = serde_json::from_slice(
+    let declared: ocx_package::metadata::authoring::AuthoringMetadata = serde_json::from_slice(
         br#"{"type":"bundle","version":1,"strip_components":1,"env":[],"binaries":["cmake","ctest"]}"#,
     )
     .expect("declared fixture parses");

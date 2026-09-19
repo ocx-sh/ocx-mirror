@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use super::bin_scan::BinScanMode;
-use ocx_lib::package::metadata::authoring::AuthoringMetadata;
-use ocx_lib::package::metadata::env::modifier::Modifier;
-use ocx_lib::package::metadata::template::classify_install_path_rooted_dir;
+use ocx_package::metadata::authoring::AuthoringMetadata;
+use ocx_package::metadata::env::modifier::Modifier;
+use ocx_package::metadata::template::classify_install_path_rooted_dir;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]

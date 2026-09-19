@@ -15,9 +15,8 @@
 //! ANSI escape reaches their terminal. `char::escape_debug` escapes both
 //! classes and supplies the quoting these messages already implied.
 
-use ocx_lib::log;
-use ocx_lib::oci::Identifier;
-use ocx_lib::oci::index::parse_physical_repository;
+use ocx_index::parse_physical_repository;
+use ocx_oci::Identifier;
 
 use crate::error::MirrorError;
 use crate::spec::Target;

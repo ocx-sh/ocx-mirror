@@ -30,7 +30,7 @@ document the four-line job, let them own the pipeline.
 |------|---------|
 | `src/` | The crate (binary `ocx-mirror`), package manifest at repo root |
 | `crates/ocx_python/` | Pure translation library: wheel → OCX packaging (PEP 751 lock parsing, wheel selection/repack, env composition) |
-| `external/ocx` | **git submodule** — vendored ocx; `ocx_lib` is a path dep into it |
+| `external/ocx` | **git submodule** — vendored ocx; its `ocx_*` crates are path deps into it |
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
 | `test/` | pytest acceptance harness (Docker registry on :5001) |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
@@ -40,13 +40,23 @@ document the four-line job, let them own the pipeline.
 
 ## Dependency model (read before touching Cargo.toml)
 
-- `ocx_lib = { path = "external/ocx/crates/ocx_lib" }` — NOT a published crate.
-  Bumping ocx_lib = bumping the submodule pointer (procedure in README.md).
+- Ten `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
+  Bumping ocx = bumping the submodule pointer (procedure in README.md); the row
+  list changes only when the code names a new crate.
+- **Never add a row for `ocx` itself** (`external/ocx/crates/ocx_cli`). It is an
+  application, not a library with an interface, and linking it for two imports
+  cost 160 packages — the whole Starlark host, an LSP/DAP/REPL stack and the gix
+  family. The two things the mirror wanted from it are mirror-owned now:
+  `src/tracing_init.rs` (a verbatim copy of ocx's, feature-tracked through the
+  `tracing-subscriber` row) and `error::tls_exit_code` (a copy of ocx's
+  `impl ClassifyExitCode for TlsError`, guarded by an exhaustive match and the
+  `tls_error_codes_match_ocx` unit test). Both are deleted upstream-side only by
+  the `ocx_tracing` extraction named in `src/tracing_init.rs`.
 - `[patch.crates-io]` re-declares ocx's fork patches pointing into the
   **nested** submodules (`external/ocx/external/...`). Patches do not travel
   with path deps; dropping the table silently resolves unpatched crates.io
   releases. CI asserts the fork source via `cargo tree -i oci-client`.
-- Dependency feature lists for deps shared with `ocx_lib`/`ocx_cli` are copied
+- Dependency feature lists for deps shared with ocx are copied
   exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
   bumps. `octocrab` is mirror-owned outright — no ocx equivalent exists to sync
   against. `url` **was** mirror-owned; **since v0.6.0** ocx declares it too
@@ -55,12 +65,12 @@ document the four-line job, let them own the pipeline.
   `rustls` is mirror-owned too: ocx only pulls it as a
   feature of its own `reqwest` dependency, never as a bare top-level
   dependency, so there is nothing to copy. **Since v0.5.8** `reqwest` is back
-  in ocx's `[workspace.dependencies]` (`ocx_lib` depends on it directly), and
+  in ocx's `[workspace.dependencies]` (`ocx_oci` depends on it directly), and
   ocx-mirror **tracks its major** — `0.13`, `rustls`, plus `json` which is
   mirror-owned. Keep them on one major: a split major linked two copies of the
-  crate and made `ocx_lib`'s reqwest types unnameable here, which is how the
+  crate and made `ocx_oci`'s reqwest types unnameable here, which is how the
   mirror ended up with its own TLS-root handling and a corporate CA that no leg
-  trusted. `src/http.rs` now calls `ocx_lib::utility::tls::seed_embedded_roots`
+  trusted. `src/http.rs` now calls `ocx_util::tls::seed_embedded_roots`
   directly. **Since v0.6.1** ocx adds `system-proxy` (its SSRF guard consults
   reqwest's own proxy matcher), so the mirror carries it too — copy-exactly.
 - Clone/checkout always `--recurse-submodules`.

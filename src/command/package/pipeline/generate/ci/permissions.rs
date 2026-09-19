@@ -291,7 +291,7 @@ pub fn render_registry_auth_steps(spec: &MirrorSpec) -> String {
         id: creds
         run: echo "have=true" >> "${{GITHUB_OUTPUT}}"
       # docker login so ocx picks the credential up via its native-credential
-      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       - name: Login to {ghcr}
         run: |
           echo "${{{{ secrets.GITHUB_TOKEN }}}}" \
@@ -320,7 +320,7 @@ pub fn render_registry_auth_steps(spec: &MirrorSpec) -> String {
             echo "::notice::No OCX_MIRROR_REGISTRY_TOKEN secret — registry push skipped (repo runs in test/validation mode)."
           fi
       # Use docker login so ocx picks credentials up via its
-      # native-credential fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # native-credential fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       # Env-var auth (`OCX_AUTH_<REG>_USER/_TOKEN`) takes precedence over the
       # docker fallback inside ocx, so do NOT also export those vars here.
       - name: Login to {registry}

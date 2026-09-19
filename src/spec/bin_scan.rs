@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_lib::package::bin_scan::ScanMode;
+use ocx_package::bin_scan::ScanMode;
 use serde::Deserialize;
 
 /// `bin_scan:` — whether a mirror run derives the published `binaries` claim

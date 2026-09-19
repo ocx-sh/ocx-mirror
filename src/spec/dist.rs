@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use ocx_lib::oci::ssrf::host_is_trusted;
+use ocx_oci::ssrf::host_is_trusted;
 use serde::Deserialize;
 use url::Url;
 
@@ -55,7 +55,7 @@ pub struct DistSpec {
     /// `www-setup/scripts/gen-dist.sh`, and a second implementation here would
     /// drift from it silently.
     // `with = "String"`, not schemars' own `url2` feature: `schemars` is
-    // shared with `ocx_lib`, and its feature list is copied verbatim from
+    // shared with ocx, and its feature list is copied verbatim from
     // ocx's `[workspace.dependencies]` (see CLAUDE.md). Adding a feature here
     // would diverge and be dropped by the next submodule re-sync — and a URL
     // is a JSON string either way.

@@ -2,7 +2,7 @@
 // Copyright 2026 The OCX Authors
 
 use super::super::*;
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 // ── closing verdict ───────────────────────────────────────────────────
 

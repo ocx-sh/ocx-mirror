@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 

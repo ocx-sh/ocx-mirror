@@ -20,10 +20,9 @@ use verdict::*;
 
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::log;
-use ocx_lib::package::version::Version;
-use ocx_lib::publisher::Publisher;
+use ocx_console::DataInterface;
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
 
 use crate::error::MirrorError;
 use crate::filter::pep440_sort_key;
@@ -728,7 +727,7 @@ impl Push {
             // version published in one run and not one completed across two —
             // see [`entries_awaiting_cascade`]. Only reachable for a cascadable
             // version: `plan::build_env_plan_entries` cannot dedup a version
-            // `ocx_lib::Version` refuses to parse, so a non-semver version
+            // `ocx_package::version::Version` refuses to parse, so a non-semver version
             // re-publishes every platform on every run and never splits.
             if version_is_cascadable && platforms_failed.is_empty() && !platforms_pushed.is_empty() {
                 cascade_tags.extend(

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use ocx_lib::ci::CiFlavor;
+use ocx_shell::ci::CiFlavor;
 
 use super::super::*;
 use super::support::*;
@@ -22,8 +22,8 @@ fn published_tile(platform: &str, layer_media_type: &str) -> target_registry::Pu
     target_registry::PublishedImage {
         version: Version::parse("26.5.1").expect("valid version"),
         platform: platform.parse().expect("valid platform"),
-        manifest_digest: ocx_lib::oci::Digest::Sha256("b".repeat(64)),
-        config: ocx_lib::oci::Descriptor {
+        manifest_digest: ocx_oci::Digest::Sha256("b".repeat(64)),
+        config: ocx_oci::Descriptor {
             media_type: "application/vnd.sh.ocx.package.v1+json".to_string(),
             digest: format!("sha256:{}", "c".repeat(64)),
             size: 42,
@@ -31,7 +31,7 @@ fn published_tile(platform: &str, layer_media_type: &str) -> target_registry::Pu
             artifact_type: None,
             annotations: None,
         },
-        layers: vec![ocx_lib::oci::Descriptor {
+        layers: vec![ocx_oci::Descriptor {
             media_type: layer_media_type.to_string(),
             digest: format!("sha256:{}", "a".repeat(64)),
             size: 1024,

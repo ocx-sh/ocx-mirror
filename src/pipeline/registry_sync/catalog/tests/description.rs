@@ -6,8 +6,8 @@
 //! bytes come back, and which failures are the source's own bytes refusing to
 //! validate (one package) rather than a read that did not answer (the run).
 
-use ocx_lib::cli::ExitCode;
-use ocx_lib::oci::Algorithm;
+use ocx_exit::ExitCode;
+use ocx_oci::Algorithm;
 
 use super::super::*;
 use super::support::*;

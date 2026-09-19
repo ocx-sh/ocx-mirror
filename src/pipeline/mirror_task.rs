@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::oci::Platform;
+use ocx_oci::Platform;
 use url::Url;
 
 use crate::spec::{AssetType, BinScanMode, MetadataConfig, Target, VerifyConfig};

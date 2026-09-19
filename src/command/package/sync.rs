@@ -4,8 +4,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use ocx_lib::cli::progress::ProgressManager;
-use ocx_lib::log;
+use ocx_console::progress::ProgressManager;
 
 use super::options::{self, SyncOptions};
 use crate::error::MirrorError;
@@ -20,8 +19,8 @@ use crate::resolver::asset_resolution::AssetResolution;
 use crate::source;
 use crate::spec::{self, MirrorSpec};
 use crate::version_platform_map::VersionPlatformMap;
-use ocx_lib::package::version::Version;
-use ocx_lib::publisher::Publisher;
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
 
 #[derive(clap::Args)]
 pub struct Sync {
@@ -35,7 +34,7 @@ pub struct Sync {
 impl Sync {
     pub async fn execute(
         &self,
-        printer: &ocx_lib::cli::DataInterface,
+        printer: &ocx_console::DataInterface,
         progress: &ProgressManager,
     ) -> Result<(), MirrorError> {
         let spec_path = &self.spec;
@@ -50,7 +49,7 @@ impl Sync {
         // firewall-blocked origin — the anti-goal replace semantics prevent).
         let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
-        let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+        let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
         log::debug!("[{}] Fetching existing tags from {}", spec.name, identifier);
         // Fail-safe (issue #157): only an authoritative "repository not found"
         // (first publish) yields an empty list; any other failure aborts so
@@ -311,7 +310,7 @@ pub(crate) async fn list_upstream_versions(
             repo,
             tag_pattern,
         } => {
-            let token = ocx_lib::env::var("GITHUB_TOKEN");
+            let token = ocx_util::env::var("GITHUB_TOKEN");
             let mut builder = source::github_release::builder();
             if let Some(token) = token {
                 builder = builder.personal_token(token);

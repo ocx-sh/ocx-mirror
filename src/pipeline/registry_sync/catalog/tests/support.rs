@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use hyper_util::client::proxy::matcher::Matcher;
-use ocx_lib::oci::ssrf::ProxyRules;
+use ocx_oci::ssrf::ProxyRules;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 

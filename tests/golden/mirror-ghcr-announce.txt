@@ -49,7 +49,7 @@ jobs:
         id: creds
         run: echo "have=true" >> "${GITHUB_OUTPUT}"
       # docker login so ocx picks the credential up via its native-credential
-      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       - name: Login to ghcr.io
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -119,7 +119,7 @@ jobs:
         id: creds
         run: echo "have=true" >> "${GITHUB_OUTPUT}"
       # docker login so ocx picks the credential up via its native-credential
-      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       - name: Login to ghcr.io
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -185,7 +185,7 @@ jobs:
         id: creds
         run: echo "have=true" >> "${GITHUB_OUTPUT}"
       # docker login so ocx picks the credential up via its native-credential
-      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       - name: Login to ghcr.io
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -497,7 +497,7 @@ jobs:
         id: creds
         run: echo "have=true" >> "${GITHUB_OUTPUT}"
       # docker login so ocx picks the credential up via its native-credential
-      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       - name: Login to ghcr.io
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -642,7 +642,7 @@ jobs:
         id: creds
         run: echo "have=true" >> "${GITHUB_OUTPUT}"
       # docker login so ocx picks the credential up via its native-credential
-      # fallback (`get_docker_auth` in crates/ocx_lib/src/auth.rs).
+      # fallback (`get_docker_auth` in crates/ocx_oci/src/auth.rs).
       - name: Login to ghcr.io
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" \

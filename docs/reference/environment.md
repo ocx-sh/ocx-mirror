@@ -48,7 +48,7 @@ Discord user ID (snowflake) to mention when a run carries failures. Non-secret �
 
 ### CI annotation variables {#annotation-env}
 
-The [OCI annotations][oci-annotations] recorded on every published image index. They are read by `ocx_lib`'s CI-annotation reader — the same one `ocx package push --ci-annotations` uses — so a mirror push and a hand push stamp the same keys from the same names. The provider is detected from `GITHUB_ACTIONS` / `GITLAB_CI`; both set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
+The [OCI annotations][oci-annotations] recorded on every published image index. They are read by `ocx_shell`'s CI-annotation reader — the same one `ocx package push --ci-annotations` uses — so a mirror push and a hand push stamp the same keys from the same names. The provider is detected from `GITHUB_ACTIONS` / `GITLAB_CI`; both set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
 
 | Annotation | GitHub Actions | GitLab CI |
 |------------|----------------|-----------|
@@ -58,7 +58,7 @@ The [OCI annotations][oci-annotations] recorded on every published image index. 
 
 `SOURCE_DATE_EPOCH` is the reproducibility knob: set it to a fixed epoch to make a content-identical re-push byte-identical. A missing or blank variable means its annotation is not written; `image.source` needs both GitHub halves. Outside either provider nothing is emitted and the push leaves the registry's existing annotations alone.
 
-These names are the **complete** environment surface for annotations — pinned by `ocx_lib`'s own tests — and the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, its values taken verbatim from the spec and winning over an auto-detected key. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
+These names are the **complete** environment surface for annotations — pinned by `ocx_shell`'s own tests — and the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, its values taken verbatim from the spec and winning over an auto-detected key. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
 
 **Scope:** `sync`, `pipeline push`, `pipeline patch`.
 
@@ -93,7 +93,7 @@ The rest of the ladder is `ocx`'s and passes through untouched, because the chil
 
 ### `OCX_EXTRA_CA_CERTS` {#ocx-extra-ca-certs}
 
-Extra CA roots — a corporate or private CA the runner's trust store does not carry. The value is either a path to a PEM bundle or the PEM text itself (anything containing `-----BEGIN`), exactly as [`ocx` reads it][ocx-env-extra-ca-certs]; `ocx-mirror` resolves it once at startup through `ocx_lib`'s own ladder and appends the roots, after the bundled Mozilla set, to every HTTP client the mirror builds itself — asset and wheel downloads, the PyPI simple index, index trees, dist uploads, the Discord webhook, remote `url_index` fetches — and the three OCI transports it builds itself — the registry client, the `registry sync` source reader and the `registry copy` legs. The `ocx` children inherit the variable and install the same roots for themselves.
+Extra CA roots — a corporate or private CA the runner's trust store does not carry. The value is either a path to a PEM bundle or the PEM text itself (anything containing `-----BEGIN`), exactly as [`ocx` reads it][ocx-env-extra-ca-certs]; `ocx-mirror` resolves it once at startup through `ocx_config`'s own ladder and appends the roots, after the bundled Mozilla set, to every HTTP client the mirror builds itself — asset and wheel downloads, the PyPI simple index, index trees, dist uploads, the Discord webhook, remote `url_index` fetches — and the three OCI transports it builds itself — the registry client, the `registry sync` source reader and the `registry copy` legs. The `ocx` children inherit the variable and install the same roots for themselves.
 
 The one standing exception is the GitHub Releases listing client: `github_release` sources list releases through octocrab, which trusts the platform store only — `SSL_CERT_FILE` / `SSL_CERT_DIR` reach it, `OCX_EXTRA_CA_CERTS` does not. Behind a TLS-intercepting proxy, put the interception CA into the platform store (or point `SSL_CERT_FILE` at it) for that one leg.
 

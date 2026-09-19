@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ocx_lib::file_structure::IndexStore;
+use ocx_index::IndexStore;
 use serde_json::{Value, json};
 
 use super::super::*;

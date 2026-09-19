@@ -18,7 +18,7 @@
 //! responsibility (e.g. the mirror's `pipeline/download.rs`). It also stays
 //! **target-agnostic**: it emits repo-relative identifiers and OCX metadata
 //! but never knows a concrete registry host — the consumer supplies the
-//! registry and assembles the final [`ocx_lib::oci::Identifier`].
+//! registry and assembles the final [`ocx_oci::Identifier`].
 //!
 //! # Pipeline
 //!

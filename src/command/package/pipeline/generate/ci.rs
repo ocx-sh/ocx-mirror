@@ -23,7 +23,7 @@ use slot::*;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::DataInterface;
+use ocx_console::DataInterface;
 
 use crate::command::package::options::OutputFormat;
 use crate::error::MirrorError;

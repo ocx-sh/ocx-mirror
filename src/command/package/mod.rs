@@ -21,8 +21,8 @@ mod sync;
 // `pub(crate)`: `pipeline::python_push` (outside this subtree) reaches the
 mod validate;
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::cli::progress::ProgressManager;
+use ocx_console::DataInterface;
+use ocx_console::progress::ProgressManager;
 
 use crate::error::MirrorError;
 
@@ -62,7 +62,7 @@ impl PackageCommand {
 /// `Config`, so an empty one is the honest input: `insecure_hosts` over a
 /// default `Config` is exactly `OCX_INSECURE_REGISTRIES`, which is what
 /// `from_env` read — and it goes through the same
-/// [`resolve_mirror_map`](ocx_lib::resolve_mirror_map) the CLI's
+/// [`resolve_mirror_map`](ocx_config::mirror::resolve_mirror_map) the CLI's
 /// `Context::try_init` uses, so there is one `Config`→mirror-map transform
 /// with one precedence rule and one plain-HTTP gate, not two.
 ///
@@ -81,14 +81,15 @@ impl PackageCommand {
 /// construction rather than degrading to an identity map — a silent degrade
 /// would route reads to the firewall-blocked origin, the exact anti-goal
 /// replace semantics exist to prevent.
-pub(crate) fn registry_client() -> Result<ocx_lib::oci::Client, MirrorError> {
-    let insecure = ocx_lib::env::insecure_registries();
-    let env_mirrors = ocx_lib::env::mirrors().map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
-    let resolved = ocx_lib::resolve_mirror_map(&ocx_lib::Config::default(), env_mirrors, &insecure)
+pub(crate) fn registry_client() -> Result<ocx_oci::Client, MirrorError> {
+    let insecure = ocx_config::env::insecure_registries();
+    let env_mirrors =
+        ocx_config::env::mirrors().map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
+    let resolved = ocx_config::mirror::resolve_mirror_map(&ocx_config::Config::default(), env_mirrors, &insecure)
         .map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
-    Ok(ocx_lib::oci::ClientBuilder::new()
+    Ok(ocx_oci::ClientBuilder::new()
         .plain_http_registries(insecure)
-        .mirrors(ocx_lib::oci::MirrorMap::new(resolved.registry))
+        .mirrors(ocx_oci::MirrorMap::new(resolved.registry))
         .extra_roots(crate::http::extra_roots().clone())
         .build())
 }

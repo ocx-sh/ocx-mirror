@@ -33,7 +33,7 @@ class MirrorRunner:
         # `OCX_COMMAND` names (the taskfile resolves it, CI points it at the
         # submodule build) is what `pipeline push` / `cascade` / `announce`
         # run — not an older toolchain `ocx` that happens to sit on PATH and
-        # rejects a flag the pinned `ocx_lib` already knows. Resolved to an
+        # rejects a flag the pinned ocx already knows. Resolved to an
         # absolute path, because the child runs out of `temp_dir` and a
         # relative `OCX_COMMAND` would dangle there; an empty variable pins
         # the same `test/bin/ocx` conftest's `ocx_binary` fixture falls back

@@ -62,7 +62,7 @@ async fn post_to_stub(summary: &RunSummary, status_code: u16) -> Result<(), Mirr
     let _guard = WebhookEnvGuard::set(&server_url);
 
     let f = write_run_summary(summary);
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     let cmd = Notify {
         run_summary: f.path().to_path_buf(),
     };
@@ -141,7 +141,7 @@ async fn notify_execute_posts_once_per_version_with_pacing() {
 
     let start = std::time::Instant::now();
     let f = write_run_summary(&summary);
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     let cmd = Notify {
         run_summary: f.path().to_path_buf(),
     };
@@ -180,7 +180,7 @@ async fn notify_execute_single_message_skips_pre_delay() {
     let summary = make_all_green_summary();
     let start = std::time::Instant::now();
     let f = write_run_summary(&summary);
-    let printer = ocx_lib::cli::DataInterface::new(ocx_lib::cli::Printer::new(false, false));
+    let printer = ocx_console::DataInterface::new(ocx_console::Printer::new(false, false));
     let cmd = Notify {
         run_summary: f.path().to_path_buf(),
     };

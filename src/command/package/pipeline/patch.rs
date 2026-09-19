@@ -41,11 +41,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ocx_lib::cli::DataInterface;
-use ocx_lib::log;
-use ocx_lib::oci::{Descriptor, Identifier};
-use ocx_lib::package::version::Version;
-use ocx_lib::publisher::{ArchiveMediaType, Publisher};
+use ocx_console::DataInterface;
+use ocx_oci::ArchiveMediaType;
+use ocx_oci::{Descriptor, Identifier};
+use ocx_package::publisher::Publisher;
+use ocx_package::version::Version;
 
 use crate::command::package::pipeline::announce;
 use crate::command::package::pipeline::plan::{image_drift, leaf_versions};
@@ -335,7 +335,7 @@ async fn layout_unchanged(
     publisher: &Publisher,
     identifier: &Identifier,
     image: &PublishedImage,
-    expected: &ocx_lib::package::metadata::Metadata,
+    expected: &ocx_package::metadata::Metadata,
 ) -> Result<Result<(), String>, MirrorError> {
     let published = target_registry::fetch_published_metadata(publisher, identifier, image).await?;
     Ok(match layout_refusal(&published, expected) {
@@ -347,8 +347,8 @@ async fn layout_unchanged(
 /// The decidable half of [`layout_unchanged`], split out so it is testable
 /// without a registry.
 fn layout_refusal(
-    published: &ocx_lib::package::metadata::Metadata,
-    expected: &ocx_lib::package::metadata::Metadata,
+    published: &ocx_package::metadata::Metadata,
+    expected: &ocx_package::metadata::Metadata,
 ) -> Option<String> {
     let (was, now) = (published.strip_components(), expected.strip_components());
     if was == now {

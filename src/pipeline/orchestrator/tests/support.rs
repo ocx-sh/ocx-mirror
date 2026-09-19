@@ -5,7 +5,7 @@
 
 use super::super::*;
 
-pub fn platform(spec: &str) -> ocx_lib::oci::Platform {
+pub fn platform(spec: &str) -> ocx_oci::Platform {
     spec.parse().expect("valid platform")
 }
 

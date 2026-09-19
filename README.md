@@ -17,7 +17,7 @@ generated GitHub Actions CI pipelines with per-platform smoke tests.
 ## Development
 
 This repository vendors ocx as a git submodule (`external/ocx`) and consumes
-`ocx_lib` as a path dependency into it — clone recursively:
+ocx's `ocx_*` crates as path dependencies into it — clone recursively:
 
 ```sh
 git clone --recurse-submodules https://github.com/ocx-sh/ocx-mirror.git
@@ -32,15 +32,15 @@ task verify     # full gate (lint, licenses, build, unit + acceptance tests)
 task test       # acceptance tests (needs Docker for the local registry)
 ```
 
-## Bumping ocx_lib (the `external/ocx` submodule)
+## Bumping ocx (the `external/ocx` submodule)
 
-`ocx_lib` is not a published crate — its version is whatever the submodule
+The `ocx_*` crates are not published — their version is whatever the submodule
 points at. To advance:
 
 ```sh
 git -C external/ocx fetch origin && git -C external/ocx checkout origin/main
 git -C external/ocx submodule update --init --recursive   # nested fork submodules
-cargo update -p ocx_lib                                   # if the version changed
+cargo check                                               # refreshes Cargo.lock
 task verify
 git add external/ocx Cargo.lock && git commit -m "chore(deps): bump external/ocx"
 ```

@@ -16,14 +16,14 @@
 //! what the builder carries.
 //!
 //! [`builder`] therefore seeds the bundled Mozilla set through
-//! [`ocx_lib::utility::tls::seed_embedded_roots`], putting every client on the
+//! [`ocx_util::tls::seed_embedded_roots`], putting every client on the
 //! second branch: the operator's corporate CA arrives from the platform store
 //! (which is what makes `SSL_CERT_FILE` / `SSL_CERT_DIR` work), and the bundled
 //! roots keep a store-less host serving public hosts anyway.
 //!
 //! On top of both come the operator's **extra CA roots** — `OCX_EXTRA_CA_CERTS`
 //! (a PEM path, or the PEM text itself), the same variable and the same
-//! [`ocx_lib::tls`] ladder `ocx` reads, resolved once at startup by
+//! [`ocx_config::tls`] ladder `ocx` reads, resolved once at startup by
 //! [`install_extra_roots`] and appended by every factory in this crate:
 //! [`builder`] here, and the three OCI transports (`registry_client`,
 //! `registry_sync::source_read_seam`, `registry_copy::client_config`) through
@@ -31,19 +31,20 @@
 //! stripped runner, a container — reaches every leg this way, not just the
 //! `ocx` children.
 //!
-//! The seeding routines are `ocx_lib`'s, not copies — the submodule is a path
+//! The seeding routines are `ocx_util`'s, not copies — the submodule is a path
 //! dependency on the same reqwest major, so its `ClientBuilder` is this
 //! crate's `ClientBuilder` and `forge::github`, the ocx index transport and
 //! every mirror leg run the same code. Keeping a second implementation here is
 //! how the two drift.
 //!
 //! The OCI transport is deliberately **not** routed through here: it belongs to
-//! `ocx_lib`, which configures its own roots, timeouts and auth ladder.
+//! `ocx_oci`, which configures its own roots, timeouts and auth ladder.
 
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
-use ocx_lib::tls::{ExtraRoots, TlsError};
+use ocx_config::tls::TlsError;
+use ocx_util::tls::ExtraRoots;
 
 use crate::error::MirrorError;
 
@@ -59,7 +60,7 @@ static EXTRA_ROOTS: OnceLock<ExtraRoots> = OnceLock::new();
 /// the environment arm is the whole ladder and an empty `Config` is the
 /// honest input; an unset or empty variable resolves to no roots at all.
 ///
-/// The same set is installed for `ocx_lib`'s Sigstore clients, so a leg that
+/// The same set is installed for `ocx_sign`'s Sigstore clients, so a leg that
 /// reaches a trust service through the library trusts what the registry legs
 /// trust.
 ///
@@ -67,11 +68,11 @@ static EXTRA_ROOTS: OnceLock<ExtraRoots> = OnceLock::new();
 ///
 /// # Errors
 ///
-/// The [`TlsError`] `ocx_lib` raised, verbatim; the caller classifies it.
+/// The [`TlsError`] `ocx_config` raised, verbatim; the caller classifies it.
 pub fn install_extra_roots() -> Result<(), TlsError> {
-    let env = ocx_lib::env::var(ocx_lib::env::keys::OCX_EXTRA_CA_CERTS);
-    let roots = ocx_lib::tls::resolve_extra_roots(&ocx_lib::Config::default(), env.as_deref(), None)?;
-    ocx_lib::tls::install_sigstore_roots(roots.clone());
+    let env = ocx_util::env::var(ocx_config::env::keys::OCX_EXTRA_CA_CERTS);
+    let roots = ocx_config::tls::resolve_extra_roots(&ocx_config::Config::default(), env.as_deref(), None)?;
+    ocx_util::tls::install_sigstore_roots(roots.clone());
     // A second install is a no-op: the roots validated at startup are what
     // every later client uses for the process's lifetime. Unreachable while
     // `main` installs once; a trace the day that stops being true, since the
@@ -79,7 +80,7 @@ pub fn install_extra_roots() -> Result<(), TlsError> {
     if let Err(later) = EXTRA_ROOTS.set(roots)
         && EXTRA_ROOTS.get() != Some(&later)
     {
-        ocx_lib::log::debug!(
+        log::debug!(
             "a second install_extra_roots with a different set ({} certificates) is ignored",
             later.len()
         );
@@ -92,7 +93,7 @@ pub fn install_extra_roots() -> Result<(), TlsError> {
 ///
 /// Reads the cell without `get_or_init`: initialising it with a default would
 /// permanently pin the empty set for a caller that reads before the install
-/// runs — the same shape as `ocx_lib::tls::sigstore_roots`.
+/// runs — the same shape as `ocx_util::tls::sigstore_roots`.
 pub(crate) fn extra_roots() -> &'static ExtraRoots {
     static EMPTY: LazyLock<ExtraRoots> = LazyLock::new(ExtraRoots::default);
     EXTRA_ROOTS.get().unwrap_or(&EMPTY)
@@ -113,7 +114,7 @@ pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// on top rather than starting from `reqwest::Client::builder()` — starting
 /// over is what silently drops the platform roots again.
 pub(crate) fn builder() -> reqwest::ClientBuilder {
-    extra_roots().seed(ocx_lib::utility::tls::seed_embedded_roots(
+    extra_roots().seed(ocx_util::tls::seed_embedded_roots(
         reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT),
     ))
 }
@@ -173,7 +174,7 @@ mod tests {
         /// `Client::new()` per call).
         const BARE_CONSTRUCTORS: [&str; 3] = ["reqwest::Client::new()", "reqwest::Client::builder()", "reqwest::get("];
         /// The OCI transports are built outside this module by design
-        /// (`ocx_lib` owns their roots, timeouts and auth), so the extra-CA
+        /// (`ocx_oci` owns their roots, timeouts and auth), so the extra-CA
         /// seam is one call each factory has to make itself:
         /// `ClientBuilder::extra_roots(..)` or a `ClientConfig`
         /// `extra_root_certificates` append, both fed from `extra_roots()`.
@@ -377,7 +378,7 @@ mod tests {
         assert!(extra_roots().is_empty(), "nothing is installed yet");
 
         let restore =
-            crate::test_support::EnvRestore::set(&[(ocx_lib::env::keys::OCX_EXTRA_CA_CERTS, Some(TEST_ROOT_PEM))]);
+            crate::test_support::EnvRestore::set(&[(ocx_config::env::keys::OCX_EXTRA_CA_CERTS, Some(TEST_ROOT_PEM))]);
         let installed = install_extra_roots();
         drop(restore);
         installed.expect("a well-formed PEM bundle installs");
@@ -385,7 +386,7 @@ mod tests {
 
         // The variable is unset again, so this resolves to the empty set — and
         // must neither fail nor replace what startup validated.
-        let _restore = crate::test_support::EnvRestore::set(&[(ocx_lib::env::keys::OCX_EXTRA_CA_CERTS, None)]);
+        let _restore = crate::test_support::EnvRestore::set(&[(ocx_config::env::keys::OCX_EXTRA_CA_CERTS, None)]);
         install_extra_roots().expect("a second install is a no-op, not an error");
         assert_eq!(
             extra_roots().len(),
@@ -413,10 +414,11 @@ SQAwRgIhAIimfmMHX7/vmMP25byiTv2805OMtA09CIveorIXnd22AiEA3cW26Dqb
     /// value that cannot be used rather than seeding nothing quietly.
     #[test]
     fn extra_roots_resolve_from_the_environment_arm_alone() {
-        let empty = ocx_lib::tls::resolve_extra_roots(&ocx_lib::Config::default(), None, None)
+        let empty = ocx_config::tls::resolve_extra_roots(&ocx_config::Config::default(), None, None)
             .expect("no variable is no roots");
         assert!(empty.is_empty());
-        let refused = ocx_lib::tls::resolve_extra_roots(&ocx_lib::Config::default(), Some("not a certificate"), None);
+        let refused =
+            ocx_config::tls::resolve_extra_roots(&ocx_config::Config::default(), Some("not a certificate"), None);
         assert!(
             refused.is_err(),
             "a value that is neither PEM nor a readable path is refused"

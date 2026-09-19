@@ -15,7 +15,7 @@ use super::*;
 
 /// A digest that parses, distinct per `seed`.
 fn digest(seed: u8) -> Digest {
-    ocx_lib::oci::Algorithm::Sha256.hash([seed])
+    ocx_oci::Algorithm::Sha256.hash([seed])
 }
 
 fn platform(text: &str) -> Platform {

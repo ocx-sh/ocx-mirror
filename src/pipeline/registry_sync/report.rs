@@ -8,7 +8,7 @@
 //! rather than a `Printable` impl — no `Printable` trait is reachable from this
 //! crate, it lives in `ocx_cli`.
 
-use ocx_lib::cli::{Cell, DataInterface, human_bytes};
+use ocx_console::{Cell, DataInterface, human_bytes};
 use serde::Serialize;
 
 use crate::command::package::options::OutputFormat;

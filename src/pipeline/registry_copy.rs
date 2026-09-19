@@ -19,12 +19,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{StreamExt, TryStreamExt};
-use ocx_lib::oci::client::OciTransport;
-use ocx_lib::oci::client::error::ClientError;
-use ocx_lib::oci::index::RootTag;
-use ocx_lib::oci::native::oci_client::client::BlobMountResponse;
-use ocx_lib::oci::native::oci_client::errors::{OciDistributionError, OciErrorCode};
-use ocx_lib::oci::{Descriptor, Digest, Identifier, ImageIndexEntry, Index, Manifest, Reference, native};
+use ocx_index::Index;
+use ocx_index::RootTag;
+use ocx_oci::client::OciTransport;
+use ocx_oci::client::error::ClientError;
+use ocx_oci::native::oci_client::client::BlobMountResponse;
+use ocx_oci::native::oci_client::errors::{OciDistributionError, OciErrorCode};
+use ocx_oci::{Descriptor, Digest, Identifier, ImageIndexEntry, Manifest, Reference, native};
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use crate::error::MirrorError;
@@ -36,7 +37,7 @@ use crate::spec::{RegistrySource, Target};
 /// Applied post-hoc in both walks: `Index::fetch_manifest_raw_bytes` has
 /// already allocated by the time it returns, so what this bounds is what
 /// travels on — parsed, recursed into, republished — never what was read.
-/// `ocx_lib`'s own `fetch_manifest_raw_bytes_capped` is post-hoc for the same
+/// `ocx_oci`'s own `fetch_manifest_raw_bytes_capped` is post-hoc for the same
 /// reason and says so (its FU-3 note): the fork's `pull_manifest_raw` does a
 /// bare `res.bytes()`, so bounding the allocation needs a capped read on the
 /// transport itself and neither layer has one.
@@ -88,7 +89,7 @@ pub const BLOB_SIZE_CEILING: u64 = 4 * 1024 * 1024 * 1024;
 ///
 /// 64: the same bound and the same reasoning as `pipeline plan`'s
 /// `DRIFT_SCAN_CONCURRENCY`, itself copied from `LocalIndex::refresh_tags` in
-/// `ocx_lib` — enough that a several-hundred-layer env package resolves in a
+/// `ocx_index` — enough that a several-hundred-layer env package resolves in a
 /// handful of rounds, low enough that the burst does not read as an attack to a
 /// registry that answers bursts with `429`. It must stay **at or above** any
 /// sane `concurrency.max_blobs` (default 4): below it, this would silently cap
@@ -156,7 +157,7 @@ const REFERRER_COUNT_CEILING: usize = 64;
 /// The cosign sidecar tag suffixes, appended to [`referrer_fallback_tag`]'s
 /// spelling of a subject digest (C-062).
 ///
-/// [`referrer_fallback_tag`]: ocx_lib::package::tag::referrer_fallback_tag
+/// [`referrer_fallback_tag`]: ocx_oci::tag::referrer_fallback_tag
 ///
 /// Cosign's pre-OCI-1.1 scheme parks a signature at `sha256-<hex>.sig` beside
 /// its subject, and the OCI referrers fallback tag for a sha256 subject is
@@ -197,9 +198,10 @@ pub const DESCRIPTION_TAG: &str = "__ocx.desc";
 
 // ── Client construction (C-046) ─────────────────────────────────────────────
 //
-// The three constants below are copied from `ClientBuilder::new`
-// (`external/ocx/crates/ocx_lib/src/oci/client/builder.rs:98-114`), which is
-// their source of truth — they are `pub(crate)` there and so cannot be
+// The three constants below are copied from `ClientBuilder`'s own
+// `PUSH_CHUNK_SIZE`, `REGISTRY_READ_TIMEOUT` and `REGISTRY_CONNECT_TIMEOUT`
+// (`external/ocx/crates/ocx_oci/src/client/builder.rs`), which are their
+// source of truth — two of the three are `pub(crate)` there and so cannot be
 // imported. `ClientConfig::default()` sets none of the timeouts, so a
 // hand-built config inherits `None` for both: on a multi-hour transfer that
 // means one hung socket stalls the whole mirror forever.
@@ -237,12 +239,12 @@ fn client_config() -> native::ClientConfig {
     // Same source `ClientBuilder::plain_http_registries` reads, so the
     // acceptance harness's plain-HTTP loopback registries are reachable
     // through this client too. Left at the `Https` default when unset.
-    let insecure = ocx_lib::env::insecure_registries();
+    let insecure = ocx_config::env::insecure_registries();
     if !insecure.is_empty() {
         config.protocol = native::ClientProtocol::HttpsExcept(insecure);
     }
     // The operator's extra CA roots go after the bundled set, never instead
-    // of it — the same append `ocx_lib`'s own `ClientBuilder` makes. Every
+    // of it — the same append `ocx_oci`'s own `ClientBuilder` makes. Every
     // DER already passed `ExtraRoots::parse_pem`, so the fork cannot refuse it.
     config
         .extra_root_certificates
@@ -267,17 +269,17 @@ fn client_config() -> native::ClientConfig {
 /// `ClientBuilder::ssrf_guard` installs — resolve → validate → pin, which is
 /// what closes the DNS-rebinding window a pre-flight check alone leaves open.
 ///
-/// Built here rather than through `ocx_lib::oci::Client` because that wrapper
+/// Built here rather than through `ocx_oci::Client` because that wrapper
 /// exposes no raw push and its `native_transport` is `pub(crate)`.
 pub async fn build_source_client(source: &RegistrySource) -> native::Client {
     let mut config = client_config();
-    config.dns_resolver = Some(Arc::new(ocx_lib::oci::ssrf::GuardedResolver::new(
+    config.dns_resolver = Some(Arc::new(ocx_oci::ssrf::GuardedResolver::new(
         Arc::new(source.trusted_hosts.clone()),
         // The process-wide proxy matcher: behind `HTTPS_PROXY` the resolver
         // admits the proxy host and resolves nothing else (the destination is
         // literal text in the CONNECT line), which is what lets a proxied
         // network pull at all.
-        ocx_lib::oci::ssrf::proxy_rules(),
+        ocx_oci::ssrf::proxy_rules(),
     )));
     authenticated(config, &source.registry).await
 }
@@ -298,7 +300,7 @@ pub async fn build_source_client(source: &RegistrySource) -> native::Client {
 // ponytail: no `dns_resolver` here on purpose. Do not "restore parity" with
 // `build_source_client` — see the paragraph above; it refuses the deployment.
 ///
-/// Bypassing `ocx_lib::oci::Client` also bypasses its `[mirrors]` base-URL
+/// Bypassing `ocx_oci::Client` also bypasses its `[mirrors]` base-URL
 /// rewriting, which is **correct for the destination**: a corporate mirror
 /// must write to the literal configured registry, never one a client-side
 /// mirror map redirected.
@@ -316,7 +318,7 @@ pub async fn build_destination_client(target: &Target) -> native::Client {
 /// (zero credentials in the spec) is satisfied.
 async fn authenticated(config: native::ClientConfig, registry: &str) -> native::Client {
     let client = native::Client::new(config);
-    let auth = ocx_lib::auth::Auth::new().get_or_fallback(registry).await;
+    let auth = ocx_oci::auth::Auth::new().get_or_fallback(registry).await;
     client.store_auth_if_needed(registry, &auth).await;
     client
 }
@@ -405,7 +407,7 @@ pub struct CopyContext {
     /// cache is shared across packages. Consulted by [`ensure_source_auth`]
     /// only for a host the operator named; an unnamed host is seeded
     /// `Anonymous` without touching it.
-    pub source_auth: ocx_lib::auth::Auth,
+    pub source_auth: ocx_oci::auth::Auth,
     /// Destination-side fork client — every probe and push (C-046).
     pub destination_client: native::Client,
     /// Run-scoped blob permit pool sized by `concurrency.max_blobs`.
@@ -431,7 +433,7 @@ pub struct CopyContext {
     /// `native::Client` can push a manifest and read a tag, but it has no
     /// spelling for the read-modify-write append an OCI fallback index needs,
     /// and re-implementing that here would fork the retry budget and the
-    /// already-present check away from `ocx_lib`'s. Everything else on the
+    /// already-present check away from `ocx_oci`'s. Everything else on the
     /// destination keeps going through `destination_client`, so this field is
     /// not a second client so much as one missing verb.
     pub destination_transport: Box<dyn OciTransport>,
@@ -897,7 +899,7 @@ fn registry_status(error: &OciDistributionError) -> Option<u16> {
 /// Referrers-API registry will contradict, or publishes nothing discoverable
 /// at all.
 fn referrer_verdict(
-    probe: Result<Option<ocx_lib::oci::ImageIndex>, OciDistributionError>,
+    probe: Result<Option<ocx_oci::ImageIndex>, OciDistributionError>,
 ) -> Result<ReferrerDestination, CopyError> {
     match probe {
         Ok(Some(_)) => Ok(ReferrerDestination::Supported),
@@ -936,7 +938,7 @@ fn push_failure(
 
 /// The cosign sidecar tag for `subject` and one suffix (C-062).
 fn sidecar_tag(subject: &Digest, suffix: &str) -> String {
-    format!("{}{suffix}", ocx_lib::package::tag::referrer_fallback_tag(subject))
+    format!("{}{suffix}", ocx_oci::tag::referrer_fallback_tag(subject))
 }
 
 /// Convert a source referrers-listing entry into the descriptor the
@@ -1394,7 +1396,7 @@ async fn copy_manifest_tree_at(
 ///
 /// ocx 0.6.0 renamed the concept to "keep tag" and moved its own writes to
 /// `__ocx.keep.<alg>-<hex>`; it no longer writes this spelling. The mirror
-/// keeps writing it deliberately. `ocx_lib`'s `Tag::LegacyKeep` is a permanent
+/// keeps writing it deliberately. `ocx_package`'s `Tag::LegacyKeep` is a permanent
 /// read arm — "the arm stays because already-published repositories carry these
 /// tags" — so `Tag::is_reserved` classifies both spellings as reserved and both
 /// are filtered out of index roots and version listings identically. The tag's
@@ -1482,7 +1484,7 @@ async fn push_manifest(
 
 /// Ensure one blob is present at the destination (C-023).
 ///
-/// **The destination probe never touches `ocx_lib::oci::Client`.** Its
+/// **The destination probe never touches `ocx_oci::Client`.** Its
 /// `head_blob` opens with `transport_reference` — the `[mirrors]` seam — and
 /// every `_addressed` sibling that would bypass it is `pub(crate)`. A
 /// mirror-rewritten HEAD would confirm content at mirror host M while the push
@@ -1851,7 +1853,7 @@ async fn fallback_referrers(
     digest: &Digest,
     context: &CopyContext,
 ) -> Result<Vec<ImageIndexEntry>, CopyError> {
-    let tag = ocx_lib::package::tag::referrer_fallback_tag(digest);
+    let tag = ocx_oci::tag::referrer_fallback_tag(digest);
     let identifier = source_identifier(source_reference).clone_with_tag(tag.clone());
     let fetched = context
         .source_index

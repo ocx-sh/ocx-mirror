@@ -11,9 +11,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use ocx_lib::forge::{ForgeKind, RepoCoordinate, WriteTransport};
-use ocx_lib::oci::Platform;
-use ocx_lib::package::version::Version;
+use ocx_announce::forge::{ForgeKind, RepoCoordinate, WriteTransport};
+use ocx_oci::Platform;
+use ocx_package::version::Version;
 
 use super::platform_keys::{infer_libc_from_image, infer_shell_from_image, libc_family_feature};
 use super::{
@@ -564,13 +564,13 @@ fn is_env_variable_name(name: &str) -> bool {
 
 /// Whether `name` is one of the variables ocx's plugin dispatch scrubs.
 ///
-/// The source of truth is ocx's own list — `ocx_lib::env::keys::CREDENTIAL_KEYS`
-/// (`external/ocx/crates/ocx_lib/src/env.rs:238`), the same constant
+/// The source of truth is ocx's own list — `ocx_config::env::keys::CREDENTIAL_KEYS`
+/// (`external/ocx/crates/ocx_config/src/env.rs`), the same constant
 /// `app/plugin_dispatch.rs` removes from the child environment. Naming it
 /// rather than copying the three strings is what keeps a rename upstream from
 /// silently reopening the hole: drift there is otherwise invisible here.
 fn is_dispatch_scrubbed(name: &str) -> bool {
-    ocx_lib::env::keys::CREDENTIAL_KEYS.contains(&name)
+    ocx_config::env::keys::CREDENTIAL_KEYS.contains(&name)
 }
 
 /// Refuse one [`Ref`] under `sign:`, naming `field` and never the value.
@@ -701,7 +701,7 @@ fn check_key(key: &KeyConfig) -> Result<(), MirrorError> {
 ///   `Ref::Literal` — those two fields accept only `env://`/`file://`.
 /// - an `env://NAME` not matching `^[A-Z_][A-Z0-9_]*$`.
 /// - an `env://NAME` naming a variable ocx's plugin dispatch scrubs
-///   (`ocx_lib::env::keys::CREDENTIAL_KEYS`) — readable on a direct run,
+///   (`ocx_config::env::keys::CREDENTIAL_KEYS`) — readable on a direct run,
 ///   empty under dispatch, so the spec's meaning depends on the caller.
 /// - a `file://` whose path is empty.
 ///
@@ -872,7 +872,7 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
 }
 
 /// Parse one announce coordinate, reporting a grammar failure under its key.
-/// `ocx_lib`'s only parse error already restates the value and the grammar,
+/// `ocx_announce`'s only parse error already restates the value and the grammar,
 /// so the message spells the grammar once.
 fn parse_coordinate(field: &str, value: &str, errors: &mut Vec<String>) -> Option<RepoCoordinate> {
     match value.parse::<RepoCoordinate>() {

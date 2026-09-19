@@ -38,8 +38,8 @@
 
 use std::path::PathBuf;
 
-use ocx_lib::cli::{Cell, DataInterface};
-use ocx_lib::publisher::Publisher;
+use ocx_console::{Cell, DataInterface};
+use ocx_package::publisher::Publisher;
 
 use crate::command::package::options::OutputFormat;
 use crate::error::MirrorError;
@@ -100,7 +100,7 @@ impl Sign {
             )));
         };
 
-        let identifier = ocx_lib::oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+        let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
         let publisher = Publisher::new(crate::command::package::registry_client()?);
 
         // Fail-safe, exactly as discover is (issue #157): only an
@@ -116,9 +116,9 @@ impl Sign {
         // Over the same registry the tag list came from, so discovery
         // inherits the credential ladder and the plain-HTTP policy the copy
         // engine already resolves rather than picking its own.
-        let transport = ocx_lib::oci::client::native_transport(
+        let transport = ocx_oci::client::native_transport(
             crate::pipeline::registry_copy::build_destination_client(&spec.target).await,
-            ocx_lib::auth::Auth::new(),
+            ocx_oci::auth::Auth::new(),
         );
 
         let report = Backfill {
@@ -139,7 +139,7 @@ impl Sign {
         report_backfill(&report, self.format, printer);
         warn_if_cancelled(&report);
 
-        if report.exit_code() == ocx_lib::cli::ExitCode::Success {
+        if report.exit_code() == ocx_exit::ExitCode::Success {
             return Ok(());
         }
         let summary = report.summary();
@@ -169,7 +169,7 @@ fn report_backfill(report: &BatchReport, format: OutputFormat, printer: &DataInt
             // Said, not swallowed: emitting nothing under `--format json` is
             // indistinguishable to a parser from a run that considered no
             // subjects, and an all-skipped run exits 0 either way.
-            Err(error) => ocx_lib::log::error!("cannot render the backfill report as JSON: {error}"),
+            Err(error) => log::error!("cannot render the backfill report as JSON: {error}"),
         },
         OutputFormat::Plain => {
             if !report.items.is_empty() {

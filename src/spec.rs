@@ -75,7 +75,7 @@ pub(crate) use versions_config::BackfillOrder;
 pub use versions_config::VersionsConfig;
 pub use wheels::{WheelPatterns, base_platform_key, libc_feature};
 
-use ocx_lib::package::version::Version;
+use ocx_package::version::Version;
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -662,7 +662,7 @@ fn applicability_key(version: &Version) -> Version {
 
 /// [`applicability_key`] rendered for the string comparator
 /// (`filter::within_bounds` / `filter::version_cmp`), which also understands
-/// the PEP 440 releases `ocx_lib::Version` rejects.
+/// the PEP 440 releases `ocx_package::version::Version` rejects.
 ///
 /// A tag that parser cannot read is passed through verbatim: it carries
 /// neither a variant prefix nor a mirror build stamp to strip, since only env

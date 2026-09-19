@@ -6,7 +6,7 @@
 //! socket uses, and the redirect policy that keeps the validated host the host
 //! actually dialled.
 
-use ocx_lib::cli::ExitCode;
+use ocx_exit::ExitCode;
 
 use super::super::*;
 use super::support::*;

@@ -109,7 +109,7 @@ pub fn build_env_plan_entries(
     let declared_platform_count = spec.platforms.as_ref().map_or(0, |platforms| platforms.len());
 
     // The pylock app version is a PEP 440 string, which may carry more
-    // numeric components than `ocx_lib::Version` (a ≤3-component
+    // numeric components than `ocx_package::version::Version` (a ≤3-component
     // tool-release-tag semver parser) accepts — pycowsay's `0.0.0.2`, or a
     // calendar version like `2024.1.1.1`. A tag that does not parse simply
     // cannot be present in the `Version`-keyed `version_map`, so it is
@@ -203,7 +203,7 @@ pub fn build_env_plan_entries(
 /// actually have outstanding work.
 ///
 /// Deliberately does not reuse `filter::filter_versions`: its already-
-/// published dedup step `.expect()`s every tag to parse as `ocx_lib::Version`,
+/// published dedup step `.expect()`s every tag to parse as `ocx_package::version::Version`,
 /// which panics on a real PyPI version string that has more components than
 /// that ≤3-component parser accepts (e.g. `0.0.0.2`) or a PEP 440 `uv`-only
 /// suffix (`2.0.0.dev0`) — the same reason `build_env_plan_entries` bypasses
@@ -484,7 +484,7 @@ pub fn pylock_interpreter_pin(python: &PythonConfig) -> Result<InterpreterPin, M
     })
 }
 
-/// Maps a wheels key's parsed `ocx_lib::oci::Platform` to `ocx_python`'s
+/// Maps a wheels key's parsed `ocx_oci::Platform` to `ocx_python`'s
 /// `TargetPlatform` (os/arch only — the key's `+libc.*` os_features travel
 /// through [`wheel_target_constraints`], not this mapping).
 pub fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPlatform, MirrorError> {
@@ -493,7 +493,7 @@ pub fn pylock_target_platform(platform: &Platform, key: &str) -> Result<TargetPl
             "platform key '{key}' must be a concrete os/arch pair for pylock sources"
         )));
     };
-    // Enumerated, never `_ =>`: ocx_lib owns both enums, so a variant added
+    // Enumerated, never `_ =>`: ocx_oci owns both enums, so a variant added
     // upstream must land here as a compile error rather than as a wasm key
     // silently mapping onto a native target.
     let operating_system = match os {

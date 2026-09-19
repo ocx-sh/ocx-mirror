@@ -168,7 +168,7 @@ fn skipped_only_report() -> RegistrySyncReport {
 }
 
 fn printer() -> DataInterface {
-    DataInterface::new(ocx_lib::cli::Printer::new(false, false))
+    DataInterface::new(ocx_console::Printer::new(false, false))
 }
 
 // ── C-042 — summary_line ────────────────────────────────────────────────

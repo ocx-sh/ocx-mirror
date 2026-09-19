@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 use chrono::Utc;
-use ocx_lib::package::version::Version;
+use ocx_package::version::Version;
 
 use crate::spec::BuildTimestampFormat;
 
@@ -71,7 +71,7 @@ pub fn normalize_version(version_str: &str, build: &Option<String>) -> Result<St
 /// path can afford to skip an unnormalizable version (`plan.rs` filters it out
 /// with `if let Ok(..)`) because a regex-resolved release tag is semver by
 /// construction; an env source's version comes from PyPI, where a >3-component
-/// release (`0.0.0.2`) or a `.dev0` suffix is ordinary and `ocx_lib::Version`
+/// release (`0.0.0.2`) or a `.dev0` suffix is ordinary and `ocx_package::version::Version`
 /// reads none of them — dropping those would stop the mirror publishing them at
 /// all. Bare is also exactly what the rest of the env pipeline already does
 /// with such a version: `push` gates `--cascade` on the same `Version::parse`,
@@ -154,7 +154,7 @@ mod tests {
     fn env_tag_stamps_what_it_can_and_keeps_the_rest_bare() {
         assert_eq!(env_version_tag("1.16.6", &ts()), "1.16.6_20260310142359");
         assert_eq!(env_version_tag("1.16.6", &None), "1.16.6");
-        // PEP 440 releases `ocx_lib::Version` cannot read stay bare rather
+        // PEP 440 releases `ocx_package::version::Version` cannot read stay bare rather
         // than being dropped — they are ordinary on PyPI.
         assert_eq!(env_version_tag("0.0.0.2", &ts()), "0.0.0.2");
         assert_eq!(env_version_tag("2.0.0.dev0", &ts()), "2.0.0.dev0");
