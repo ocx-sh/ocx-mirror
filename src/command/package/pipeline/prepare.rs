@@ -680,6 +680,10 @@ fn build_tasks_from_plan(
             ))
         })?;
 
+    // `off` is expressed by dropping the digest, so `verify` needs no policy
+    // of its own. Read from the local spec, never from the plan: the policy is
+    // an operator decision, the digest is the datum.
+    let policy = spec.digest_policy();
     let mut tasks = Vec::new();
     for asset in &entry.assets {
         // Re-check applicability for consistency with the crawl path; plan
@@ -711,8 +715,8 @@ fn build_tasks_from_plan(
             bin_scan: variant.bin_scan,
             libc_lint: variant.libc_lint,
             verify_config: spec.verify.clone(),
-            asset_digest: asset.digest.clone(),
-            require_digest: false,
+            asset_digest: policy.apply(asset.digest.as_ref()),
+            require_digest: policy.requires_digest(),
             cascade: spec.cascade.enabled,
             spec_dir: spec_dir.to_path_buf(),
             asset_type,
@@ -740,6 +744,7 @@ async fn build_tasks_for_version(
 
     let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
     let effective_variants = spec.effective_variants();
+    let policy = spec.digest_policy();
     let mut tasks = Vec::new();
 
     for variant in &effective_variants {
@@ -796,8 +801,8 @@ async fn build_tasks_for_version(
                             bin_scan: variant.bin_scan,
                             libc_lint: variant.libc_lint,
                             verify_config: spec.verify.clone(),
-                            asset_digest: platform_asset.digest.clone(),
-                            require_digest: false,
+                            asset_digest: policy.apply(platform_asset.digest.as_ref()),
+                            require_digest: policy.requires_digest(),
                             cascade: spec.cascade.enabled,
                             spec_dir: spec_dir.to_path_buf(),
                             asset_type,

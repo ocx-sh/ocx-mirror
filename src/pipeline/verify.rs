@@ -87,15 +87,20 @@ pub async fn verify(
     file: &Path,
     asset_name: &str,
     declared_digest: Option<&str>,
-    // Carried, not yet read: the policy that gives a *missing* digest meaning
-    // lands with `DigestPolicy` (#76). Every construction site passes `false`.
-    _require_digest: bool,
+    require_digest: bool,
 ) -> Result<()> {
-    // 1. Verify against the source-declared digest if configured and available
-    if config.github_asset_digest
-        && let Some(expected) = declared_digest
-    {
-        verify_digest(file, expected).await?;
+    // 1. The digest the publisher declared for this asset — GitHub's Releases
+    //    API (`verify.github_asset_digest`) or a url_index entry
+    //    (`verify.url_index_digest`). `off` is expressed by the caller passing
+    //    no digest, so there is no policy to re-read here. Host-independent by
+    //    construction, which is what lets it prove a proxy served the upstream
+    //    bytes (#75).
+    match (declared_digest, require_digest) {
+        (Some(expected), _) => verify_digest(file, expected).await?,
+        // After the download, not before: keeping the policy in one place
+        // costs one wasted fetch, and a `require` failure is meant to be loud.
+        (None, true) => bail!("no publisher digest declared for '{asset_name}' and the verify policy is 'require'"),
+        (None, false) => {}
     }
 
     // 2. Verify against sidecar checksums file if configured
@@ -166,6 +171,65 @@ mod tests {
         let result = verify_digest(&file, "not-a-digest").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid digest string"));
+    }
+
+    fn config() -> VerifyConfig {
+        VerifyConfig {
+            github_asset_digest: crate::spec::DigestPolicy::default(),
+            url_index_digest: crate::spec::DigestPolicy::default(),
+            checksums_file: None,
+        }
+    }
+
+    async fn written(dir: &TempDir, content: &[u8]) -> std::path::PathBuf {
+        let file = dir.path().join("asset.bin");
+        tokio::fs::write(&file, content).await.unwrap();
+        file
+    }
+
+    #[tokio::test]
+    async fn require_without_declared_digest_fails() {
+        let dir = TempDir::new().unwrap();
+        let file = written(&dir, b"hello world").await;
+        let client = reqwest::Client::new();
+
+        let err = verify(&config(), &client, &file, "asset.bin", None, true)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'require'"), "{err}");
+        assert!(err.contains("asset.bin"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn optional_without_declared_digest_passes() {
+        let dir = TempDir::new().unwrap();
+        let file = written(&dir, b"hello world").await;
+        let client = reqwest::Client::new();
+
+        verify(&config(), &client, &file, "asset.bin", None, false)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn declared_digest_is_verified() {
+        let dir = TempDir::new().unwrap();
+        let content = b"hello world";
+        let file = written(&dir, content).await;
+        let client = reqwest::Client::new();
+        let expected = format!("sha256:{}", hex::encode(Sha256::digest(content)));
+
+        verify(&config(), &client, &file, "asset.bin", Some(&expected), false)
+            .await
+            .unwrap();
+
+        let wrong = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+        let err = verify(&config(), &client, &file, "asset.bin", Some(wrong), false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("digest mismatch"), "{err}");
     }
 
     #[test]

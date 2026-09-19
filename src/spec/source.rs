@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::source::url_index::IndexAsset;
+
 const DEFAULT_TAG_PATTERN: &str = r"^v?(?P<version>\d+\.\d+\.\d+)(?:-(?P<prerelease>[0-9a-zA-Z]+))?$";
 
 #[derive(Debug, Deserialize)]
@@ -179,7 +181,9 @@ impl<'de> Deserialize<'de> for UrlIndexSource {
 pub struct UrlIndexVersion {
     #[serde(default)]
     pub prerelease: bool,
-    pub assets: HashMap<String, String>,
+    /// Asset name to its download URL, bare or carrying a `sha256`. Same two
+    /// forms the fetched document uses — one type, one contract.
+    pub assets: HashMap<String, IndexAsset>,
 }
 
 /// Configuration for an external generator command.

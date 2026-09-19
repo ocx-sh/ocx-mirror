@@ -601,6 +601,10 @@ pub(crate) fn task_dir(work_dir: &Path, version: &str, platform: &ocx_oci::Platf
 /// - flipping `libc_lint` back to `true` does not reach a work dir that already
 ///   holds a bundle. The operator must discard the bundle to re-check it.
 ///
+/// The publisher-declared digest is the exception: it reads the downloaded
+/// archive rather than the content tree, so the resume branch re-runs it and
+/// refuses outright when the archive is gone.
+///
 /// The declared-binaries chmod sits in the same block and is uncovered the same
 /// way: a bundle written by a binary predating it keeps its 0644 members, and no
 /// resume will fix them — discard the bundle to re-prepare it.
@@ -649,6 +653,29 @@ pub(crate) async fn prepare_task(
         // the absent field as "nothing to adopt" — so plan reports no drift and
         // the mistake is permanent.
         reject_empty_scan(&authoring, task)?;
+        // The one download-window check a resume can still run: the declared
+        // digest reads the downloaded archive, not the content tree that run
+        // discarded. It is the control #75's whole safety argument rests on —
+        // the proof a proxy served the bytes the publisher declared — so a
+        // bundle is never adopted on the strength of existing. Fail-closed when
+        // the archive is gone: an unverifiable bundle is not evidence.
+        match (task.asset_digest.as_deref(), archive_path.exists()) {
+            (Some(digest), true) => verify::verify_digest(&archive_path, digest).await?,
+            (Some(_), false) => anyhow::bail!(
+                "cannot re-check the declared digest of '{}': {} is present but the downloaded \
+                 asset is gone — delete the bundle to re-download and re-verify",
+                task.asset_name,
+                bundle_path.display(),
+            ),
+            // Same refusal the fresh path makes, in the same place in the
+            // sequence: `require` with nothing declared fails whether or not a
+            // bundle happens to be lying around.
+            (None, _) if task.require_digest => anyhow::bail!(
+                "no publisher digest declared for '{}' and the verify policy is 'require'",
+                task.asset_name,
+            ),
+            (None, _) => {}
+        }
         let metadata = finalize_metadata(&authoring, &task.platform, &sidecar_path).await?;
         return Ok((bundle_path, metadata));
     }
@@ -663,19 +690,22 @@ pub(crate) async fn prepare_task(
             download::download(http_client, &task.download_url, &archive_path).await?;
         }
 
-        // Verify (only if configured)
-        if let Some(verify_config) = &task.verify_config {
-            progress::set_stage(spinner, "Verifying", &task.normalized_version, &task.platform);
-            verify::verify(
-                verify_config,
-                http_client,
-                &archive_path,
-                &task.asset_name,
-                task.asset_digest.as_deref(),
-                task.require_digest,
-            )
-            .await?;
-        }
+        // Verify. Unconditional since #76: an absent `verify:` block means the
+        // *default* policy (`if_present` on both digest axes), not "no
+        // verification" — a source that declares a digest is checked against
+        // it whether or not the spec spells the block out. The sidecar
+        // `checksums_file` leg still needs the block, and defaults to absent.
+        let verify_config = task.verify_config.clone().unwrap_or_default();
+        progress::set_stage(spinner, "Verifying", &task.normalized_version, &task.platform);
+        verify::verify(
+            &verify_config,
+            http_client,
+            &archive_path,
+            &task.asset_name,
+            task.asset_digest.as_deref(),
+            task.require_digest,
+        )
+        .await?;
     } // download permit released
 
     // --- Bundle phase (CPU-bound) ---

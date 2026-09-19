@@ -135,7 +135,7 @@ The JSON document is `schema_version: 4` and adds a `has_drift` flag alongside `
 }
 ```
 
-An asset's `digest` is present only when the upstream source declared one.
+An asset's `digest` is the digest the upstream source declared for it (`sha256:<hex>`), present only when the source declared one; `prepare --plan` verifies the download against it under [`verify:`](./mirror-yml.md#verify).
 `legs` is the resolved per-platform test matrix, keyed by the
 [`platforms:`](./mirror-yml.md#platforms) key verbatim: where the job runs, what
 it runs in, and which tests it runs. It is what lets a renderer for a forge the
