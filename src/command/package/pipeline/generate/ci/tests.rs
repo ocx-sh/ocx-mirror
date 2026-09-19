@@ -27,6 +27,8 @@ mod env_sources;
 mod ghcr;
 #[path = "tests/golden.rs"]
 mod golden;
+#[path = "tests/leg_parity.rs"]
+mod leg_parity;
 #[path = "tests/multi_spec.rs"]
 mod multi_spec;
 #[path = "tests/notify.rs"]

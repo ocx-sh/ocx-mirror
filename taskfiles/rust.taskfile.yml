@@ -23,14 +23,16 @@ tasks:
         2. cargo clippy
         3. hawkeye license headers
         4. cargo-deny license audit
-        5. cargo build --release
-        6. cargo nextest run
+        5. cargo check --features jsonschema
+        6. cargo build --release
+        7. cargo nextest run
       Use during review-fix loops when only Rust code changed.
     cmds:
       - task: format:check
       - task: clippy:check
       - task: license:check
       - task: license:deps
+      - task: jsonschema:check
       - task: build
       - task: test:unit
 
@@ -51,6 +53,17 @@ tasks:
   clippy:fix:
     desc: Auto-fix clippy warnings
     cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
+
+  jsonschema:check:
+    desc: Type-check the optional `jsonschema` feature
+    summary: |
+      The `schema` command and every `schemars` derive live behind the
+      `jsonschema` feature, which no other task and no CI job builds — so a
+      derive that stopped compiling stayed green until someone ran
+      `ocx-mirror schema` by hand. `--all-targets` so the feature-gated tests
+      are type-checked too.
+    sources: *rust-sources
+    cmd: cargo check --locked --features jsonschema --all-targets
 
   build:
     desc: Build release binary
