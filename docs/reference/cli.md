@@ -99,18 +99,41 @@ ocx-mirror package pipeline plan [OPTIONS]
 
 Alongside `new` (not yet published) and `backfill-partial` (published for some platforms, missing for others), a plan entry can carry kind `metadata-drift`: a published `(version, platform)` whose config blob no longer matches what the spec would publish today. Drift is only ever reported, never acted on — a version already scheduled as `new` or `backfill-partial` is never also reported as drifted, since its next push writes current metadata anyway.
 
-The JSON document is `schema_version: 3` and adds a `has_drift` flag alongside `has_new`:
+The JSON document is `schema_version: 4` and adds a `has_drift` flag alongside `has_new`:
 
 ```json
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "has_new": true,
   "has_drift": false,
-  "versions": [...],
+  "versions": [
+    {
+      "version": "3.29.0_20260610",
+      "source_version": "3.29.0",
+      "platforms": ["linux/amd64"],
+      "kind": "new",
+      "assets": [
+        {
+          "platform": "linux/amd64",
+          "asset_name": "cmake-3.29.0-linux-x86_64.tar.gz",
+          "url": "https://github.com/...",
+          "digest": "sha256:..."
+        }
+      ]
+    }
+  ],
   "target": "ocx.sh/cmake",
-  "ocx_mirror_rev": "abc123..."
+  "ocx_mirror_rev": "abc123...",
+  "legs": {},
+  "versions_resolved": { "min_inclusive": true, "max_inclusive": false }
 }
 ```
+
+An asset's `digest` is present only when the upstream source declared one.
+`legs` is the resolved per-platform test matrix — filled in by the
+[`plan.json` contract](./plan-json.md). `versions_resolved` is the version
+window the run actually filtered by — filled in by the resolved `versions:`
+bounds.
 
 `has_new` deliberately ignores drift-only versions — the generated workflow's `discover` job gates the download-and-build jobs on it, and a drift fix has nothing to download. The `discover` job also drops every `metadata-drift` entry before building the `prepare` matrix: a drift entry carries no resolved assets, so a `prepare` leg for one would abort looking for a bundle nothing wrote. `has_drift` surfaces the finding for a human to act on with [`pipeline patch`](#pipeline-patch).
 

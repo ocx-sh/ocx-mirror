@@ -3,8 +3,6 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Stdio;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -50,6 +48,7 @@ fn parse_remote_index(index: RemoteIndex) -> anyhow::Result<Vec<VersionInfo>> {
         versions.push(VersionInfo {
             version,
             assets,
+            asset_digests: HashMap::new(),
             is_prerelease: entry.prerelease,
         });
     }
@@ -73,6 +72,7 @@ pub fn from_inline(versions: &HashMap<String, crate::spec::UrlIndexVersion>) -> 
         result.push(VersionInfo {
             version: version.clone(),
             assets,
+            asset_digests: HashMap::new(),
             is_prerelease: entry.prerelease,
         });
     }
@@ -91,49 +91,10 @@ pub async fn from_remote(url: &str) -> anyhow::Result<Vec<VersionInfo>> {
 
 /// Run a generator command and parse its stdout as url_index JSON.
 pub async fn from_generator(config: &GeneratorConfig, spec_dir: &Path) -> anyhow::Result<Vec<VersionInfo>> {
-    let working_dir = config.resolve_working_directory(spec_dir);
-
-    let timeout = Duration::from_secs(config.timeout_seconds);
-    let result = tokio::time::timeout(timeout, async {
-        let output = tokio::process::Command::new(&config.command[0])
-            .args(&config.command[1..])
-            .current_dir(&working_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to run generator '{}': {e}", config.command[0]))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "generator '{}' failed (exit {}): {}",
-                config.command.join(" "),
-                output.status,
-                stderr.trim()
-            );
-        }
-
-        if output.stdout.is_empty() {
-            anyhow::bail!("generator '{}' produced no output", config.command.join(" "));
-        }
-
-        let index: RemoteIndex = serde_json::from_slice(&output.stdout)
-            .map_err(|e| anyhow::anyhow!("generator output is not valid url_index JSON: {e}"))?;
-
-        parse_remote_index(index)
-    })
-    .await;
-
-    match result {
-        Ok(inner) => inner,
-        Err(_) => anyhow::bail!(
-            "generator '{}' timed out after {}s",
-            config.command.join(" "),
-            config.timeout_seconds
-        ),
-    }
+    let stdout = super::generator::run(config, spec_dir).await?;
+    let index: RemoteIndex = serde_json::from_slice(&stdout)
+        .map_err(|e| anyhow::anyhow!("generator output is not valid url_index JSON: {e}"))?;
+    parse_remote_index(index)
 }
 
 #[cfg(test)]

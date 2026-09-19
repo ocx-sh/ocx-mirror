@@ -63,6 +63,9 @@ impl Sync {
         let upstream_versions = list_upstream_versions(&spec, spec_dir).await?;
         log::debug!("[{}] Found {} upstream versions", spec.name, upstream_versions.len());
 
+        // The `versions:` window, both edges resolved once per run.
+        let bounds = crate::spec::resolve_version_bounds(spec.versions.as_ref(), spec_dir).await?;
+
         // Generate build timestamp
         let build_ts = normalizer::build_timestamp(&spec.build_timestamp);
         log::debug!("[{}] Build timestamp: {:?}", spec.name, build_ts);
@@ -78,7 +81,7 @@ impl Sync {
                 .map_err(|e| MirrorError::SpecInvalid(vec![e]))?;
 
             for version_info in &upstream_versions {
-                match resolver::resolve_assets(&version_info.assets, &patterns) {
+                match resolver::resolve_assets(version_info, &patterns) {
                     AssetResolution::Resolved(platforms) => {
                         match normalizer::normalize_version(&version_info.version, &build_ts) {
                             Ok(normalized) => {
@@ -159,6 +162,7 @@ impl Sync {
             &self.options.version,
             spec.skip_prereleases,
             spec.versions.as_ref(),
+            &bounds,
             &version_map,
             self.options.latest,
         );
@@ -196,6 +200,8 @@ impl Sync {
                     bin_scan: eff_variant.bin_scan,
                     libc_lint: eff_variant.libc_lint,
                     verify_config: spec.verify.clone(),
+                    asset_digest: platform_asset.digest.clone(),
+                    require_digest: false,
                     cascade: spec.cascade.enabled,
                     spec_dir: spec_dir.to_path_buf(),
                     asset_type,

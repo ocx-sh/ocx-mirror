@@ -15,14 +15,20 @@ use super::*;
 /// `has_drift` is always `false`: env metadata is composed from the lock, so
 /// there is no spec-declared document to diff a published tile against (see
 /// the dispatch in [`build_plan_report`]).
-pub fn env_plan_report(spec: &MirrorSpec, versions: Vec<PlanVersionEntry>) -> PlanReport {
+pub fn env_plan_report(
+    spec: &MirrorSpec,
+    versions: Vec<PlanVersionEntry>,
+    bounds: &spec::ResolvedBounds,
+) -> PlanReport {
     PlanReport {
-        schema_version: 3,
+        schema_version: PLAN_SCHEMA_VERSION,
         has_new: !versions.is_empty(),
         has_drift: false,
         versions,
         target: format!("{}/{}", spec.target.registry, spec.target.repository),
         ocx_mirror_rev: spec.ocx_mirror.as_ref().and_then(|c| c.rev.clone()),
+        legs: BTreeMap::new(),
+        versions_resolved: bounds.clone(),
     }
 }
 
@@ -163,6 +169,9 @@ pub fn build_env_plan_entries(
                 platform: key.clone(),
                 asset_name: wheel.filename,
                 url,
+                // Env wheels already verify their lock sha256 in
+                // `python_prepare`; a second path is out of scope.
+                digest: None,
             });
         }
     }
@@ -208,12 +217,13 @@ pub fn build_env_plan_entries(
 /// that ≤3-component parser accepts (e.g. `0.0.0.2`) or a PEP 440 `uv`-only
 /// suffix (`2.0.0.dev0`) — the same reason `build_env_plan_entries` bypasses
 /// it for `pylock` (D1, `plan_python_mirror_v2`). It does share that
-/// function's bounds comparator (`filter::within_bounds`) and its fail-open
+/// function's resolved bounds (`ResolvedBounds::admits`) and its fail-open
 /// convention: a tag no version parser understands is kept as outstanding
 /// work.
 pub fn select_pypi_candidates<'a>(
     spec: &MirrorSpec,
     upstream_versions: &'a [source::VersionInfo],
+    bounds: &spec::ResolvedBounds,
     version_map: &VersionPlatformMap,
 ) -> Vec<&'a source::VersionInfo> {
     let wheels_keys: Vec<&Platform> = spec
@@ -222,13 +232,11 @@ pub fn select_pypi_candidates<'a>(
         .map_or_else(Vec::new, WheelPatterns::sorted_platforms);
 
     let versions_config = spec.versions.as_ref();
-    let min = versions_config.and_then(|c| c.min.as_deref());
-    let max = versions_config.and_then(|c| c.max.as_deref());
 
     let mut candidates: Vec<&source::VersionInfo> = upstream_versions
         .iter()
         .filter(|info| !(spec.skip_prereleases && info.is_prerelease))
-        .filter(|info| filter::within_bounds(&info.version, min, max))
+        .filter(|info| bounds.admits(&info.version))
         .filter(|info| {
             let tag_version = Version::parse(&info.version);
             wheels_keys.iter().any(|&platform| {
@@ -394,6 +402,7 @@ pub async fn derive_one_pypi_lock(
 pub async fn build_pypi_plan_entries(
     spec: &MirrorSpec,
     upstream_versions: &[source::VersionInfo],
+    bounds: &spec::ResolvedBounds,
     all_tags: &[String],
     version_map: &VersionPlatformMap,
     locks_dir: &Path,
@@ -403,7 +412,7 @@ pub async fn build_pypi_plan_entries(
         MirrorError::SpecInvalid(vec!["python config is required for source.type 'pypi'".to_string()])
     })?;
 
-    let candidates = select_pypi_candidates(spec, upstream_versions, version_map);
+    let candidates = select_pypi_candidates(spec, upstream_versions, bounds, version_map);
     if candidates.is_empty() {
         return Ok(Vec::new());
     }

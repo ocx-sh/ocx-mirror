@@ -254,6 +254,7 @@ fn versions_from_files(files: Vec<(String, bool)>) -> Vec<VersionInfo> {
         .map(|(version, (_, is_prerelease))| VersionInfo {
             version,
             assets: HashMap::new(),
+            asset_digests: HashMap::new(),
             is_prerelease,
         })
         .collect()

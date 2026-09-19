@@ -45,7 +45,7 @@ hashes = { sha256 = "aaaa" }
 /// A `pypi` plan document carrying `pylock` for its single entry.
 fn pypi_plan_with_lock(lock_relative: &str) -> PlanReport {
     PlanReport {
-        schema_version: 3,
+        schema_version: crate::command::package::pipeline::plan::PLAN_SCHEMA_VERSION,
         has_new: true,
         has_drift: false,
         versions: vec![PlanVersionEntry {
@@ -59,6 +59,8 @@ fn pypi_plan_with_lock(lock_relative: &str) -> PlanReport {
         }],
         target: "ocx.sh/pycowsay".to_string(),
         ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: Default::default(),
     }
 }
 

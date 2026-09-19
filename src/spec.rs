@@ -72,7 +72,8 @@ pub(crate) use validate::*;
 pub use variant::{EffectiveVariant, VariantSpec};
 pub use verify_config::VerifyConfig;
 pub(crate) use versions_config::BackfillOrder;
-pub use versions_config::VersionsConfig;
+pub(crate) use versions_config::resolve_version_bounds;
+pub use versions_config::{BoundOrigin, ResolvedBounds, VersionsConfig};
 pub use wheels::{WheelPatterns, base_platform_key, libc_feature};
 
 use ocx_package::version::Version;

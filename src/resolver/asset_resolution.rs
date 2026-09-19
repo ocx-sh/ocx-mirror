@@ -19,6 +19,8 @@ pub struct ResolvedPlatformAsset {
     pub platform: Platform,
     pub asset_name: String,
     pub url: Url,
+    /// `sha256:<hex>` the source declared for this asset, when it declared one.
+    pub digest: Option<String>,
 }
 
 /// A platform that matched multiple distinct assets — this is an error.

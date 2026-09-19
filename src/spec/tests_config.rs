@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The resolved kind of a [`TestEntry`], borrowed from the entry's fields.
 ///
@@ -38,19 +38,23 @@ pub enum TestKind<'a> {
 /// | `command` | Shell command string executed verbatim in the configured shell |
 /// | `script` | Path to a Starlark `.star` file relative to the mirror repo root |
 /// | `script_inline` | Starlark source inline in the YAML (use `|` block scalar) |
-#[derive(Debug, Clone, Deserialize)]
+///
+/// This type is also the plan document's `legs.<key>.tests[]` shape, so a new
+/// field here widens the `plan.json` wire contract.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct TestEntry {
     /// Unique test name. Must match `^[a-zA-Z][a-zA-Z0-9_-]*$`.
     pub name: String,
     /// Single-line shell command executed in the configured shell.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// Path to a Starlark script file, relative to the mirror repo root.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<PathBuf>,
     /// Inline Starlark script source.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script_inline: Option<String>,
 }
 
