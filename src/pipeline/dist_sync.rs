@@ -756,33 +756,11 @@ async fn fetch_manifest(client: &reqwest::Client, spec: &DistSpec) -> Result<Dis
             MirrorError::SourceError(format!("cannot fetch {}: {:#}", spec.source, anyhow::Error::new(error)))
         })?;
 
-    // Refuse a declared oversize body before reading a byte of it.
-    if let Some(declared) = response.content_length()
-        && declared > MANIFEST_FETCH_CEILING as u64
-    {
-        return Err(MirrorError::SourceError(format!(
-            "{} declares {declared} bytes, over the {MANIFEST_FETCH_CEILING}-byte cap",
-            spec.source
-        )));
-    }
-
-    // An endpoint that omits or lies about `Content-Length` — chunked transfer,
-    // or a hostile host — still cannot stream more than the cap into memory,
-    // because the running total is checked before each chunk is appended.
-    let mut bytes: Vec<u8> = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| MirrorError::SourceError(format!("cannot read {}: {error}", spec.source)))?
-    {
-        if bytes.len() + chunk.len() > MANIFEST_FETCH_CEILING {
-            return Err(MirrorError::SourceError(format!(
-                "{} exceeds the {MANIFEST_FETCH_CEILING}-byte cap",
-                spec.source
-            )));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    // Both ceilings — the declared one and the streamed running total — live in
+    // `http::read_capped`; every message is what this leg emitted before the
+    // read was lifted (`spec.source` is a `Url`, so `{}` and `as_str()` render
+    // the same bytes).
+    let bytes = crate::http::read_capped(&mut response, spec.source.as_str(), MANIFEST_FETCH_CEILING).await?;
 
     let manifest: DistManifest = serde_json::from_slice(&bytes)
         .map_err(|error| MirrorError::SourceError(format!("cannot parse {}: {error}", spec.source)))?;

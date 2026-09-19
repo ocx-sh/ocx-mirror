@@ -130,6 +130,55 @@ pub(crate) fn client() -> Result<reqwest::Client, MirrorError> {
         .map_err(|error| MirrorError::ExecutionFailed(vec![format!("cannot build an HTTP client: {error}")]))
 }
 
+/// Read a response body into memory, refusing more than `cap` bytes.
+///
+/// `label` names the thing being read in every message: a URL, or a
+/// capability-stripped document name where echoing the URL would re-emit a
+/// path the caller deliberately withheld.
+///
+/// Lifted from `dist_sync::fetch_manifest` when a second in-memory foreign
+/// body — a resolved `versions:` bound — needed the same two ceilings. The
+/// auth, status and 404 policy stay at the call sites: those differ by leg
+/// by design, only the read is identical.
+///
+/// # Errors
+///
+/// [`MirrorError::SourceError`] when the body is declared or streamed over
+/// `cap`, or when a chunk cannot be read.
+// ponytail: `registry_sync/catalog.rs` keeps its own copy. Its read error
+// goes through `fetch_failed`, so converting it would change a message in a
+// subsystem this seam does not own.
+pub(crate) async fn read_capped(
+    response: &mut reqwest::Response,
+    label: &str,
+    cap: usize,
+) -> Result<Vec<u8>, MirrorError> {
+    // Refuse a declared oversize body before reading a byte of it.
+    if let Some(declared) = response.content_length()
+        && declared > cap as u64
+    {
+        return Err(MirrorError::SourceError(format!(
+            "{label} declares {declared} bytes, over the {cap}-byte cap"
+        )));
+    }
+
+    // An endpoint that omits or lies about `Content-Length` — chunked transfer,
+    // or a hostile host — still cannot stream more than the cap into memory,
+    // because the running total is checked before each chunk is appended.
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| MirrorError::SourceError(format!("cannot read {label}: {error}")))?
+    {
+        if bytes.len() + chunk.len() > cap {
+            return Err(MirrorError::SourceError(format!("{label} exceeds the {cap}-byte cap")));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
