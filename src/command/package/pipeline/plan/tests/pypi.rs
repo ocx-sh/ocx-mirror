@@ -82,12 +82,13 @@ platforms:
     serde_yaml_ng::from_str(yaml).unwrap()
 }
 
-/// The window `resolve_version_bounds` produces for a spec — built inline
-/// rather than awaited, so the async tests below do not nest runtimes.
-fn bounds(spec: &MirrorSpec) -> crate::spec::ResolvedBounds {
+/// The window `resolve_version_bounds` produces for a spec's literal edges —
+/// built inline rather than awaited, so the async tests below do not nest
+/// runtimes. `None`/`None` is the window a spec without `versions:` gets.
+fn bounds(min: Option<&str>, max: Option<&str>) -> crate::spec::ResolvedBounds {
     crate::spec::ResolvedBounds {
-        min: spec.versions.as_ref().and_then(|v| v.min.clone()),
-        max: spec.versions.as_ref().and_then(|v| v.max.clone()),
+        min: min.map(str::to_string),
+        max: max.map(str::to_string),
         ..Default::default()
     }
 }
@@ -120,7 +121,7 @@ fn select_pypi_candidates_orders_oldest_first_and_applies_new_per_run() {
     ];
     let version_map = VersionPlatformMap::default();
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &version_map);
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(None, None), &version_map);
     let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
     // Default backfill (newest_first) with cap=2: oldest-first order among the
     // two highest surviving versions.
@@ -133,20 +134,79 @@ fn select_pypi_candidates_bounds_four_segment_pep440_versions() {
     // releases, `ocx_package::version::Version` rejects them, and this filter kept whatever it
     // could not parse — so `0.15.5.1`/`0.16.2.0` planned as new work under a
     // 1.16 floor.
-    let mut spec = pypi_fixture_spec();
-    spec.versions = Some(crate::spec::VersionsConfig {
-        min: Some("1.16.0".to_string()),
-        ..Default::default()
-    });
+    let spec = pypi_fixture_spec();
     let upstream = vec![
         version_info("0.15.5.1", false),
         version_info("0.16.2.0", false),
         version_info("1.16.6", false),
     ];
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &VersionPlatformMap::default());
+    let candidates = select_pypi_candidates(
+        &spec,
+        &upstream,
+        &bounds(Some("1.16.0"), None),
+        &VersionPlatformMap::default(),
+    );
     let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
     assert_eq!(versions, vec!["1.16.6"], "sub-min PEP 440 releases must be dropped");
+}
+
+#[test]
+fn select_pypi_candidates_honours_an_inclusive_max() {
+    // The env seam is the second place the window is applied. This is the test
+    // that fails if a resolved ceiling reaches `filter_versions` but not here.
+    let spec = pypi_fixture_spec();
+    let upstream = vec![
+        version_info("1.0.0", false),
+        version_info("2.0.0", false),
+        version_info("3.0.0", false),
+    ];
+
+    let inclusive = crate::spec::ResolvedBounds {
+        max: Some("2.0.0".to_string()),
+        max_inclusive: true,
+        ..Default::default()
+    };
+    let candidates = select_pypi_candidates(&spec, &upstream, &inclusive, &VersionPlatformMap::default());
+    let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+    assert_eq!(versions, vec!["1.0.0", "2.0.0"], "an inclusive ceiling keeps its edge");
+
+    let candidates = select_pypi_candidates(
+        &spec,
+        &upstream,
+        &bounds(None, Some("2.0.0")),
+        &VersionPlatformMap::default(),
+    );
+    let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+    assert_eq!(versions, vec!["1.0.0"], "the shorthand ceiling stays exclusive");
+}
+
+#[test]
+fn select_pypi_candidates_honours_an_exclusive_min() {
+    let spec = pypi_fixture_spec();
+    let upstream = vec![
+        version_info("1.0.0", false),
+        version_info("2.0.0", false),
+        version_info("3.0.0", false),
+    ];
+
+    let exclusive = crate::spec::ResolvedBounds {
+        min: Some("2.0.0".to_string()),
+        min_inclusive: false,
+        ..Default::default()
+    };
+    let candidates = select_pypi_candidates(&spec, &upstream, &exclusive, &VersionPlatformMap::default());
+    let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+    assert_eq!(versions, vec!["3.0.0"], "an exclusive floor drops its edge");
+
+    let candidates = select_pypi_candidates(
+        &spec,
+        &upstream,
+        &bounds(Some("2.0.0"), None),
+        &VersionPlatformMap::default(),
+    );
+    let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
+    assert_eq!(versions, vec!["2.0.0", "3.0.0"], "the shorthand floor stays inclusive");
 }
 
 #[test]
@@ -156,7 +216,7 @@ fn select_pypi_candidates_skips_fully_published_version() {
     let mut version_map = VersionPlatformMap::default();
     version_map.add(Version::parse("1.0.0").unwrap(), "linux/amd64".parse().unwrap());
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &version_map);
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(None, None), &version_map);
     let versions: Vec<&str> = candidates.iter().map(|c| c.version.as_str()).collect();
     assert_eq!(versions, vec!["2.0.0"], "already-published version must be dropped");
 }
@@ -171,7 +231,7 @@ fn select_pypi_candidates_never_panics_on_unparseable_version() {
     let upstream = vec![version_info("2024.1.1.1", false)];
     let version_map = VersionPlatformMap::default();
 
-    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(&spec), &version_map);
+    let candidates = select_pypi_candidates(&spec, &upstream, &bounds(None, None), &version_map);
     assert_eq!(candidates.len(), 1, "unparseable version kept as outstanding work");
 }
 
@@ -240,7 +300,7 @@ fn build_pypi_plan_entries_writes_lock_and_references_it_in_the_entry() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
-        &bounds(&spec),
+        &bounds(None, None),
         &[],
         &version_map,
         &locks_dir,
@@ -296,7 +356,7 @@ fn build_pypi_plan_entries_reparse_failure_maps_to_data_error_exit_65() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
-        &bounds(&spec),
+        &bounds(None, None),
         &[],
         &version_map,
         &locks_dir,
@@ -342,7 +402,7 @@ fn build_pypi_plan_entries_universal_mode_never_invokes_ocx() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
-        &bounds(&spec),
+        &bounds(None, None),
         &[],
         &version_map,
         &locks_dir,
@@ -402,7 +462,7 @@ fn build_pypi_plan_entries_derived_lock_filename_follows_uv_naming_rule() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
-        &bounds(&spec),
+        &bounds(None, None),
         &[],
         &version_map,
         &locks_dir,
@@ -449,7 +509,7 @@ fn build_pypi_plan_entries_uv_resolution_failure_maps_to_data_error_exit_65() {
     let result = block_on(build_pypi_plan_entries(
         &spec,
         &upstream,
-        &bounds(&spec),
+        &bounds(None, None),
         &[],
         &version_map,
         &locks_dir,
@@ -478,9 +538,17 @@ async fn build_pypi_plan_entries_skips_derivation_when_no_candidates() {
     let locks_root = tempfile::tempdir().unwrap();
     let locks_dir = locks_root.path().join("locks");
 
-    let entries = build_pypi_plan_entries(&spec, &upstream, &bounds(&spec), &[], &version_map, &locks_dir, &None)
-        .await
-        .expect("no candidates means no subprocess spawns, so this never touches uv/ocx");
+    let entries = build_pypi_plan_entries(
+        &spec,
+        &upstream,
+        &bounds(None, None),
+        &[],
+        &version_map,
+        &locks_dir,
+        &None,
+    )
+    .await
+    .expect("no candidates means no subprocess spawns, so this never touches uv/ocx");
     assert!(entries.is_empty());
     assert!(
         !locks_dir.exists(),

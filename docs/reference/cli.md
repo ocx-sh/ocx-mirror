@@ -142,7 +142,11 @@ it runs in, and which tests it runs. It is what lets a renderer for a forge the
 GitHub templates do not cover build the whole test fan-out without ever reading
 `mirror.yml` — the full contract, field by field, is
 [`plan.json`](./plan-json.md). `versions_resolved` is the version window the run
-actually filtered by — filled in by the resolved `versions:` bounds.
+actually filtered by, after resolving
+[`versions.min`/`max`](./mirror-yml.md#versions-bounds): an edge the spec does
+not set emits no version key, while its inclusivity flag always travels. The
+plain renderer prints the same window above the table, including on a "nothing
+to do" run.
 
 `has_new` deliberately ignores drift-only versions — the generated workflow's `discover` job gates the download-and-build jobs on it, and a drift fix has nothing to download. The `discover` job also drops every `metadata-drift` entry before building the `prepare` matrix: a drift entry carries no resolved assets, so a `prepare` leg for one would abort looking for a bundle nothing wrote. `has_drift` surfaces the finding for a human to act on with [`pipeline patch`](#pipeline-patch).
 

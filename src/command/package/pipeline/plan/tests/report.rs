@@ -39,6 +39,68 @@ fn plan_report_serializes_schema_version_4() {
 }
 
 #[test]
+fn plan_report_carries_the_resolved_window() {
+    // D4's wire shape: `{min?, min_inclusive, max?, max_inclusive}`. A moving
+    // vendor pointer makes the spec alone insufficient to reproduce the run,
+    // which is why the window travels in the plan at all.
+    let report = PlanReport {
+        schema_version: PLAN_SCHEMA_VERSION,
+        has_new: true,
+        has_drift: false,
+        versions: vec![entry("3.29.0", &["linux/amd64"], PlanVersionKind::New)],
+        target: "ocx.sh/cmake".to_string(),
+        ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: crate::spec::ResolvedBounds {
+            min: Some("1.0.0".to_string()),
+            min_inclusive: true,
+            max: Some("3.29.0".to_string()),
+            max_inclusive: true,
+            ..Default::default()
+        },
+    };
+
+    let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+    let window = &value["versions_resolved"];
+    assert_eq!(window["min"].as_str().unwrap(), "1.0.0");
+    assert!(window["min_inclusive"].as_bool().unwrap());
+    assert_eq!(window["max"].as_str().unwrap(), "3.29.0");
+    assert!(window["max_inclusive"].as_bool().unwrap());
+    // The origins are `print_plan_plain`'s, not the wire's.
+    assert!(window.get("min_origin").is_none(), "origins must not serialize");
+    assert!(window.get("max_origin").is_none(), "origins must not serialize");
+}
+
+#[test]
+fn an_unset_edge_emits_no_version_key_but_keeps_its_flag() {
+    // The absent-when-unset half of D4: a consumer reads `max_inclusive`
+    // unconditionally, and `max` only when the run had a ceiling.
+    let report = PlanReport {
+        schema_version: PLAN_SCHEMA_VERSION,
+        has_new: false,
+        has_drift: false,
+        versions: vec![],
+        target: "ocx.sh/cmake".to_string(),
+        ocx_mirror_rev: None,
+        legs: Default::default(),
+        versions_resolved: crate::spec::ResolvedBounds {
+            max: Some("3.0.0".to_string()),
+            max_inclusive: true,
+            ..Default::default()
+        },
+    };
+
+    let value: serde_json::Value = serde_json::to_value(&report).unwrap();
+    let window = &value["versions_resolved"];
+    assert!(window.get("min").is_none(), "an unset floor emits no key: {window}");
+    assert!(
+        window["min_inclusive"].as_bool().unwrap(),
+        "its flag still travels, carrying the shorthand default"
+    );
+    assert_eq!(window["max"].as_str().unwrap(), "3.0.0");
+}
+
+#[test]
 fn plan_report_has_new_false_when_no_versions() {
     // §3.5: Empty source + empty target → has_new: false, versions: []
     let report = PlanReport {
@@ -364,4 +426,57 @@ fn build_legs_is_empty_without_a_platforms_block() {
     )
     .expect("spec without platforms must parse");
     assert!(build_legs(&spec).is_empty());
+}
+
+// ── S3: a real v3 plan.json must still deserialize ────────────────────────
+
+/// A hand-written schema-3 document: no `legs`, no `versions_resolved`, and
+/// an asset entry with no `digest`.
+///
+/// Every other deserialization test in this file round-trips a v4 document the
+/// code just serialized, which exercises no `#[serde(default)]` at all. The
+/// read-compat the plan contract promises — `prepare --plan` reads a plan an
+/// older `ocx-mirror` wrote — is only pinned here.
+const V3_PLAN_JSON: &str = r#"{
+  "schema_version": 3,
+  "has_new": true,
+  "has_drift": false,
+  "versions": [
+    {
+      "version": "3.29.0_20260610",
+      "platforms": ["linux/amd64"],
+      "kind": "new",
+      "source_version": "3.29.0",
+      "assets": [
+        {
+          "platform": "linux/amd64",
+          "asset_name": "cmake-3.29.0-linux-x86_64.tar.gz",
+          "url": "https://github.com/Kitware/CMake/releases/download/v3.29.0/cmake-3.29.0-linux-x86_64.tar.gz"
+        }
+      ]
+    }
+  ],
+  "target": "ocx.sh/cmake",
+  "ocx_mirror_rev": "abc123def456"
+}"#;
+
+#[test]
+fn a_v3_plan_document_still_deserializes() {
+    let report: PlanReport = serde_json::from_str(V3_PLAN_JSON).expect("a v3 plan must still parse");
+
+    assert_eq!(report.schema_version, 3, "the version is read back, not rewritten");
+    assert!(report.legs.is_empty(), "an absent `legs` is an empty map, not an error");
+
+    // `ResolvedBounds::default()` is the unconstrained window: `min_inclusive`
+    // is hand-written `true` so an absent block admits its own lower edge.
+    let bounds = &report.versions_resolved;
+    assert_eq!(bounds.min, None);
+    assert_eq!(bounds.max, None);
+    assert!(bounds.min_inclusive);
+    assert!(!bounds.max_inclusive);
+
+    assert!(
+        report.versions[0].assets[0].digest.is_none(),
+        "a v3 asset declares no digest, and prepare must read that as `off`",
+    );
 }

@@ -1,0 +1,17 @@
+# expect: versions.max.version.url 'ftp://example.com/stable' must be an http(s) URL
+name: test
+target:
+  registry: localhost:5000
+  repository: test
+source:
+  type: github_release
+  owner: test
+  repo: test
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+versions:
+  max:
+    version:
+      url: ftp://example.com/stable
+    inclusive: false
