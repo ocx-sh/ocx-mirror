@@ -4,10 +4,13 @@
 //! Per-platform runner configuration for the test pipeline.
 //!
 //! [`PlatformConfig`] maps an OCI platform key (e.g. `linux/amd64`) to a
-//! GitHub Actions runner label and optional container matrix. Absence of
+//! forge-neutral runner label set and optional container matrix. Absence of
 //! `containers` means native mode; presence means container mode.
 
+use std::fmt;
+
 use serde::Deserialize;
+use serde::de;
 
 use super::tests_config::TestEntry;
 
@@ -46,6 +49,32 @@ pub struct ContainerConfig {
     pub setup: Option<Vec<String>>,
 }
 
+impl ContainerConfig {
+    /// The JUnit / matrix `container_id`: the declared `id`, else the
+    /// slugified image.
+    ///
+    /// The join key `pipeline push` looks results up by, so the CI renderer
+    /// and `plan.json`'s `legs` derive it here rather than each for itself —
+    /// a second copy hands one of them a name the other never wrote.
+    pub fn resolved_id(&self) -> String {
+        self.id
+            .clone()
+            .unwrap_or_else(|| super::image_to_container_id(&self.image))
+    }
+
+    /// The shell tests run in: declared, else inferred from the image
+    /// basename.
+    ///
+    /// Validation guarantees an explicit shell whenever the image has no known
+    /// default, so the POSIX `sh` fallback is unreachable for a loaded spec —
+    /// it is the safest thing to guess for anything that slips through.
+    pub fn resolved_shell(&self) -> String {
+        self.shell
+            .clone()
+            .unwrap_or_else(|| super::infer_shell_from_image(&self.image).unwrap_or("sh").to_owned())
+    }
+}
+
 /// Configuration for one platform target in the test pipeline.
 ///
 /// A platform without `containers` runs tests natively on the declared GHA
@@ -59,8 +88,17 @@ pub struct ContainerConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlatformConfig {
-    /// GitHub Actions runner label (e.g. `ubuntu-latest`, `macos-latest`).
-    pub runner: String,
+    /// Runner label set: the job runs on a runner carrying **all** of these.
+    /// Spelled as one label or a list —
+    /// `runner: ubuntu-latest` / `runner: [self-hosted, linux, arm64]`.
+    ///
+    /// Forge-neutral by intent (issue #77): GitHub reads it as `runs-on`,
+    /// GitLab as `tags`. Normalised to a list here so every consumer sees one
+    /// shape; the renderer re-emits the single-label spelling unchanged.
+    ///
+    /// No `#[serde(default)]` — a missing `runner:` stays a parse error.
+    #[serde(deserialize_with = "deserialize_runner")]
+    pub runner: Vec<String>,
     /// Container images to test against. Absence = native mode.
     #[serde(default)]
     pub containers: Option<Vec<ContainerConfig>>,
@@ -98,6 +136,53 @@ pub struct PlatformConfig {
     /// `min_version`/`max_version` range. See [`ExcludeEntry`].
     #[serde(default)]
     pub exclude: Vec<ExcludeEntry>,
+}
+
+impl PlatformConfig {
+    /// The shell a native leg runs in: declared, else `pwsh` on windows and
+    /// `bash` everywhere else.
+    ///
+    /// Shared with `plan.json`'s `legs` for the same reason as
+    /// [`ContainerConfig::resolved_shell`] — the default is what the spec
+    /// *means*, not a renderer opinion.
+    pub fn native_shell<'a>(&'a self, platform_key: &str) -> &'a str {
+        if let Some(shell) = &self.shell {
+            return shell.as_str();
+        }
+        if platform_key.starts_with("windows") {
+            "pwsh"
+        } else {
+            "bash"
+        }
+    }
+}
+
+/// Deserialize `runner:` from either a single label or a list of labels.
+///
+/// Hand-rolled rather than `#[serde(untagged)]`, the same call
+/// [`CascadeConfig`](super::CascadeConfig) makes: an untagged enum reports
+/// every failure as "data did not match any variant", so `runner: 3` would
+/// never name what it should have been.
+fn deserialize_runner<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    deserializer.deserialize_any(RunnerVisitor)
+}
+
+struct RunnerVisitor;
+
+impl<'de> de::Visitor<'de> for RunnerVisitor {
+    type Value = Vec<String>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a runner label, or a list of runner labels")
+    }
+
+    fn visit_str<E: de::Error>(self, label: &str) -> Result<Self::Value, E> {
+        Ok(vec![label.to_owned()])
+    }
+
+    fn visit_seq<S: de::SeqAccess<'de>>(self, seq: S) -> Result<Self::Value, S::Error> {
+        Deserialize::deserialize(de::value::SeqAccessDeserializer::new(seq))
+    }
 }
 
 /// Surface treatment for an [`ExcludeEntry`].

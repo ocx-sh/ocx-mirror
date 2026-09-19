@@ -630,7 +630,7 @@ Each entry sets exactly one of three mutually exclusive fields:
 
 ## `platforms` {#platforms}
 
-Declares the GHA runner and container matrix for the generated workflow. Each key is a platform key, in the same form [`assets`](#assets) uses — including the `+libc.<flavor>` suffix.
+Declares the runner and container matrix for the generated workflow. Each key is a platform key, in the same form [`assets`](#assets) uses — including the `+libc.<flavor>` suffix.
 
 A platform without `containers:` runs its tests natively on the runner. A platform with `containers:` runs them once per image: the generated workflow fetches a libc-matched, statically-linked `ocx` release and executes every `ocx package test` inside `docker run <image>`, so the mirrored artifact is loaded and run by that image's own libc. That is the only way an `os.features` musl or glibc claim is actually verified — an artifact that links glibc reds its Alpine leg instead of shipping a false claim. Declaring [`setup`](#container-setup) on a container narrows that claim, honestly: not "runs on stock image X", but "runs on stock image X plus these named packages" — and the packages are named right next to the image they provision.
 
@@ -729,7 +729,7 @@ platforms:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `runner` | string | Yes | [GitHub Actions][github-actions-docs] runner label |
+| `runner` | string or array of strings | Yes | Runner **label set** — the job runs on a runner carrying *all* of these. See [Runner labels](#platform-runner). |
 | `containers` | array | No | Container matrix entries. Absent = native mode. Must have ≥1 entry when present. |
 | `containers[].image` | string | Yes | Valid OCI image reference (e.g. `ubuntu:24.04`) |
 | `containers[].shell` | string | No* | Shell to invoke inside the container. *Required when image name does not match a known default (see below). |
@@ -741,6 +741,29 @@ platforms:
 | `min_version` | string | No | Inclusive lower bound: the first upstream version this platform applies to. See [Version applicability](#platform-version-applicability). |
 | `max_version` | string | No | Exclusive upper bound: the first upstream version this platform no longer applies to. |
 | `exclude` | array | No | Individual `(version[, range])` holes within the window. See [Version applicability](#platform-version-applicability). |
+
+#### Runner labels {#platform-runner}
+
+`runner:` is a **label set**, not a runner name: the job runs on a runner
+carrying every label listed. Write one label or a list —
+
+```yaml
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+  linux/arm64:
+    runner: [self-hosted, linux, arm64]
+```
+
+Both spellings mean the same thing to `ocx-mirror`; the single label is the set
+of one. Which is why this is a set and not a string: it is the one shape every
+forge already has. GitHub renders it as [`runs-on`][github-actions-docs] — a
+bare scalar for one label, a flow sequence for more — and GitLab reads the same
+list as `tags`. [`plan.json`](./plan-json.md#fields) always carries it as a
+list, so a renderer for any other forge never has to handle two shapes.
+
+An empty list, or a label that is only whitespace, is rejected (exit 65). A
+missing `runner:` is a parse error — there is no default.
 
 **Platform key validation:**
 

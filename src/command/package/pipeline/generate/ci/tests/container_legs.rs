@@ -1019,3 +1019,26 @@ fn render_r3_discord_url_rejected_before_write() {
         Err(e) => panic!("Expected SpecUsageError/SpecInvalid, got: {e}"),
     }
 }
+
+#[test]
+fn a_label_set_renders_as_a_flow_sequence_and_a_single_label_stays_bare() {
+    // Byte-level, because this is what the 15 pinned goldens depend on: one
+    // label must render exactly as it always did, or every mirror repository
+    // in the wild reds its drift guard on its next run.
+    let workflow = workflow_for("mirror-runner-labels.yml");
+
+    assert!(
+        workflow.contains("            runner: [\"self-hosted\", \"linux\", \"x64\"]\n"),
+        "a label set must render as a YAML flow sequence, got:\n{workflow}"
+    );
+    assert!(
+        workflow.contains("            runner: ubuntu-24.04-arm\n"),
+        "a single label must stay the bare scalar it always was, got:\n{workflow}"
+    );
+    // The job line is untouched: GitHub resolves the expression to whichever
+    // shape the matrix leg carries.
+    assert!(
+        workflow.contains("    runs-on: ${{ matrix.runner }}\n"),
+        "`runs-on` must keep reading the matrix key verbatim, got:\n{workflow}"
+    );
+}
