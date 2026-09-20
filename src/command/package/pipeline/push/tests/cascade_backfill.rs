@@ -3,8 +3,6 @@
 
 use std::collections::BTreeMap;
 
-use ocx_shell::ci::CiFlavor;
-
 use super::super::*;
 use super::support::*;
 use crate::annotations::build_annotations_for;
@@ -180,9 +178,10 @@ fn build_push_args_omits_cascade_so_a_platform_can_land_without_moving_an_alias(
 /// The argv boundary: the `ocx` child inherits the runner's whole environment,
 /// so the only way a token reaches a published index is through an
 /// `--annotation` the mirror assembled. Every credential name the runner
-/// could carry answers with a canary here, and none of it may surface —
-/// while the allowlisted GitHub names still do, so the guard cannot pass on
-/// an empty argv.
+/// could carry answers with a canary here, and none of it may surface. The
+/// mirror reads no CI variable of its own any more — `--ci-annotations` does,
+/// inside `ocx` — so the positive half is that flag plus the run's pinned
+/// `created`, which is what keeps the guard from passing on an empty argv.
 #[test]
 fn build_push_args_never_carries_a_non_allowlisted_env_value() {
     const TOKEN: &str = "ghs_liveTokenFromTheRunnerEnvironment";
@@ -195,9 +194,11 @@ fn build_push_args_never_carries_a_non_allowlisted_env_value() {
         ("GITHUB_SERVER_URL", Some("https://github.com")),
         ("GITHUB_REPOSITORY", Some("ocx-sh/mirror-shfmt")),
         ("GITHUB_SHA", Some("a1b2c3d4")),
+        // The runner marker `--ci-annotations` is emitted for.
+        ("GITHUB_ACTIONS", Some("true")),
     ]);
 
-    let annotations = build_annotations_for(Some(CiFlavor::GitHubActions), &BTreeMap::new());
+    let annotations = build_annotations_for(Some("github"), &BTreeMap::new());
     let args = build_push_args(
         "linux/amd64",
         "ghcr.io/ocx-sh/shfmt:3.8.0",
@@ -215,9 +216,11 @@ fn build_push_args_never_carries_a_non_allowlisted_env_value() {
     );
     // Positive half, so the assertion above cannot pass on an empty argv.
     assert!(
-        args.contains(&"org.opencontainers.image.source=https://github.com/ocx-sh/mirror-shfmt".to_string())
-            && args.contains(&"org.opencontainers.image.revision=a1b2c3d4".to_string()),
-        "allowlisted values must still reach the argv: {args:?}"
+        args.contains(&"--ci-annotations=github".to_string())
+            && args
+                .iter()
+                .any(|arg| arg.starts_with("org.opencontainers.image.created=")),
+        "the provider flag and the run's pinned created must reach the argv: {args:?}"
     );
 }
 

@@ -34,24 +34,32 @@ jsonschema = ["dep:schemars"]
 # is still exactly one thing: bumping the external/ocx submodule pointer. What
 # changed upstream is the shape of the surface — the single `ocx_lib` crate was
 # dissolved into responsibility-derived crates, so the pointer bump now lands
-# across the ten rows below instead of one. Each row is a surface this
+# across the eight rows below instead of one. Each row is a surface this
 # binary names directly; a crate the code stops using is a row to delete, not a
 # convenience to keep.
 #
-# Deliberately absent: `ocx` itself (`external/ocx/crates/ocx_cli`), the CLI
-# *application*. Its `tracing_init` and its error -> exit-code ladder are the
-# only two things this binary ever wanted from it, and the row cost 160
-# packages — the whole Starlark host plus an LSP/DAP/REPL stack and the gix
-# family — for them. Both now live here: `src/tracing_init.rs` (a verbatim copy)
-# and `error::tls_exit_code`.
-ocx_announce = { path = "external/ocx/crates/ocx_announce" }
+# Every row is an **ecosystem**- or **interface**-tier crate in ocx's
+# stability table (`ocx`'s CLAUDE.md; `ocx_exit` is the interface one). An
+# **internal**-tier crate must never get a row: `task satellite:verify` in
+# ocx's `verify-deep.yml` asserts this workspace resolves none of them, because
+# internal code carries no stability at all and a link to it is a break waiting
+# for the next rename. The two that used to be here are the precedent —
+# `ocx_shell` (CI annotations, now reached through `ocx package push
+# --ci-annotations`) and `ocx_announce` (the forge vocabulary, restated in
+# `src/spec/forge.rs`, which says why).
+#
+# Deliberately absent for a different reason: `ocx` itself
+# (`external/ocx/crates/ocx_cli`), the CLI *application*. Its `tracing_init`
+# and its error -> exit-code ladder are the only two things this binary ever
+# wanted from it, and the row cost 160 packages — the whole Starlark host plus
+# an LSP/DAP/REPL stack and the gix family — for them. Both now live here:
+# `src/tracing_init.rs` (a verbatim copy) and `error::tls_exit_code`.
 ocx_config = { path = "external/ocx/crates/ocx_config" }
 ocx_console = { path = "external/ocx/crates/ocx_console" }
 ocx_exit = { path = "external/ocx/crates/ocx_exit" }
 ocx_index = { path = "external/ocx/crates/ocx_index" }
 ocx_oci = { path = "external/ocx/crates/ocx_oci" }
 ocx_package = { path = "external/ocx/crates/ocx_package" }
-ocx_shell = { path = "external/ocx/crates/ocx_shell" }
 ocx_sign = { path = "external/ocx/crates/ocx_sign" }
 ocx_util = { path = "external/ocx/crates/ocx_util" }
 # ocx_python is an in-workspace path dep (crates/ocx_python) — the pylock

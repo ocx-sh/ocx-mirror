@@ -9,6 +9,7 @@ mod cascade_config;
 mod catalog_config;
 mod concurrency_config;
 mod dist;
+mod forge;
 mod load;
 mod metadata_config;
 mod notify_config;
@@ -41,6 +42,8 @@ pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 // what makes `tests/dist_spec_validation.rs` reachable without touching
 // `lib.rs`. Its children ride along so the pipeline can name them.
 pub use dist::{DistDocs, DistLayout, DistPublish, DistSpec, Identity, Publish, Select, Snapshots, Upload};
+pub(crate) use forge::forge_is_gitlab;
+pub use forge::{ForgeKind, WriteTransport};
 #[allow(unused_imports)]
 // Glob so `crate::spec::…` stays the one path callers use — the split is an
 // internal file boundary, not a new namespace for them to learn — and so this

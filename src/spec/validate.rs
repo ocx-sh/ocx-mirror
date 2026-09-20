@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use ocx_announce::forge::{ForgeKind, RepoCoordinate, WriteTransport};
+use super::forge::{ForgeKind, RepoCoordinate, WriteTransport};
 use ocx_oci::Platform;
 use ocx_package::version::Version;
 
@@ -768,11 +768,10 @@ pub fn validate_notify_config(config: &NotifyConfig, errors: &mut Vec<String>) {
 /// the optional catch-up schedule must be a cron expression safe to splice
 /// into a generated `on:` block (see [`validate_cron`]).
 ///
-/// The forge rules are `ocx package announce`'s own, called rather than
-/// re-spelled — `ForgeKind::{resolve, validate_coordinate, same_host,
-/// validate_transport}` — and applied in the order `ocx`'s CLI applies them,
-/// so a spec `plan` refuses is one `ocx` would have refused at exit 64, with
-/// the one message the operator can act on.
+/// The forge rules are `ocx package announce`'s own, restated in
+/// [`super::forge`] and applied in the order `ocx`'s CLI applies them, so a
+/// spec `plan` refuses is one `ocx` would have refused at exit 64 — with the
+/// one message the operator can act on, before anything is published.
 ///
 /// A malformed value is reported as a named field error (contributing to
 /// `SpecInvalid`, exit 65) rather than a serde shape mismatch, so the message
@@ -802,7 +801,7 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
     };
     let transport = match config.transport.as_deref() {
         None => Ok(WriteTransport::default()),
-        Some(spelled) => <WriteTransport as clap::ValueEnum>::from_str(spelled, false).map_err(|_| spelled),
+        Some(spelled) => WriteTransport::parse(spelled).ok_or(spelled),
     };
     if let Err(spelled) = forge {
         errors.push(format!(
@@ -820,7 +819,7 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
 
     // `ocx`'s own order (`ForgeWriteOptions::validate`): the key pair first —
     // on the default github.com index `transport: git` also trips
-    // `validate_transport`, whose message names the forge, not the second key.
+    // `serves_transport`, whose message names the forge, not the second key.
     if transport == WriteTransport::Git && fork.is_some() {
         errors.push(
             "announce.transport: 'git' pushes the branch to announce.index_repo itself — drop announce.fork"
@@ -831,7 +830,7 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
     // Resolved from the index coordinate, never from the fork: a fork lives
     // on the instance it forks from. A self-hosted host says nothing about
     // what runs there, so `ocx` makes the publisher declare it.
-    let Ok(kind) = ForgeKind::resolve(forge, &index) else {
+    let Some(kind) = ForgeKind::resolve(forge, &index) else {
         errors.push(format!(
             "announce.index_repo: cannot tell which forge '{}' is — set announce.forge to 'github' or 'gitlab'",
             index.host.as_deref().unwrap_or_default()
@@ -866,7 +865,7 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
         ));
         return;
     }
-    if kind.validate_transport(transport).is_err() {
+    if !kind.serves_transport(transport) {
         errors.push(
             "announce.transport: 'git' is GitLab-only — drop it, or point announce.index_repo at a GitLab \
              instance and set announce.forge to 'gitlab'"
@@ -876,16 +875,14 @@ pub fn validate_announce_config(config: &AnnounceConfig, errors: &mut Vec<String
 }
 
 /// Parse one announce coordinate, reporting a grammar failure under its key.
-/// `ocx_announce`'s only parse error already restates the value and the grammar,
-/// so the message spells the grammar once.
+/// The grammar is spelled once, here, because the parse itself only answers
+/// yes or no.
 fn parse_coordinate(field: &str, value: &str, errors: &mut Vec<String>) -> Option<RepoCoordinate> {
-    match value.parse::<RepoCoordinate>() {
-        Ok(coordinate) => Some(coordinate),
-        Err(_) => {
-            errors.push(format!(
-                "announce.{field}: '{value}' is not a valid repository (must be '[HOST/]NAMESPACE/PROJECT')"
-            ));
-            None
-        }
+    let coordinate = RepoCoordinate::parse(value);
+    if coordinate.is_none() {
+        errors.push(format!(
+            "announce.{field}: '{value}' is not a valid repository (must be '[HOST/]NAMESPACE/PROJECT')"
+        ));
     }
+    coordinate
 }

@@ -16,8 +16,7 @@
 //! `bazelbuild/bazelisk`. So the logical name is spelled out here rather than
 //! string-stripped off the target.
 
-use clap::ValueEnum;
-use ocx_announce::forge::{ForgeKind, WriteTransport};
+use super::forge::{ForgeKind, WriteTransport};
 use serde::Deserialize;
 
 /// Default index repository the pull request targets — also `ocx package
@@ -73,24 +72,22 @@ fn default_index_repo() -> String {
 }
 
 impl AnnounceConfig {
-    /// The declared forge, read through `ocx`'s own `--forge` spelling
-    /// (`clap::ValueEnum`) so the two vocabularies cannot drift. `None` when
-    /// the block names none — `ocx` infers it from the index host — or names
-    /// a spelling `validate_announce_config` has already refused.
+    /// The declared forge, read through `ocx`'s own `--forge` spelling so the
+    /// two vocabularies cannot drift. `None` when the block names none —
+    /// `ocx` infers it from the index host — or names a spelling
+    /// `validate_announce_config` has already refused.
     pub(crate) fn forge_kind(&self) -> Option<ForgeKind> {
-        self.forge
-            .as_deref()
-            .and_then(|forge| <ForgeKind as ValueEnum>::from_str(forge, false).ok())
+        self.forge.as_deref().and_then(ForgeKind::parse)
     }
 
     /// The write transport `ocx package announce` runs under, read through
-    /// its own `--transport` spelling (`clap::ValueEnum`) — `ocx`'s default
-    /// when the block names none. `validate_announce_config` has already
-    /// refused any other spelling, so an unparsable value is the default.
+    /// its own `--transport` spelling — `ocx`'s default when the block names
+    /// none. `validate_announce_config` has already refused any other
+    /// spelling, so an unparsable value is the default.
     pub fn transport(&self) -> WriteTransport {
         self.transport
             .as_deref()
-            .and_then(|transport| <WriteTransport as ValueEnum>::from_str(transport, false).ok())
+            .and_then(WriteTransport::parse)
             .unwrap_or_default()
     }
 }

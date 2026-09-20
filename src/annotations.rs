@@ -3,74 +3,108 @@
 
 //! OCI annotations recorded on every image index this mirror publishes.
 //!
-//! The CI half is `ocx_shell`'s: [`ocx_shell::ci::annotations::for_flavor`] reads
-//! the same GitHub Actions / GitLab CI variables `ocx package push
-//! --ci-annotations` does — `image.source` (the mirror's own repository,
-//! which is what GHCR uses to link a package to a repository and inherit its
-//! permissions), `image.revision` (the commit that produced the build) and
-//! `image.created` — so a mirror and a hand push stamp the same keys from the
-//! same names. The spec's `annotations:` block supplies further keys and
-//! overrides any auto-detected one, the precedence `--ci-annotations` itself
+//! The CI half is `ocx`'s own: `ocx package push --ci-annotations=<provider>`
+//! stamps `image.source` (the mirror's own repository, which is what GHCR uses
+//! to link a package to a repository and inherit its permissions),
+//! `image.revision` (the commit that produced the build), `image.created` and
+//! `image.version` — so a mirror and a hand push stamp the same keys from the
+//! same names, because they are one implementation rather than two. The
+//! spec's `annotations:` block rides along as `--annotation KEY=VALUE` and
+//! overrides any auto-detected key, the precedence `--ci-annotations` itself
 //! promises.
 //!
+//! The provider is named rather than autodetected: a bare `--ci-annotations`
+//! outside a detectable CI is a usage error (exit 64), and a local
+//! `ocx-mirror` run must not fail on one. Outside CI the flag is simply not
+//! emitted — `ocx package push` then leaves the index's `annotations` field as
+//! it found it, so a local push never clears a link an earlier CI push made.
+//!
 //! A published index is public, permanent and readable without
-//! authentication, so the environment surface is the fixed, pinned read set
-//! `ocx_shell::ci::annotations` tests against and nothing else: the `ocx`
-//! subprocess inherits the runner's full environment (including `GH_TOKEN`),
-//! and anything resembling iteration over it would put a live token on the
-//! wire.
+//! authentication, so the environment surface stays the fixed read set `ocx`
+//! documents for the flag and nothing else: the `ocx` subprocess inherits the
+//! runner's full environment (including `GH_TOKEN`), and anything resembling
+//! iteration over it would put a live token on the wire.
 
 use std::collections::BTreeMap;
 
-use ocx_shell::ci::CiFlavor;
-
-/// Build the annotation set for a publish, merging CI auto-detection with the
-/// spec's `annotations:` block. A configured key wins over the auto-detected
-/// value for that key; every other auto-detected key still applies.
+/// Build the annotation overlay for a run: the spec's `annotations:` block,
+/// plus the run's own `image.created` on GitHub Actions.
 ///
-/// Outside CI (`CiFlavor::detect()` finds neither provider) nothing is
-/// auto-detected — `ocx package push` leaves the index's `annotations` field
-/// as it found it, so a local push never clears a link an earlier CI push
-/// made.
+/// **Why `created` is pinned here.** `--ci-annotations` takes it from
+/// `SOURCE_DATE_EPOCH`, else the provider's pipeline clock, else the wall
+/// clock — and GitHub Actions exposes no pipeline-creation variable. A run
+/// pushes each platform of a version as its own `ocx package push`, so the
+/// wall-clock fallback would date one version's platforms minutes apart.
+/// Resolved once per run instead, through `ocx`'s own reader and spelling, so
+/// a pinned `SOURCE_DATE_EPOCH` still wins and the value is the one `ocx`
+/// would have written. GitLab needs nothing: `CI_PIPELINE_CREATED_AT` is
+/// already one instant for the whole pipeline.
 ///
-/// No `image.version`: this map is built once per run and reused for every
-/// version the run pushes, and the tag already names the version.
-// ponytail: thread the per-push `Version` through `build_push_args` if an
-// SBOM consumer ever needs the version key on the index.
+/// A configured key wins over the pinned one, the same precedence `ocx`
+/// applies to every other auto-detected key.
+///
+/// No `image.version`: that key is `--ci-annotations`' own, resolved per push
+/// from the tag it is writing, which is the one value a per-run map cannot
+/// hold.
 pub fn build_annotations(configured: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    build_annotations_for(CiFlavor::detect(), configured)
+    build_annotations_for(ci_provider(), configured)
 }
 
-/// [`build_annotations`] with the CI detection already made — the seam a
-/// test reaches to state which provider's variables the map is read from.
+/// [`build_annotations`] with the CI detection already made — the seam a test
+/// reaches to state which provider the run is built for.
 pub(crate) fn build_annotations_for(
-    flavor: Option<CiFlavor>,
+    provider: Option<&str>,
     configured: &BTreeMap<String, String>,
 ) -> BTreeMap<String, String> {
-    let auto = flavor
-        .map(|flavor| ocx_shell::ci::annotations::for_flavor(flavor, None))
-        .unwrap_or_default();
-    overlay(auto, configured)
+    let mut annotations = BTreeMap::new();
+    if provider == Some(GITHUB) {
+        annotations.insert(
+            ocx_oci::annotations::CREATED.to_string(),
+            ocx_oci::referrer::manifest::bundle_created(
+                ocx_oci::referrer::manifest::pinned_instant().unwrap_or_else(chrono::Utc::now),
+            ),
+        );
+    }
+    annotations.extend(configured.iter().map(|(key, value)| (key.clone(), value.clone())));
+    annotations
 }
 
-/// The pure half of [`build_annotations`]: the spec's `annotations:` laid over
-/// the auto-detected set, configured winning per key.
-pub(crate) fn overlay(
-    mut auto: BTreeMap<String, String>,
-    configured: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    auto.extend(configured.iter().map(|(k, v)| (k.clone(), v.clone())));
-    auto
+/// `--ci-annotations`' spelling for GitHub Actions.
+const GITHUB: &str = "github";
+
+/// The `--ci-annotations` provider for this process, or `None` outside CI —
+/// the two markers `ocx`'s own detection reads, under the spelling its flag
+/// accepts.
+fn ci_provider() -> Option<&'static str> {
+    if ocx_util::env::var("GITHUB_ACTIONS").as_deref() == Some("true") {
+        return Some(GITHUB);
+    }
+    if ocx_util::env::var("GITLAB_CI").as_deref() == Some("true") {
+        return Some("gitlab");
+    }
+    None
 }
 
-/// Render an annotation map as repeated `--annotation KEY=VALUE` arguments.
+/// Render a run's annotations as `ocx package push` arguments: the CI provider
+/// flag when there is one, then the overlay as repeated
+/// `--annotation KEY=VALUE`.
 ///
 /// Ordering is the map's (lexicographic by key), so an assembled argv is
 /// reproducible across runs.
 pub fn push_args(annotations: &BTreeMap<String, String>) -> Vec<String> {
-    annotations
-        .iter()
-        .flat_map(|(key, value)| ["--annotation".to_string(), format!("{key}={value}")])
+    push_args_for(ci_provider(), annotations)
+}
+
+/// [`push_args`] with the CI detection already made.
+pub(crate) fn push_args_for(provider: Option<&str>, annotations: &BTreeMap<String, String>) -> Vec<String> {
+    provider
+        .map(|provider| format!("--ci-annotations={provider}"))
+        .into_iter()
+        .chain(
+            annotations
+                .iter()
+                .flat_map(|(key, value)| ["--annotation".to_string(), format!("{key}={value}")]),
+        )
         .collect()
 }
 
@@ -99,105 +133,79 @@ mod tests {
             .collect()
     }
 
-    fn auto() -> BTreeMap<String, String> {
-        configured(&[
-            (annotations::SOURCE, "https://github.com/ocx-sh/mirror-shfmt"),
-            (annotations::REVISION, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"),
-        ])
-    }
-
+    /// Inside CI the provider is named, never left to `ocx`'s autodetect: the
+    /// bare flag is a usage error wherever detection fails.
     #[test]
-    fn configured_key_overrides_auto_detected_source() {
-        let result = overlay(
-            auto(),
-            &configured(&[(annotations::SOURCE, "https://github.com/upstream/project")]),
+    fn a_ci_run_names_its_provider_before_the_configured_keys() {
+        let args = push_args_for(
+            Some("gitlab"),
+            &configured(&[
+                (annotations::SOURCE, "https://github.com/upstream/project"),
+                (annotations::LICENSES, "Apache-2.0"),
+            ]),
         );
-        assert_eq!(result[annotations::SOURCE], "https://github.com/upstream/project");
-        // The other auto-detected key survives the override.
-        assert_eq!(
-            result[annotations::REVISION],
-            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-        );
-    }
-
-    #[test]
-    fn configured_keys_beyond_the_auto_detected_ones_pass_through() {
-        let result = overlay(auto(), &configured(&[(annotations::LICENSES, "Apache-2.0")]));
-        assert_eq!(result[annotations::LICENSES], "Apache-2.0");
-        assert_eq!(result.len(), 3);
-    }
-
-    /// The CI read set is `ocx_shell`'s, pinned there (`ci::annotations::tests`):
-    /// GitHub's three names and GitLab's three, nothing that could carry a
-    /// token. Whatever the runner looks like, the configured keys always win
-    /// and always arrive.
-    #[test]
-    fn configured_keys_always_reach_the_built_map() {
-        let configured = configured(&[
-            (annotations::LICENSES, "Apache-2.0"),
-            (annotations::SOURCE, "https://github.com/upstream/project"),
-        ]);
-        let result = build_annotations(&configured);
-        for (key, value) in &configured {
-            assert_eq!(result.get(key), Some(value));
-        }
-    }
-
-    /// Outside CI nothing is auto-detected: the map is the spec's block and
-    /// nothing else, whatever the developer's own `GITHUB_*` say.
-    #[test]
-    fn outside_ci_the_built_map_is_exactly_the_configured_one() {
-        let configured = configured(&[(annotations::LICENSES, "Apache-2.0")]);
-        assert_eq!(build_annotations_for(None, &configured), configured);
-    }
-
-    /// The GitLab wiring end to end: `for_flavor` reads the three `CI_*`
-    /// names, `created` comes from the pipeline clock, and the configured
-    /// `image.source` still wins over the job's own.
-    #[test]
-    fn a_gitlab_job_stamps_source_revision_and_created_with_configured_source_winning() {
-        let _guard = crate::test_support::ocx_env_lock();
-        let _restore = crate::test_support::EnvRestore::set(&[
-            ("GITLAB_CI", Some("true")),
-            ("CI_PROJECT_URL", Some("https://gitlab.example/tools/mirror-shfmt")),
-            ("CI_COMMIT_SHA", Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")),
-            ("CI_PIPELINE_CREATED_AT", Some("2026-09-15T18:59:14Z")),
-            ("SOURCE_DATE_EPOCH", None),
-        ]);
-        let result = build_annotations_for(
-            Some(CiFlavor::GitLab),
-            &configured(&[(annotations::SOURCE, "https://github.com/upstream/project")]),
-        );
-
-        assert_eq!(result[annotations::SOURCE], "https://github.com/upstream/project");
-        assert_eq!(
-            result[annotations::REVISION],
-            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
-        );
-        assert_eq!(result[annotations::CREATED], "2026-09-15T18:59:14Z");
-        assert_eq!(result.len(), 3);
-    }
-
-    #[test]
-    fn push_args_render_repeated_flag_pairs_in_key_order() {
-        let args = push_args(&configured(&[
-            (annotations::SOURCE, "https://github.com/ocx-sh/mirror-shfmt"),
-            (annotations::REVISION, "a1b2c3d4"),
-        ]));
         assert_eq!(
             args,
             vec![
+                "--ci-annotations=gitlab",
                 "--annotation",
-                "org.opencontainers.image.revision=a1b2c3d4",
+                "org.opencontainers.image.licenses=Apache-2.0",
                 "--annotation",
-                "org.opencontainers.image.source=https://github.com/ocx-sh/mirror-shfmt",
+                "org.opencontainers.image.source=https://github.com/upstream/project",
             ]
         );
     }
 
+    /// Outside CI the argv is the spec's block and nothing else, whatever the
+    /// developer's own `GITHUB_*` say.
     #[test]
-    fn push_args_are_empty_for_an_empty_map() {
-        assert!(push_args(&BTreeMap::new()).is_empty());
+    fn outside_ci_no_provider_flag_is_emitted() {
+        assert_eq!(
+            push_args_for(None, &configured(&[(annotations::LICENSES, "Apache-2.0")])),
+            vec!["--annotation", "org.opencontainers.image.licenses=Apache-2.0"]
+        );
+        assert!(push_args_for(None, &BTreeMap::new()).is_empty());
+    }
+
+    /// GitLab and a local run add nothing to the spec's block; GitHub adds the
+    /// run's `created`, and a configured one still wins.
+    #[test]
+    fn only_github_pins_created_and_a_configured_key_still_wins() {
+        let _guard = crate::test_support::ocx_env_lock();
+        let _restore = crate::test_support::EnvRestore::set(&[("SOURCE_DATE_EPOCH", Some("1700000000"))]);
+        let spec_block = configured(&[(annotations::LICENSES, "Apache-2.0")]);
+
+        assert_eq!(build_annotations_for(None, &spec_block), spec_block);
+        assert_eq!(build_annotations_for(Some("gitlab"), &spec_block), spec_block);
+
+        let github = build_annotations_for(Some(GITHUB), &spec_block);
+        assert_eq!(github[annotations::CREATED], "2023-11-14T22:13:20Z");
+        assert_eq!(github[annotations::LICENSES], "Apache-2.0");
+
+        let pinned_by_spec = build_annotations_for(
+            Some(GITHUB),
+            &configured(&[(annotations::CREATED, "2020-01-01T00:00:00Z")]),
+        );
+        assert_eq!(pinned_by_spec[annotations::CREATED], "2020-01-01T00:00:00Z");
+    }
+
+    /// The detection is `ocx`'s: the marker must read exactly `true`, and
+    /// GitHub wins over GitLab when a runner sets both.
+    #[test]
+    fn the_provider_is_read_from_the_two_ci_markers() {
+        let _guard = crate::test_support::ocx_env_lock();
+
+        let _restore = crate::test_support::EnvRestore::set(&[("GITHUB_ACTIONS", None), ("GITLAB_CI", None)]);
+        assert_eq!(ci_provider(), None);
+
+        let _gitlab = crate::test_support::EnvRestore::set(&[("GITLAB_CI", Some("true"))]);
+        assert_eq!(ci_provider(), Some("gitlab"));
+
+        let _github = crate::test_support::EnvRestore::set(&[("GITHUB_ACTIONS", Some("true"))]);
+        assert_eq!(ci_provider(), Some(GITHUB));
+
+        let _not_true = crate::test_support::EnvRestore::set(&[("GITHUB_ACTIONS", Some("1"))]);
+        assert_eq!(ci_provider(), Some("gitlab"));
     }
 
     #[test]

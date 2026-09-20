@@ -40,9 +40,16 @@ document the four-line job, let them own the pipeline.
 
 ## Dependency model (read before touching Cargo.toml)
 
-- Ten `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
+- Eight `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
   Bumping ocx = bumping the submodule pointer (procedure in README.md); the row
   list changes only when the code names a new crate.
+- **Only ecosystem- or interface-tier crates may get a row.** ocx's `task
+  satellite:verify` (a `verify-deep.yml` job) asserts this workspace resolves
+  no internal-tier crate: internal code carries no stability at all, so a link
+  is a break waiting for the next rename. `ocx_shell` and `ocx_announce` were
+  dropped for this reason ([ocx-sh/ocx#497](https://github.com/ocx-sh/ocx/issues/497));
+  what each was doing is now `--ci-annotations` on the push argv and
+  `src/spec/forge.rs` respectively.
 - **Never add a row for `ocx` itself** (`external/ocx/crates/ocx_cli`). It is an
   application, not a library with an interface, and linking it for two imports
   cost 160 packages — the whole Starlark host, an LSP/DAP/REPL stack and the gix

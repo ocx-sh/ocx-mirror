@@ -67,17 +67,18 @@ It does **not** apply to `source.type: pylock` or `pypi` — an env source downl
 
 ### CI annotation variables {#annotation-env}
 
-The [OCI annotations][oci-annotations] recorded on every published image index. They are read by `ocx_shell`'s CI-annotation reader — the same one `ocx package push --ci-annotations` uses — so a mirror push and a hand push stamp the same keys from the same names. The provider is detected from `GITHUB_ACTIONS` / `GITLAB_CI`; both set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
+The [OCI annotations][oci-annotations] recorded on every published image index. Every push the mirror makes carries `ocx package push --ci-annotations=<provider>`, so a mirror push and a hand push stamp the same keys from the same names — one implementation, not two. The provider is named from `GITHUB_ACTIONS` / `GITLAB_CI` (each must read exactly `true`); both providers set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
 
 | Annotation | GitHub Actions | GitLab CI |
 |------------|----------------|-----------|
 | `org.opencontainers.image.source` | `$GITHUB_SERVER_URL/$GITHUB_REPOSITORY` — the mirror repository, which is what [GHCR][ghcr-source] uses to link the package to a repository and inherit its permissions | `CI_PROJECT_URL` |
 | `org.opencontainers.image.revision` | `GITHUB_SHA` | `CI_COMMIT_SHA` |
-| `org.opencontainers.image.created` | `SOURCE_DATE_EPOCH`, else the wall clock — a re-run stamps a fresh timestamp unless `SOURCE_DATE_EPOCH` is set | `SOURCE_DATE_EPOCH`, else `CI_PIPELINE_CREATED_AT`, else the wall clock — a new pipeline stamps a fresh timestamp unless `SOURCE_DATE_EPOCH` is set (a retried job keeps its pipeline's) |
+| `org.opencontainers.image.created` | `SOURCE_DATE_EPOCH`, else the run's own start instant — GitHub exposes no pipeline clock, so the mirror resolves this once per run and stamps every platform of a version with it. A re-run stamps a fresh timestamp unless `SOURCE_DATE_EPOCH` is set | `SOURCE_DATE_EPOCH`, else `CI_PIPELINE_CREATED_AT`, else the wall clock — a new pipeline stamps a fresh timestamp unless `SOURCE_DATE_EPOCH` is set (a retried job keeps its pipeline's) |
+| `org.opencontainers.image.version` | the version the push resolved, variant prefix stripped — a tag that is not a version writes no key | same |
 
 `SOURCE_DATE_EPOCH` is the reproducibility knob: set it to a fixed epoch to make a content-identical re-push byte-identical. A missing or blank variable means its annotation is not written; `image.source` needs both GitHub halves. Outside either provider nothing is emitted and the push leaves the registry's existing annotations alone.
 
-These names are the **complete** environment surface for annotations — pinned by `ocx_shell`'s own tests — and the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, its values taken verbatim from the spec and winning over an auto-detected key. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
+These names are the **complete** environment surface for annotations — pinned by `ocx`'s own tests — and the [`annotations:`](./mirror-yml.md#annotations) block is the only other input, its values taken verbatim from the spec and winning over an auto-detected key. Nothing enumerates the process environment. The `ocx` subprocess inherits the runner's environment (including `GH_TOKEN`), and a published index is public, permanent and readable without authentication, so widening this to a prefix match or a caller-named variable would put whatever the runner carries on the wire.
 
 **Scope:** `sync`, `pipeline push`, `pipeline patch`.
 
