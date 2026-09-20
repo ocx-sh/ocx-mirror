@@ -89,6 +89,7 @@ fn a_version_pushed_whole_in_one_run_has_nothing_left_to_re_cascade() {
 
 #[test]
 fn the_re_cascade_argv_carries_cascade_and_the_published_layer_digests() {
+    let _no_ci = crate::test_support::no_ci_env();
     // The repair re-emits the tile from the registry's OWN descriptors: the
     // published layers by digest (never re-uploaded, never re-downloaded) and
     // `--cascade`, which is the entire point of the re-push.
@@ -126,6 +127,7 @@ fn the_re_cascade_argv_carries_cascade_and_the_published_layer_digests() {
 
 #[test]
 fn build_push_args_without_annotations_matches_the_bare_invocation() {
+    let _no_ci = crate::test_support::no_ci_env();
     let args = build_push_args(
         "linux/amd64",
         "ghcr.io/ocx-sh/shfmt:3.8.0",
@@ -143,6 +145,7 @@ fn build_push_args_without_annotations_matches_the_bare_invocation() {
 
 #[test]
 fn build_push_args_omits_cascade_so_a_platform_can_land_without_moving_an_alias() {
+    let _no_ci = crate::test_support::no_ci_env();
     // The non-cascade shape still names the exact version tag, and the
     // registry merges the platform into that tag's image index — a version
     // can therefore be assembled platform by platform and only advertised

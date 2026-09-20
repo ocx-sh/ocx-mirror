@@ -8,6 +8,7 @@ use super::support::*;
 
 #[test]
 fn a_published_layer_becomes_a_digest_reference_with_its_media_type_extension() {
+    let _no_ci = crate::test_support::no_ci_env();
     let args = patch_push_args(
         "ghcr.io/ocx-sh/cmake:3.29.0_20260610",
         &image(vec![descriptor(tar_xz())]),

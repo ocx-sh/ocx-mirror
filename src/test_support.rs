@@ -71,3 +71,28 @@ impl Drop for EnvRestore {
         }
     }
 }
+
+/// Neutralises the CI markers [`crate::annotations::push_args`] autodetects,
+/// so an argv assertion reads the same on a developer box and on a runner.
+///
+/// Without it every `build_push_args` / `patch_push_args` / `build_env_push_args`
+/// assertion is green locally and red in GitHub Actions, where `GITHUB_ACTIONS=true`
+/// appends a `--ci-annotations=github` the expectation does not list.
+///
+/// Holds [`OCX_ENV_LOCK`] for the same reason the tests that *set* these
+/// markers do: the hazard is a neighbouring module's writer. `_restore` is
+/// declared before `_lock` so the runner's own markers go back while the lock
+/// is still held.
+pub(crate) struct NoCiEnv {
+    _restore: EnvRestore,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+/// Guard for [`NoCiEnv`] — sync `#[test]` contexts only, as [`ocx_env_lock`].
+pub(crate) fn no_ci_env() -> NoCiEnv {
+    let lock = ocx_env_lock();
+    NoCiEnv {
+        _restore: EnvRestore::set(&[("GITHUB_ACTIONS", None), ("GITLAB_CI", None)]),
+        _lock: lock,
+    }
+}

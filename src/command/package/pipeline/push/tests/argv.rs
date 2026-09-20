@@ -9,6 +9,7 @@ use crate::pipeline::ocx_cli::push::build_push_args;
 
 #[test]
 fn build_push_args_orders_flags_then_bundle_then_annotations() {
+    let _no_ci = crate::test_support::no_ci_env();
     let annotations = BTreeMap::from([
         (
             "org.opencontainers.image.source".to_string(),

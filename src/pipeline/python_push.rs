@@ -450,6 +450,7 @@ mod tests {
 
     #[test]
     fn build_env_push_args_orders_flags_and_layers() {
+        let _no_ci = crate::test_support::no_ci_env();
         let layers = vec![
             env_layer(
                 "/work/layers/pycowsay.tar.zst",
@@ -540,6 +541,7 @@ mod tests {
 
     #[test]
     fn build_env_push_args_carries_the_annotation_tail() {
+        let _no_ci = crate::test_support::no_ci_env();
         // Regression: the env leg published without `--annotation`, so every
         // env package landed in GHCR unlinked from the mirror repository while
         // the archive leg's images carried `image.source`.
