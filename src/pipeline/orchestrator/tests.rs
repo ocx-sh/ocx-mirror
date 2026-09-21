@@ -19,3 +19,5 @@ mod bin_scan;
 mod libc_lint;
 #[path = "tests/resume_digest.rs"]
 mod resume_digest;
+#[path = "tests/version_agreement.rs"]
+mod version_agreement;

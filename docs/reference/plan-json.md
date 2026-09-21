@@ -115,10 +115,10 @@ Generate the machine-readable schema for this document with
 
 | Field | Type | Since | Meaning |
 |---|---|---|---|
-| `version` | string | 1 | The tag the pipeline will publish — build-stamped, and variant-prefixed for a non-default archive variant (`slim-3.29.0_20260610`). Every downstream step keys on this string. |
+| `version` | string | 1 | The tag the pipeline will publish — build-stamped, and variant-prefixed for a non-default archive variant (`slim-3.29.0_20260610`). Every downstream step keys on this string: it is the **fan-out key**, and what [`prepare --version`](./cli.md#pipeline-prepare) takes. |
 | `platforms` | [string] | 1 | Base `os/arch` keys still needing work for this version. Env sources dedupe their `+libc.*` wheels keys onto the base here; the full keys are in `assets[].platform`. |
 | `kind` | `"new"` \| `"backfill-partial"` \| `"metadata-drift"` | 1 (`metadata-drift`: 3) | Why the version is listed. |
-| `source_version` | string | 2 | The upstream version before normalisation (`3.29.0` for `3.29.0_20260610`). |
+| `source_version` | string | 2 | The upstream version before normalisation (`3.29.0` for `3.29.0_20260610`). Informational — `prepare --version` accepts it too, but a variant spec stamps two tags from one release, so the bare form names both and is refused as ambiguous. Fan out on `version`. |
 | `variant` | string \| null | 2 | Archive variant this entry belongs to; `null` for the default. |
 | `assets` | array | 2 | Resolved download targets — see below. Empty for a `metadata-drift` entry. |
 | `pylock` | string | 2 | Derived PEP 751 lock path, **relative to this file's own directory**. Present only for `source.type: pypi`; the key is omitted otherwise. |
@@ -183,6 +183,11 @@ for the bound forms a spec may write.
 **The fan-out is `versions[] × legs`.** One prepare job per `versions[]` entry,
 one test job per `(version, platform key, container)` triple where the platform
 key appears in that version's `platforms`.
+
+**Pass `versions[].version`, never `source_version`.** It is the string
+`prepare --version`, `patch --version` and the JUnit file names all key on. The
+adjacent `source_version` is there to say what upstream called the release, and
+passing it fans out correctly only while the spec declares no `variants:`.
 
 Drop every entry whose `kind` is `metadata-drift` before building the prepare
 matrix: a drift entry carries no assets by construction, so a prepare leg for

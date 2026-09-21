@@ -335,10 +335,8 @@ def test_pipeline_prepare_bundles_the_declared_platform(
 
     Invoked the way the generated `prepare` job invokes it: the version comes
     from the plan, and `--plan` hands over the assets discover already
-    resolved. That also pins the timestamped version — `prepare` names its
-    manifest after the `--version` argument verbatim but derives the bundle
-    directory from the clock, so passing the bare `3.7.0` puts the two in
-    different directories.
+    resolved. The bare-`--version` invocation is
+    `test_pipeline_prepare_keeps_the_manifest_beside_its_bundles` below.
 
     The bundle path asserted here is the one `pipeline generate ci` flattens in
     the `prepare` job, so a rename on either side breaks this test.
@@ -375,6 +373,44 @@ def test_pipeline_prepare_bundles_the_declared_platform(
     assert [b["platform_slug"] for b in manifest["bundles"]] == ["linux_amd64"]
     assert manifest["bundles"][0]["bundle_path"] == str(bundle_path)
     assert manifest["bundles"][0]["size_bytes"] == bundle_path.stat().st_size
+
+
+def test_pipeline_prepare_keeps_the_manifest_beside_its_bundles(
+    mirror: MirrorRunner, pipeline_spec: Path, mirror_work_dir: Path
+) -> None:
+    """#35: a bare `--version`, with no `--plan`, writes one directory.
+
+    `prepare` used to name its manifest after the `--version` argument
+    verbatim while deriving each bundle directory from the build stamp, so
+    with the default `build_timestamp` a bare `3.7.0` wrote
+    `3.7.0/manifest.json` beside `3.7.0_<stamp>/linux_amd64/bundle.tar.xz`
+    and exited 0. The manifest described a version it was not stored next to,
+    and named a tag that does not exist.
+
+    Only `--plan` invocations were exercised anywhere, which is exactly why
+    the broken path stayed green.
+    """
+    result = mirror.run(
+        "package", "pipeline", "prepare",
+        "--spec", str(pipeline_spec),
+        "--version", "3.7.0",
+        "--work-dir", str(mirror_work_dir),
+    )
+
+    manifest_path = Path(result.stdout.strip())
+    assert manifest_path.exists(), f"the printed manifest path must exist: {result.stdout}"
+    version_dir = manifest_path.parent
+    assert re.fullmatch(r"3\.7\.0_\d{14}", version_dir.name), (
+        f"the manifest belongs under the stamped tag, not the bare one: {version_dir}"
+    )
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["version"] == version_dir.name, (
+        f"the manifest must name the tag it is stored under: {manifest}"
+    )
+    bundle_path = version_dir / "linux_amd64" / "bundle.tar.xz"
+    assert bundle_path.exists(), f"the bundles must share the manifest's directory: {bundle_path}"
+    assert manifest["bundles"][0]["bundle_path"] == str(bundle_path)
 
 
 def test_pipeline_push_with_no_bundles_reports_nothing_published(
