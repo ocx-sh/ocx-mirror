@@ -10,11 +10,58 @@ use ocx_package::metadata::env::modifier::Modifier;
 use ocx_package::metadata::template::classify_install_path_rooted_dir;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+/// `metadata:` — the package metadata JSON, with optional per-platform
+/// overrides.
+///
+/// `deny_unknown_fields` for the reason every `{default, platforms}` block in
+/// this crate carries it: without it the flat form —
+///
+/// ```yaml
+/// metadata:
+///   default: metadata.json
+///   windows/amd64: metadata-windows.json   # no `platforms:`
+/// ```
+///
+/// parsed as `platforms: {}`, and every platform quietly published the default
+/// file. Paths resolve against the **spec's own directory**, never the
+/// repository root; `tests[].script` is the one spec path that works the other
+/// way round.
+#[derive(Debug, Clone)]
 pub struct MetadataConfig {
     pub default: PathBuf,
-    #[serde(default)]
     pub platforms: HashMap<String, PathBuf>,
+}
+
+/// Names the block in the refusal, the way `asset_type` and
+/// `strip_components` name theirs.
+///
+/// All three reject the same misplaced platform key, and `deny_unknown_fields`
+/// alone answers each with a bare ``unknown field `windows/amd64` `` — three
+/// byte-identical messages for three different blocks, leaving the reader to
+/// search a spec for the one that produced it. The other two own their error
+/// because they dispatch by hand; this one would have been a plain derive, so
+/// the derive moved to a private twin and the label goes on here.
+impl<'de> serde::Deserialize<'de> for MetadataConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        /// The shape, so the outer impl is only about the message.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            default: PathBuf,
+            #[serde(default)]
+            platforms: HashMap<String, PathBuf>,
+        }
+
+        let value = serde_yaml_ng::Value::deserialize(deserializer)?;
+        serde_yaml_ng::from_value::<Fields>(value)
+            .map(|fields| Self {
+                default: fields.default,
+                platforms: fields.platforms,
+            })
+            .map_err(|error| D::Error::custom(format!("metadata: {error}")))
+    }
 }
 
 impl MetadataConfig {

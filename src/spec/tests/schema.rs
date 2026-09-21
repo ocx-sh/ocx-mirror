@@ -521,3 +521,174 @@ assets:
     let unsigned: MirrorSpec = serde_yaml_ng::from_str(base).expect("a spec without `sign:` must parse");
     assert!(unsigned.sign.is_none(), "an absent `sign:` must stay absent");
 }
+
+// ── issue #86: per-platform override keys are platform keys ─────────────
+
+/// The base spec with an `asset_type` per-platform map whose override key is
+/// `key`, so one test body covers a good key and a nonsense one.
+fn spec_with_asset_type_override(key: &str) -> MirrorSpec {
+    let yaml = format!(
+        r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+asset_type:
+  default:
+    type: binary
+    name: shfmt
+  platforms:
+    "{key}":
+      type: binary
+      name: shfmt.exe
+"#
+    );
+    serde_yaml_ng::from_str(&yaml).expect("the nested form parses; only the key is under test")
+}
+
+#[test]
+fn a_non_platform_key_in_the_asset_type_map_is_an_error() {
+    // The map is looked up by exact string equality, so a key that is not a
+    // platform matches nothing and falls through to `default`. The spec says
+    // one thing and the bundle contains another, silently.
+    let errors = spec_with_asset_type_override("totally/bogus").validate(std::path::Path::new("mirror.yml"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("asset_type.platforms") && error.contains("totally/bogus")),
+        "expected an asset_type.platforms key error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn a_real_platform_key_in_the_asset_type_map_is_accepted() {
+    let errors = spec_with_asset_type_override("windows/amd64").validate(std::path::Path::new("mirror.yml"));
+    assert!(
+        !errors.iter().any(|error| error.contains("asset_type.platforms")),
+        "a platform key must pass: {errors:?}"
+    );
+    // The libc-qualified grammar is the same one `assets:` uses.
+    let errors = spec_with_asset_type_override("linux/amd64+libc.musl").validate(std::path::Path::new("mirror.yml"));
+    assert!(
+        !errors.iter().any(|error| error.contains("asset_type.platforms")),
+        "a libc-qualified key must pass: {errors:?}"
+    );
+}
+
+#[test]
+fn a_non_platform_key_in_the_metadata_map_is_an_error() {
+    let yaml = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+metadata:
+  default: metadata.json
+  platforms:
+    win/amd64: metadata-windows.json
+"#;
+    let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+    let errors = spec.validate(std::path::Path::new("mirror.yml"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("metadata.platforms") && error.contains("win/amd64")),
+        "expected a metadata.platforms key error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn a_flat_metadata_map_is_a_spec_load_failure() {
+    // The same silent drop `asset_type` had: without `platforms:`, the
+    // override landed in no declared field and every platform published the
+    // default file.
+    let yaml = r#"
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+metadata:
+  default: metadata.json
+  windows/amd64: metadata-windows.json
+"#;
+    let error = serde_yaml_ng::from_str::<MirrorSpec>(yaml).expect_err("the flat metadata form must be refused");
+    assert!(
+        error.to_string().contains("windows/amd64"),
+        "the message must name the stray key: {error}"
+    );
+}
+
+/// The second per-platform map, one level further down inside an `archive`
+/// entry's `strip_components:`.
+fn spec_with_strip_components_override(key: &str) -> MirrorSpec {
+    let yaml = format!(
+        r#"
+name: tool
+target:
+  registry: ocx.sh
+  repository: tool
+source:
+  type: url_index
+  url: "http://127.0.0.1:1/index.json"
+assets:
+  linux/amd64:
+    - "tool-linux-amd64$"
+asset_type:
+  default:
+    type: archive
+    strip_components:
+      default: 1
+      platforms:
+        {key}: 0
+"#
+    );
+    serde_yaml_ng::from_str(&yaml).expect("the spec parses; only the key is under test")
+}
+
+#[test]
+fn a_non_platform_key_in_the_nested_strip_components_map_is_an_error() {
+    // Issue #86's other half, in the map it was first skipped for: the keys
+    // *inside* `platforms:` are a `HashMap<String, u8>` that takes anything,
+    // which `deny_unknown_fields` on the block around it never touched. A
+    // typo'd `windows/amd65` strips the default instead of 0, in silence.
+    let errors = spec_with_strip_components_override("windows/amd65").validate(std::path::Path::new("mirror.yml"));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("asset_type.strip_components.platforms") && error.contains("windows/amd65")),
+        "expected a nested strip_components key error, got: {errors:?}"
+    );
+}
+
+#[test]
+fn a_real_platform_key_in_the_nested_strip_components_map_is_accepted() {
+    let errors = spec_with_strip_components_override("windows/amd64").validate(std::path::Path::new("mirror.yml"));
+    assert!(
+        !errors.iter().any(|error| error.contains("strip_components")),
+        "a platform key must pass: {errors:?}"
+    );
+}

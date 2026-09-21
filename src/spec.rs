@@ -397,6 +397,41 @@ impl MirrorSpec {
         if let Some(platforms) = &self.platforms {
             validate_platforms(platforms, &mut errors);
         }
+
+        // The per-platform override maps, whose keys nothing parsed until now:
+        // they are looked up by exact string equality, so `totally/bogus:` —
+        // or `windows/amd65:` — matched no platform and fell through to
+        // `default` without a word. Checked per declared variant as well as at
+        // the top level, and only there: an inherited block would otherwise be
+        // reported once per variant that did not override it.
+        if let Some(asset_type) = &self.asset_type {
+            validate_platform_keys("asset_type", asset_type.platform_keys(), &mut errors);
+            validate_platform_keys(
+                "asset_type.strip_components",
+                asset_type.strip_components_platform_keys(),
+                &mut errors,
+            );
+        }
+        if let Some(metadata) = &self.metadata {
+            validate_platform_keys("metadata", metadata.platforms.keys(), &mut errors);
+        }
+        for variant in self.variants.iter().flatten() {
+            let label = |block: &str| match &variant.name {
+                Some(name) => format!("variants.{name}.{block}"),
+                None => block.to_string(),
+            };
+            if let Some(asset_type) = &variant.asset_type {
+                validate_platform_keys(&label("asset_type"), asset_type.platform_keys(), &mut errors);
+                validate_platform_keys(
+                    &label("asset_type.strip_components"),
+                    asset_type.strip_components_platform_keys(),
+                    &mut errors,
+                );
+            }
+            if let Some(metadata) = &variant.metadata {
+                validate_platform_keys(&label("metadata"), metadata.platforms.keys(), &mut errors);
+            }
+        }
         if let Some(ocx_mirror) = &self.ocx_mirror {
             validate_ocx_mirror_config(ocx_mirror, &mut errors);
         }

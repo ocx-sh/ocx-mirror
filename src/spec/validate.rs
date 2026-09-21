@@ -267,6 +267,34 @@ pub fn validate_container_setup(key: &str, container: &ContainerConfig, errors: 
     }
 }
 
+/// Check that every key of a per-platform override map is a platform key.
+///
+/// The `{default, platforms}` blocks (`asset_type`, `metadata`) key their
+/// overrides by the same `os/arch[/variant][+feature,…]` grammar `assets:` and
+/// the top-level `platforms:` use, and look them up by exact string equality.
+/// A key that is not a platform therefore matches nothing and falls through to
+/// `default` — the spec says one thing and the pipeline does another, with no
+/// error anywhere. `field` names the block in the message (`asset_type`,
+/// `variants.slim.metadata`), because a multi-variant spec can carry several.
+///
+/// Applied to the `strip_components:` map nested inside an `asset_type` entry
+/// too. It was skipped at first on the reasoning that `deny_unknown_fields`
+/// already covered it — which is wrong, and worth recording: that attribute
+/// rejects a key written *beside* `default:`/`platforms:`, while this function
+/// is about the keys written *inside* `platforms:`, where the map is a
+/// `HashMap<String, _>` that accepts anything. The two halves of issue #86 are
+/// separate checks, and only one of them was there.
+pub fn validate_platform_keys<'a>(field: &str, keys: impl IntoIterator<Item = &'a String>, errors: &mut Vec<String>) {
+    for key in keys {
+        if key.parse::<Platform>().is_err() {
+            errors.push(format!(
+                "{field}.platforms: invalid key '{key}' (must be os/arch[+feature] format, \
+                 e.g. linux/amd64 or linux/amd64+libc.musl)"
+            ));
+        }
+    }
+}
+
 /// Validate `platforms:` map: valid platform keys, runner present, container
 /// image format, shell defaults for known distros, explicit shell required for
 /// unknown, per-container `setup:` commands, plus per-platform version
