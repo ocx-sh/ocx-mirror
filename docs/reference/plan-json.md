@@ -118,9 +118,9 @@ Generate the machine-readable schema for this document with
 | `version` | string | 1 | The tag the pipeline will publish — build-stamped, and variant-prefixed for a non-default archive variant (`slim-3.29.0_20260610`). Every downstream step keys on this string: it is the **fan-out key**, and what [`prepare --version`](./cli.md#pipeline-prepare) takes. |
 | `platforms` | [string] | 1 | Base `os/arch` keys still needing work for this version. Env sources dedupe their `+libc.*` wheels keys onto the base here; the full keys are in `assets[].platform`. |
 | `kind` | `"new"` \| `"backfill-partial"` \| `"metadata-drift"` | 1 (`metadata-drift`: 3) | Why the version is listed. |
-| `source_version` | string | 2 | The upstream version before normalisation (`3.29.0` for `3.29.0_20260610`). Informational — `prepare --version` accepts it too, but a variant spec stamps two tags from one release, so the bare form names both and is refused as ambiguous. Fan out on `version`. |
+| `source_version` | string | 2 | The upstream version before normalisation (`3.29.0` for `3.29.0_20260610`); **empty** on a `metadata-drift` entry, where a normalized tag cannot be reversed into the version it was stamped from. Informational — `prepare --version` accepts it too, but a variant spec stamps two tags from one release, so the bare form names both and is refused as ambiguous. Fan out on `version`. |
 | `variant` | string \| null | 2 | Archive variant this entry belongs to; `null` for the default. |
-| `assets` | array | 2 | Resolved download targets — see below. Empty for a `metadata-drift` entry. |
+| `assets` | array | 2 | Resolved download targets — see below. Empty for a `metadata-drift` entry, by construction: the repair re-references the published layers and fetches nothing. |
 | `pylock` | string | 2 | Derived PEP 751 lock path, **relative to this file's own directory**. Present only for `source.type: pypi`; the key is omitted otherwise. |
 
 ### `versions[].assets[]`
@@ -193,6 +193,14 @@ Drop every entry whose `kind` is `metadata-drift` before building the prepare
 matrix: a drift entry carries no assets by construction, so a prepare leg for
 one aborts looking for a bundle nothing wrote. Gate the whole download-and-build
 chain on `has_new`, which already excludes them.
+
+**A drift entry is repaired, not prepared.** Its job is
+`ocx-mirror package pipeline patch --metadata-only --version <versions[].version>`
+— a manifest re-emission against the layers already published, so it downloads
+nothing, needs no matrix and takes no `plan.json`. `kind` is what selects it;
+there is deliberately no field naming the command, because a flag spelling in
+this document would be frozen by the compatibility promise below. Render one
+such job per drift entry, or none and read `has_drift` as a report.
 
 The reference GitHub renderer projects the plan with exactly two `jq` lines:
 
