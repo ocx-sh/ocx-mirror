@@ -132,12 +132,25 @@ impl tower_service::Service<http::Request<octocrab::OctoBody>> for MirrorTranspo
 /// [`MirrorError::ExecutionFailed`](crate::error::MirrorError::ExecutionFailed)
 /// when the TLS backend cannot be built, or when `base` or `token` cannot be
 /// put on the wire.
+///
+/// # Panics
+///
+/// Outside a Tokio runtime: octocrab buffers the service, and `tower`'s
+/// `Buffer` spawns its worker on construction.
 pub(crate) fn client(base: &str, token: Option<&str>) -> Result<octocrab::Octocrab, crate::error::MirrorError> {
     let failed = |message: String| crate::error::MirrorError::ExecutionFailed(vec![message]);
 
-    let base: http::Uri = base
+    let parsed: http::Uri = base
         .parse()
         .map_err(|error| failed(format!("invalid GitHub API root '{base}': {error}")))?;
+    // A root without both halves composes a relative URI that reqwest refuses
+    // at send time — five retries and half a minute after the real mistake.
+    if parsed.scheme().is_none() || parsed.authority().is_none() {
+        return Err(failed(format!(
+            "invalid GitHub API root '{base}': expected a scheme and a host, as in https://api.github.com"
+        )));
+    }
+    let base = parsed;
     let authorization = token
         .map(|token| {
             http::HeaderValue::from_str(&format!("Bearer {token}"))
@@ -557,6 +570,22 @@ mod tests {
             request.starts_with("GET /repos/o/r/releases?"),
             "octocrab's relative route must be resolved against the configured base: {request}"
         );
+    }
+
+    #[tokio::test]
+    async fn an_api_root_without_a_scheme_or_host_is_refused_up_front() {
+        // Composing onto a half-built base yields a relative URI that reqwest
+        // refuses at send time, which the retry ladder then treats as a
+        // transient fault: five attempts and ~31s before anyone sees the
+        // actual mistake.
+        for bad in ["api.github.com", "/repos", "https://"] {
+            let error = super::client(bad, None).expect_err("'{bad}' is not an API root");
+            assert!(
+                error.to_string().contains("GitHub API root"),
+                "unexpected error for {bad:?}: {error}"
+            );
+        }
+        super::client("https://api.github.com", None).expect("a full root builds");
     }
 
     /// Without a token the header is absent rather than empty — an empty
