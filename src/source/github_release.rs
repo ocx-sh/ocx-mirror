@@ -19,6 +19,17 @@ const GITHUB_API_ROOT: &str = "https://api.github.com";
 /// Sent on every listing request. GitHub refuses a request without one.
 const USER_AGENT: &str = concat!("ocx-mirror/", env!("CARGO_PKG_VERSION"));
 
+/// Deadline for one listing request, headers and body together.
+///
+/// `crate::http::client()` carries the connect bound and nothing else, by
+/// design — its doc comment hands the request deadline to the caller, and the
+/// download, catalog, dist and webhook legs each set their own. This leg had
+/// none: a proxy or an upstream that accepts the socket and then stalls the
+/// body parked `list_upstream_versions` forever, and [`LIST_RETRIES`] never
+/// fired, because a hang raises no error to retry. 30s matches
+/// `spec::value_source`, the other leg that reads a small JSON document.
+const LIST_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Extra attempts a transient page fetch is granted on top of the first.
 ///
 /// Fixed rather than read from `concurrency.max_retries`, which the spec
@@ -164,7 +175,10 @@ pub(crate) fn client(base: &str, token: Option<&str>) -> Result<octocrab::Octocr
         .transpose()?;
 
     let transport = MirrorTransport {
-        client: crate::http::client()?,
+        client: crate::http::builder()
+            .timeout(LIST_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|error| failed(format!("cannot build an HTTP client: {error}")))?,
         base,
         authorization,
     };
