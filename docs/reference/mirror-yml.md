@@ -14,7 +14,7 @@
 | `metadata` | object | No | Path(s) to the package metadata JSON, with optional per-platform overrides. See [`metadata`](#metadata). |
 | `bin_scan` | string | No | `off` (default), `auto`, or `verify` — derive the published `binaries` claim from the extracted bundle. See [`bin_scan`](#bin-scan). |
 | `libc_lint` | boolean | No | Check a Linux build's declared `os.features` against the libc its binaries link against (`true` by default). See [`libc_lint`](#libc-lint). |
-| `asset_type` | string | No | `Archive` (default) or `Binary`. Not used by `source.type: pylock`/`pypi`. |
+| `asset_type` | object | No | How a downloaded asset becomes package content: `archive` (default, extracted) or `binary` (placed under a name), uniformly or per platform. See [`asset_type`](#asset-type). Not used by `source.type: pylock`/`pypi`. |
 | `python` | object | No* | Interpreter version/ABI + `interpreter_package`, plus optional [`lock`](#python-lock) and [`entrypoints`](#entrypoints) config. **Required** for `source.type: pylock` or `pypi`. See [Python apps](#pylock). |
 | `wheels` | object | No* | Per-platform wheel selection for env sources. **Required** for `source.type: pylock`/`pypi`; keys may carry `+libc.glibc`/`+libc.musl` (published as OCI `os.features`). See [`wheels`](#wheels). |
 | `wheel_scope` | string | No | Repo-naming scope prefix for [shared wheel layers](#shared-wheel-layers) (`source.type: pylock`/`pypi`). Default `pip-packages`. |
@@ -155,7 +155,7 @@ Supported on `github_release` and `url_index`. On `pylock`/`pypi` it is **refuse
 
 [`extends:`](#inheritance) is a shallow top-level merge, so a shared base cannot contribute `source.url_rewrite` alone — a child spec that declares `source:` replaces the whole block. That is what [`OCX_MIRROR_URL_REWRITE`][env-url-rewrite] is for: it overrides this block entirely from the environment, keeping one spec byte-identical between a public repository and an internal fork.
 
-TLS note: the GitHub Releases *listing* client is the one leg [`OCX_EXTRA_CA_CERTS`][env-extra-ca-certs] does not reach. The same API-here / downloads-there split applies — downloads through the rewritten host use the mirror's own client and do honour it.
+TLS note: since v0.7.0 the GitHub Releases *listing* client is built through the mirror's own HTTP factory like every other leg, so [`OCX_EXTRA_CA_CERTS`][env-extra-ca-certs] and the proxy variables reach it too — the API-here / downloads-there split no longer implies a trust-root split. On an older binary the listing leg honoured neither; see [`OCX_EXTRA_CA_CERTS`][env-extra-ca-certs] for the workaround.
 
 ## `assets` {#assets}
 
@@ -477,7 +477,7 @@ variants:
 | `metadata` | object | No | Overrides the top-level [`metadata`](#metadata) for this variant only. |
 | `bin_scan` | string | No | Overrides the top-level [`bin_scan`](#bin-scan) for this variant only. |
 | `libc_lint` | boolean | No | Overrides the top-level [`libc_lint`](#libc-lint) for this variant only. |
-| `asset_type` | string | No | Overrides the top-level `asset_type` for this variant only. |
+| `asset_type` | object | No | Overrides the top-level [`asset_type`](#asset-type) for this variant only — the same three forms, including the per-platform map, whose keys are validated under `variants.<name>.asset_type`. |
 
 **Rules:**
 
@@ -515,6 +515,53 @@ The file's `binaries` list also decides what `prepare` makes executable. A tar o
 The fix only reaches a name **declared** in `binaries` — whether hand-written, or filled in by [`bin_scan: auto`/`verify`](#bin-scan) from a scan. That second path has a gap of its own: the scan only reports candidates it found *already* executable, so a `0644` binary the archive ships is never picked up by an auto-fill and is therefore never in scope for the chmod either — it stays non-executable in the published bundle. A mirror hitting that case fixes it by hand-declaring the name in `binaries`, not by turning `bin_scan` on.
 
 As with [`libc_lint`](#libc-lint), a version already published keeps the modes it was pushed with. `prepare` never re-processes a version the registry already holds, and [`pipeline patch`][cli-patch] re-references an already-published version's existing layers by digest instead of re-extracting them, so it cannot repair an exec bit either — the only way to correct a version published with the wrong mode is to delete its tags and re-mirror it.
+
+## `asset_type` {#asset-type}
+
+How a downloaded asset becomes the package's content tree. Optional; the default is `archive` with no component stripping. Ignored by `source.type: pylock`/`pypi`, which compose from wheels instead.
+
+Three forms. **Uniform** — one type for every platform:
+
+```yaml
+asset_type:
+  type: archive
+  strip_components: 1
+```
+
+```yaml
+asset_type:
+  type: binary
+  name: shfmt        # `.exe` is appended on Windows when the asset carries it
+```
+
+**Per-platform** — a `default:` plus a `platforms:` map, for upstreams that ship an archive on one OS and a bare executable on another:
+
+```yaml
+asset_type:
+  default:
+    type: archive
+    strip_components: 0
+  platforms:
+    windows/amd64:
+      type: binary
+      name: lychee
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes* | `archive` or `binary`. *Required in the uniform form and inside `default:`/each `platforms:` entry. |
+| `strip_components` | integer or object | No | `archive` only. Leading path components to strip. Takes its own per-platform form: `strip_components: 1`, or `{default: 1, platforms: {windows/amd64: 0}}`. |
+| `name` | string | Yes | `binary` only. The filename the executable takes in the package. |
+| `default` | object | Yes* | The fallback asset type. *Required in the per-platform form. |
+| `platforms` | object | No | Per-platform overrides, keyed exactly as [`assets`](#assets) is. |
+
+**Validation:**
+
+- `deny_unknown_fields` on the per-platform form, and on `strip_components`'s. The override map goes **under `platforms:`** — writing the platform keys as siblings of `default:` is a spec-load failure (exit 65), not a silently-ignored block. It used to be the latter, and the mirror published the `default:` entry on every platform without a word.
+- `platforms:` keys must parse as platform keys, by the same grammar [`assets`](#assets) uses. A key that is not a platform matches nothing and would fall through to `default:`, so it is rejected (exit 65) rather than left to be discovered in a tarball.
+- The `type:` value is checked in every position, `default:` and each `platforms:` entry included.
 
 ## `bin_scan` {#bin-scan}
 
@@ -854,7 +901,9 @@ Each entry sets exactly one of three mutually exclusive fields:
 
 ## `platforms` {#platforms}
 
-Declares the runner and container matrix for the generated workflow. Each key is a platform key, in the same form [`assets`](#assets) uses — including the `+libc.<flavor>` suffix.
+Declares the runner and container matrix the CI legs run on. Each key is a platform key, in the same form [`assets`](#assets) uses — including the `+libc.<flavor>` suffix.
+
+Nothing in this block is GitHub-specific. [`pipeline generate ci`][cli-generate-ci] renders it as a GitHub Actions matrix because that is the renderer shipped in the box, and [`plan.json`](./plan-json.md#fields) publishes the same resolved matrix as `legs` for any other forge to render — a GitLab child pipeline, a Jenkins job, a shell script. `runner:` is a [label set](#platform-runner), not a GitHub runner name, so declaring it costs a GitLab user nothing but their own `tags:`.
 
 A platform without `containers:` runs its tests natively on the runner. A platform with `containers:` runs them once per image: the generated workflow fetches a libc-matched, statically-linked `ocx` release and executes every `ocx package test` inside `docker run <image>`, so the mirrored artifact is loaded and run by that image's own libc. That is the only way an `os.features` musl or glibc claim is actually verified — an artifact that links glibc reds its Alpine leg instead of shipping a false claim. Declaring [`setup`](#container-setup) on a container narrows that claim, honestly: not "runs on stock image X", but "runs on stock image X plus these named packages" — and the packages are named right next to the image they provision.
 
@@ -1340,7 +1389,9 @@ Both paths resolve against the directory holding the spec file, never the reposi
 
 - `deny_unknown_fields` — a key other than `readme` or `logo` under `catalog:` is a spec-load failure (exit 65), not a silently-ignored typo.
 
-When the resolved README does not exist on disk, `pipeline describe` logs and exits 0 — the workflow is a no-op until catalog content lands in the repository.
+When `readme:` is **unset** and no `CATALOG.md` exists, `pipeline describe` logs and exits 0 — the generated workflow is a no-op until catalog content lands in the repository.
+
+A `readme:` or `logo:` that **is** set and resolves to nothing is a spec error (exit 65), reported by [`package validate`][cli-validate] like a missing [`metadata.default`](#metadata). The forgiving default exists for a repository that has not written its catalog yet; a path somebody typed is a typo every time, and the one that keeps happening is the repository-root reading of a spec-directory-relative field — see [`catalog:` resolves from the spec's own directory](#multi-spec-catalog-path).
 
 ## Spec inheritance {#inheritance}
 
@@ -1435,6 +1486,22 @@ Every generated pipeline invocation in a nested spec's workflows names its own s
 
 `allow_manual_edits: true` disarms the guard only when **every** spec in the repository sets it; a partial opt-out still emits the guard — covering every spec, including the ones that opted out — and `generate` prints a warning naming the dissenters.
 
+### Which directory a path resolves against {#path-bases}
+
+The spec mixes three base directories, and which one a key uses is not guessable from the key. Relative paths in a single-spec repository make all three look the same; in a multi-spec one they diverge, and a path under the wrong reading resolves to nothing — sometimes loudly, sometimes not.
+
+| Key | Resolves against |
+|-----|------------------|
+| [`metadata.default`](#metadata), [`metadata.platforms.<key>`](#metadata) | the **spec's own directory** |
+| [`catalog.readme`](#catalog), [`catalog.logo`](#catalog) | the **spec's own directory** |
+| [`source.generator.working_directory`](#url-index-source) | the **spec's own directory** (and defaults to it) |
+| [`tests[].script`](#tests), including per-platform `platforms.<key>.tests[].script` | the **repository root** |
+| [`sign`](#sign) `file://` references | the **process working directory** — where the command was invoked, not where either file lives |
+
+`extends:` is not on the list: it resolves relative to the child spec but is additionally required to stay inside the repository, which is a containment rule rather than a base.
+
+Every one of these is checked. A missing `metadata.default`, `metadata.platforms.<key>`, `catalog.readme` or `catalog.logo` is a spec-load failure (exit 65) under [`package validate`][cli-validate]; a `script:` that resolves to nothing is the same exit code under [`pipeline generate ci`][cli-generate-ci], which is where the repository root is known.
+
 ### `script:` resolves from the repository root {#multi-spec-script-path}
 
 A [`tests`](#tests) entry's `script:` path is read relative to where the workflow checks the repository out — the repository root — never the spec's own directory. In a single-spec repository the two coincide, so the distinction is invisible. In a multi-spec repository it is not: `buildifier/mirror.yml` must write
@@ -1445,7 +1512,7 @@ tests:
     script: buildifier/tests/smoke.star
 ```
 
-not `tests/smoke.star`. [`metadata.default`](#metadata) and [`catalog.readme` / `catalog.logo`](#catalog) work the other way — both resolve against the spec's own directory — so the same-looking relative path means something different depending on which key it sits under. The nested workflow's own trigger-path comment says as much, so the gap is visible without opening this page:
+not `tests/smoke.star`. [`metadata.default`](#metadata) and [`catalog.readme` / `catalog.logo`](#catalog) work the other way — both resolve against the spec's own directory — so the same-looking relative path means something different depending on which key it sits under ([the full table](#path-bases)). The nested workflow's own trigger-path comment says as much, so the gap is visible without opening this page:
 
 ```yaml
     paths:
@@ -1550,6 +1617,7 @@ notify:
 [cmd-pipeline]: ./cli.md#pipeline
 [cmd-sync]: ./cli.md#sync
 [cli-announce]: ./cli.md#pipeline-announce
+[cli-validate]: ./cli.md#validate
 [cli-generate-ci]: ./cli.md#pipeline-generate-ci
 [cli-push]: ./cli.md#pipeline-push
 [cli-sync]: ./cli.md#sync
