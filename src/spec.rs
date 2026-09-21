@@ -385,6 +385,10 @@ impl MirrorSpec {
             }
         }
 
+        if let Some(catalog) = &self.catalog {
+            catalog.validate(spec_dir, &mut errors);
+        }
+
         self.cascade.validate(&mut errors);
 
         if let Some(versions) = &self.versions {
