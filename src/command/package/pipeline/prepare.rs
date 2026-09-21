@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use ocx_console::DataInterface;
 
 use crate::command::package::pipeline::plan::{
-    PlanReport, PlanVersionEntry, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin,
+    PlanReport, PlanVersionEntry, PlanVersionKind, derive_one_pypi_lock, derived_lock_filename, pylock_interpreter_pin,
     pylock_target_platform, resolve_uv_python, wheel_target_constraints,
 };
 use crate::command::package::sync::list_upstream_versions;
@@ -71,7 +71,7 @@ impl Prepare {
         let tasks = match &self.plan {
             Some(plan_path) => {
                 let plan = read_plan(plan_path).await?;
-                build_tasks_from_plan(&spec, &spec_dir, &plan, &self.version)?
+                build_tasks_from_plan(&spec, &spec_dir, &self.spec, &plan, &self.version)?
             }
             None => build_tasks_for_version(&spec, &spec_dir, &self.version).await?,
         };
@@ -686,6 +686,7 @@ async fn read_plan(path: &std::path::Path) -> Result<PlanReport, MirrorError> {
 fn build_tasks_from_plan(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
+    spec_path: &std::path::Path,
     plan: &PlanReport,
     version: &str,
 ) -> Result<Vec<MirrorTask>, MirrorError> {
@@ -709,10 +710,47 @@ fn build_tasks_from_plan(
         }
     };
 
-    if entry.assets.is_empty() {
+    // Drift first: a `metadata-drift` entry has no assets *by construction*
+    // (the repair re-references the published layers by digest and never
+    // touches the upstream source), so the empty-assets arm below sent every
+    // reader of this message after a schema mismatch that does not exist —
+    // the plan was written by this same binary seconds earlier. `prepare` is
+    // simply the wrong verb, and `plan`'s own plain-text output has always
+    // said which one is right; only the JSON path left the reader to find out.
+    if matches!(entry.kind, PlanVersionKind::MetadataDrift) {
+        // `--spec` is named rather than left to its `./mirror.yml` default:
+        // this message exists to be pasted, and the reader most likely to hit
+        // it runs a multi-spec repository — where the default either misses or,
+        // worse, finds a root spec and patches a different package.
         return Err(MirrorError::PlanError(format!(
-            "plan entry for '{version}' carries no resolved assets — regenerate plan.json \
-             with an ocx-mirror that emits schema_version >= 2"
+            "plan entry for '{tag}' is a metadata-drift finding, which carries no assets by \
+             construction — repair it with `ocx-mirror package pipeline patch --spec {spec} \
+             --metadata-only --version {tag}`, which re-publishes the metadata against the \
+             existing layers and downloads nothing",
+            tag = entry.version,
+            spec = spec_path.display()
+        )));
+    }
+
+    if entry.assets.is_empty() {
+        // Now genuinely about the schema — but only when it is. A current
+        // plan with an empty `assets` was edited or written by hand, and
+        // telling its author to regenerate for schema_version 2 wastes the
+        // same hour twice.
+        let cause = if plan.schema_version < 2 {
+            format!(
+                "regenerate plan.json with an ocx-mirror that emits schema_version >= 2 (this one is {})",
+                plan.schema_version
+            )
+        } else {
+            format!(
+                "the plan is schema_version {}, so the entry was hand-edited — regenerate it with \
+                 `ocx-mirror package pipeline plan`",
+                plan.schema_version
+            )
+        };
+        return Err(MirrorError::PlanError(format!(
+            "plan entry for '{version}' carries no resolved assets — {cause}"
         )));
     }
 

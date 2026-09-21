@@ -73,7 +73,7 @@ fn build_tasks_from_plan_does_not_query_source() {
         pylock: None,
     }]);
 
-    let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap();
+    let tasks = build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "1.2.3").unwrap();
 
     assert_eq!(tasks.len(), 2);
     let task = tasks.iter().find(|t| t.platform.to_string() == "linux/amd64").unwrap();
@@ -89,7 +89,7 @@ fn build_tasks_from_plan_errors_on_missing_version() {
     let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
     let plan = plan_with(vec![]);
 
-    let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "9.9.9").unwrap_err();
+    let err = build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "9.9.9").unwrap_err();
     assert!(
         matches!(err, MirrorError::PlanError(_)),
         "expected PlanError, got {err:?}"
@@ -102,7 +102,7 @@ fn build_tasks_from_plan_errors_on_plan_without_assets() {
     // resolved assets — prepare must fail with an actionable error
     // instead of silently building nothing.
     let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
-    let plan = plan_with(vec![PlanVersionEntry {
+    let mut plan = plan_with(vec![PlanVersionEntry {
         version: "1.2.3".to_string(),
         platforms: vec!["linux/amd64".to_string()],
         kind: PlanVersionKind::New,
@@ -111,11 +111,82 @@ fn build_tasks_from_plan_errors_on_plan_without_assets() {
         assets: vec![],
         pylock: None,
     }]);
+    plan.schema_version = 1;
 
-    let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err();
+    let err = build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "1.2.3").unwrap_err();
     match err {
         MirrorError::PlanError(msg) => {
             assert!(msg.contains("no resolved assets"), "unexpected message: {msg}");
+            assert!(
+                msg.contains("schema_version >= 2"),
+                "a genuinely old plan must still get the regenerate advice: {msg}"
+            );
+        }
+        other => panic!("expected PlanError, got {other:?}"),
+    }
+}
+
+// ── issue #85: a drift entry is not an old plan ─────────────────────────
+
+#[test]
+fn build_tasks_from_plan_names_patch_for_a_metadata_drift_entry() {
+    // `plan` emits a drift entry with `assets: []` by construction, and
+    // `prepare` used to blame the plan's schema version for it — advice the
+    // reader cannot follow, since the plan was written by the same binary
+    // seconds earlier. Name the verb that does repair it.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+    let mut plan = plan_with(vec![PlanVersionEntry {
+        version: "2.1.267".to_string(),
+        platforms: vec!["linux/amd64".to_string()],
+        kind: PlanVersionKind::MetadataDrift,
+        // Empty by construction: a normalized tag cannot be reversed into the
+        // upstream version it was stamped from.
+        source_version: String::new(),
+        variant: None,
+        assets: vec![],
+        pylock: None,
+    }]);
+    plan.has_new = false;
+    plan.has_drift = true;
+
+    match build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "2.1.267").unwrap_err() {
+        MirrorError::PlanError(msg) => {
+            assert!(
+                msg.contains("patch --spec mirror.yml --metadata-only --version 2.1.267"),
+                "the message must carry the command that repairs it, `--spec` included — \
+                 `patch` defaults it to ./mirror.yml, which in a multi-spec repository either \
+                 misses or patches a different package: {msg}"
+            );
+            assert!(
+                !msg.contains("schema_version"),
+                "a drift entry is not a schema problem: {msg}"
+            );
+        }
+        other => panic!("expected PlanError, got {other:?}"),
+    }
+}
+
+#[test]
+fn build_tasks_from_plan_does_not_blame_the_schema_on_a_current_plan() {
+    // A hand-edited current-schema entry is neither drift nor an old plan.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+    let plan = plan_with(vec![PlanVersionEntry {
+        version: "1.2.3".to_string(),
+        platforms: vec!["linux/amd64".to_string()],
+        kind: PlanVersionKind::New,
+        source_version: "1.2.3".to_string(),
+        variant: None,
+        assets: vec![],
+        pylock: None,
+    }]);
+
+    match build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "1.2.3").unwrap_err() {
+        MirrorError::PlanError(msg) => {
+            assert!(
+                !msg.contains("schema_version >= 2"),
+                "schema_version 2 advice must not fire on a schema_version 2 plan: {msg}"
+            );
+            assert!(msg.contains("hand-edited"), "unexpected message: {msg}");
         }
         other => panic!("expected PlanError, got {other:?}"),
     }
@@ -134,7 +205,7 @@ fn build_tasks_from_plan_errors_on_unknown_variant() {
         pylock: None,
     }]);
 
-    let err = build_tasks_from_plan(&spec, Path::new("."), &plan, "slim-1.2.3").unwrap_err();
+    let err = build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "slim-1.2.3").unwrap_err();
     assert!(
         matches!(err, MirrorError::PlanError(_)),
         "expected PlanError, got {err:?}"
@@ -160,7 +231,7 @@ fn build_tasks_from_plan_respects_platform_applicability() {
         pylock: None,
     }]);
 
-    let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();
+    let tasks = build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "0.10.0").unwrap();
     assert_eq!(platforms_of(&tasks), vec!["linux/amd64".to_string()]);
 }
 
@@ -184,7 +255,7 @@ fn build_tasks_from_plan_accepts_the_bare_source_version() {
     }]);
 
     for requested in ["1.2.3", "1.2.3_20260920084410"] {
-        let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, requested).unwrap();
+        let tasks = build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, requested).unwrap();
         assert_eq!(tasks.len(), 1, "{requested} must resolve to the one entry");
         assert_eq!(
             tasks[0].normalized_version, "1.2.3_20260920084410",
@@ -213,7 +284,7 @@ fn build_tasks_from_plan_refuses_an_ambiguous_bare_version() {
         entry("slim-1.2.3_20260920084410", Some("slim")),
     ]);
 
-    match build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err() {
+    match build_tasks_from_plan(&spec, Path::new("."), Path::new("mirror.yml"), &plan, "1.2.3").unwrap_err() {
         MirrorError::PlanError(message) => {
             assert!(
                 message.contains("names 2 plan entries"),
@@ -228,6 +299,13 @@ fn build_tasks_from_plan_refuses_an_ambiguous_bare_version() {
     }
 
     // An exact tag stays unambiguous even though the bare form is not.
-    let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3_20260920084410").unwrap();
+    let tasks = build_tasks_from_plan(
+        &spec,
+        Path::new("."),
+        Path::new("mirror.yml"),
+        &plan,
+        "1.2.3_20260920084410",
+    )
+    .unwrap();
     assert_eq!(tasks[0].normalized_version, "1.2.3_20260920084410");
 }
