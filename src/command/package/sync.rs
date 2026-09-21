@@ -353,13 +353,7 @@ async fn crawl_source(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Result<V
             ..
         } => {
             let token = ocx_util::env::var("GITHUB_TOKEN");
-            let mut builder = source::github_release::builder();
-            if let Some(token) = token {
-                builder = builder.personal_token(token);
-            }
-            let octocrab = builder
-                .build()
-                .map_err(|e| MirrorError::SourceError(format!("failed to create GitHub client: {e}")))?;
+            let octocrab = source::github_release::api_client(token.as_deref())?;
 
             let pattern = regex::Regex::new(tag_pattern)
                 .map_err(|e| MirrorError::SpecInvalid(vec![format!("invalid tag_pattern: {e}")]))?;

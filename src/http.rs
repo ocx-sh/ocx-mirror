@@ -221,7 +221,34 @@ mod tests {
         /// The bare constructors a leg must not call: each is a client with
         /// no extra roots, `reqwest::get` included (it builds a fresh
         /// `Client::new()` per call).
-        const BARE_CONSTRUCTORS: [&str; 3] = ["reqwest::Client::new()", "reqwest::Client::builder()", "reqwest::get("];
+        ///
+        /// `octocrab::Octocrab::builder()` is the fourth because this scan was
+        /// blind to it for a whole release: it selects octocrab's *config*
+        /// path, whose `build()` raises a `hyper_util` legacy client that
+        /// reads no proxy variables and trusts the platform store alone —
+        /// the same defect as a bare `reqwest` constructor, on a stack no
+        /// `reqwest` needle can see. The service path
+        /// (`OctocrabBuilder::new_empty().with_service(..)`,
+        /// `src/source/github_release.rs`) is how a GitHub client is built
+        /// here, and it takes its transport from this module.
+        /// The octocrab needles are four because the config path has four
+        /// spellings, not one: `Octocrab::builder()` (lib.rs:1088),
+        /// `OctocrabBuilder::new()` (:466), `OctocrabBuilder::default()`
+        /// (:536) and `octocrab::instance()` (:412) all land on
+        /// `DefaultOctocrabBuilderConfig` and raise the same proxy-blind
+        /// client. The first needle is written unqualified so it catches the
+        /// imported spelling too — a scan that only matched
+        /// `octocrab::Octocrab::builder()` would miss the form anyone writes
+        /// after a `use octocrab::Octocrab;`.
+        const BARE_CONSTRUCTORS: [&str; 7] = [
+            "reqwest::Client::new()",
+            "reqwest::Client::builder()",
+            "reqwest::get(",
+            "Octocrab::builder()",
+            "OctocrabBuilder::new()",
+            "OctocrabBuilder::default()",
+            "octocrab::instance(",
+        ];
         /// The OCI transports are built outside this module by design
         /// (`ocx_oci` owns their roots, timeouts and auth), so the extra-CA
         /// seam is one call each factory has to make itself:
