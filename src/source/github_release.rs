@@ -2,12 +2,22 @@
 // Copyright 2026 The OCX Authors
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use regex::Regex;
 
 use super::VersionInfo;
 use crate::pipeline::ocx_cli::push::jitter;
+
+/// GitHub's public API root — the base the injected transport resolves
+/// octocrab's relative routes against.
+const GITHUB_API_ROOT: &str = "https://api.github.com";
+
+/// Sent on every listing request. GitHub refuses a request without one.
+const USER_AGENT: &str = concat!("ocx-mirror/", env!("CARGO_PKG_VERSION"));
 
 /// Extra attempts a transient page fetch is granted on top of the first.
 ///
@@ -22,19 +32,147 @@ const LIST_RETRIES: u32 = 5;
 const LIST_RETRY_BACKOFF_BASE: Duration = Duration::from_secs(1);
 const LIST_RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 
-/// The builder every GitHub listing client starts from.
+/// The mirror's own HTTP stack, shaped as the [`tower_service::Service`]
+/// octocrab accepts through `OctocrabBuilder::with_service`.
 ///
-/// octocrab's own retry layer is switched off so [`list_versions`]'s ladder is
-/// the only one: the default `Simple(3)` fires three retries back-to-back with
-/// no delay, which any blip longer than a round-trip defeats, and stacking the
-/// two would multiply requests during an outage.
-pub(crate) fn builder() -> octocrab::OctocrabBuilder<
-    octocrab::NoSvc,
-    octocrab::DefaultOctocrabBuilderConfig,
-    octocrab::NoAuth,
-    octocrab::NotLayerReady,
-> {
-    octocrab::Octocrab::builder().add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+/// octocrab's bundled client is a bare `hyper_util` legacy client: it reads no
+/// `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`, and it trusts the platform store
+/// alone, so `OCX_EXTRA_CA_CERTS` never reached this one leg either. Both were
+/// standing, documented exceptions until this transport put release listing on
+/// the same `crate::http` factory as every other client the mirror builds.
+///
+/// octocrab hands the service a **relative** URI — the base URI it would
+/// otherwise apply is a tower layer on its config path, and that path is
+/// mutually exclusive with `with_service`. So the base lives here, which is
+/// also what lets a test point the client at a loopback fixture.
+struct MirrorTransport {
+    client: reqwest::Client,
+    /// Scheme and authority every relative route is resolved against.
+    base: http::Uri,
+    /// `Authorization` header value, when a `GITHUB_TOKEN` was supplied.
+    ///
+    /// Carried here rather than through `AuthState`: the service path only
+    /// builds under octocrab's `NoConfig`, whose `AuthState` needs a
+    /// `secrecy::SecretString` the mirror would otherwise have no reason to
+    /// depend on. One header, set in one place.
+    authorization: Option<http::HeaderValue>,
+}
+
+/// The erased error every failure on this transport arrives as. octocrab
+/// requires `Into<tower::BoxError>`, and the leg has two unrelated failure
+/// sources — URI composition and reqwest — with no common concrete type.
+type TransportError = Box<dyn std::error::Error + Send + Sync>;
+
+impl MirrorTransport {
+    /// Resolve one of octocrab's relative routes against [`Self::base`].
+    ///
+    /// An absolute URI is returned unchanged: nothing in this crate sends one,
+    /// but rewriting an authority someone else set would be the wrong answer
+    /// if that ever changes.
+    fn resolve(&self, uri: http::Uri) -> Result<http::Uri, TransportError> {
+        if uri.authority().is_some() {
+            return Ok(uri);
+        }
+        let mut parts = self.base.clone().into_parts();
+        parts.path_and_query = Some(
+            uri.path_and_query()
+                .cloned()
+                .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/")),
+        );
+        Ok(http::Uri::from_parts(parts)?)
+    }
+}
+
+impl tower_service::Service<http::Request<octocrab::OctoBody>> for MirrorTransport {
+    type Response = http::Response<reqwest::Body>;
+    type Error = TransportError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // `reqwest::Client` is always ready; it does its own pooling.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: http::Request<octocrab::OctoBody>) -> Self::Future {
+        let client = self.client.clone();
+        let resolved = self.resolve(request.uri().clone());
+        let authorization = self.authorization.clone();
+
+        Box::pin(async move {
+            let (mut parts, body) = request.into_parts();
+            parts.uri = resolved?;
+            parts
+                .headers
+                .insert(http::header::USER_AGENT, http::HeaderValue::from_static(USER_AGENT));
+            if let Some(value) = authorization {
+                parts.headers.insert(http::header::AUTHORIZATION, value);
+            }
+
+            let request = http::Request::from_parts(parts, reqwest::Body::wrap(body));
+            let response = client.execute(reqwest::Request::try_from(request)?).await?;
+            Ok(http::Response::from(response))
+        })
+    }
+}
+
+/// A GitHub listing client on the mirror's own HTTP stack.
+///
+/// `base` is the API root — [`GITHUB_API_ROOT`] in production, a fixture's
+/// address in a test. `token` is `GITHUB_TOKEN`, which only raises the rate
+/// limit; listing works unauthenticated.
+///
+/// octocrab's own retry layer never enters the picture: the service path
+/// carries no middleware, so [`list_versions`]'s ladder is the only one. That
+/// was already the intent — its default `Simple(3)` fires three retries
+/// back-to-back with no delay, which any blip longer than a round-trip
+/// defeats, and stacking the two would multiply requests during an outage.
+///
+/// # Errors
+///
+/// [`MirrorError::ExecutionFailed`](crate::error::MirrorError::ExecutionFailed)
+/// when the TLS backend cannot be built, or when `base` or `token` cannot be
+/// put on the wire.
+pub(crate) fn client(base: &str, token: Option<&str>) -> Result<octocrab::Octocrab, crate::error::MirrorError> {
+    let failed = |message: String| crate::error::MirrorError::ExecutionFailed(vec![message]);
+
+    let base: http::Uri = base
+        .parse()
+        .map_err(|error| failed(format!("invalid GitHub API root '{base}': {error}")))?;
+    let authorization = token
+        .map(|token| {
+            http::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map(|mut value| {
+                    value.set_sensitive(true);
+                    value
+                })
+                // Never echo the value: this is a credential.
+                .map_err(|_| failed("GITHUB_TOKEN is not a valid HTTP header value".to_string()))
+        })
+        .transpose()?;
+
+    let transport = MirrorTransport {
+        client: crate::http::client()?,
+        base,
+        authorization,
+    };
+
+    // `with_auth(AuthState::None)` is not a choice: `build()` on the service
+    // path is implemented for the concrete `AuthState` type, so the builder has
+    // to carry one. The `Authorization` header is the transport's.
+    Ok(octocrab::OctocrabBuilder::new_empty()
+        .with_service(transport)
+        .with_auth(octocrab::AuthState::None)
+        .build()
+        .unwrap_or_else(|infallible| match infallible {}))
+}
+
+/// The production client: [`client`] against [`GITHUB_API_ROOT`].
+///
+/// # Errors
+///
+/// As [`client`].
+pub(crate) fn api_client(token: Option<&str>) -> Result<octocrab::Octocrab, crate::error::MirrorError> {
+    client(GITHUB_API_ROOT, token)
 }
 
 /// Whether a failed page fetch is one a retry can plausibly clear: a GitHub
@@ -320,8 +458,9 @@ mod tests {
     }
 
     /// A one-shot HTTP server answering each connection with the next canned
-    /// status in `statuses`, counting what it served.
-    async fn serve(statuses: Vec<u16>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    /// status in `statuses`, counting what it served and recording the raw
+    /// request text of each.
+    async fn serve(statuses: Vec<u16>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>, Requests) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -329,11 +468,17 @@ mod tests {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let served = std::sync::Arc::new(AtomicUsize::new(0));
         let counter = served.clone();
+        let requests: Requests = Default::default();
+        let recorder = requests.clone();
         tokio::spawn(async move {
             for status in statuses {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut buf = [0u8; 4096];
-                let _ = socket.read(&mut buf).await;
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                recorder
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..read]).into_owned());
                 let body = if status == 200 { "[]" } else { r#"{"message":"boom"}"# };
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -343,19 +488,24 @@ mod tests {
                 counter.fetch_add(1, Ordering::SeqCst);
             }
         });
-        (base, served)
+        (base, served, requests)
     }
 
-    fn client(base: &str) -> octocrab::Octocrab {
-        builder().base_uri(base).unwrap().build().unwrap()
+    /// The raw request text [`serve`] recorded, one entry per connection.
+    type Requests = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+    fn fixture_client(base: &str) -> octocrab::Octocrab {
+        super::client(base, None).unwrap()
     }
 
     #[tokio::test]
     async fn a_5xx_page_is_retried_until_it_serves() {
-        let (base, served) = serve(vec![502, 503, 200]).await;
+        let (base, served, _requests) = serve(vec![502, 503, 200]).await;
         let pattern = make_pattern(r"^v(?P<version>\d+\.\d+\.\d+)$");
 
-        let versions = list_versions(&client(&base), "o", "r", &pattern, 0).await.unwrap();
+        let versions = list_versions(&fixture_client(&base), "o", "r", &pattern, 0)
+            .await
+            .unwrap();
 
         assert!(versions.is_empty());
         assert_eq!(
@@ -367,16 +517,63 @@ mod tests {
 
     #[tokio::test]
     async fn a_4xx_page_fails_at_once_with_status_and_message() {
-        let (base, served) = serve(vec![404, 200]).await;
+        let (base, served, _requests) = serve(vec![404, 200]).await;
         let pattern = make_pattern(r"^v(?P<version>\d+\.\d+\.\d+)$");
 
-        let error = list_versions(&client(&base), "o", "r", &pattern, 0).await.unwrap_err();
+        let error = list_versions(&fixture_client(&base), "o", "r", &pattern, 0)
+            .await
+            .unwrap_err();
 
         assert_eq!(format!("{error:#}"), "GitHub API 404 Not Found: boom");
         assert_eq!(
             served.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a 404 is not retried"
+        );
+    }
+
+    /// The two headers the transport owns, because octocrab's service path
+    /// carries no config layer to set them: GitHub refuses a request without
+    /// a `User-Agent`, and the token is the difference between the 60/hour
+    /// unauthenticated quota and 5 000/hour.
+    #[tokio::test]
+    async fn the_transport_sets_the_user_agent_and_the_token() {
+        let (base, _served, requests) = serve(vec![200]).await;
+        let pattern = make_pattern(r"^v(?P<version>\d+\.\d+\.\d+)$");
+
+        let client = super::client(&base, Some("ghp_example")).unwrap();
+        list_versions(&client, "o", "r", &pattern, 0).await.unwrap();
+
+        let request = requests.lock().unwrap().first().cloned().expect("one request served");
+        assert!(
+            request.contains(&format!("user-agent: {USER_AGENT}")),
+            "the listing request must carry the mirror's user agent: {request}"
+        );
+        assert!(
+            request.contains("authorization: Bearer ghp_example"),
+            "a supplied GITHUB_TOKEN must reach the wire: {request}"
+        );
+        assert!(
+            request.starts_with("GET /repos/o/r/releases?"),
+            "octocrab's relative route must be resolved against the configured base: {request}"
+        );
+    }
+
+    /// Without a token the header is absent rather than empty — an empty
+    /// `Authorization` is a 401, not an unauthenticated request.
+    #[tokio::test]
+    async fn no_token_sends_no_authorization_header() {
+        let (base, _served, requests) = serve(vec![200]).await;
+        let pattern = make_pattern(r"^v(?P<version>\d+\.\d+\.\d+)$");
+
+        list_versions(&fixture_client(&base), "o", "r", &pattern, 0)
+            .await
+            .unwrap();
+
+        let request = requests.lock().unwrap().first().cloned().expect("one request served");
+        assert!(
+            !request.to_ascii_lowercase().contains("authorization:"),
+            "an unauthenticated listing must send no Authorization header: {request}"
         );
     }
 

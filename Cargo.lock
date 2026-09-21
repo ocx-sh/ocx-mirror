@@ -1626,19 +1626,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-timeout"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b90d566bffbce6a75bd8b09a05aa8c2cb1fabb6cb348f8840c9e4c90a0d83b0"
-dependencies = [
- "hyper",
- "hyper-util",
- "pin-project-lite",
- "tokio",
- "tower-service",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2507,14 +2494,12 @@ dependencies = [
  "cfg-if",
  "chrono",
  "futures",
- "futures-util",
  "getrandom 0.2.17",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-timeout",
  "hyper-util",
  "jsonwebtoken",
  "once_cell",
@@ -2526,7 +2511,6 @@ dependencies = [
  "serde_path_to_error",
  "serde_urlencoded",
  "snafu",
- "tokio",
  "tower",
  "tower-http",
  "tracing",
@@ -2643,6 +2627,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tower-service",
  "tracing",
  "tracing-subscriber",
  "url",
