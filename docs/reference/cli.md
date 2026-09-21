@@ -152,7 +152,9 @@ to do" run.
 
 ### `package pipeline prepare` {#pipeline-prepare}
 
-Download, verify, and bundle one version across all declared platforms. Writes `{work_dir}/{V}/{platform_slug}/bundle.tar.xz` per platform plus `{work_dir}/{V}/manifest.json` with sizes and digests.
+Download, verify, and bundle one version across all declared platforms. Writes `{work_dir}/{tag}/{platform_slug}/bundle.tar.xz` per platform plus `{work_dir}/{tag}/manifest.json` with sizes and digests, and prints the manifest path on stdout.
+
+`{tag}` is the **normalized tag the run publishes under** — `3.29.0_20260610` on a spec with a `build_timestamp`, variant-prefixed for a non-default variant — not the `--version` argument. The two coincide only when nothing stamps the version. `--version` itself accepts either form: the tag verbatim, or the bare upstream version it was stamped from.
 
 ```sh
 ocx-mirror package pipeline prepare --version <V> [OPTIONS]
@@ -160,10 +162,10 @@ ocx-mirror package pipeline prepare --version <V> [OPTIONS]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--version <V>` | required | Version to prepare (e.g. `3.29.0`) |
+| `--version <V>` | required | Version to prepare. Either the published tag (`3.29.0_20260610`, `slim-3.29.0_20260610`) or the bare upstream version it was stamped from (`3.29.0`). On a spec declaring [`variants`](./mirror-yml.md#variants) the bare form names one tag per variant, so it is **refused as ambiguous** — pass the tag. Rendering from `plan.json`? Fan out on [`versions[].version`](./plan-json.md), never `source_version`. |
 | `--spec <PATH>` | `./mirror.yml` | Path to the mirror spec file |
 | `--work-dir <DIR>` | `./.ocx-mirror` | Working directory for intermediate artifacts |
-| `--plan <PATH>` | — | A `plan.json` produced by [`pipeline plan`](#pipeline-plan). When set, tasks are built from the plan's resolved assets and the source is never queried — one crawl per pipeline run instead of one per prepare leg. |
+| `--plan <PATH>` | — | A `plan.json` produced by [`pipeline plan`](#pipeline-plan). When set, tasks are built from the plan's resolved assets and the source is never queried — one crawl per pipeline run instead of one per prepare leg. A `metadata-drift` entry is not preparable — repair it with [`pipeline patch --metadata-only`](#pipeline-patch). |
 
 ### `package pipeline push` {#pipeline-push}
 
