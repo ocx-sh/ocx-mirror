@@ -104,10 +104,13 @@ impl Prepare {
             ),
         };
 
-        let manifest =
-            orchestrator::prepare_version(&self.version, &tasks, &work_dir, &http_client, &concurrency).await?;
+        let manifest = orchestrator::prepare_version(&tasks, &work_dir, &http_client, &concurrency).await?;
 
-        let manifest_path = work_dir.join(&self.version).join("manifest.json");
+        // `manifest.version` is the tag the run actually published under — the
+        // plan's own string on the `--plan` path, the resolved stamp on the
+        // bare one. Naming the path from `--version` is what put the manifest
+        // in a different directory from its bundles (issue #35).
+        let manifest_path = work_dir.join(&manifest.version).join("manifest.json");
         println!("{}", manifest_path.display());
 
         log::debug!(
@@ -514,9 +517,34 @@ async fn build_pypi_env_tasks(
 /// lookup finds nothing there and every caller degrades silently (an empty
 /// allowed-platform set composes no env at all).
 fn plan_entry_for_version<'a>(plan: &'a PlanReport, version: &str) -> Option<&'a PlanVersionEntry> {
-    plan.versions.iter().find(|entry| {
-        entry.version == version || entry.source_version == version || is_build_stamp_of(version, &entry.source_version)
-    })
+    plan_entries_for_version(plan, version).into_iter().next()
+}
+
+/// Every plan entry `version` could name, exact matches first.
+///
+/// Split out of [`plan_entry_for_version`] because the archive path has to
+/// *refuse* an ambiguous bare version rather than take the first: a spec with
+/// [`variants`](crate::spec::VariantSpec) publishes `3.29.0_20260610` and
+/// `slim-3.29.0_20260610` from one upstream release, so `--version 3.29.0`
+/// names two entries and picking either silently prepares the wrong one. An
+/// env source cannot hit that — variants are refused there — so the env
+/// callers keep the first-match reading.
+///
+/// An exact `versions[].version` hit wins outright: a tag is unambiguous by
+/// construction, and it is the string `plan.json` tells renderers to fan out
+/// on.
+fn plan_entries_for_version<'a>(plan: &'a PlanReport, version: &str) -> Vec<&'a PlanVersionEntry> {
+    let (exact, stamped): (Vec<_>, Vec<_>) = plan
+        .versions
+        .iter()
+        .filter(|entry| {
+            entry.version == version
+                || entry.source_version == version
+                || is_build_stamp_of(version, &entry.source_version)
+        })
+        .partition(|entry| entry.version == version);
+
+    if exact.is_empty() { stamped } else { exact }
 }
 
 /// Whether `tag` is `source_version` carrying a build-metadata stamp — i.e.
@@ -646,21 +674,40 @@ async fn read_plan(path: &std::path::Path) -> Result<PlanReport, MirrorError> {
 /// run already crawled — no source query (issue #160: N prepare matrix legs
 /// re-crawling the source exhausted the GitHub GraphQL points budget).
 ///
-/// `version` is matched against the plan entry's variant-prefixed normalized
-/// tag (the string the workflow matrix carries). Spec-owned task fields
-/// (target, verify, cascade, metadata, asset_type) come from the local spec;
-/// only the asset resolution is taken from the plan.
+/// `version` is resolved under the either-form contract
+/// [`plan_entries_for_version`] defines: the entry's own variant-prefixed
+/// normalized tag (the string the workflow matrix carries and the one
+/// `plan.json` documents as the fan-out key), or the bare upstream version it
+/// was stamped from. Matching the tag alone was the whole of issue #83 — a
+/// renderer iterating `versions[]` and passing the obvious field worked
+/// without `--plan` and failed with it, per version, in CI. Spec-owned task
+/// fields (target, verify, cascade, metadata, asset_type) come from the local
+/// spec; only the asset resolution is taken from the plan.
 fn build_tasks_from_plan(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     plan: &PlanReport,
     version: &str,
 ) -> Result<Vec<MirrorTask>, MirrorError> {
-    let entry = plan
-        .versions
-        .iter()
-        .find(|e| e.version == version)
-        .ok_or_else(|| MirrorError::PlanError(format!("version '{version}' not present in plan")))?;
+    let entry = match plan_entries_for_version(plan, version).as_slice() {
+        [entry] => *entry,
+        [] => {
+            return Err(MirrorError::PlanError(format!(
+                "version '{version}' not present in plan"
+            )));
+        }
+        candidates => {
+            return Err(MirrorError::PlanError(format!(
+                "version '{version}' names {} plan entries — pass one of their `version` strings: {}",
+                candidates.len(),
+                candidates
+                    .iter()
+                    .map(|entry| entry.version.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    };
 
     if entry.assets.is_empty() {
         return Err(MirrorError::PlanError(format!(

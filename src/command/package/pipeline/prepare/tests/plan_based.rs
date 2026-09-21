@@ -163,3 +163,71 @@ fn build_tasks_from_plan_respects_platform_applicability() {
     let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "0.10.0").unwrap();
     assert_eq!(platforms_of(&tasks), vec!["linux/amd64".to_string()]);
 }
+
+// ── issue #83: `--version` means one thing, not two ─────────────────────
+
+#[test]
+fn build_tasks_from_plan_accepts_the_bare_source_version() {
+    // The renderer's case: `plan.json` carries a stamped `version` next to the
+    // bare `source_version`, nothing says which one `prepare --version` takes,
+    // and passing the bare one used to fail only under `--plan`. Both forms
+    // now resolve to the same entry, and the tasks carry the stamped tag.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+    let plan = plan_with(vec![PlanVersionEntry {
+        version: "1.2.3_20260920084410".to_string(),
+        platforms: vec!["linux/amd64".to_string()],
+        kind: PlanVersionKind::New,
+        source_version: "1.2.3".to_string(),
+        variant: None,
+        assets: vec![asset_entry("linux/amd64", "tool-linux-amd64")],
+        pylock: None,
+    }]);
+
+    for requested in ["1.2.3", "1.2.3_20260920084410"] {
+        let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, requested).unwrap();
+        assert_eq!(tasks.len(), 1, "{requested} must resolve to the one entry");
+        assert_eq!(
+            tasks[0].normalized_version, "1.2.3_20260920084410",
+            "{requested} must publish under the plan's own tag"
+        );
+    }
+}
+
+#[test]
+fn build_tasks_from_plan_refuses_an_ambiguous_bare_version() {
+    // A variant spec stamps two tags from one upstream release, so the bare
+    // version names both. Taking the first would prepare the wrong artifact
+    // without a word.
+    let spec: MirrorSpec = serde_yaml_ng::from_str(UNREACHABLE_SOURCE_SPEC).unwrap();
+    let entry = |version: &str, variant: Option<&str>| PlanVersionEntry {
+        version: version.to_string(),
+        platforms: vec!["linux/amd64".to_string()],
+        kind: PlanVersionKind::New,
+        source_version: "1.2.3".to_string(),
+        variant: variant.map(str::to_string),
+        assets: vec![asset_entry("linux/amd64", "tool-linux-amd64")],
+        pylock: None,
+    };
+    let plan = plan_with(vec![
+        entry("1.2.3_20260920084410", None),
+        entry("slim-1.2.3_20260920084410", Some("slim")),
+    ]);
+
+    match build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3").unwrap_err() {
+        MirrorError::PlanError(message) => {
+            assert!(
+                message.contains("names 2 plan entries"),
+                "unexpected message: {message}"
+            );
+            assert!(
+                message.contains("slim-1.2.3_20260920084410"),
+                "must name the candidates: {message}"
+            );
+        }
+        other => panic!("expected PlanError, got {other:?}"),
+    }
+
+    // An exact tag stays unambiguous even though the bare form is not.
+    let tasks = build_tasks_from_plan(&spec, Path::new("."), &plan, "1.2.3_20260920084410").unwrap();
+    assert_eq!(tasks[0].normalized_version, "1.2.3_20260920084410");
+}

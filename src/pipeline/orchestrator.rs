@@ -192,22 +192,74 @@ pub(crate) fn metadata_plan_for(spec: &MirrorSpec, version: &Version) -> Option<
     })
 }
 
+/// The single tag `tasks` names, or a refusal when they name more than one.
+///
+/// [`prepare_version`] writes one manifest and names one directory, so the
+/// slice it is handed has to agree on the tag. It does not always: a bare
+/// `--version 3.7.0` with no `--plan` is matched against *every* effective
+/// variant (`build_tasks_for_version`'s `version_info.version == version`),
+/// so a spec declaring `variants:` produces tasks carrying `3.7.0_<stamp>`
+/// **and** `slim-3.7.0_<stamp>`. Reading the first tag put the manifest under
+/// whichever variant came first, listed every variant's bundles in it —
+/// colliding two `linux_amd64` rows in one `bundles` array — and left the
+/// other variant's directory without a manifest. Reordering `variants:`
+/// moved the file, which is issue #35 wearing a different hat.
+///
+/// Refusing is what the `--plan` path already does for the same input
+/// (`version '{v}' names N plan entries`), so the two paths now answer an
+/// ambiguous `--version` the same way: name the tag you meant.
+fn one_version_per_run(tasks: &[MirrorTask]) -> Result<String, MirrorError> {
+    let Some(first) = tasks.first() else {
+        return Err(MirrorError::ExecutionFailed(vec![
+            "no prepare tasks to run".to_string(),
+        ]));
+    };
+
+    let mut tags: Vec<&str> = tasks.iter().map(|task| task.normalized_version.as_str()).collect();
+    tags.sort_unstable();
+    tags.dedup();
+    if let [_, _, ..] = tags.as_slice() {
+        return Err(MirrorError::SpecUsageError(format!(
+            "these prepare tasks name {} versions, and a run publishes one version per run — \
+             pass one of these tags as `--version`: {}",
+            tags.len(),
+            tags.join(", ")
+        )));
+    }
+
+    Ok(first.normalized_version.clone())
+}
+
 /// Prepare all platforms for a single version: download, verify, and bundle.
 ///
 /// Runs platform tasks concurrently with `max_downloads` and `max_bundles`
-/// semaphore slots. On success, writes `{work_dir}/{version}/manifest.json`
-/// and returns the populated manifest.
+/// semaphore slots. On success, writes
+/// `{work_dir}/{normalized_version}/manifest.json` and returns the populated
+/// manifest.
 ///
-/// Call sites:
-/// - `execute_mirror` — drives the existing sync pipeline
-/// - `command::package::pipeline::prepare` — standalone `ocx-mirror package pipeline prepare` subcommand
+/// The version is **read off the tasks**, never passed in. It used to be a
+/// parameter, and `prepare` passed its raw `--version` argument while
+/// [`task_dir`] below named each bundle directory from
+/// `task.normalized_version`: with any `build_timestamp` but `none`, a bare
+/// `--version 3.7.0` wrote `3.7.0/manifest.json` beside
+/// `3.7.0_20260727160931/<slug>/bundle.tar.xz`, and the manifest described a
+/// version it was not stored next to (issue #35). Two names for one thing is
+/// the whole defect, so there is now one.
+///
+/// # Errors
+///
+/// [`MirrorError::SpecUsageError`] when the tasks do not all carry the same
+/// `normalized_version` — see the guard below.
+/// [`MirrorError::ExecutionFailed`] when `tasks` is empty — there is no
+/// version to name the run after — when a task panics, or when the manifest
+/// cannot be written.
 pub(crate) async fn prepare_version(
-    version: &str,
     tasks: &[MirrorTask],
     work_dir: &Path,
     http_client: &reqwest::Client,
     concurrency: &ConcurrencyParams,
 ) -> Result<VersionManifest, MirrorError> {
+    let version = one_version_per_run(tasks)?;
     let download_sem = Arc::new(Semaphore::new(concurrency.max_downloads));
     let bundle_sem = Arc::new(Semaphore::new(concurrency.max_bundles));
     let compression_threads = concurrency.compression_threads;
@@ -275,12 +327,13 @@ pub(crate) async fn prepare_version(
     }
 
     let manifest = VersionManifest {
-        version: version.to_owned(),
+        version: version.clone(),
         bundles,
     };
 
-    // Write manifest.json to {work_dir}/{version}/
-    let version_dir = work_dir.join(version);
+    // Beside the bundles, because both directories are now named by the same
+    // string.
+    let version_dir = work_dir.join(&version);
     tokio::fs::create_dir_all(&version_dir)
         .await
         .map_err(|e| MirrorError::ExecutionFailed(vec![format!("failed to create version dir: {e}")]))?;
