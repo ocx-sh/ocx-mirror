@@ -2807,6 +2807,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rustls-pki-types",
+ "same-file",
  "schemars 1.2.1",
  "serde",
  "serde_json",
