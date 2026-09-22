@@ -1,8 +1,11 @@
 #:schema https://grimoire.rs/schemas/grimoire-config.schema.json
 [options]
-clients = ["claude"]
+clients = ["claude", "codex", "opencode"]
 
 [bundles]
+bazel-essentials = "ghcr.io/ocx-sh/lore/bazel-essentials:latest"
+docs-essentials = "ghcr.io/ocx-sh/lore/docs-essentials:latest"
+python-essentials = "ghcr.io/ocx-sh/lore/python-essentials:latest"
 rust-essentials = "ghcr.io/ocx-sh/lore/rust-essentials:latest"
 
 [skills]

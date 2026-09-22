@@ -1,12 +1,59 @@
-skill = []
 agent = []
 
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:ab336cd06935567b6ef67120a47077e51a8d34b7cceb3d3d4f93678d9ee96bbb"
-generated_by = "grim 0.14.0"
-generated_at = "2026-08-19T22:54:47Z"
+declaration_hash = "sha256:15ddf1b49900fbd66bad7241bc0c36163729712b53951b6aaaeb1edc9cea89fe"
+generated_by = "grim 0.14.2"
+generated_at = "2026-09-22T20:21:43Z"
+
+[[skill]]
+name = "bazel-adopt"
+pinned = "ghcr.io/ocx-sh/lore/bazel-adopt@sha256:680625f2d0edc08073da774d6e080ef326ea6abb60dbde7a67a1d80b309f3205"
+bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "bazel-diagnose"
+pinned = "ghcr.io/ocx-sh/lore/bazel-diagnose@sha256:dc164748fdae83cc3dfa9d4f3c85d15149694c4e3220a23cd6bbae91220e0fd7"
+bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "docs-instrument"
+pinned = "ghcr.io/ocx-sh/lore/docs-instrument@sha256:e6a5459c18f7d8192ec81efc70bc674809edfbdc305d96bc60bf3cb14b3b790d"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "docs-plan"
+pinned = "ghcr.io/ocx-sh/lore/docs-plan@sha256:cbff12650842b27b1af5513caf447c516bb33b72735121902b48576fa0840778"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "bazel-quality"
+pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:a7d36a1e1f8530fefbeaec94f9593325f13aeab5cf90307fbc8133b7b7d05ea4"
+bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "docs-quality"
+pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:c31e99d6d45536c089f643dd96d3fe23540fbbd918530bd68497ab029f2d12bf"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "python-packaging"
+pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:83b48110ecdfdc874b6714e7c7ba10deb199f4bf0cdc3169631cb884d842c802"
+bundle = "ghcr.io/ocx-sh/lore/python-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "python-quality"
+pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:7ad282eaddce2add9f9fd7ef17dc6cbd547908a3d7f5cb1be47f751b8a360797"
+bundle = "ghcr.io/ocx-sh/lore/python-essentials"
+bundle_tag = "latest"
 
 [[rule]]
 name = "rust-cargo"
@@ -19,6 +66,64 @@ name = "rust-quality"
 pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:39f5455aadd3ce6dff3b085aab28454b95a7a681ec3de6fadb14a84014a81e65"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
 bundle_tag = "latest"
+
+[[bundle]]
+name = "bazel-essentials"
+repo = "ghcr.io/ocx-sh/lore/bazel-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/bazel-essentials@sha256:0db259091751f23de88cffcc4efeca9b81325e72139dba1dc54509eafa163b08"
+
+[[bundle.member]]
+kind = "skill"
+name = "bazel-adopt"
+id = "ghcr.io/ocx-sh/lore/bazel-adopt:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "bazel-diagnose"
+id = "ghcr.io/ocx-sh/lore/bazel-diagnose:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "bazel-quality"
+id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
+
+[[bundle]]
+name = "docs-essentials"
+repo = "ghcr.io/ocx-sh/lore/docs-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:f6ef95d3c3668716d443af0338ca9a38642e9758235cedc1209b4f1feaa3cafc"
+
+[[bundle.member]]
+kind = "skill"
+name = "docs-instrument"
+id = "ghcr.io/ocx-sh/lore/docs-instrument:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "docs-plan"
+id = "ghcr.io/ocx-sh/lore/docs-plan:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "docs-quality"
+id = "ghcr.io/ocx-sh/lore/docs-quality:latest"
+
+[[bundle]]
+name = "python-essentials"
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:e187285b34e5e6f10c62b6ddc6fd8daaa7b17858d3a1f4598d72cbd92f8b805e"
+
+[[bundle.member]]
+kind = "rule"
+name = "python-packaging"
+id = "ghcr.io/ocx-sh/lore/python-packaging:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "python-quality"
+id = "ghcr.io/ocx-sh/lore/python-quality:latest"
 
 [[bundle]]
 name = "rust-essentials"
