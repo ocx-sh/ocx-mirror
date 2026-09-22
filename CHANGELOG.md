@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-09-22
+
+### Added
+
+- Runner as a forge-neutral label set *(spec)*
+- Plan.json v4 legs, schema target and contract page (#77) *(plan)*
+- Read_capped bounded body reads *(http)*
+- Resolvable min/max bounds with inclusive edges (#78) *(versions)*
+- Digest policies and url_index per-asset sha256 (#76) *(verify)*
+- Url_rewrite and OCX_MIRROR_URL_REWRITE for proxied downloads (#75) *(source)*
+
+### Changed
+
+- Adopt ocx's split crates in place of the dissolved ocx_lib *(deps)*
+- Schema v4 foundation for the corporate-proxy story *(plan)*
+
+### Documentation
+
+- Record the corporate-proxy surface in subsystem-mirror *(rules)*
+- Asset_type, path base directories, forge-neutral runner *(reference)*
+- Add the /update-ocx skill *(claude)*
+
+### Fixed
+
+- Drop the internal-tier ocx_shell and ocx_announce links *(deps)*
+- Neutralise the CI markers the argv assertions inherit *(test)*
+- Give octocrab the mirror's own HTTP transport *(source)*
+- Refuse a half-built GitHub API root before the retry ladder *(source)*
+- Give the GitHub listing leg a request deadline *(source)*
+- Resolve prepare --version to one tag, beside its bundles *(pipeline)*
+- Name the repair verb on a metadata-drift plan entry *(pipeline)*
+- Refuse a flat per-platform map, and its non-platform keys *(spec)*
+- Refuse a catalog path that resolves to nothing *(spec)*
+
 ## [0.6.1] - 2026-09-15
 
 ### Added
@@ -32,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deps
 
 - Updated grim artifacts
+
+### Release
+
+- V0.6.1
 
 ## [0.6.0] - 2026-08-31
 
@@ -337,6 +375,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.6.2]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.7..v0.6.0
 [0.5.7]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.6..v0.5.7
