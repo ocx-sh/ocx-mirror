@@ -81,3 +81,33 @@ new_local_repository(
     build_file = "//:BUILD.ocx_python_wheels.bazel",
     path = "external/ocx/crates/ocx_python/tests/fixtures/wheels",
 )
+
+# ---------------------------------------------------------------------------
+# The docs site toolchain (`//docs:site`) — one contiguous block, WP-C.
+# ---------------------------------------------------------------------------
+
+# rules_python is the one Bazel-side route to a hermetic interpreter plus a
+# hashed PyPI closure; `@tools//` exposes executables only (a uv launcher), so
+# it cannot feed a sandboxed action a pinned site-packages. 2.3.4 is the BCR
+# head and presubmits against Bazel 9.x.
+bazel_dep(name = "rules_python", version = "2.3.4")
+
+# BZL-PY-01: both calls carry the literal version, or the interpreter rides
+# rules_python's rolling default and moves on any bump. 3.14 = the version the
+# acceptance venv (`test/`) resolves to, and the `--python-version` the lock
+# was compiled for.
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.defaults(python_version = "3.14")
+python.toolchain(python_version = "3.14")
+
+# BZL-PY-03: bound to that interpreter. The wheels come from the lock's own
+# sha256 pins through the repository cache — nothing is fetched inside the
+# build action, which is what lets `//docs:site` run offline and sandboxed and
+# live on the remote cache (docs/BUILD.bazel says why that differs from ocx).
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "docs_pip",
+    python_version = "3.14",
+    requirements_lock = "//docs:requirements.lock",
+)
+use_repo(pip, "docs_pip")

@@ -186,7 +186,7 @@ _MEMBER_SOURCES = [
             "log_targets",
             [
                 "crates/crate_map.toml",
-                "docs/reference/cli.md",
+                "//docs:reference/cli.md",
             ],
             {},
         ),
@@ -253,3 +253,13 @@ exports_files([
     "src/command/package/pipeline/generate/ci/matrix.rs",
     "tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
 ])
+
+# The docs site's two root-level inputs (docs/BUILD.bazel `//docs:site`):
+# mkdocs.yml, and CHANGELOG.md, which docs/changelog.md snippet-includes.
+exports_files(
+    [
+        "CHANGELOG.md",
+        "mkdocs.yml",
+    ],
+    visibility = ["//docs:__pkg__"],
+)

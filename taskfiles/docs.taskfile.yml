@@ -1,15 +1,49 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# The docs site. Both tasks run mkdocs from the same pinned closure — the
+# hashed `docs/requirements.lock`, resolved by MODULE.bazel's rules_python
+# block — so `serve` previews exactly what `build` publishes.
+#
+# Both start with `bazel:bootstrap`: `//docs:site` reads two root files
+# (mkdocs.yml, CHANGELOG.md), naming them loads the root package, and that
+# package loads `@crates`, whose gitignored lockfile bootstrap generates.
 
 version: '3'
 
+vars:
+  JOBS: '{{.JOBS | default "6"}}'
+  # Same client-env scrub as taskfiles/bazel.taskfile.yml's `{{.BAZEL}}`: the
+  # telemetry credential must not reach the BEP or a repository rule.
+  BAZEL: env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT ocx exec bazel -- bazel
+  # The shared cache's CI credential (`.github/actions/bazel-cache-rc`), as a
+  # startup `--bazelrc`, or nothing. Derived from the file existing — a fork PR
+  # and a developer shell have none, and `--bazelrc` naming a missing file is a
+  # hard error (ocx taskfiles/bazel.taskfile.yml `CACHE_RC`, which also
+  # records why this is `printf '%s'` and not `printf --`).
+  CACHE_RC:
+    sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+
 tasks:
   serve:
-    desc: Serve the mkdocs site locally (http://127.0.0.1:8000)
-    cmd: uv run --with mkdocs-material mkdocs serve
+    desc: Serve the mkdocs site locally (http://127.0.0.1:8000) from the pinned toolchain
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: :bazel:bootstrap
+      - '{{.BAZEL}} run --jobs={{.JOBS}} //docs:mkdocs -- serve {{.CLI_ARGS}}'
 
   build:
-    desc: Build the mkdocs site (strict — broken nav/links fail)
-    cmd: uv run --with mkdocs-material mkdocs build --strict
+    desc: Build the site with Bazel (//docs:site, mkdocs --strict) and unpack it into site/ — extra Bazel flags after --
+    summary: |
+      `{{.CLI_ARGS}}` rides before the download flag, never after it: CI
+      passes `--config=ci`, which expands to `--remote_download_minimal` in
+      place, and a later `--remote_download_outputs=toplevel` is what still
+      puts the archive on disk for the unpack. CI's write lane appends its
+      upload grant the same way.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: :bazel:bootstrap
+      - '{{.BAZEL}} {{.CACHE_RC}} build --jobs={{.JOBS}} {{.CLI_ARGS}} --remote_download_outputs=toplevel //docs:site'
+      - rm -rf site && mkdir site && tar -xf bazel-bin/docs/site.tar -C site
 
   lint:links:
     desc: Check external links in the docs

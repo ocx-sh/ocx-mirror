@@ -27,6 +27,14 @@ theme:
     - content.code.copy
     - toc.follow
 
+# The site's Bazel build and its pinned toolchain live beside the pages
+# (docs/BUILD.bazel); mkdocs would otherwise publish them as static files.
+exclude_docs: |
+  BUILD.bazel
+  mkdocs_bazel.py
+  requirements.in
+  requirements.lock
+
 # A `[text](page.md#anchor)` whose anchor no page renders is a broken link
 # the reader only finds by clicking; surface it so `--strict` fails the build.
 validation:

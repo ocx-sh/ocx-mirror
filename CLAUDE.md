@@ -44,7 +44,7 @@ document the four-line job, let them own the pipeline.
 | `.github/actions/test-telemetry/` | Composite action pushing a JUnit report's timings to otel.ocx.sh from CI (the `push` task's CI half) |
 | `.github/actions/bazel-cache-rc/` | Verbatim ocx port: writes the CI-only Bazel cache credential rc under `$RUNNER_TEMP` (read on every lane, write on the `main` push only); `selftest.sh` runs under `task scripts:self-test` |
 | `test/` | pytest acceptance harness (Docker registry on :5001) |
-| `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
+| `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages; built by Bazel as `//docs:site` (`docs/BUILD.bazel`, hermetic + remote-cacheable) from the hashed `docs/requirements.lock` |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
 | `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package description push` in `oci-publish.yml` (frontmatter = title/description/keywords) |
 | `src/command/package/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
