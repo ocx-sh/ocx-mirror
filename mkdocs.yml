@@ -56,4 +56,5 @@ nav:
       - CLI: reference/cli.md
       - plan.json: reference/plan-json.md
       - Environment: reference/environment.md
+  - Contributing: contributing.md
   - Changelog: changelog.md

@@ -52,7 +52,7 @@ Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md)
 ### Rust Unit Tests
 
 - Location: alongside source in `#[cfg(test)] mod tests { ... }`; renderer/spec fixtures in `tests/fixtures/`
-- Run: `task rust:test:unit` (cargo nextest) or `cargo test -- <test_name> --nocapture`
+- Run: `task rust:test:unit` or `cargo test -- <test_name> --nocapture`
 - Use `tempfile::tempdir()` for isolated filesystem tests
 - Test `MirrorError` variants and exit-code mappings explicitly
 
@@ -65,7 +65,7 @@ Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md)
 
 ## Task Runner
 
-Use `task` commands: `task test:quick` (acceptance tests in parallel, skip rebuild), `task test:parallel` (acceptance, parallel), `task rust:test:unit` (cargo nextest). Run `task --list` to discover.
+Use `task` commands: `task test:quick` (acceptance tests in parallel, skip rebuild), `task test:parallel` (acceptance, parallel), `task rust:test:unit`. Run `task --list` to discover.
 
 ## Constraints
 

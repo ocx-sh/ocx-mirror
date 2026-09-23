@@ -1,4 +1,5 @@
 [tools]
+bazel = "ocx.sh/bazelbuild/bazel:9.2.0"
 go-task = "ocx.sh/go-task/task:3"
 git-cliff = "ocx.sh/git-cliff/git-cliff:2"
 uv = "ocx.sh/astral-sh/uv:0"

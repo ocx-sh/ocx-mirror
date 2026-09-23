@@ -23,6 +23,65 @@ tasks:
     cmds:
       - git-cliff --unreleased
 
+  # C6.5 guard (adr_bazel_crate_split.md § C6.5, C8): a release ships against
+  # an ocx that has itself been released. The committed external/ocx pointer
+  # must be contained in some ocx tag; a pointer on an unreleased branch head
+  # (or a commit ocx never published) is exit 1, naming the SHA. Tags are
+  # fetched first — a stale local tag list would red a pointer that ocx has
+  # since released, and a fetch that fails reds too (unverified is not green).
+  guard:ocx-released:
+    desc: The committed external/ocx pointer is contained in a released ocx tag (C6.5)
+    silent: true
+    dir: '{{.ROOT_DIR}}'
+    cmd: |
+      set -eu
+      root=$(git rev-parse --show-toplevel)
+      ocx="$root/external/ocx"
+      ptr=$(git -C "$root" rev-parse HEAD:external/ocx)
+      git -C "$ocx" fetch --quiet --tags origin
+      if ! git -C "$ocx" cat-file -e "$ptr^{commit}" 2>/dev/null; then
+        echo "release: external/ocx pointer $ptr is not a commit in ocx's fetched history - bump the submodule to a released ocx tag first" >&2
+        exit 1
+      fi
+      tags=$(git -C "$ocx" tag --contains "$ptr")
+      if [ -z "$tags" ]; then
+        echo "release: external/ocx pointer $ptr is in no ocx tag - release ocx (or bump the submodule to a tagged commit) before releasing ocx-mirror" >&2
+        exit 1
+      fi
+      echo "release: external/ocx pointer $ptr is released in: $(echo "$tags" | head -n 3 | tr '\n' ' ')"
+
+  # Bazel twins of the workspace version (adr_bazel_crate_split.md § C8):
+  # MODULE.bazel's module() version and every rust rule's `version` attr in the
+  # root and crates/* BUILD files. `bazel:pin:check` and `bazel:build:drift`
+  # compare them to Cargo.toml's [workspace.package] version, so they move in
+  # the same step as `cargo set-version`. MODULE.bazel.lock is refreshed after,
+  # behind a bootstrap: `cargo set-version` just made Cargo.bazel.lock.json
+  # stale, and `bazel mod deps` evaluates @crates against it.
+  bump:bazel:
+    internal: true
+    dir: '{{.ROOT_DIR}}'
+    requires:
+      vars: [VERSION]
+    cmds:
+      - cmd: |
+          python3 - '{{.VERSION}}' <<'EOF'
+          import re, sys
+          from pathlib import Path
+          version = sys.argv[1]
+          module = Path("MODULE.bazel")
+          text, n = re.subn(r'(module\([^)]*?version\s*=\s*")[^"]+(")', rf"\g<1>{version}\g<2>", module.read_text(), count=1, flags=re.S)
+          if n != 1:
+              sys.exit("release: no module(version = ...) in MODULE.bazel")
+          module.write_text(text)
+          for build in [Path("BUILD.bazel"), *sorted(Path("crates").glob("*/BUILD.bazel"))]:
+              text, n = re.subn(r'(?m)^(\s*version = )"[^"]*"', rf'\g<1>"{version}"', build.read_text())
+              if n:
+                  build.write_text(text)
+                  print(f"release: {build}: {n} version attr(s) -> {version}")
+          EOF
+      - task: :bazel:bootstrap
+      - env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT ocx exec bazel -- bazel mod deps --lockfile_mode=update
+
   # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
   # After this task succeeds, the human reviews and commits.
   #
@@ -55,8 +114,11 @@ tasks:
             git-cliff --bumped-version --bump "{{.BUMP}}"
           fi
     cmds:
+      - task: guard:ocx-released
       - echo "Next version:{{.NEXT_VERSION}}"
       - cargo set-version "{{.NEXT_VERSION | trimPrefix "v"}}"
+      - task: bump:bazel
+        vars: {VERSION: '{{.NEXT_VERSION | trimPrefix "v"}}'}
       - git-cliff --tag "{{.NEXT_VERSION}}" -o CHANGELOG.md
       - task verify
       - |

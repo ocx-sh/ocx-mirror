@@ -1,5 +1,506 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# The Bazel Linux loop (adr_bazel_crate_split.md § C7, C8, A-4, A-8). Ported
+# from ocx's taskfiles/bazel.taskfile.yml; ocx-only material (remote cache,
+# tag guard, doctor) is not carried.
+#
+# Every Bazel call goes through `ocx exec bazel -- bazel …` (the `bazel` row in
+# ocx.toml) and passes `--jobs={{.JOBS}}` where the command takes it: the host
+# ~/.bazelrc outranks the workspace rc. CI and the C11 lane pass JOBS=auto.
+#
+# `{{.BAZEL}}` drops the telemetry credential from the client environment:
+# Bazel writes that environment into every BEP and hands it to repository
+# rules. `telemetry:bazel` still reads both from the task env.
+#
+# Gates are `cmds:`, never `preconditions:` or `status:` — `task --force`
+# skips those, and a cached green cannot be told from a gate that never ran.
 
 version: '3'
 
-tasks: {}
+vars:
+  JOBS: '{{.JOBS | default "6"}}'
+  OCX_DIR: '{{.ROOT_DIR}}/external/ocx'
+  NO_OTEL: env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT
+  BAZEL: '{{.NO_OTEL}} ocx exec bazel -- bazel'
+
+tasks:
+  bep:mode:
+    internal: true
+    desc: Pin a BEP scratch directory to 0700 and prove it before anything writes into it
+    summary: |
+      The Build Event Protocol stream carries the whole client environment and
+      every rc flag value (the host rc holds a --remote_header credential), so
+      the directory must be ours alone. `mktemp -d` is 0700 on GNU coreutils;
+      the read-back is what reds on a mktemp or filesystem that is not.
+    cmd: >-
+      chmod 700 '{{.DIR}}' && python3 -c "import os,sys; m = os.stat(sys.argv[1]).st_mode & 0o777; sys.exit(0 if m == 0o700 else f'bazel: the BEP scratch directory {sys.argv[1]} is mode {m:04o}, not 0700 - the BEP carries the client environment. Point TMPDIR at a filesystem that honours modes.')" '{{.DIR}}'
+
+  bootstrap:
+    desc: Make this checkout buildable — repin @crates when Cargo.bazel.lock.json is absent or stale, undo crate_universe's writes into external/ocx, write test/acceptance.stamp
+    summary: |
+      C8 + A-4. `Cargo.bazel.lock.json` is gitignored (crate_universe records
+      this checkout's absolute paths), so a fresh clone has none. Bootstrap
+      evaluates @crates against it with a plain `bazel fetch --repo=@crates`;
+      when the lockfile is absent, or that fetch fails (the lockfile's digest
+      no longer matches Cargo.toml/Cargo.lock — an edit, a branch switch),
+      it repins, with the splice temp outside $HOME (a ~/.cargo/config.toml
+      above the splice workspace makes cargo-bazel refuse).
+
+      Every @crates evaluation that renders (a repin, the first plain
+      evaluation after one) writes BUILD.bazel into the source folder of
+      every non-member path crate (rules_rust render_build_files): ocx's
+      committed `crates/*/BUILD.bazel` come back modified, each nested fork
+      gets an untracked one. Bootstrap restores exactly the files that open
+      with crate_universe's generated header — a hand edit is never touched
+      and reds below — and hides the forks' file per worktree through
+      `info/exclude`. A repin is refused on a dirty tree.
+
+      Post-conditions, both decided on the thing produced, not on an exit
+      code (`bazel fetch --repo=@crates` exits 0 as a no-op once the repo is
+      cached): the lockfile is non-empty, and external/ocx plus each nested
+      fork has an empty `git status --porcelain --untracked-files=all`.
+
+      The stamp keys `//test:acceptance` on host inputs Bazel cannot see:
+      sha256 of the resolved Sigstore compose file (OCX_SIGSTORE_COMPOSE, else
+      the harness's default `<main checkout>/../ocx/test/docker-compose.yml` —
+      the main checkout, not this worktree, exactly as test/src/helpers.py
+      resolves it — else `absent`), one digest over every file (relative path
+      + content) under the `sigstore/` directory beside it (the token minter,
+      trusted root, keys and service configs the harness and stack read; else
+      `absent`), and the external/ocx HEAD. A dirty submodule needs no key:
+      bootstrap exits 1 on one below.
+    silent: true
+    # `task verify` reaches it from seven gates; it takes no per-caller vars.
+    run: once
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - cmd: |
+          set -eu
+          O='{{.OCX_DIR}}'
+          subs() { git -C "$O" config --file .gitmodules --get-regexp '^submodule\..*\.path$' | cut -d' ' -f2; }
+          dirty() {
+            git -C "$O" status --porcelain --untracked-files=all | sed 's|^\(...\)|\1external/ocx/|'
+            for p in $(subs); do
+              [ -e "$O/$p/.git" ] || continue
+              git -C "$O/$p" status --porcelain --untracked-files=all | sed "s|^\(...\)|\1external/ocx/$p/|"
+            done
+          }
+          # Undo crate_universe's render over ocx's tracked BUILD files — only
+          # files that open with its generated header (a rule line, `# @generated`,
+          # then this sentence on line 3), so a hand edit is never touched.
+          restore_generated() {
+            for f in $(git -C "$O" diff --name-only -- 'crates/*/BUILD.bazel'); do
+              if [ "$(sed -n 2p "$O/$f")" = '# @generated' ] && sed -n 3p "$O/$f" | grep -qF '# DO NOT MODIFY: This file is auto-generated by a crate_universe tool.'; then git -C "$O" checkout -- "$f"; fi
+            done
+          }
+          # Hide the forks' rendered BUILD.bazel (untracked) — idempotent, per worktree.
+          for p in $(subs); do
+            [ -e "$O/$p/.git" ] || continue
+            ex=$(git -C "$O/$p" rev-parse --git-path info/exclude)
+            case "$ex" in /*) ;; *) ex="$O/$p/$ex" ;; esac
+            mkdir -p "$(dirname "$ex")"
+            grep -qxF 'BUILD.bazel' "$ex" 2>/dev/null || echo 'BUILD.bazel' >> "$ex"
+          done
+          restore_generated
+          why=
+          if [ ! -s Cargo.bazel.lock.json ]; then
+            why='Cargo.bazel.lock.json is absent (gitignored, per checkout)'
+          else
+            log=$(mktemp)
+            if ! {{.BAZEL}} fetch --repo=@crates > "$log" 2>&1; then
+              tail -n 5 "$log" >&2
+              why='@crates does not evaluate against Cargo.bazel.lock.json (stale after a Cargo.toml/Cargo.lock change or a branch switch; its error is above)'
+            fi
+            rm -f "$log"
+            restore_generated
+          fi
+          if [ -n "$why" ]; then
+            d=$(dirty)
+            if [ -n "$d" ]; then
+              printf 'bazel: refusing to repin over a dirty submodule tree:\n%s\n' "$d" >&2
+              exit 1
+            fi
+            echo "bazel: $why - repinning." >&2
+            mkdir -p /var/tmp/ocx-mirror-splice
+            CARGO_BAZEL_REPIN=1 {{.BAZEL}} fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-mirror-splice
+            # Settle: the first evaluation without CARGO_BAZEL_REPIN renders
+            # again (the env var is an extension input). Take it here, before
+            # the restore, not in the caller's next build.
+            {{.BAZEL}} fetch --repo=@crates
+            restore_generated
+          fi
+          test -s Cargo.bazel.lock.json || {
+            echo 'bazel: Cargo.bazel.lock.json is still absent after the repin - its cause is printed above (bazel fetch exits 0 as a no-op once @crates is cached; a cargo config above the splice temp makes cargo-bazel refuse).' >&2
+            exit 1; }
+          main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+          compose="${OCX_SIGSTORE_COMPOSE:-$main/../ocx/test/docker-compose.yml}"
+          if [ -f "$compose" ]; then sum=$(sha256sum < "$compose" | cut -d' ' -f1); else sum=absent; fi
+          # The harness also reads beside the compose file (sigstore/get-token.py,
+          # sigstore/trusted_root.json) and the stack mounts sigstore/keys and the
+          # dex/fulcio configs: one digest over every file's relative path + content.
+          sdir="$(dirname "$compose")/sigstore"
+          if [ -d "$sdir" ]; then
+            tree=$(cd "$sdir" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum | sha256sum | cut -d' ' -f1)
+          else tree=absent; fi
+          stamp=$(printf 'sigstore-compose %s\nsigstore-dir %s\nexternal/ocx %s\n' "$sum" "$tree" "$(git -C "$O" rev-parse HEAD)")
+          [ "$(cat test/acceptance.stamp 2>/dev/null)" = "$stamp" ] || printf '%s\n' "$stamp" > test/acceptance.stamp
+          d=$(dirty)
+          if [ -n "$d" ]; then
+            printf 'bazel: the external/ocx submodule tree is not clean - bootstrap only undoes crate_universe output; commit, stash or revert these:\n%s\n' "$d" >&2
+            exit 1
+          fi
+
+  build:
+    desc: Build every target (`bazel build //...`)
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} //...'
+
+  build:nobuild:
+    desc: Load and analyse every target without building; push the analysis BEP to telemetry
+    summary: |
+      A-8 / C-005. The BEP holds the whole client environment, so it goes into
+      a 0700 `mktemp -d` outside the checkout, is 0600 once written, and the
+      `defer` (armed first) removes it on every exit. `test -s` blocks a
+      dropped --build_event_json_file flag; the telemetry push never blocks.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-mirror-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/bep.json'
+    cmds:
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - task: bootstrap
+      - '{{.BAZEL}} build --nobuild --jobs={{.JOBS}} --build_event_json_file={{.BEP}} //...'
+      - cmd: >-
+          test -s {{.BEP}} || {
+          echo 'bazel: --build_event_json_file wrote nothing to {{.BEP}} - restore the flag on the build above.' >&2;
+          exit 1; };
+          chmod 600 {{.BEP}}
+      - task: :telemetry:bazel
+        vars:
+          BEP: '{{.BEP}}'
+
+  test:
+    desc: The whole Bazel test lane — unit, the C4 coverage gate, then acceptance
+    cmds:
+      - task: test:unit
+      - task: test:coverage
+      - task: test:accept
+
+  test:accept:
+    desc: The acceptance suite as one cached Bazel test — `bazel test //test:acceptance`
+    summary: |
+      C-008. One `sh_test` running `pytest -n auto` against the Bazel-built
+      ocx-mirror and the ocx.lock-pinned ocx (test/BUILD.bazel carries the
+      tags, inputs and inherited environment). Bootstrap first: it writes
+      test/acceptance.stamp, the input that re-keys the result when the
+      Sigstore compose file, its sigstore/ tree, or the external/ocx HEAD
+      moves. The suite's
+      registry knobs (REGISTRY, MIRROR_REGISTRY, ZOT_REGISTRY, …) are read
+      from this shell, exactly as `task test:parallel` reads them — and are
+      not part of the cache key.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} test --jobs={{.JOBS}} //test:acceptance {{.CLI_ARGS}}'
+
+  test:unit:
+    desc: Unit tests under Bazel (`//crates/... //:all`), floored per target and reported per case in target/bazel/junit.xml
+    summary: |
+      C-006, ocx's `test:unit` shape. The BEP holds the whole client
+      environment, so it lives in a 0700 `mktemp -d` outside the checkout
+      (`bep:mode`), 0600 once written, removed by the `defer` armed first.
+
+      `scripts/bazel_test_floor.py` reads each target's `test.log` off the BEP:
+      per-target case count == libtest `test result:` total, every target at
+      or above its `crates/TEST_TARGET_MAP.toml` count, and a per-case JUnit
+      at target/bazel/junit.xml (classname = label, name = libtest path,
+      failure = panic block). Its `--self-test` is `task scripts:self-test`'s
+      (verify phase 1).
+
+      Exit = Bazel's, unless the floor has a finding. `FLOOR_ARGS=--update`
+      rewrites the map's `[[target]]` rows from this run (counts rise only).
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-mirror-test-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/test-bep.json'
+      JUNIT: '{{.ROOT_DIR}}/target/bazel/junit.xml'
+    cmds:
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - task: bootstrap
+      - cmd: |
+          status=0
+          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all \
+            --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}} || status=$?
+          if [ ! -s '{{.BEP}}' ]; then
+            echo 'bazel test:unit: --build_event_json_file wrote nothing to {{.BEP}} - the floor has no subject. Restore the flag on the run above.' >&2
+            exit 1
+          fi
+          chmod 600 '{{.BEP}}'
+          python3 scripts/bazel_test_floor.py --bep '{{.BEP}}' --junit '{{.JUNIT}}' {{.FLOOR_ARGS}} || exit $?
+          exit "$status"
+
+  test:coverage:
+    desc: C4 coverage gate — Bazel-executed cases ⊇ `cargo nextest list` minus the [[excluded]] rows
+    summary: |
+      C-009. Runs `bazel test //crates/... //:all` with a BEP (a cache replay
+      on an unchanged tree), then `cargo nextest list --workspace --release
+      --locked` — sequentially: cargo and Bazel never build at once. Red on
+      any case nextest names that no Bazel target executed and no
+      `[[excluded]]` row covers (the names are printed), on a row matching no
+      case, and on a row Bazel executes (the list only shrinks).
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-mirror-cov-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/test-bep.json'
+      LISTING: '{{.BEP_DIR}}/nextest-list.json'
+    cmds:
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - task: :rust:install:nextest
+      - task: bootstrap
+      - cmd: |
+          set -e
+          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
+          chmod 600 '{{.BEP}}'
+      - cargo nextest list --workspace --release --locked --message-format json > '{{.LISTING}}'
+      - python3 scripts/bazel_test_floor.py --bep '{{.BEP}}' --coverage '{{.LISTING}}'
+
+  test:scoped:
+    desc: Test only what the change reaches — changed files vs BASE (default origin/main) → `rdeps` → `bazel test`
+    summary: |
+      C-010. Changed = `git diff --name-only $(git merge-base BASE HEAD)`
+      (committed and working-tree) plus untracked files.
+
+        escalate   MODULE.bazel(.lock), .bazelversion, .bazelrc, Cargo.lock,
+                   any Cargo.toml or BUILD.bazel, external/ocx → `bazel:test`
+        test/**    `//test:acceptance`
+        otherwise  each file as a label of its owning package (a deleted
+                   file: that package's `:all`); files that are no target —
+                   docs, .github, anything no rule reads — are dropped by a
+                   `--keep_going` resolve, then
+                   `kind(test, rdeps(//..., set(<labels>)))`
+
+      The selection is written to target/bazel/scoped-targets.txt. An empty
+      one prints "nothing to test" and exits 0.
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      BASE: '{{.BASE | default "origin/main"}}'
+      TARGETS: '{{.ROOT_DIR}}/target/bazel/scoped-targets.txt'
+    cmds:
+      - task: bootstrap
+      - mkdir -p '{{.ROOT_DIR}}/target/bazel'
+      - silent: true
+        cmd: |
+          python3 - '{{.BASE}}' '{{.TARGETS}}' <<'PY'
+          import shlex, subprocess, sys
+          from pathlib import Path
+
+          base, out = sys.argv[1], Path(sys.argv[2])
+          BAZEL = shlex.split("{{.BAZEL}}")
+          ESCALATE = {"MODULE.bazel", "MODULE.bazel.lock", ".bazelversion", ".bazelrc", ".bazelignore", "Cargo.lock"}
+
+          def run(*cmd, check=True):
+              result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
+              if check and result.returncode != 0:
+                  sys.exit(f"bazel test:scoped: `{' '.join(cmd)}` exited {result.returncode}: {result.stderr[-600:]}")
+              return result
+
+          def lines(text):
+              return {line for line in text.splitlines() if line}
+
+          merge_base = run("git", "merge-base", base, "HEAD").stdout.strip()
+          changed = lines(run("git", "diff", "--name-only", "--no-renames", merge_base).stdout)
+          changed |= lines(run("git", "ls-files", "--others", "--exclude-standard").stdout)
+
+          escalate = sorted(
+              f for f in changed
+              if f in ESCALATE or Path(f).name in ("BUILD.bazel", "Cargo.toml") or f == "external/ocx" or f.startswith("external/ocx/")
+          )
+          if escalate:
+              out.write_text("ESCALATE\n", encoding="utf-8")
+              print(f"bazel test:scoped: {len(changed)} changed path(s); escalating to bazel:test on {escalate}")
+              sys.exit(0)
+
+          def package(path):
+              for parent in Path(path).parents:
+                  if (parent / "BUILD.bazel").is_file():
+                      return "" if str(parent) == "." else str(parent)
+              return None
+
+          selected, labels = set(), []
+          for f in sorted(changed):
+              if f.startswith("test/"):
+                  selected.add("//test:acceptance")
+                  continue
+              pkg = package(f)
+              if pkg is None:
+                  continue
+              rel = Path(f).relative_to(pkg) if pkg else Path(f)
+              labels.append(f"//{pkg}:{rel}" if Path(f).exists() else f"//{pkg}:all")
+          if labels:
+              query = "set(" + " ".join(labels) + ")"
+              # --keep_going exits 3 on a partial result (the non-target paths);
+              # anything else but 0 is a query that did not run.
+              result = run(*BAZEL, "query", "--keep_going", "--output=label", query, check=False)
+              if result.returncode not in (0, 3):
+                  sys.exit(f"bazel test:scoped: `bazel query --keep_going {query}` exited {result.returncode}: {result.stderr[-600:]}")
+              resolved = lines(result.stdout)
+              dropped = sorted(set(labels) - resolved - {l for l in labels if l.endswith(":all")})
+              if dropped:
+                  print(f"bazel test:scoped: {len(dropped)} path(s) are no Bazel target - dropped: {dropped}", file=sys.stderr)
+              if resolved:
+                  rdeps = f"kind(test, rdeps(//..., set({' '.join(sorted(resolved))})))"
+                  selected |= lines(run(*BAZEL, "query", "--output=label", rdeps).stdout)
+          out.write_text(" ".join(sorted(selected)) + "\n", encoding="utf-8")
+          print(f"bazel test:scoped: {len(changed)} changed path(s) select {len(selected)} target(s): {' '.join(sorted(selected)) or '(none)'}")
+          PY
+      - cmd: |
+          selected=$(cat '{{.TARGETS}}')
+          case "$selected" in
+            ESCALATE) exec '{{.TASK_EXE}}' --dir '{{.ROOT_DIR}}' bazel:test ;;
+            '') echo 'bazel test:scoped: the change reaches no Bazel test target - nothing to test'; exit 0 ;;
+          esac
+          {{.BAZEL}} test --jobs={{.JOBS}} $selected {{.CLI_ARGS}}
+
+  cache:check:
+    desc: Re-run the test targets on an unchanged tree; red unless every result was served from a cache
+    summary: |
+      C-007. `scripts/bazel_cache_check.py` decides: cached iff `cachedLocally`
+      or `executionInfo.strategy` names a cache hit — never `cachedRemotely`
+      alone. Run it after a green `bazel:test` with no edit in between; a
+      red names the target that executed again (an undeclared input).
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      BEP_DIR:
+        sh: mktemp -d -t ocx-mirror-cache-bep.XXXXXXXX
+      BEP: '{{.BEP_DIR}}/test-bep.json'
+    cmds:
+      - defer: rm -rf '{{.BEP_DIR}}'
+      - task: bep:mode
+        vars: {DIR: '{{.BEP_DIR}}'}
+      - python3 scripts/bazel_cache_check.py --self-test
+      - task: bootstrap
+      - cmd: |
+          set -e
+          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all //test:acceptance --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
+          chmod 600 '{{.BEP}}'
+      - python3 scripts/bazel_cache_check.py --bep '{{.BEP}}'
+
+  pin:check:
+    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, MODULE.bazel rust version vs rust-toolchain.toml, MODULE.bazel version vs the workspace version
+    silent: true
+    dir: '{{.ROOT_DIR}}'
+    cmd: |
+      python3 - <<'EOF'
+      import re, sys, tomllib
+      from pathlib import Path
+      module = Path("MODULE.bazel").read_text()
+      bazelversion = Path(".bazelversion").read_text().strip()
+      ocx_tag = tomllib.loads(Path("ocx.toml").read_text())["tools"]["bazel"].rsplit(":", 1)[1]
+      channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+      workspace = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
+      rust = re.search(r'rust\.toolchain\([^)]*versions\s*=\s*\["([^"]+)"\]', module, re.S)
+      mod = re.search(r'module\([^)]*version\s*=\s*"([^"]+)"', module, re.S)
+      pairs = [
+          (".bazelversion", bazelversion, "ocx.toml bazel tag", ocx_tag),
+          ("MODULE.bazel rust.toolchain versions", rust and rust.group(1), "rust-toolchain.toml channel", channel),
+          ("MODULE.bazel module version", mod and mod.group(1), "Cargo.toml [workspace.package] version", workspace),
+      ]
+      bad = [f"bazel:pin:check: {a} = {x!r} but {b} = {y!r}" for a, x, b, y in pairs if x != y]
+      print("\n".join(bad) or "bazel:pin:check: 3 pin pairs agree", file=sys.stderr if bad else sys.stdout)
+      sys.exit(1 if bad else 0)
+      EOF
+
+  patch:check:
+    desc: The [patch.crates-io] forks bind under Bazel — exactly one Cargo.bazel.lock.json entry each for oci-client, docker_credential, sigstore, each a Path into external/ocx/external/<fork>
+    summary: |
+      ADR Q2. Nothing in MODULE.bazel names the forks; the splice reads the
+      Cargo patch table. Dropping that table does not error — the splice
+      resolves the crates.io releases — so this asserts the binding in the
+      generated lockfile. `LOCK=<file>` checks another file (red proofs).
+    silent: true
+    dir: '{{.ROOT_DIR}}'
+    vars:
+      LOCK: '{{.LOCK | default "Cargo.bazel.lock.json"}}'
+    cmds:
+      - task: bootstrap
+      - cmd: |
+          python3 - '{{.LOCK}}' <<'EOF'
+          import json, sys
+          forks = {"oci-client": "rust-oci-client", "docker_credential": "docker_credential", "sigstore": "sigstore-rs"}
+          crates = json.load(open(sys.argv[1]))["crates"]
+          bad = []
+          for name, fork in forks.items():
+              hits = [(k, v) for k, v in crates.items() if k.startswith(name + " ")]
+              if len(hits) != 1:
+                  bad.append(f"{name}: {len(hits)} entries, expected exactly 1: {[k for k, _ in hits]}")
+                  continue
+              key, entry = hits[0]
+              path = ((entry.get("repository") or {}).get("Path") or {}).get("path", "")
+              if not path.endswith("/external/ocx/external/" + fork):
+                  bad.append(f"{key}: repository is {entry.get('repository')!r}, expected a Path ending /external/ocx/external/{fork} - the patch table no longer binds")
+          for line in bad:
+              print(f"bazel:patch:check: {line}", file=sys.stderr)
+          if not bad:
+              print(f"bazel:patch:check: {', '.join(forks)} bind to external/ocx/external/*")
+          sys.exit(1 if bad else 0)
+          EOF
+
+  build:drift:
+    desc: Every Cargo dep edge has a BUILD twin and back; every rust `version` attr equals the workspace version
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.NO_OTEL}} ocx exec bazel -- python3 scripts/bazel_build_drift.py'
+
+  lint:
+    desc: Buildifier over every BUILD.bazel and .bzl — format diff plus lint findings, decided on the exit code
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      # The root package loads @crates, which a fresh worktree has no lockfile for.
+      - task: bootstrap
+      - '{{.BAZEL}} run --jobs={{.JOBS}} //:buildifier.check'
+
+  mod:check:
+    desc: MODULE.bazel.lock is fresh — `bazel mod deps --lockfile_mode=error`
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} mod deps --lockfile_mode=error'
+
+  cache:gc:
+    desc: Delete the Bazel disk cache when it exceeds MAX_GB (default 30) — manual, never in a gate
+    summary: |
+      Bazel 9.2.0's own disk-cache GC stays off (TOCTOU, bazel#30836, fixed in
+      9.3.0). Another worktree's server may be using the cache, so this is a
+      command you choose to run. `CACHE_DIR` defaults to the .bazelrc path.
+    silent: true
+    vars:
+      CACHE_DIR: '{{.CACHE_DIR | default (printf "%s/.cache/ocx-mirror/bazel-disk" (env "HOME"))}}'
+      MAX_GB: '{{.MAX_GB | default "30"}}'
+    cmd: |
+      set -eu
+      d='{{.CACHE_DIR}}'; max='{{.MAX_GB}}'
+      case "$max" in ''|*[!0-9]*) echo "bazel:cache:gc: MAX_GB must be a whole number, got '$max'" >&2; exit 1 ;; esac
+      size() { if [ -d "$d" ]; then du -sk "$d" | cut -f1; else echo 0; fi; }
+      before=$(size)
+      echo "bazel:cache:gc: before $((before / 1024)) MiB in $d (cap ${max} GiB)"
+      if [ "$before" -gt $((max * 1024 * 1024)) ]; then
+        {{.BAZEL}} shutdown
+        rm -rf "$d"
+      fi
+      echo "bazel:cache:gc: after $(( $(size) / 1024 )) MiB"

@@ -21,7 +21,8 @@
 #     It has no CI half: it runs at the tail of `bazel:build:nobuild` in both
 #     lanes. A step of its own would need the BEP to outlive the build, and the
 #     BEP carries the whole client environment (see `scripts/bep_to_otlp.py`).
-#   * `self-test` — the reader's proofs and the name/never-fail pytest.
+#   * `self-test` — the name/never-fail pytest (the reader's own proofs are
+#     `task scripts:self-test`'s).
 #
 # OFF BY DEFAULT, and silently: with no endpoint configured these tasks print
 # nothing and change nothing, so `task verify` on a fresh checkout is
@@ -108,7 +109,7 @@ tasks:
       this file.
     summary: |
       The reader is `scripts/bep_to_otlp.py`, whose `--self-test` (run by
-      `telemetry:self-test`) is where its red states are proved; this task is
+      `scripts:self-test`) is where its red states are proved; this task is
       the wiring and nothing else.
 
       `{{.BEP}}` is a scratch path the caller owns and deletes — this task
@@ -141,8 +142,6 @@ tasks:
       vars: [BEP]
 
   self-test:
-    desc: Prove the BEP reader red and green, and the telemetry names + never-fail contract
+    desc: Prove the telemetry names + never-fail contract (the BEP reader's proofs are scripts:self-test's)
     dir: '{{.ROOT_DIR}}'
-    cmds:
-      - python3 scripts/bep_to_otlp.py --self-test
-      - uv run --project test pytest scripts -q -p no:cacheprovider
+    cmd: uv run --project test pytest scripts -q -p no:cacheprovider

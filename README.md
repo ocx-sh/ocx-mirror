@@ -28,9 +28,12 @@ Toolchain bootstraps via [direnv](https://direnv.net) + `ocx direnv export`
 
 ```sh
 task            # fast check (fmt, clippy, cargo check)
-task verify     # full gate (lint, licenses, build, unit + acceptance tests)
+task verify     # full gate (lint, licenses, build, Bazel gates on Linux, unit + acceptance tests)
 task test       # acceptance tests (needs Docker for the local registry)
 ```
+
+The Linux Bazel loop, test telemetry and the rest of the task list:
+[docs/contributing.md](./docs/contributing.md).
 
 ## Bumping ocx (the `external/ocx` submodule)
 
@@ -47,7 +50,9 @@ git add external/ocx Cargo.lock && git commit -m "chore(deps): bump external/ocx
 
 Checklist when bumping:
 
-- keep `rust-toolchain.toml` channel in sync with `external/ocx/rust-toolchain.toml`
+- keep `rust-toolchain.toml` channel in sync with `external/ocx/rust-toolchain.toml`,
+  and `MODULE.bazel`'s `rust.toolchain(versions = [...])` with that channel
+  (`task bazel:pin:check` reds on a mismatch)
 - keep the dependency feature lists in root `Cargo.toml`'s
   `[workspace.dependencies]` in sync with ocx's `[workspace.dependencies]`
 - the `[patch.crates-io]` table must keep pointing at the nested fork
@@ -61,7 +66,8 @@ spawns), the pinned `ocx` moves with it, in four places:
 - `OCX_CONTAINER_CLI_TAG` in `src/command/package/pipeline/generate/ci/matrix.rs`
   (the `setup-ocx` version every generated workflow bakes in), then regenerate
   the golden fixtures under `tests/golden/`
-- the `setup-ocx` `version:` in `.github/workflows/verify.yml`
+- the `setup-ocx` `version:` steps in `.github/workflows/verify.yml`
+  (acceptance tests, Bazel graph)
 - the floor prose in `.claude/rules/subsystem-mirror.md` and
   `docs/reference/environment.md`
 
@@ -86,7 +92,9 @@ first; then bump the submodule here to the landed commit.
 ## Releases
 
 ```sh
-task release:prepare   # compute version (git-cliff), update Cargo.toml + CHANGELOG, verify
+task release:prepare   # refuse an unreleased ocx pointer, compute version (git-cliff),
+                       # bump Cargo.toml + the MODULE.bazel/BUILD version twins,
+                       # refresh MODULE.bazel.lock, update CHANGELOG, verify
 # review, then:
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z

@@ -187,7 +187,7 @@ depends on.
 travels on `--platform`), and an older `ocx package push` / `package test`
 demands the key and exits **65** — not a retried code — on every push leg.
 `ocx.toml` pins `ocx` itself for exactly this reason, so a local `task verify`
-and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` step carries the
+and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` steps carry the
 same floor and moves with the submodule pointer.
 
 **Three legs raise that floor**, each rejected by an older binary with exit

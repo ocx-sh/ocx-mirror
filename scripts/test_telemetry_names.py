@@ -147,6 +147,26 @@ def test_push_without_endpoint_is_silent(scratch: Path) -> None:
     assert result.stdout == "" and result.stderr == "", result
 
 
+def test_bazel_unreadable_bep_exits_zero_with_warning(scratch: Path) -> None:
+    # A stream bep_to_otlp.py cannot read: the script exits 1 before any
+    # network call, and the wrapper swallows that with its one line.
+    bep = scratch / "bep.json"
+    bep.write_text("this is not a build event stream\n", encoding="utf-8")
+    env = _env(scratch, OTEL_EXPORTER_OTLP_ENDPOINT=UNREACHABLE)
+    task = shutil.which("task", path=env["PATH"])
+    assert task, "go-task must be on PATH (run via `task telemetry:self-test`)"
+    result = subprocess.run(
+        [task, "--taskfile", str(TASKFILE), "bazel", f"BEP={bep}"],
+        env=env,
+        capture_output=True,
+        encoding="utf-8",
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result
+    assert "telemetry: bep_to_otlp.py failed" in result.stderr, result
+
+
 def _action_body() -> str:
     """The composite step's `run: |` block, de-indented. No YAML library in `test/`."""
     lines = ACTION.read_text(encoding="utf-8").splitlines()

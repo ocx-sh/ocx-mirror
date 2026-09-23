@@ -1,0 +1,76 @@
+# The acceptance suite as ONE cached Bazel test (adr_bazel_crate_split.md § C7,
+# D6): `pytest -n auto` inside a single `sh_test`. ocx runs one target per
+# module; here any binary rebuild re-keys every module anyway, and ocx measured
+# per-module exclusive-serial at 1421 s against 160 s for one parallel run.
+#
+# Tags: `exclusive` serialises it against every other test of the invocation
+# (it drives shared registries; never a global `--local_test_jobs`);
+# `no-sandbox` gives the runner the source tree the suite resolves through
+# `__file__`. Never `external` (disables result caching) or `local` (its
+# `no-remote` half drops the disk-cache hit on a fresh server).
+#
+# Inputs Bazel cannot see — the Sigstore compose file, its sigstore/ tree,
+# the external/ocx HEAD — are keyed through `acceptance.stamp`, written by
+# `task bazel:bootstrap` (which exits 1 on a dirty submodule, so its worktree
+# state needs no key). `env_inherit` values are NOT part of the action key: a
+# result recorded against one REGISTRY is served for another.
+
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+sh_test(
+    name = "acceptance",
+    timeout = "long",
+    srcs = ["bazel_accept.sh"],
+    args = [
+        "$(rlocationpath //:ocx-mirror)",
+        "$(rlocationpath @tools//:ocx)",
+        "$(rlocationpath @tools//:uv)",
+    ],
+    data = [
+        "acceptance.stamp",
+        "conftest.py",
+        "docker-compose.yml",
+        "pyproject.toml",
+        "uv.lock",
+        "zot-config.json",
+        "//:ocx.lock",
+        "//:ocx.toml",
+        "//:ocx-mirror",
+        "//:renovate.json",
+        "//:src/command/package/pipeline/generate/ci/matrix.rs",
+        "//:tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
+        "@tools//:ocx",
+        "@tools//:uv",
+    ] + glob(
+        [
+            "fixtures/**",
+            "src/**",
+            "tests/**",
+        ],
+        # pytest writes bytecode beside every module it imports; globbed, it
+        # would re-key the target on every run and the rerun would never cache.
+        exclude = [
+            "**/__pycache__/**",
+            "**/*.pyc",
+        ],
+    ),
+    env_inherit = [
+        "HOME",
+        "USER",
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "XDG_RUNTIME_DIR",
+        "REGISTRY",
+        "MIRROR_REGISTRY",
+        "ZOT_REGISTRY",
+        "OCX_SIGSTORE_COMPOSE",
+        "OCX_TEST_DEX_PORT",
+        "OCX_TEST_FULCIO_PORT",
+        "OCX_TEST_REKOR_PORT",
+        "CI",
+    ],
+    tags = [
+        "exclusive",
+        "no-sandbox",
+    ],
+)

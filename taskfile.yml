@@ -55,12 +55,30 @@ tasks:
     cmds:
       - cargo install --locked {{.CRATE | default .TOOL}}
 
+  scripts:self-test:
+    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bep_to_otlp
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - python3 scripts/bazel_test_floor.py --self-test
+      - python3 scripts/bazel_build_drift.py --self-test
+      - python3 scripts/bazel_cache_check.py --self-test
+      - python3 scripts/bep_to_otlp.py --self-test
+
   # Two-phase verify: parallel lint, then sequential build+test
   verify:
     desc: Full quality gate
     summary: |
-      Phase 1 (parallel): format, clippy, claude hooks test
-      Phase 2 (sequential): license, jsonschema feature, build, unit tests, acceptance tests
+      Phase 1 (parallel): format, clippy, gate-script self-tests, telemetry self-test
+      Phase 2 (sequential; adr_bazel_crate_split.md § C8):
+        Linux — license headers, dependency licenses, jsonschema feature,
+          cargo release build (the shipped artifact), claude hooks test, the
+          Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift),
+          Bazel unit tests, the Bazel coverage gate, the Bazel-excluded rows
+          under nextest, Bazel acceptance.
+        elsewhere — license headers, dependency licenses, jsonschema feature,
+          cargo release build, claude hooks test, nextest unit tests,
+          acceptance tests.
+      Clippy (phase 1) finishes before any Bazel command (phase 2) starts.
       Use `task --force verify` to bypass caching.
       Use `task --status verify` to check freshness without running.
     cmds:
@@ -72,7 +90,8 @@ tasks:
     deps:
       - task: rust:format:check
       - task: rust:clippy:check
-      - task: claude:hooks:test
+      - task: scripts:self-test
+      - task: telemetry:self-test
 
   .verify:build-test:
     internal: true
@@ -81,5 +100,25 @@ tasks:
       - task: rust:license:deps
       - task: rust:jsonschema:check
       - task: rust:build
+      - task: claude:hooks:test
+      # `if:`, not `platforms:` — go-task 3.53 ignores `platforms:` on a
+      # `task:` call (measured), and would run both arms.
+      - task: .verify:test:linux
+        if: '[ "{{OS}}" = linux ]'
       - task: rust:test:unit
+        if: '[ "{{OS}}" != linux ]'
       - task: test:parallel
+        if: '[ "{{OS}}" != linux ]'
+
+  .verify:test:linux:
+    internal: true
+    cmds:
+      - task: bazel:pin:check
+      - task: bazel:lint
+      - task: bazel:mod:check
+      - task: bazel:patch:check
+      - task: bazel:build:drift
+      - task: bazel:test:unit
+      - task: bazel:test:coverage
+      - task: rust:test:bazel-excluded
+      - task: bazel:test:accept

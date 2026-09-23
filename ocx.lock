@@ -1,9 +1,21 @@
 [metadata]
 lock_version = 3
 declaration_hash_version = 1
-declaration_hash = "sha256:2b3f5fd3e4a0e087f43123a2db6f82cfab0d28b2a4a8ad736e270d6e689d4657"
+declaration_hash = "sha256:26235ead8fa835d4efa0feb2c9a11dbd7d0ab62be155d9c5918908544e066224"
 generated_by = "ocx 0.6.1"
-generated_at = "2026-09-15T23:14:25Z"
+generated_at = "2026-09-23T08:42:52Z"
+
+[[tool]]
+name = "bazel"
+group = "default"
+repository = "ocx.sh/bazelbuild/bazel"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:118679b14e27ae5c8017bf20605fd4a983e6c9dfe3b88b3227cd0257832127ff"
+"darwin/arm64" = "sha256:8f47dbc43d89593072a9bcbbe97e45f5e98c8ba2c4bcb78a544072386d85017a"
+"linux/amd64+libc.glibc" = "sha256:839e9612c62619516f43861234da603af4475880d95d9575cdc445cb890e63dc"
+"linux/arm64+libc.glibc" = "sha256:019a098cc4257c51b949cbc3bb0df66a7cd63721e2809d40328a8d544c884af5"
+"windows/amd64" = "sha256:d2e5c396805d0a0e5037f76b03cce191d2518a59f2399efcaeff4673f06fb9a4"
 
 [[tool]]
 name = "git-cliff"

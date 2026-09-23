@@ -1,0 +1,58 @@
+"""ocx-mirror — the Bazel module (Linux test loop; release and non-Linux stay cargo).
+
+Pins copy ocx's MODULE.bazel (external/ocx). `compatibility_level` is absent on
+purpose: it is non-functional from Bazel 9.1.0 on.
+"""
+
+module(
+    name = "ocx_mirror",
+    version = "0.6.2",
+)
+
+bazel_dep(name = "rules_rust", version = "0.74.0")
+bazel_dep(name = "rules_shell", version = "0.8.0")
+bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
+
+# Resolved by the `git_override` below, not the registry.
+bazel_dep(name = "rules_ocx", version = "0.4.0")
+
+# Equal to rust-toolchain.toml's channel (`task bazel:pin:check`).
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2024",
+    versions = ["1.95.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# Root manifest only: the splice discovers `members = ["crates/*"]`, and the
+# ocx crates (path deps into external/ocx) render as `@crates//:ocx_*`. The
+# `[patch.crates-io]` forks bind through the same splice (`task bazel:patch:check`).
+# `lockfile =` is mandatory — without it every build re-splices. It is
+# gitignored: it records absolute paths of the generating checkout, so
+# `task bazel:bootstrap` regenerates it per checkout.
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:Cargo.bazel.lock.json",
+    manifests = ["//:Cargo.toml"],
+)
+use_repo(crate, "crates")
+
+# rules_ocx has no BCR release with Bazel 9 support yet; same commit as ocx.
+git_override(
+    module_name = "rules_ocx",
+    commit = "9ced5ffb79a77d37d6f479498bf32517a49b3dc7",
+    remote = "https://github.com/ocx-sh/rules_ocx",
+)
+
+# `@tools//:<bin>` from the same ocx.toml/ocx.lock pair the shell hook reads.
+ocx = use_extension("@rules_ocx//ocx:extensions.bzl", "ocx")
+ocx.project(
+    name = "tools",
+    ocx_lock = "//:ocx.lock",
+    ocx_toml = "//:ocx.toml",
+)
+use_repo(ocx, "tools")
