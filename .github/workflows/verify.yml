@@ -48,17 +48,6 @@ jobs:
       # can see. False on a fork PR, and the push skips rather than fails. The
       # credential itself is those steps' `env:` alone, never the whole job's.
       OTEL_ON: ${{ secrets.OTEL_OTLP_AUTH != '' }}
-      # Without this the keyless tier looks for a *sibling* ../ocx checkout,
-      # which CI does not have, and all 14 signing acceptance tests skip — a
-      # green check that tested none of the feature. The submodule's copy is
-      # the same file, at the pin this branch builds against. Job-wide, not on
-      # the acceptance step: every `bazel:bootstrap` in this job writes
-      # test/acceptance.stamp off it (sha256 of the file and its sigstore/
-      # tree, never the path), and one value keeps that stamp from flapping
-      # between steps. `//test:acceptance` reads it through `env_inherit`.
-      # `pytest_sessionstart` brings the stack up by explicit service name, so
-      # ocx's own registries in that compose file are never started.
-      OCX_SIGSTORE_COMPOSE: ${{ github.workspace }}/external/ocx/test/docker-compose.yml
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -197,7 +186,7 @@ jobs:
       - name: Bazel static gates
         # No explicit bazel:bootstrap: every Bazel gate below runs it, and
         # `run: once` makes that one bootstrap per invocation.
-        run: task bazel:pin:check bazel:lint bazel:mod:check bazel:patch:check bazel:build:drift JOBS=auto
+        run: task bazel:pin:check bazel:lint bazel:mod:check bazel:patch:check bazel:build:drift bazel:tag:guard JOBS=auto
       # Per-target analysis timings to otel.ocx.sh are pushed from inside this
       # step, by `telemetry:bazel` at the tail of `bazel:build:nobuild`. The
       # BEP holds the whole client environment, so it lives in a 0700 mktemp
@@ -290,11 +279,17 @@ jobs:
         with:
           junit: target/bazel/accept/junit.xml
           suite: acceptance
-      # >>> SLOT (WP-C): the mkdocs site build — `bazel build //docs:site`
-      # through its task, with the same `--config=ci`, an
-      # `--execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/site.zst"`
-      # and the same upload-grant expression as the two test steps. Goes here,
-      # after the test lanes and before the execution-log steps below. <<<
+      # `//docs:site` (docs/BUILD.bazel): mkdocs --strict, sandboxed and
+      # offline over the hashed docs/requirements.lock, so the archive lives on
+      # the shared cache like any test result — and docs.yml, which only reads,
+      # deploys what this lane wrote. Same `--config=ci`, execution log and
+      # upload grant as the two test steps.
+      - name: Docs site (Bazel)
+        run: >-
+          task docs:build JOBS=auto --
+          --config=ci
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/site.zst"
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}
       # One sorted `<label> <mnemonic> <digest>` line per spawn, per log: the
       # diff of two runs' files is the action-key comparison. Evidence only —
       # never the job's verdict.
