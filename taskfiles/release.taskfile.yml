@@ -29,12 +29,15 @@ tasks:
   # (or a commit ocx never published) is exit 1, naming the SHA. Tags are
   # fetched first — a stale local tag list would red a pointer that ocx has
   # since released, and a fetch that fails reds too (unverified is not green).
+  # A tag counts only while origin serves it at the same object: `fetch --tags`
+  # never deletes a local tag, so a tag made (or moved) here and never pushed
+  # would otherwise pass.
   guard:ocx-released:
     desc: The committed external/ocx pointer is contained in a released ocx tag (C6.5)
     silent: true
     dir: '{{.ROOT_DIR}}'
     cmd: |
-      set -eu
+      set -euo pipefail
       root=$(git rev-parse --show-toplevel)
       ocx="$root/external/ocx"
       ptr=$(git -C "$root" rev-parse HEAD:external/ocx)
@@ -43,12 +46,19 @@ tasks:
         echo "release: external/ocx pointer $ptr is not a commit in ocx's fetched history - bump the submodule to a released ocx tag first" >&2
         exit 1
       fi
-      tags=$(git -C "$ocx" tag --contains "$ptr")
+      remote=$(git -C "$ocx" ls-remote --tags origin)
+      # Captured first: a `$(…)` in the `for` list swallows git's exit status.
+      contains=$(git -C "$ocx" tag --contains "$ptr")
+      tags=
+      for t in $contains; do
+        ref=$(printf '%s\trefs/tags/%s' "$(git -C "$ocx" rev-parse "refs/tags/$t")" "$t")
+        if grep -qxF -- "$ref" <<<"$remote"; then tags="${tags:+$tags }$t"; fi
+      done
       if [ -z "$tags" ]; then
-        echo "release: external/ocx pointer $ptr is in no ocx tag - release ocx (or bump the submodule to a tagged commit) before releasing ocx-mirror" >&2
+        echo "release: external/ocx pointer $ptr is in no ocx tag published on origin - release ocx (or bump the submodule to a tagged commit) before releasing ocx-mirror; a local-only tag does not count" >&2
         exit 1
       fi
-      echo "release: external/ocx pointer $ptr is released in: $(echo "$tags" | head -n 3 | tr '\n' ' ')"
+      echo "release: external/ocx pointer $ptr is released in: $(echo "$tags" | cut -d' ' -f1-3)"
 
   # Bazel twins of the workspace version (adr_bazel_crate_split.md § C8):
   # MODULE.bazel's module() version and every rust rule's `version` attr in the

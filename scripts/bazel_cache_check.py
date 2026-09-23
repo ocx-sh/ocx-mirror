@@ -36,6 +36,8 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+from _gate import expect
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "bep" / "cache_states.json"
 
@@ -111,11 +113,6 @@ def run(bep: Path) -> int:
     if not findings:
         print(f"bazel cache check: all {sum(tally.values())} test result(s) served from a cache")
     return 1 if findings else 0
-
-
-def expect(condition: bool, problem: str) -> None:
-    if not condition:
-        raise SystemExit(f"bazel cache check self-test: {problem}")
 
 
 def _event(label: str, payload: dict) -> str:

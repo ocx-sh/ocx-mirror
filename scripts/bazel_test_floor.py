@@ -45,13 +45,14 @@ import argparse
 import dataclasses
 import json
 import re
-import sys
 import tempfile
 import tomllib
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+from _gate import Finding, codes, expect, report
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_TARGET_MAP = REPO_ROOT / "crates" / "TEST_TARGET_MAP.toml"
@@ -145,31 +146,6 @@ STATUS_CASE_MSG = (
     "Bazel reported {status} for this target while every case in its test.log passed (a crash "
     "after the summary, a timeout in teardown). The tail of the log follows"
 )
-
-
-@dataclasses.dataclass(frozen=True)
-class Finding:
-    """One exit-1 reason. Tests assert on `code`; `message` is stderr."""
-
-    code: str
-    message: str
-
-
-def codes(findings: list[Finding]) -> list[str]:
-    return sorted({finding.code for finding in findings})
-
-
-def expect(condition: bool, problem: str) -> None:
-    """A loud exit — a bare `assert` vanishes under `python3 -O`."""
-    if not condition:
-        raise SystemExit(f"bazel test floor self-test: {problem}")
-
-
-def report(findings: list[Finding]) -> int:
-    sys.stdout.flush()
-    for finding in findings:
-        print(finding.message, file=sys.stderr)
-    return 1 if findings else 0
 
 
 @dataclasses.dataclass(frozen=True)
