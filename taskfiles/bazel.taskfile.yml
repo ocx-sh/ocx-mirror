@@ -275,7 +275,7 @@ tasks:
           set -e
           {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
           chmod 600 '{{.BEP}}'
-      - cargo nextest list --workspace --release --locked --message-format json > '{{.LISTING}}'
+      - cargo nextest list --workspace --release --locked --features ocx_mirror/__testing --message-format json > '{{.LISTING}}'
       - python3 scripts/bazel_test_floor.py --bep '{{.BEP}}' --coverage '{{.LISTING}}'
 
   test:scoped:
