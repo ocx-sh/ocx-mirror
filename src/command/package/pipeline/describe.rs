@@ -476,6 +476,52 @@ hashes = { sha256 = "aaaa" }
     }
 
     #[tokio::test]
+    async fn synthesize_env_catalog_pylock_app_not_found_is_source_error_exit_69() {
+        // Characterization (plan_bazel_phase2 gate 1, S-002): the not-found
+        // error carries no `LockError`, so `classify_error` keeps it
+        // `SourceError` (exit 69).
+        let tmp = tempdir().unwrap();
+        let lock_toml = r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "pycowsay"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "pycowsay-1.0.0-py3-none-any.whl"
+url = "https://example.com/pycowsay-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+"#;
+        std::fs::write(tmp.path().join("pylock.toml"), lock_toml).unwrap();
+        let yaml = r#"
+name: missing-app
+target:
+  registry: ocx.sh
+  repository: missing-app
+source:
+  type: pylock
+  path: pylock.toml
+python:
+  version: "3.13.1"
+  abi: cp313
+  interpreter_package: "ocx.sh/python/cpython:3.13.1"
+"#;
+        let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
+
+        let err = synthesize_env_catalog(&spec, tmp.path())
+            .await
+            .expect_err("an app absent from the lock must fail");
+
+        assert!(matches!(err, MirrorError::SourceError(_)), "got: {err:?}");
+        assert_eq!(
+            err.to_string(),
+            "source error: failed to resolve pylock app package for catalog autogen: app package 'missing-app' not found in pylock.toml (locked packages: [\"pycowsay\"])"
+        );
+        assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
+    }
+
+    #[tokio::test]
     async fn find_any_derived_pypi_lock_returns_none_for_missing_directory() {
         let tmp = tempdir().unwrap();
         assert!(find_any_derived_pypi_lock(tmp.path()).await.is_none());

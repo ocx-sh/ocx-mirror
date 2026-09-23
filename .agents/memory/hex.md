@@ -89,3 +89,8 @@ research-axes:
 - Note for the next `/hex-init` re-audit: `meta-plan-status.md`'s `Step:`
   vocabulary is swarm-era (`/swarm-plan → …`); hex plans write
   `Step: /hex-plan → plan-approved` etc. Reconcile the vocabulary or exempt hex.
+- Plan 2026-09-23 done: `.claude/state/plans/plan_bazel_phase1_crate_split.md` (crate split, Loop 1 of
+  the bazel-crate-split goal). Learned: in a crate split the review perspective that mattered was
+  test-coverage — moved tests kept their names (count gate green) but lost end-to-end assertions;
+  cross-crate `#[cfg(test)]` shortcuts need an inventory before the first move. rtk-proxied `diff`
+  reported differing schema files identical — use `/usr/bin/diff`.

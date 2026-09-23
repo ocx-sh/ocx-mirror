@@ -31,7 +31,9 @@ pub struct Pylock {
 /// A single locked package with its candidate wheels.
 #[derive(Debug, Clone)]
 pub struct LockedPackage {
-    /// Normalized distribution name (e.g. `"charset-normalizer"`).
+    /// Distribution name as written in the lock (e.g. `"charset-normalizer"`).
+    /// PEP 751 asks for the normalised form but it is not enforced here —
+    /// compare via [`normalize_package_name`](crate::normalize_package_name).
     pub name: String,
     /// The pinned project version (e.g. `"3.4.0"`).
     pub version: String,
