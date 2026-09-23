@@ -37,7 +37,12 @@ from pathlib import Path
 
 from _gate import expect
 
-SPAWN, LABEL, MNEMONIC, CACHE_HIT, DIGEST = 7, 7, 8, 12, 16
+SPAWN, ARGS, LABEL, MNEMONIC, CACHE_HIT, DIGEST = 7, 1, 7, 8, 12, 16
+# The follow-up spawn a freshly *executed* test gets: it turns that run's
+# test.log into test.xml, so its key carries the log's timings and differs on
+# every execution. A cached test never spawns it — it is not a lookup the
+# second run makes — so it is left out of the key file and counted instead.
+XML_GENERATOR = "tools/test/generate-xml.sh"
 HASH, SIZE = 1, 2
 
 
@@ -84,13 +89,21 @@ def spawns(stream: bytes) -> Iterator[dict[int, int | bytes]]:
             raise ValueError("truncated entry")
         for number, value in _fields(entry):
             if number == SPAWN and isinstance(value, bytes):
-                yield dict(_fields(value))
+                # First occurrence wins: `args` is repeated, and argv[0] is the
+                # one that names the program.
+                spawn: dict[int, int | bytes] = {}
+                for field, item in _fields(value):
+                    spawn.setdefault(field, item)
+                yield spawn
 
 
-def keys(stream: bytes) -> tuple[list[str], int, int]:
-    """(sorted key lines, spawns carrying no digest, cache hits)."""
-    lines, undigested, hits = [], 0, 0
+def keys(stream: bytes) -> tuple[list[str], int, int, int]:
+    """(sorted key lines, spawns carrying no digest, cache hits, test.xml generators left out)."""
+    lines, undigested, hits, generators = [], 0, 0, 0
     for spawn in spawns(stream):
+        if bytes(spawn.get(ARGS, b"")).decode().endswith(XML_GENERATOR):
+            generators += 1
+            continue
         label = bytes(spawn.get(LABEL, b"")).decode() or "-"
         mnemonic = bytes(spawn.get(MNEMONIC, b"")).decode() or "-"
         digest = dict(_fields(bytes(spawn[DIGEST]))) if DIGEST in spawn else {}
@@ -100,14 +113,17 @@ def keys(stream: bytes) -> tuple[list[str], int, int]:
             key, undigested = "-", undigested + 1
         hits += 1 if spawn.get(CACHE_HIT) else 0
         lines.append(f"{label}\t{mnemonic}\t{key}")
-    return sorted(lines), undigested, hits
+    return sorted(lines), undigested, hits, generators
 
 
 def run(log: Path, out: Path) -> int:
     stream = subprocess.run(["zstd", "-dc", str(log)], capture_output=True, check=True).stdout
-    lines, undigested, hits = keys(stream)
+    lines, undigested, hits, generators = keys(stream)
     out.write_text("".join(f"{line}\n" for line in lines))
-    print(f"bazel execlog: {len(lines)} spawn(s), {hits} cache hit(s), {undigested} without an action digest -> {out}")
+    print(
+        f"bazel execlog: {len(lines)} spawn(s), {hits} cache hit(s), {undigested} without an action digest, "
+        f"{generators} test.xml generator(s) left out -> {out}"
+    )
     if lines and undigested == len(lines):
         # Bazel records the digest only with a remote cache configured; a file of
         # `-` keys would diff equal for any two trees.
@@ -144,13 +160,22 @@ def self_test() -> int:
         + _entry(_enc(1, 2), _enc(3, _enc(1, "bazel-out/f")))  # File: skipped
         + _entry(_enc(SPAWN, _enc(LABEL, "//z:t") + _enc(MNEMONIC, "Rustc") + _enc(CACHE_HIT, 1) + _enc(DIGEST, digest)))
         + _entry(_enc(SPAWN, _enc(LABEL, "//a:t") + _enc(MNEMONIC, "TestRunner") + _enc(DIGEST, digest) + _enc(99, 7)))
+        + _entry(
+            _enc(
+                SPAWN,
+                _enc(ARGS, "external/bazel_tools/tools/test/generate-xml.sh")
+                + _enc(LABEL, "//a:t")
+                + _enc(MNEMONIC, "TestRunner")
+                + _enc(DIGEST, _enc(HASH, "cd" * 32)),
+            )
+        )
     )
-    lines, undigested, hits = keys(stream)
+    lines, undigested, hits, generators = keys(stream)
     expect(lines == [f"//a:t\tTestRunner\t{'ab' * 32}/142", f"//z:t\tRustc\t{'ab' * 32}/142"], f"green: got {lines}")
-    expect((undigested, hits) == (0, 1), f"green: undigested/hits {undigested}/{hits}")
-    print("GREEN: two spawns, sorted, one hit counted, non-spawn entries and unknown fields skipped")
+    expect((undigested, hits, generators) == (0, 1, 1), f"green: undigested/hits/generators {undigested}/{hits}/{generators}")
+    print("GREEN: two spawns, sorted, one hit counted, the test.xml generator and non-spawn entries left out")
 
-    lines, undigested, _ = keys(_entry(_enc(SPAWN, _enc(LABEL, "//a:t"))))
+    lines, undigested, _, _ = keys(_entry(_enc(SPAWN, _enc(LABEL, "//a:t"))))
     expect(lines == ["//a:t\t-\t-"] and undigested == 1, f"red: an undigested spawn must read as `-`, got {lines}")
     print("RED  : a spawn without an action digest is counted, not dropped")
 

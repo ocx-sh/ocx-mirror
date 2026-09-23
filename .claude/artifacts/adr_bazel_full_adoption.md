@@ -96,4 +96,25 @@ binaries' `[patch.crates-io]` table, which only this repository re-declares.
 
 ## Evidence
 
-_Filled from CI — run URLs, executed-action counts, cache-hit lines._
+**Pre-merge (branch runs read, never write — C3).** A cache *hit* cannot show before a `main` push has
+written, so the pre-merge proof is that two runs ask the cache for identical keys. It uses the
+`bazel-execlog` artifact (`scripts/bazel_execlog_keys.py`: one `<label> <mnemonic> <action digest>`
+line per spawn). Left out: the `generate-xml.sh` spawn Bazel adds after a test *executes*, because it
+reads that run's `test.log`. A cached test never runs it.
+
+| Run | Tree | Unit | Acceptance | Site |
+|---|---|---|---|---|
+| [35923034539](https://github.com/ocx-sh/ocx-mirror/actions/runs/35923034539) | 813e6ca | 1590 processes, 1139 executed, 14/14 tests run | 1 local | 2 sandboxed |
+| [35925312539](https://github.com/ocx-sh/ocx-mirror/actions/runs/35925312539) attempt 2 | 6a462b2 | same | same | same |
+| [35925312539](https://github.com/ocx-sh/ocx-mirror/actions/runs/35925312539) attempt 3 | 6a462b2 | same | same | same |
+
+Key files, attempt 2 vs attempt 3 (same tree): unit 1125/1125, acceptance 1/1 and site 2/2 lines,
+all byte-identical. Run 1 vs run 2 (commits differing only outside these targets' inputs): also
+byte-identical. Every action a second run would look up has the key the first run would have written.
+
+**Local (done-bar 4).** After `bazel clean`, `bazel test //test:acceptance //docs:site` reported
+`1523 processes: 1099 disk cache hit, 424 internal` and `Executed 0 out of 1 test`.
+
+**Post-merge (the C1 bar itself).** Pending the owner's merge. The first `main` push run writes the
+cache. A re-run of it (`gh run rerun <id>`) must then report `Executed 0 out of 14` (unit) and
+`0 out of 1` (acceptance), and zero non-internal processes in all three Bazel steps.
