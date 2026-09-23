@@ -7,13 +7,17 @@
 # (it drives shared registries; never a global `--local_test_jobs`);
 # `no-sandbox` gives the runner the source tree the suite resolves through
 # `__file__`. Never `external` (disables result caching) or `local` (its
-# `no-remote` half drops the disk-cache hit on a fresh server).
+# `no-remote` half drops the disk-cache hit on a fresh server) — nor any other
+# cache-suppressing tag: `task bazel:tag:guard` reds one.
 #
-# Inputs Bazel cannot see — the Sigstore compose file, its sigstore/ tree,
-# the external/ocx HEAD — are keyed through `acceptance.stamp`, written by
-# `task bazel:bootstrap` (which exits 1 on a dirty submodule, so its worktree
-# state needs no key). `env_inherit` values are NOT part of the action key: a
-# result recorded against one REGISTRY is served for another.
+# Its result is REMOTE-cached (diverging from ocx, whose acceptance verdicts
+# never leave the host — ocx test/bazel.bzl "None of these results reaches
+# another machine"): CI's main-push lane uploads it and every later run on the
+# same tree reads it. That is only sound while `data` covers everything the
+# suite reads, so every read outside test/ is declared here — including the
+# ocx submodule files, through @ocx_test — and nothing host-side is left to
+# pick a verdict (see `env_inherit`). Residuals the key cannot see: the
+# running containers' state and mutable image tags (`registry:2`).
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -25,15 +29,27 @@ sh_test(
         "$(rlocationpath //:ocx-mirror)",
         "$(rlocationpath @tools//:ocx)",
         "$(rlocationpath @tools//:uv)",
+        "$(rlocationpath @ocx_test//:docker-compose.yml)",
     ],
+    # `@tools//:ocx` / `@tools//:uv` are rules_ocx launchers whose text bakes
+    # this host's absolute `$OCX_HOME` store paths, so the key is per host
+    # path: every CI runner (/home/runner) shares entries, a developer host
+    # re-runs once and then hits its own. Over-keyed, never under-keyed — the
+    # pinned binaries' content is `//:ocx.lock` (declared), and a lazy,
+    # path-free launcher would re-export ocx's pinned env into every `ocx` the
+    # suite spawns with its own per-test OCX_HOME.
     data = [
-        "acceptance.stamp",
         "//:ocx.lock",
         "//:ocx.toml",
         "//:ocx-mirror",
         "//:renovate.json",
         "//:src/command/package/pipeline/generate/ci/matrix.rs",
         "//:tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
+        # The Sigstore stack the runner brings up and the golden cosign keys
+        # test_signing.py reads, both from the pinned submodule.
+        "@ocx_test//:docker-compose.yml",
+        "@ocx_test//:golden_keys",
+        "@ocx_test//:sigstore",
         "@tools//:ocx",
         "@tools//:uv",
     ] + glob(
@@ -41,8 +57,6 @@ sh_test(
         # helper) is an input the day it lands, not a cached green after.
         ["**"],
         exclude = [
-            # Named above: a missing stamp must fail, not glob to nothing.
-            "acceptance.stamp",
             # The runner, already `srcs`.
             "bazel_accept.sh",
             # pytest writes bytecode beside every module it imports; globbed,
@@ -59,22 +73,33 @@ sh_test(
             ".venv/**",
             "bin/**",
             "home/**",
+            "results/**",
         ],
     ),
+    # NOT part of the action key: a result recorded under one value is served
+    # under another (remotely too). So this list holds only what cannot pick a
+    # verdict — what the runner itself needs, and how to reach the Docker
+    # daemon; the suite gets none of its knobs from here (the runner pins the
+    # registries' defaults, the Sigstore compose file, project and ports):
+    #   HOME            the runner's own roots (uv cache, TMPDIR, lock); the
+    #                   suite and every binary it spawns get a fresh per-run
+    #                   HOME, so no ~/.netrc, ~/.config/ocx or warm ~/.ocx of
+    #                   this host reaches a verdict.
+    #   USER            pytest's basetemp directory name only.
+    #   DOCKER_HOST, XDG_RUNTIME_DIR, DOCKER_CONFIG
+    #                   which daemon and CLI config (plugins, context) `docker
+    #                   compose` uses; the images and ports it runs are the
+    #                   declared compose files.
+    # Dropped on purpose: `CI` (no reader — the harness never reads it, and
+    # neither binary reads it at run time), `REGISTRY`/`MIRROR_REGISTRY`/
+    # `ZOT_REGISTRY` and `OCX_SIGSTORE_COMPOSE`/`OCX_TEST_*_PORT` (each moved a
+    # verdict's stack without moving the key).
     env_inherit = [
+        "DOCKER_CONFIG",
+        "DOCKER_HOST",
         "HOME",
         "USER",
-        "DOCKER_HOST",
-        "DOCKER_CONFIG",
         "XDG_RUNTIME_DIR",
-        "REGISTRY",
-        "MIRROR_REGISTRY",
-        "ZOT_REGISTRY",
-        "OCX_SIGSTORE_COMPOSE",
-        "OCX_TEST_DEX_PORT",
-        "OCX_TEST_FULCIO_PORT",
-        "OCX_TEST_REKOR_PORT",
-        "CI",
     ],
     tags = [
         "exclusive",

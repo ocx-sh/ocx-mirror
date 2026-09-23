@@ -56,7 +56,7 @@ tasks:
       - cargo install --locked {{.CRATE | default .TOOL}}
 
   scripts:self-test:
-    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bazel_execlog_keys, bep_to_otlp, and the bazel-cache-rc action's selftest.sh
+    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bazel_execlog_keys, bazel_tag_guard, bep_to_otlp, and the bazel-cache-rc action's selftest.sh
     dir: '{{.ROOT_DIR}}'
     cmds:
       - python3 scripts/bazel_test_floor.py --self-test
@@ -64,6 +64,7 @@ tasks:
       - python3 scripts/bazel_cache_check.py --self-test
       - python3 scripts/bazel_scoped.py --self-test
       - python3 scripts/bazel_execlog_keys.py --self-test
+      - python3 scripts/bazel_tag_guard.py --self-test
       - python3 scripts/bep_to_otlp.py --self-test
       # ocx's scripts.taskfile.yml wires it the same way: it lives under
       # `.github/actions/`, not `scripts/`, so a list of `scripts/*.py` alone
@@ -78,8 +79,9 @@ tasks:
       Phase 2 (sequential; adr_bazel_crate_split.md § C8):
         Linux — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing` provenance), claude hooks test, the
-          Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift),
-          Bazel unit tests, the Bazel coverage gate, Bazel acceptance.
+          Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift,
+          tag guard), Bazel unit tests, the Bazel coverage gate, Bazel
+          acceptance.
         elsewhere — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing`), claude hooks test, nextest unit tests,
           acceptance tests.
@@ -123,6 +125,7 @@ tasks:
       - task: bazel:mod:check
       - task: bazel:patch:check
       - task: bazel:build:drift
+      - task: bazel:tag:guard
       - task: bazel:test:unit
       - task: bazel:test:coverage
       - task: bazel:test:accept

@@ -378,6 +378,21 @@ def sigstore_compose_path() -> Path:
     return Path(os.environ.get("OCX_SIGSTORE_COMPOSE", str(DEFAULT_SIGSTORE_COMPOSE)))
 
 
+def sigstore_compose_argv(compose_file: Path) -> list[str]:
+    """``docker compose`` against the Sigstore file, in ``OCX_SIGSTORE_PROJECT`` when set.
+
+    Unset, compose names the project after the file's directory (``test``) --
+    the sibling ocx checkout's own stack, shared by design. The Bazel runner
+    (test/bazel_accept.sh) sets it, together with dedicated ``OCX_TEST_*_PORT``
+    values, to run the submodule's stack beside that one: bringing the
+    submodule's file up under ``test`` would recreate the sibling's containers
+    from another path. ``-p`` rather than ``COMPOSE_PROJECT_NAME``: the variable
+    would also rename this harness's own registry project, whose file names it.
+    """
+    project = os.environ.get("OCX_SIGSTORE_PROJECT")
+    return ["docker", "compose", *(["-p", project] if project else []), "-f", str(compose_file)]
+
+
 def sigstore_base_urls() -> dict[str, str]:
     """Host-side base URL per polled service, from the ``OCX_TEST_*_PORT`` vars.
 
@@ -480,7 +495,7 @@ def wait_for_sigstore(compose_file: Path | None = None, *, timeout: float = 180.
             unready = ", ".join(f"{service} did not answer {url}" for service, url in sorted(pending.items()))
             raise RuntimeError(
                 f"the sigstore stack from {compose_file} was not ready after {timeout:.0f}s: {unready}\n"
-                f"  docker compose -f {compose_file} logs --tail=40 " + " ".join(sorted(pending))
+                f"  {' '.join(sigstore_compose_argv(compose_file))} logs --tail=40 " + " ".join(sorted(pending))
             )
         time.sleep(1.0)
 

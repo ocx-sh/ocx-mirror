@@ -26,9 +26,9 @@ Windows, CI's test lanes and the release build stay on cargo.
 
 | Command | What it does |
 |---|---|
-| `task bazel:bootstrap` | Once per fresh worktree: generate `Cargo.bazel.lock.json`, write `test/acceptance.stamp` |
+| `task bazel:bootstrap` | Once per fresh worktree: generate `Cargo.bazel.lock.json` |
 | `task bazel:test:unit` | Unit tests; per-case JUnit at `target/bazel/junit.xml` |
-| `task bazel:test:accept` | The acceptance suite as one cached test (same environment as `task test:parallel`) |
+| `task bazel:test:accept` | The acceptance suite as one cached test, against its own Sigstore stack from `external/ocx` (no registry or port overrides — use `task test:parallel` for those) |
 | `task bazel:test:scoped` | Only the tests affected by what changed against `origin/main` |
 | `task bazel:cache:gc` | Delete the disk cache when it exceeds `MAX_GB` (default 30); manual |
 

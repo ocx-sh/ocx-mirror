@@ -68,7 +68,7 @@ tasks:
       chmod 700 '{{.DIR}}' && python3 -c "import os,sys; m = os.stat(sys.argv[1]).st_mode & 0o777; sys.exit(0 if m == 0o700 else f'bazel: the BEP scratch directory {sys.argv[1]} is mode {m:04o}, not 0700 - the BEP carries the client environment. Point TMPDIR at a filesystem that honours modes.')" '{{.DIR}}'
 
   bootstrap:
-    desc: Make this checkout buildable — repin @crates when Cargo.bazel.lock.json is absent or stale, undo crate_universe's writes into external/ocx, write test/acceptance.stamp
+    desc: Make this checkout buildable — repin @crates when Cargo.bazel.lock.json is absent or stale, undo crate_universe's writes into external/ocx
     summary: |
       C8 + A-4. `Cargo.bazel.lock.json` is gitignored (crate_universe records
       this checkout's absolute paths), so a fresh clone has none. Bootstrap
@@ -92,15 +92,11 @@ tasks:
       cached): the lockfile is non-empty, and external/ocx plus each nested
       fork has an empty `git status --porcelain --untracked-files=all`.
 
-      The stamp keys `//test:acceptance` on host inputs Bazel cannot see:
-      sha256 of the resolved Sigstore compose file (OCX_SIGSTORE_COMPOSE, else
-      the harness's default `<main checkout>/../ocx/test/docker-compose.yml` —
-      the main checkout, not this worktree, exactly as test/src/helpers.py
-      resolves it — else `absent`), one digest over every file (relative path
-      + content) under the `sigstore/` directory beside it (the token minter,
-      trusted root, keys and service configs the harness and stack read; else
-      `absent`), and the external/ocx HEAD. A dirty submodule needs no key:
-      bootstrap exits 1 on one below.
+      The external/ocx files the tests read (the Sigstore stack, the golden
+      cosign keys, ocx_python's wheel) are Bazel inputs of their own, through
+      the @ocx_test / @ocx_python_wheels local repositories (MODULE.bazel), so
+      a dirty submodule would re-key them rather than hide — bootstrap still
+      exits 1 on one below.
     silent: true
     # `task verify` reaches it from seven gates; it takes no per-caller vars.
     run: once
@@ -164,18 +160,6 @@ tasks:
           test -s Cargo.bazel.lock.json || {
             echo 'bazel: Cargo.bazel.lock.json is still absent after the repin - its cause is printed above (bazel fetch exits 0 as a no-op once @crates is cached; a cargo config above the splice temp makes cargo-bazel refuse).' >&2
             exit 1; }
-          main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
-          compose="${OCX_SIGSTORE_COMPOSE:-$main/../ocx/test/docker-compose.yml}"
-          if [ -f "$compose" ]; then sum=$(sha256sum < "$compose" | cut -d' ' -f1); else sum=absent; fi
-          # The harness also reads beside the compose file (sigstore/get-token.py,
-          # sigstore/trusted_root.json) and the stack mounts sigstore/keys and the
-          # dex/fulcio configs: one digest over every file's relative path + content.
-          sdir="$(dirname "$compose")/sigstore"
-          if [ -d "$sdir" ]; then
-            tree=$(cd "$sdir" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum | sha256sum | cut -d' ' -f1)
-          else tree=absent; fi
-          stamp=$(printf 'sigstore-compose %s\nsigstore-dir %s\nexternal/ocx %s\n' "$sum" "$tree" "$(git -C "$O" rev-parse HEAD)")
-          [ "$(cat test/acceptance.stamp 2>/dev/null)" = "$stamp" ] || printf '%s\n' "$stamp" > test/acceptance.stamp
           d=$(dirty)
           if [ -n "$d" ]; then
             printf 'bazel: the external/ocx submodule tree is not clean - bootstrap only undoes crate_universe output; commit, stash or revert these:\n%s\n' "$d" >&2
@@ -227,14 +211,12 @@ tasks:
     desc: The acceptance suite as one cached Bazel test — `bazel test //test:acceptance`
     summary: |
       C-008. One `sh_test` running `pytest -n auto` against the Bazel-built
-      ocx-mirror and the ocx.lock-pinned ocx (test/BUILD.bazel carries the
-      tags, inputs and inherited environment). Bootstrap first: it writes
-      test/acceptance.stamp, the input that re-keys the result when the
-      Sigstore compose file, its sigstore/ tree, or the external/ocx HEAD
-      moves. The suite's
-      registry knobs (REGISTRY, MIRROR_REGISTRY, ZOT_REGISTRY, …) are read
-      from this shell, exactly as `task test:parallel` reads them — and are
-      not part of the cache key.
+      ocx-mirror, the ocx.lock-pinned ocx and the external/ocx Sigstore stack
+      (test/BUILD.bazel carries the tags, inputs and inherited environment).
+      The result is remote-cacheable, so the suite takes none of its knobs
+      from this shell: registries at their defaults, the Sigstore stack as
+      its own compose project on fixed ports (test/bazel_accept.sh). For
+      other registries or the sibling ../ocx stack, run `task test:parallel`.
 
       The per-case pytest JUnit (the runner's `--junit-xml=$XML_OUTPUT_FILE`)
       is copied out of `bazel-testlogs` — a symlink into the output base — to
@@ -459,6 +441,18 @@ tasks:
     cmds:
       - task: bootstrap
       - '{{.NO_OTEL}} ocx exec bazel -- python3 scripts/bazel_build_drift.py'
+
+  tag:guard:
+    desc: Every test stays remotely cacheable and honestly keyed — no cache-suppressing tag, acceptance's inputs declared, no stray env_inherit, no volatile .bazelrc flag
+    summary: |
+      `scripts/bazel_tag_guard.py` (adapted from ocx's) over two queries:
+      `tests(//...)` for tags and `env_inherit`, `deps(//test:acceptance)` for
+      its input closure; plus the checked-in .bazelrc. Its `--self-test` is
+      `task scripts:self-test`'s.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - python3 scripts/bazel_tag_guard.py --bazel '{{.BAZEL}}'
 
   lint:
     desc: Buildifier over every BUILD.bazel and .bzl — format diff plus lint findings, decided on the exit code
