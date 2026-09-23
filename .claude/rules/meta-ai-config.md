@@ -38,6 +38,9 @@ re-sync means drift — investigate before landing.
 | `rules/security-threat-model.md` | No ocx equivalent; owner ruling on the defended boundary (outside attackers only, execution environment trusted). Binds every security review |
 | `rules/meta-plan-status.md` | Extracted from ocx's monolithic `meta-ai-config.md`, restructured standalone |
 | `rules/meta-ai-config.md` | This file |
+| `rules/crate-placement.md` | No ocx equivalent; where mirror code goes vs. promotes to an ocx ecosystem crate, keyed to `adr_bazel_crate_split.md` |
+| `skills/ocx-upstream-pr/` | No ocx equivalent; the mirror is the only repo authoring PRs against the vendored `external/ocx` submodule from inside this repo |
+| `hooks/` | No ocx equivalent; guards the submodule/sibling-repo boundary this repo alone has (`pre_tool_use_guard.py`) |
 | `artifacts/**` | ocx-mirror ADRs, design specs, plans, research |
 | `CLAUDE.md` | Project root instructions |
 
@@ -46,9 +49,10 @@ re-sync means drift — investigate before landing.
 ocx ships extra skills (`deps`, `docs`, `next`, `meta-maintain-config`, …), many
 `subsystem-*`/`arch-principles`/`product-*`/`quality-{bash,ts,vite,cli-help,security}`
 rules, and enforcement machinery the mirror does **not** have: **no `.claude/rules.md`
-catalog, no `.claude/tests` structural tests, no `.claude/hooks`**. Never reference these
-in a ported file — strip such references on port. (`worker-doc-writer.md` is also not
-ported — the mirror has no doc-authoring swarm role.)
+catalog, no `.claude/tests` structural tests**; ocx's own hooks are not ported —
+`.claude/hooks/` here is mirror-native. Never reference the un-ported catalog or
+structural tests in a ported file — strip such references on port. (`worker-doc-writer.md`
+is also not ported — the mirror has no doc-authoring swarm role.)
 
 ## Adaptation List (the ONLY legitimate edits when porting)
 
@@ -62,8 +66,10 @@ ported — the mirror has no doc-authoring swarm role.)
    worker must exist in `.claude/agents/`.
 5. **Verify command** — `task verify` → `task rust:verify` for the Rust loop gate inside
    swarm tiers; `task verify` stays the full pre-merge gate.
-6. **Drop upstream-only plumbing** — remove any reference to `.claude/rules.md`,
-   `task claude:tests` / `test_ai_config.py`, or `.claude/hooks/` (none exist here).
+6. **Drop upstream-only plumbing** — remove any reference to `.claude/rules.md` or
+   `task claude:tests` / `test_ai_config.py`. Also strip a ported file's references to
+   ocx's own hooks: `.claude/hooks/` exists here, but it is the mirror-native guard
+   (`pre_tool_use_guard.py`), not a port of anything ocx ships.
 
 Anything beyond this list is divergence. If a change is genuinely mirror-specific, put it
 in a mirror-native file — never bolt it onto a port.

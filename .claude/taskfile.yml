@@ -16,3 +16,9 @@ tasks:
       # into a cached ephemeral env. (`uvx` is `uv tool run` — for PyPI tools —
       # and refuses a local script path, pointing here instead.)
       - uv run --script .claude/scripts/review_surface.py {{.CLI_ARGS}}
+
+  hooks:test:
+    desc: Run the PreToolUse guard hook tests (.claude/hooks).
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - uv run --project test pytest .claude/hooks -q -p no:cacheprovider

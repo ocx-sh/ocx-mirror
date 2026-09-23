@@ -51,6 +51,18 @@ research-axes:
   conftest `REGISTRY` default is `localhost:5001` — no collision surface left.
 - Learned: `task test:quick` is the acceptance loop that skips the rebuild —
   there is no `--no-build` pytest flag.
+- Discussion hand-off 2026-09-22: `.agents/discussions/bazel-crate-split.md`
+  → architect (`handed-off → architect`), consumed by an autonomous `/goal` (prompt in the
+  artifact's `## Goal prompt`; run ledger `.agents/goal/bazel-crate-split.md`). Decisions: phases
+  AI config → crate split → promote `ocx_python` to ocx (submodule-authored PR, run squash-merges)
+  → Bazel (local loop mandatory, CI swap only on a pre-declared measured bar); oracle = `test/` at
+  `v0.6.2` unmodified via `OCX_MIRROR_COMMAND`. Research:
+  `.claude/artifacts/research_bazel_crate_split_lessons.md`.
+- Umbrella ADR 2026-09-22: `.claude/artifacts/adr_bazel_crate_split.md` (Proposed) closes the
+  bazel-crate-split dossier Q1–Q5. Research: `research_bazel_cross_module_ocx.md`,
+  `research_mirror_crate_graph.md`. Learned: ocx-sh/ocx allows rebase-merge only (squash off) with
+  required_signatures — the run may not squash; landing is an owner action (ADR C6.3). Codex
+  adversary was out of usage that day. Axis worth a Preferences hint: "Bazel / crate_universe".
 - Discussion hand-off 2026-09-02: `.agents/discussions/mirror-signing.md`
   → plan (`handed-off → plan`). Decisions: mirror signs its own pushes
   (keyless default, `--key` schemes as fallback), copies preserve upstream

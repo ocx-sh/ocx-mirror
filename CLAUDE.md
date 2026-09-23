@@ -114,8 +114,8 @@ Releases: `task release:prepare` → human reviews → commit + tag + push
 (see README.md).
 
 Rules in `.claude/rules/` auto-load by path (`quality-rust`, `quality-core`,
-`quality-python`, `subsystem-mirror`, `security-threat-model`, `workflow-*`,
-`meta-plan-status`, `meta-ai-config`). Design records live in
+`quality-python`, `subsystem-mirror`, `crate-placement`, `security-threat-model`,
+`workflow-*`, `meta-plan-status`, `meta-ai-config`). Design records live in
 `.claude/artifacts/` (ADRs and design specs moved from the ocx mono-repo).
 
 **Every security review reads
@@ -137,8 +137,15 @@ Skills in `.claude/skills/` (ported from ocx): `/architect`,
 Mirror-native: `/e2e-test` (tiered e2e: acceptance harness → local contrib
 integration → dev.ocx.sh dev channel), `/update-ocx` (bump the `external/ocx`
 submodule and adopt what changed: drift gates, semantic review of the eight
-linked crates, consolidation onto new shared API, upstream-issue cross-check).
-Worker agents the swarm skills spawn live in `.claude/agents/`.
+linked crates, consolidation onto new shared API, upstream-issue cross-check),
+`/ocx-upstream-pr` (author an ocx-sh/ocx PR from the `external/ocx` submodule;
+landing is an owner action). Worker agents the swarm skills spawn live in
+`.claude/agents/`.
+
+`.claude/hooks/pre_tool_use_guard.py` is a `PreToolUse` guard (rules G1–G5)
+blocking git/edits inside `external/ocx` on `main`/detached HEAD or without an
+absolute `-C`, a root-level recursive `submodule update`, and writes to the
+sibling `../ocx`; tested via `task claude:hooks:test`, part of `task verify`.
 
 Planning flow: ADR → Design Spec → Plan → Implementation. Templates →
 `.claude/templates/artifacts/`; durable artifacts → `.claude/artifacts/`;
