@@ -48,7 +48,7 @@ Three tiers, defined in ocx's own `CLAUDE.md` and `adr_crate_split_workspace.md`
   Breaking changes are allowed when justified; ocx's own `task
   satellite:verify` obligates it to upgrade the mirror in the same change
   series. `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`,
-  `ocx_config`, `ocx_index`, `ocx_package`.
+  `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`.
 - **Interface** — the CLI surface, every wire/persisted format, the shim wire
   ABI, and `ocx_exit` (an exit code is a CLI contract).
 - `ocx_cli` is not a tier crate (application layer), and the satellite
@@ -61,11 +61,12 @@ A satellite (this mirror) may take a **direct** dependency on any
 ocx crate. It must not name an internal-tier crate or `ocx_cli` in its
 manifest or its source.
 
-**The eight allowed today:** `ocx_config`, `ocx_console`, `ocx_exit`,
-`ocx_index`, `ocx_oci`, `ocx_package`, `ocx_sign`, `ocx_util`. Plus
-`ocx_python` from phase 2 of `adr_bazel_crate_split.md` (an owner-directed
-exception — see Promotion below). CLAUDE.md's "Dependency model" section is
-the authoritative row list; this rule states the boundary, not the count.
+**The nine allowed today:** `ocx_config`, `ocx_console`, `ocx_exit`,
+`ocx_index`, `ocx_oci`, `ocx_package`, `ocx_python`, `ocx_sign`, `ocx_util`.
+`ocx_python` joined in phase 2 of `adr_bazel_crate_split.md` (an
+owner-directed exception — see Promotion below). CLAUDE.md's "Dependency
+model" section is the authoritative row list; this rule states the boundary,
+not the count.
 
 Two sanctioned transitive paths exist and do not widen the rule: `ocx_index`
 and `ocx_package` both depend on `ocx_store` (internal tier), so linking
@@ -83,10 +84,10 @@ Format/protocol logic promotes out of the mirror into an ocx ecosystem crate
 when a **named second caller with a real call site** exists, recorded in an
 ADR. "Might be useful to ocx someday" is not a trigger — a live consumer is.
 
-**`ocx_python`'s phase-2 promotion (`adr_bazel_crate_split.md` § Q3, § C5) is
+**`ocx_python`'s phase-2 promotion (`adr_bazel_crate_split.md` § Q3, § C5) was
 an owner-directed exception, not precedent.** It moved on the owner naming
 `ocx-dist` (planned, no repository yet) as the second caller, before that
-caller exists. Do not cite it to justify promoting code with no live
+caller existed. Do not cite it to justify promoting code with no live
 consumer — this rule and any future ADR must treat it as a one-off grant,
 not a lowered bar.
 
@@ -110,8 +111,8 @@ How to promote: the `/ocx-upstream-pr` skill authors the PR against
 | `ocx_mirror_pipeline` | mirror | Prepare/push orchestration, `ocx` subprocess boundary |
 | `ocx_mirror` (root) | app | CLI dispatch, `main.rs`, façade re-exports, CI-workflow rendering |
 
-`ocx_python` is a workspace member in phase 1 (`crates/ocx_python`, mirror-owned)
-and an `external/ocx` path crate from phase 2 on.
+`ocx_python` is not a mirror crate: since phase 2 it is an `external/ocx` path
+crate (ecosystem tier), linked like the other ocx rows.
 
 ## Rules for new code
 
@@ -135,6 +136,6 @@ and an `external/ocx` path crate from phase 2 on.
 - `.claude/artifacts/adr_bazel_crate_split.md` — § C1 (crate map, full
   contract), § C3 (error boundary), § Q3 (the `ocx_python` promotion
   decision), § C9(a) (this rule's own design record).
-- `CLAUDE.md` § "Dependency model" — the authoritative eight-row list and why
+- `CLAUDE.md` § "Dependency model" — the authoritative nine-row list and why
   `ocx_cli` never gets a row.
 - `.claude/rules/subsystem-mirror.md` — the module map, keyed to the crate layout.

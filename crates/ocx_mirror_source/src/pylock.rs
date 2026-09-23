@@ -15,7 +15,6 @@ use std::path::Path;
 
 use anyhow::Context;
 use ocx_package::version::Version;
-use ocx_python::normalize_package_name;
 use ocx_python::{LockedPackage, Pylock};
 
 use super::VersionInfo;
@@ -35,7 +34,10 @@ pub async fn load(spec_dir: &Path, path: &str) -> anyhow::Result<Pylock> {
     let contents = tokio::fs::read_to_string(&lock_path)
         .await
         .with_context(|| format!("failed to read pylock file '{}'", lock_path.display()))?;
-    ocx_python::parse_pylock(&contents).context("failed to parse pylock.toml")
+    // Named type: the 65/69 split downcasts to `LockError` at runtime, so an
+    // upstream error-type change must break the build, not turn 65 into 1.
+    let parsed: Result<Pylock, ocx_python::LockError> = ocx_python::parse_pylock(&contents);
+    parsed.context("failed to parse pylock.toml")
 }
 
 /// Lists the single upstream version recorded in the lock: the pinned
@@ -81,19 +83,16 @@ pub fn app_version(lock: &Pylock, app_name: &str) -> anyhow::Result<String> {
 ///
 /// Returns an error when no locked package normalizes to `app_name`.
 pub fn find_app_package<'a>(lock: &'a Pylock, app_name: &str) -> anyhow::Result<&'a LockedPackage> {
-    let normalized_app_name = normalize_package_name(app_name);
-    lock.packages
-        .iter()
-        .find(|package| normalize_package_name(&package.name) == normalized_app_name)
-        .ok_or_else(|| {
-            let locked: Vec<&str> = lock.packages.iter().map(|p| p.name.as_str()).collect();
-            anyhow::anyhow!("app package '{app_name}' not found in pylock.toml (locked packages: {locked:?})")
-        })
+    lock.find_package(app_name).ok_or_else(|| {
+        let locked: Vec<&str> = lock.packages.iter().map(|p| p.name.as_str()).collect();
+        anyhow::anyhow!("app package '{app_name}' not found in pylock.toml (locked packages: {locked:?})")
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocx_python::normalize_package_name;
 
     const LOCK: &str = r#"
 lock-version = "1.0"

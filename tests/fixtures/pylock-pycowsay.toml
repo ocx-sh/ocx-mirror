@@ -1,6 +1,7 @@
 # PEP 751 lock fixture for the `mirror-pylock.yml` plan-phase test (W2.2).
-# Adapted from crates/ocx_python/tests/fixtures/pylock/valid-multi.toml with
-# concrete http(s) wheel URLs (unlike ocx_python's `{ASSET_BASE}`-templated
+# Adapted from ocx_python's valid-multi.toml
+# (external/ocx/crates/ocx_python/tests/fixtures/pylock/) with concrete
+# http(s) wheel URLs (unlike ocx_python's `{ASSET_BASE}`-templated
 # unit fixtures) so `pipeline plan` can emit them directly as PlanAssetEntry
 # URLs. Both wheels are `none-any` — platform/libc-agnostic — so they resolve
 # identically on every declared platform, giving a deterministic N=2 wheel

@@ -150,16 +150,15 @@ fn check(members: &[Member], map: &CrateMap) -> Vec<Violation> {
         }
         // (h) `CARGO_PKG_VERSION` is the workspace version in every member
         // (ADR § C2): `ocx_mirror_source`'s `User-Agent` reads it and must stay
-        // byte-identical to the pre-split binary's. `ocx_python` versions on
-        // its own.
-        if from != "ocx_python" && !member.inherits_version {
+        // byte-identical to the pre-split binary's.
+        if !member.inherits_version {
             violations.push(violation(
                 'h',
                 format!("member {from} lacks `version.workspace = true`"),
             ));
         }
         // (f) mirror-owned members are `ocx_mirror_*`.
-        if from != "ocx_mirror" && from != "ocx_python" && !from.starts_with("ocx_mirror_") {
+        if from != "ocx_mirror" && !from.starts_with("ocx_mirror_") {
             violations.push(violation('f', format!("member {from} is not named ocx_mirror_*")));
         }
 
@@ -306,11 +305,11 @@ fn real_workspace_has_no_violations() {
 /// A clean two-member workspace mirroring today's real one.
 const MAP: &str = r#"
 [allowed]
-ocx_mirror = ["ocx_python"]
-ocx_python = []
+ocx_mirror = ["ocx_mirror_source"]
+ocx_mirror_source = []
 
 [ocx]
-allowed = ["ocx_oci", "ocx_package"]
+allowed = ["ocx_oci", "ocx_package", "ocx_python"]
 
 [dev]
 allowed_everywhere = ["ocx_mirror_test_support"]
@@ -351,13 +350,16 @@ fn clean_packages() -> Vec<SyntheticPackage> {
         (
             "ocx_mirror",
             &[
-                ("ocx_python", None),
+                ("ocx_mirror_source", None),
                 ("ocx_oci", None),
                 ("serde", None),
                 ("toml", Some("dev")),
             ],
         ),
-        ("ocx_python", &[("ocx_package", None), ("serde", None)]),
+        (
+            "ocx_mirror_source",
+            &[("ocx_package", None), ("ocx_python", None), ("serde", None)],
+        ),
     ]
 }
 
@@ -398,28 +400,31 @@ fn clean_synthetic_workspace_has_no_violations() {
 #[test]
 fn red_proof_a_upward_normal_edge() {
     let mut packages = clean_packages();
-    packages[1] = ("ocx_python", &[("ocx_mirror", None)]);
+    packages[1] = ("ocx_mirror_source", &[("ocx_mirror", None)]);
     assert_single(
         &packages,
         MAP,
         |_| MANIFEST_OK.into(),
         'a',
-        &["ocx_python -> ocx_mirror", "normal"],
+        &["ocx_mirror_source -> ocx_mirror", "normal"],
     );
 }
 
 #[test]
 fn red_proof_a_build_edge_onto_dev_only_crate() {
-    let map = MAP.replace("ocx_python = []", "ocx_python = []\nocx_mirror_test_support = []");
+    let map = MAP.replace(
+        "ocx_mirror_source = []",
+        "ocx_mirror_source = []\nocx_mirror_test_support = []",
+    );
     let mut packages = clean_packages();
-    packages[1] = ("ocx_python", &[("ocx_mirror_test_support", Some("build"))]);
+    packages[1] = ("ocx_mirror_source", &[("ocx_mirror_test_support", Some("build"))]);
     packages.push(("ocx_mirror_test_support", &[]));
     assert_single(
         &packages,
         &map,
         |_| MANIFEST_OK.into(),
         'a',
-        &["build edge ocx_python -> ocx_mirror_test_support"],
+        &["build edge ocx_mirror_source -> ocx_mirror_test_support"],
     );
 }
 
@@ -427,18 +432,21 @@ fn red_proof_a_build_edge_onto_dev_only_crate() {
 fn red_proof_b_dev_edge_outside_the_map() {
     let mut packages = clean_packages();
     packages[1] = (
-        "ocx_python",
+        "ocx_mirror_source",
         &[("ocx_mirror", Some("dev")), ("ocx_mirror_test_support", Some("dev"))],
     );
     // The test-support dev edge is allowed everywhere; the ocx_mirror one is not.
-    let map = MAP.replace("ocx_python = []", "ocx_python = []\nocx_mirror_test_support = []");
+    let map = MAP.replace(
+        "ocx_mirror_source = []",
+        "ocx_mirror_source = []\nocx_mirror_test_support = []",
+    );
     packages.push(("ocx_mirror_test_support", &[]));
     assert_single(
         &packages,
         &map,
         |_| MANIFEST_OK.into(),
         'b',
-        &["dev edge ocx_python -> ocx_mirror is not"],
+        &["dev edge ocx_mirror_source -> ocx_mirror is not"],
     );
 }
 
@@ -446,15 +454,24 @@ fn red_proof_b_dev_edge_outside_the_map() {
 fn red_proof_c_forbidden_ocx_crates() {
     let cases: [(&str, SyntheticPackage); 4] = [
         // cargo metadata names ocx's CLI package `ocx`, never `ocx_cli`.
-        ("ocx", ("ocx_mirror", &[("ocx_python", None), ("ocx", None)])),
-        ("ocx-shim", ("ocx_mirror", &[("ocx_python", None), ("ocx-shim", None)])),
+        ("ocx", ("ocx_mirror", &[("ocx_mirror_source", None), ("ocx", None)])),
+        (
+            "ocx-shim",
+            ("ocx_mirror", &[("ocx_mirror_source", None), ("ocx-shim", None)]),
+        ),
         (
             "ocx_store",
-            ("ocx_mirror", &[("ocx_python", None), ("ocx_store", Some("build"))]),
+            (
+                "ocx_mirror",
+                &[("ocx_mirror_source", None), ("ocx_store", Some("build"))],
+            ),
         ),
         (
             "ocx_test_support",
-            ("ocx_mirror", &[("ocx_python", None), ("ocx_test_support", Some("dev"))]),
+            (
+                "ocx_mirror",
+                &[("ocx_mirror_source", None), ("ocx_test_support", Some("dev"))],
+            ),
         ),
     ];
     for (forbidden, member) in cases {
@@ -473,7 +490,7 @@ fn red_proof_d_member_without_row() {
 
 #[test]
 fn red_proof_d_row_without_member() {
-    let map = MAP.replace("ocx_python = []", "ocx_python = []\nocx_mirror_gone = []");
+    let map = MAP.replace("ocx_mirror_source = []", "ocx_mirror_source = []\nocx_mirror_gone = []");
     assert_single(
         &clean_packages(),
         &map,
@@ -486,32 +503,38 @@ fn red_proof_d_row_without_member() {
 #[test]
 fn red_proof_e_member_without_workspace_lints() {
     let lints = |path: &Path| {
-        if path.starts_with("/ws/ocx_python") {
-            "[package]\nname = \"ocx_python\"\n\n[lints.rust]\nwarnings = \"deny\"\n".to_owned()
+        if path.starts_with("/ws/ocx_mirror_source") {
+            "[package]\nname = \"ocx_mirror_source\"\nversion.workspace = true\n\n[lints.rust]\nwarnings = \"deny\"\n"
+                .to_owned()
         } else {
             MANIFEST_OK.to_owned()
         }
     };
-    assert_single(&clean_packages(), MAP, lints, 'e', &["ocx_python"]);
+    assert_single(&clean_packages(), MAP, lints, 'e', &["ocx_mirror_source"]);
 }
 
 #[test]
 fn red_proof_h_member_with_its_own_version() {
-    // Both members pin a literal version; only `ocx_python` is exempt, so
-    // exactly the root is reported.
-    let manifest = |_: &Path| "[package]\nname = \"x\"\nversion = \"0.6.2\"\n\n[lints]\nworkspace = true\n".to_owned();
+    // Only the root pins a literal version, so exactly the root is reported.
+    let manifest = |path: &Path| {
+        if path.starts_with("/ws/ocx_mirror") {
+            "[package]\nname = \"x\"\nversion = \"0.6.2\"\n\n[lints]\nworkspace = true\n".to_owned()
+        } else {
+            MANIFEST_OK.to_owned()
+        }
+    };
     assert_single(
         &clean_packages(),
         MAP,
         manifest,
         'h',
-        &["ocx_mirror", "version.workspace"],
+        &["member ocx_mirror lacks `version.workspace = true`"],
     );
 }
 
 #[test]
 fn red_proof_f_member_outside_the_prefix() {
-    let map = MAP.replace("ocx_python = []", "ocx_python = []\nmirror_http = []");
+    let map = MAP.replace("ocx_mirror_source = []", "ocx_mirror_source = []\nmirror_http = []");
     let mut packages = clean_packages();
     packages.push(("mirror_http", &[]));
     assert_single(&packages, &map, |_| MANIFEST_OK.into(), 'f', &["mirror_http"]);

@@ -31,7 +31,6 @@ document the four-line job, let them own the pipeline.
 | `src/` | The root crate (binary `ocx-mirror`): CLI dispatch (`command/`), `main.rs`, the `lib.rs` façade; package manifest at repo root |
 | `crates/ocx_mirror_*` | Cargo workspace members from the phase-1 crate split (`error`, `http`, `pipeline`, `report`, `source`, `spec`, `test_support`); each `Cargo.toml` inherits `[workspace.dependencies]` via `.workspace = true` |
 | `crates/crate_map.toml` | Authority for which crate may depend on which; enforced by `tests/workspace_structure.rs` |
-| `crates/ocx_python/` | Pure translation library: wheel → OCX packaging (PEP 751 lock parsing, wheel selection/repack, env composition) |
 | `external/ocx` | **git submodule** — vendored ocx; its `ocx_*` crates are path deps into it |
 | `tests/workspace_structure.rs` | Reads `cargo metadata`; fails naming the offender on any crate-map violation (upward edge, unlisted `ocx_*`, missing `[lints] workspace = true`, …) — the enforcement half of `crates/crate_map.toml` |
 | `tests/source_scan.rs` | Cross-crate source scans that need the whole tree at once: the extra-roots self-scan (walks `src/` and every `crates/*/src/`) and the cross-crate `include_str!` factory scan |
@@ -44,11 +43,11 @@ document the four-line job, let them own the pipeline.
 
 ## Dependency model (read before touching Cargo.toml)
 
-- Eight `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
+- Nine `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
   They live in root `[workspace.dependencies]` once, and every member that
-  needs one takes it `.workspace = true` — except `crates/ocx_python`, which
-  keeps its own `ocx_oci`/`ocx_package` path rows (and its own copy-exactly
-  version rows) until phase 2 moves it onto the workspace table. Bumping ocx
+  needs one takes it `.workspace = true`. `ocx_python` (PEP 751 lock → OCX
+  package translation) is one of them; its git-pinned `uv-*` rows live in
+  ocx's `[workspace.dependencies]` and move with the pointer. Bumping ocx
   = bumping the submodule pointer (procedure in README.md); the row list
   changes only when the code names a new crate.
 - **Only ecosystem- or interface-tier crates may get a row.** ocx's `task
@@ -147,7 +146,7 @@ Skills in `.claude/skills/` (ported from ocx): `/architect`,
 `/swarm-plan`, `/swarm-execute`, `/swarm-review`, `/commit`, `/finalize`.
 Mirror-native: `/e2e-test` (tiered e2e: acceptance harness → local contrib
 integration → dev.ocx.sh dev channel), `/update-ocx` (bump the `external/ocx`
-submodule and adopt what changed: drift gates, semantic review of the eight
+submodule and adopt what changed: drift gates, semantic review of the nine
 linked crates, consolidation onto new shared API, upstream-issue cross-check),
 `/ocx-upstream-pr` (author an ocx-sh/ocx PR from the `external/ocx` submodule;
 landing is an owner action). Worker agents the swarm skills spawn live in

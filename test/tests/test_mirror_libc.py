@@ -27,7 +27,7 @@ import pytest
 from src.helpers import PROJECT_ROOT, push_stub_ocx_package
 
 FIXTURE_WHEEL = (
-    PROJECT_ROOT / "crates" / "ocx_python" / "tests" / "fixtures" / "wheels" / "console_pkg-1.0.0-py3-none-any.whl"
+    PROJECT_ROOT / "tests" / "fixtures" / "wheels" / "console_pkg-1.0.0-py3-none-any.whl"
 )
 
 
