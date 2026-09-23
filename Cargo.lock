@@ -3440,6 +3440,7 @@ name = "ocx_console"
 version = "0.6.2"
 dependencies = [
  "chrono",
+ "clap",
  "clap_builder",
  "colored_json",
  "console",
