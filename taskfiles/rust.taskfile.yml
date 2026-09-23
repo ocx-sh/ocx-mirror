@@ -127,8 +127,12 @@ tasks:
     cmds:
       # --workspace: the root package plus every crates/* member (external/ocx
       # is workspace-excluded); without it only the root package's tests run.
+      # `ocx_mirror/__testing`: the same feature set as `rust:build`, so this
+      # release build reuses its artifacts instead of relinking
+      # target/release/ocx-mirror without the placeholders — CI uploads that
+      # file for the acceptance job after this step.
       - rm -f '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
-      - cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+      - cargo nextest run --workspace --release --locked --features ocx_mirror/__testing {{.CLI_ARGS}}
       - task: :telemetry:push
         vars:
           JUNIT: '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
@@ -154,9 +158,9 @@ tasks:
       - cmd: |
           set -eu
           filter=$(python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-filter)
-          cargo nextest list --workspace --release --locked --message-format json -E "$filter" > '{{.LISTING}}'
+          cargo nextest list --workspace --release --locked --features ocx_mirror/__testing --message-format json -E "$filter" > '{{.LISTING}}'
           python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-check '{{.LISTING}}'
-          cargo nextest run --workspace --release --locked -E "$filter" {{.CLI_ARGS}}
+          cargo nextest run --workspace --release --locked --features ocx_mirror/__testing -E "$filter" {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true
