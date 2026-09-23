@@ -952,7 +952,9 @@ open question.
   so it is recorded here. `version` has no `--format` of its own. `ocx-mirror --format
   plain|json <cmd>` and its `--json` shorthand (POSIX last-wins) are ocx's `Format` group,
   **promoted** from `ocx_cli::options::format` into the ecosystem crate `ocx_console` (ocx
-  PR `feat/console-format-options`) so both binaries flatten one type. The mirror still links
+  PR [ocx-sh/ocx#505](https://github.com/ocx-sh/ocx/pull/505), landed by the owner as
+  `bda3c9d2` on 2026-09-23, tree-identical to the verified head `50961421`) so both binaries
+  flatten one type. The mirror still links
   no `ocx_cli`. ocx keeps the `options::Format` path through a re-export. The promoted type
   gains `Format::requested()`, which returns `None` when neither flag was given; the mirror
   needs it because `pipeline plan` has a default of its own (JSON under GitHub Actions).

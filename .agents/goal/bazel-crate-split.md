@@ -73,6 +73,19 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
   (`release_provenance_check.py`) not ported — `__testing = []` is a leaf nothing enables and the
   release build passes no feature. `generate ci --check` still compares the header, so binaries of one
   version from different commits now drift-red each other (owner call, § Owner actions).
+- Owner correction 2026-09-23 (relay): output format is a ROOT option like ocx (`ocx-mirror --format json <cmd>`,
+  `--json`); `version` has no `--format`; reuse ocx's flatten by promoting it into an ecosystem crate. Done:
+  ocx's `Format`/`FormatMode` → `ocx_console` via `/ocx-upstream-pr`
+  ([ocx-sh/ocx#505](https://github.com/ocx-sh/ocx/pull/505): verified head `50961421`, ocx `task verify` exit 0 locally,
+  PR checks 14/14, Verify Deep [35900023849](https://github.com/ocx-sh/ocx/actions/runs/35900023849) green incl. Satellite
+  Verify; owner merged it as `bda3c9d2`, same tree, unsigned via the merge button); pointer → `bda3c9d2`. Mirror:
+  `Command::apply_format` folds the root value into the per-command `--format` flags (JSON if either asks; root `plain`
+  turns off plan's GitHub Actions default); ADR A-11 (7) (the relay said "A-10" — taken by refine-finalize). ocx gate ran
+  with isolated primary/mirror registries (compose project `ocxup`, ports 5100/5101); target/prod/sigstore services
+  came from the sibling's running `test` stack (shared, not recreated).
+- Found: `bazel:bootstrap` did not repin when only a path crate's dependency list changed (Cargo.lock +1 line under
+  `ocx_console`): the plain `@crates` fetch passed, then rustc failed on the missing `clap` (fails closed, never a
+  stale green). Repinned by moving the gitignored lock aside. Owner call whether bootstrap should key on Cargo.lock.
 
 - Owner requirement added 2026-09-23 (scope of Loop 3): ocx-mirror pushes CI/test telemetry to
   otel.ocx.sh exactly like ocx — port `../ocx/.github/actions/test-telemetry/action.yml`,
@@ -216,7 +229,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 | 5 | 2026-09-23 | sub-orchestrator phase2-loop | opus | Loop 2 (`ocx_python` promotion, ocx PR, pointer, oracle, e2e tier 2) | done 8e62543 (+ ledger commit); ocx-sh/ocx#503 open, green |
 | 6 | 2026-09-23 | sub-orchestrator phase3-loop | opus | Loop 3 (Bazel Linux loop, JUnit, CI bar C11, OTEL telemetry + Grafana repo filter, final oracle) | done 4b1f40f (+ ledger commit); C11 NO-GO; telemetry live |
 | 7 | 2026-09-23 | sub-orchestrator refine-finalize | opus | R (≤3 turns /hex-review + /hex-execute on whole branch) + F (/hex-finalize, mirror PR, green pipeline, Verification items) | done — [#89](https://github.com/ocx-sh/ocx-mirror/pull/89) |
-| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | done 9d874c3 + f58c79b (CI fix: release nextest relinked the uploaded binary without `__testing`); ADR A-11; cache proof 4/4; `task verify` EXIT=0 at f58c79b; Verify [35890579251](https://github.com/ocx-sh/ocx-mirror/actions/runs/35890579251) green |
+| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | done 9d874c3 + f58c79b (CI fix: release nextest relinked the uploaded binary without `__testing`); ADR A-11; cache proof 4/4; `task verify` EXIT=0 at f58c79b; Verify [35890579251](https://github.com/ocx-sh/ocx-mirror/actions/runs/35890579251) green |; owner correction → root `--format`/`--json` via ocx-sh/ocx#505 (landed `bda3c9d2`), 6b24dda + pointer re-point
 
 ## Verification checklist (artifact § Verification + ADR § Phase plan and gates)
 
