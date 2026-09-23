@@ -106,6 +106,17 @@ arms of `task rust:lint` / `rust:verify` / `verify`. What moved:
 | Clippy/rustfmt scope = first-party targets | `cargo fmt --all` also checks the path dependencies; ocx's own crates are its members | the vendored ocx crates are ocx's to lint and format |
 | `cargo metadata` for the drift gate via the Bazel toolchain | ocx's `bazel_build_drift.py` calls the host cargo | no host Rust toolchain in the CI job |
 
+**The one explicit exception — release and cross-platform builds stay on cargo** (`build-matrix.yml`,
+`release.yml`), as ocx's (`release.yml` has no Bazel; its darwin/windows legs keep nextest, ADR § Stage 2
+ruling 1). They run on tags and manual dev deploys, never in `Verify`, so they do not touch the C1 bar.
+**Owner decision** whether to port them. Cost of porting: six targets (musl x86_64/aarch64, darwin
+x86_64/aarch64, windows-msvc x86_64/aarch64) need a hermetic C toolchain per target
+(`hermetic_cc_toolchain`/zig or `toolchains_llvm` + sysroots — one new ruleset), a macOS SDK story
+(macOS runners running Bazel, or an osxcross sysroot) and an MSVC/xwin SDK under Bazel (no maintained
+ruleset equivalent to `cargo xwin`); plus `build.rs`'s real provenance (git SHA, timestamps, CI run)
+as `--workspace_status_command` stamping on an uncacheable path — ocx's stamping ruling. Estimate:
+several days, with Windows the riskiest leg; none of it is ported in ocx to copy.
+
 ## Consequences
 
 - `verify.yml` runs no cargo and sets up no Rust toolchain; `Smoke (Linux)` replaces `acceptance-tests`
