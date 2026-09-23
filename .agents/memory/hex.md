@@ -96,7 +96,7 @@ research-axes:
   cross-crate `#[cfg(test)]` shortcuts need an inventory before the first move. rtk-proxied `diff`
   reported differing schema files identical — use `/usr/bin/diff`.
 - Plan 2026-09-23 done: `.claude/state/plans/plan_bazel_phase2_ocx_python.md` (Loop 2 of the
-  bazel-crate-split goal: `ocx_python` promoted as ocx-sh/ocx#503, pointer on the verified PR head).
+  bazel-crate-split goal: `ocx_python` promoted as ocx-sh/ocx#503, landed on ocx main as `15946973`; pointer there).
   Learned: ocx's commit-gate hook blocks local submodule commits without a verify mark — scratch commits
   take `--no-verify`, the full ocx `task verify` is the gate. Mutation-think in review caught a
   prefix-match `find_package` that passed every test — ask "which wrong implementation survives?".

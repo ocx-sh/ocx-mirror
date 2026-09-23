@@ -8,8 +8,8 @@ update before and after every sub-orchestrator spawn.
 - Mirror branch: `hex/bazel-crate-split` (from local `main` 537d591; origin/main 02481a5)
 - Mirror branch pushed 2026-09-23, finalized + force-pushed (series 537d591..621310c + ledger); Mirror PR: [ocx-sh/ocx-mirror#89](https://github.com/ocx-sh/ocx-mirror/pull/89) — open, not merged (owner)
 - ocx branch (in `external/ocx`): `feat/ocx-python-crate` (pushed; `delete_branch_on_merge` false)
-- ocx PR: [ocx-sh/ocx#503](https://github.com/ocx-sh/ocx/pull/503) — OPEN, head `77ae3cc0` (one GitHub-verified commit, parent = ocx main `f38d22f6`), checks 14/14 + Verify Deep green; **not merged** (C6.3: squash off, ruleset rebase-only + 1 approval)
-- ocx merged SHA (pointer target): — (not landed); pointer = pushed PR head `77ae3cc0` (mirror 8e62543)
+- ocx PR: [ocx-sh/ocx#503](https://github.com/ocx-sh/ocx/pull/503) — MERGED by owner 2026-09-23T14:56Z as `15946973` on ocx main (parent `f38d22f6`, tree identical to PR head `77ae3cc0`; unsigned — landed via the merge button, not the FF)
+- ocx merged SHA (pointer target): `159469736d6bc5a1f3d65ecf7c98a4cbac0bad9c` — pointer moved from PR head `77ae3cc0` 2026-09-23 (same tree)
 - Submodule pointer at start: `external/ocx` 191b9324
 - Drafts / long-job logs: `.tmp/` (gitignored, delete at end)
 
@@ -171,11 +171,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
   `curl -s -u … https://<grafana>/api/dashboards/uid/ocx-test-time | jq .dashboard` (and `ocx-bazel-build`), commit, `task git:push`.
 - Delete scratch the agent sandbox could not remove: `rm -rf /var/tmp/ocx-mirror-sd ~/.cache/ocx/bazel-root/59ad284773a2ad66bb28d6caac9bd95d`.
 
-- Land [ocx-sh/ocx#503](https://github.com/ocx-sh/ocx/pull/503) — either (a) fast-forward the verified head as admin:
-  `git fetch https://github.com/ocx-sh/ocx.git feat/ocx-python-crate && git push https://github.com/ocx-sh/ocx.git 77ae3cc0f5799811987570944923232afa1b327f:refs/heads/main`,
-  or (b) enable squash in both the repo setting and the `main` ruleset, approve, squash-merge — then re-point `external/ocx` to the
-  `merge_commit_sha`. Do not press the merge button (rebase only → unsigned). Do not delete `feat/ocx-python-crate` while the pointer names it.
-  If ocx main moves first, the head must be recreated on the new tip (`/ocx-upstream-pr` step 3) and the pointer re-bumped.
+- ~~Land ocx-sh/ocx#503~~ — done by owner 2026-09-23 (`15946973`); pointer re-bumped. `feat/ocx-python-crate` may now be deleted.
 - No mirror release until an ocx tag contains the pointer SHA (`release:prepare` check enforces).
 - ~~`sudo dnf install libstdc++-devel`~~ — not needed on this host: spike S found `~/.bazelrc` already sets `--linkopt/--host_linkopt=-L~/.cache/ocx/libdir` (it also sets `--jobs=12`, overriding the workspace rc; pass `--jobs` explicitly).
 - Push `hex/bazel-crate-split` + `gh workflow run "Deploy Dev" --ref hex/bazel-crate-split` to get `/e2e-test` tier 2 for the split (run reached tier 1 only).
@@ -203,7 +199,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 | 3 | Current suite green, also as cached `bazel test`; second no-change run fully cached | met | `//test:acceptance` PASSED in `task verify` (verify-r3), `(cached) PASSED` in verify-final on the identical tree; `bazel:cache:check` in both runs |
 | 4 | `/e2e-test` tier 2 green | met | phase 3: Deploy Dev 35844493373 → mirror-actionlint 35845563705 (15/15), mirror-pypi 35845567353 (11/11); R changed no production Rust (test files + a lint attribute only) |
 | 5 | Per-test JUnit published to the PR, count == libtest total | met | 1570 cases / 14 targets == libtest 1570 (verify-final floor line); [gist](https://gist.github.com/michael-herwig/cfd7b9d994ba86f39b1d20bda4a32b02) linked from the PR body (C11 NO-GO clause) |
-| 6 | ocx PR squash-merged; pointer = `merge_commit_sha`; `cargo tree -i oci-client` fork | **impossible** (fork half met) | squash disabled on ocx-sh/ocx and ruleset needs signatures + 1 approval (ADR D1/C6.3) → pointer = verified head `77ae3cc0` of [ocx-sh/ocx#503](https://github.com/ocx-sh/ocx/pull/503), landing = owner action; `cargo tree -i oci-client` → `external/ocx/external/rust-oci-client`; `cargo tree -i ocx_python` → `external/ocx/crates/ocx_python` |
+| 6 | ocx PR squash-merged; pointer = `merge_commit_sha`; `cargo tree -i oci-client` fork | met (landed by owner) | [ocx-sh/ocx#503](https://github.com/ocx-sh/ocx/pull/503) landed as `15946973` on ocx main (tree identical to verified head `77ae3cc0`); `external/ocx` → `15946973`; `cargo tree -i oci-client` → `external/ocx/external/rust-oci-client`; `cargo tree -i ocx_python` → `external/ocx/crates/ocx_python` |
 | 7 | ocx `satellite:verify` green with the new crate | met | Verify Deep run 35831653459 (Satellite Verify) on #503 head + local run (phase-2 row) |
 | 8 | CI lane-swap decision recorded with numbers | met | `measurement_bazel_ci_lane.md` (NO-GO, run 35846656688), `decision_bazel_adoption.md` |
 | 9 | Mirror PR green, finalized via `/hex-finalize`, left for the owner | met | [#89](https://github.com/ocx-sh/ocx-mirror/pull/89): Verify run [35867476966](https://github.com/ocx-sh/ocx-mirror/actions/runs/35867476966) on b581093 all 6 checks green (Conventional Commits, Smoke, Bazel graph, Acceptance, both result publishers), first attempt, no reruns; merge state BLOCKED only on the required approval; not draft, no auto-merge. The ledger-only amend that records this re-ran Verify on the final head (see PR) |
