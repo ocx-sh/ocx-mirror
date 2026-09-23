@@ -17,18 +17,28 @@ x-shared:
 
 tasks:
   verify:
-    desc: Rust loop gate (format, clippy, unit tests — Bazel on Linux, nextest elsewhere)
+    desc: Rust loop gate (format, clippy, BUILD drift on Linux, unit tests — Bazel on Linux, nextest elsewhere); skips the [[excluded]] rows
     summary: |
       adr_bazel_crate_split.md § C8 — sequential, fail-fast:
         1. cargo fmt --all --check
         2. cargo clippy (stays cargo; finishes before Bazel starts, so the
            two never build at once)
-        3. test:unit — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
+        3. Linux: `bazel:build:drift` — a query, no build. Reds on a Cargo
+           test target (a new `tests/foo.rs`, a crate's first `tests/`) with
+           no `rust_test`, which the Bazel run below would never notice.
+        4. test:unit — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
+      NOT run: `rust:test:bazel-excluded`, the crates/TEST_TARGET_MAP.toml
+      `[[excluded]]` rows Bazel `--skip`s — a release-profile nextest build of
+      every test binary, too heavy for the loop. On Linux those cases run only
+      under `task verify`; run that task by hand after touching them.
       Use during review-fix loops when only Rust code changed; license,
       jsonschema, the release build and acceptance are `task verify`'s.
     cmds:
       - task: format:check
       - task: clippy:check
+      # `if:`, not `platforms:` — see test:unit.
+      - task: :bazel:build:drift
+        if: '[ "{{OS}}" = linux ]'
       - task: test:unit
 
   format:check:

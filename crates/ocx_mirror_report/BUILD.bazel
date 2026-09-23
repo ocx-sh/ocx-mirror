@@ -30,6 +30,8 @@ rust_test(
         normal_dev = True,
         proc_macro_dev = True,
     ),
+    # No `--test-threads=1`: no case here mutates the process environment;
+    # the first one that does needs it (see //crates/ocx_mirror_spec).
     crate = ":ocx_mirror_report",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_report"},

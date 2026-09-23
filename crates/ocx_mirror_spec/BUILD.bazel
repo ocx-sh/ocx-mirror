@@ -36,6 +36,7 @@ rust_test(
     # (`EnvRestore`, `set_var`) under `OCX_ENV_LOCK`, but libtest runs every
     # case as a thread of one process and other cases read the environment
     # unlocked. nextest gives each case its own process; Bazel drives libtest.
+    # A target without the flag gains it with its first env-mutating case.
     args = [
         "--test-threads=1",
     ],

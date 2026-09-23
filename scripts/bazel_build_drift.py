@@ -28,11 +28,27 @@ Differences from ocx, both deliberate:
   tokio `test-util`) is twinned by the library's edge: a `crate =` test
   inherits the library's deps, and `all_crate_deps(normal_dev = True)` omits
   a crate that is already normal.
-  Build-kind edges are excluded: no `cargo_build_script` exists here.
+  Build-kind edges are excluded: no `cargo_build_script` exists here, and
+  the next point keeps it that way until one does.
+
+Two things the edge comparison cannot see, each its own finding:
+
+* A first-party package with a non-empty `default` feature or a
+  `custom-build` target (`build.rs`) reds: Bazel builds no feature a BUILD
+  `crate_features` does not name and runs no build script without a
+  `cargo_build_script`, so either compiles a different crate under Bazel.
+  Mirror it into BUILD first, then widen this gate.
+* Every Cargo target that `cargo test` builds (`"test": true` — the lib and
+  bin unit tests, each `tests/*.rs`) needs a `rust_test` in its package: a
+  lib/bin one whose `crate` names a rule of the Cargo target's name, any
+  other through `srcs` naming its source. Without it the case count never
+  moves (the floor reads only targets that exist), so a new `tests/foo.rs`
+  would run under nextest and nowhere under Bazel.
 
 Also: every `rust_library`/`rust_binary` carries `version` == the workspace
-version, and a reader floor — every Cargo member must own >= 1 rust rule, and
-at least MIN_MEMBERS members must exist — so an empty read is never green.
+version, and a reader floor — every Cargo member must own >= 1 rust rule, at
+least MIN_MEMBERS members must exist, and at least one member must have a
+tested target — so an empty read is never green.
 """
 
 from __future__ import annotations
@@ -42,8 +58,10 @@ import dataclasses
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
+
+from _gate import Finding, expect
+from _gate import report as gate_report
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 QUERY = 'kind("rust_", //...)'
@@ -56,15 +74,14 @@ RULE_CLOSE = re.compile(r"^\)$")
 DEP_ATTR = re.compile(r"^  (?:deps|proc_macro_deps) = (?P<value>.*)$")
 VERSION_ATTR = re.compile(r'^  version = "(?P<value>[^"]*)",$')
 NAME_ATTR = re.compile(r'^  name = "(?P<value>[^"]*)",$')
+CRATE_ATTR = re.compile(r'^  crate = "(?P<value>[^"]*)",$')
+SRCS_ATTR = re.compile(r"^  srcs = (?P<value>.*)$")
+#: Cargo target kinds a `rust_test` reaches through `crate =`; any other
+#: tested kind (`test`, `example`, `bench`) through `srcs`.
+CRATE_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin"})
 STRING_LITERAL = re.compile(r'"([^"]*)"')
 DEP_LABEL_PREFIX = ("@crates//", "//")
 VERSIONED_KINDS = ("rust_library", "rust_binary", "rust_proc_macro")
-
-
-@dataclasses.dataclass(frozen=True)
-class Finding:
-    code: str
-    message: str
 
 
 @dataclasses.dataclass
@@ -72,6 +89,10 @@ class BuildRead:
     normal: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     test: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     versions: list[tuple[str, str, str | None]] = dataclasses.field(default_factory=list)
+    #: Per package: rule names `rust_test`s name as `crate`, and the
+    #: package-relative paths they name as `srcs`.
+    test_crates: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    test_srcs: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     targets: int = 0
     orphan_rules: int = 0
 
@@ -83,10 +104,20 @@ class CargoRead:
     own_name: dict[str, str]
     stems: dict[str, str]
     version: str
+    #: Per package: `(kinds, name, package-relative src_path)` of every
+    #: target with `"test": true`.
+    tested: dict[str, list[tuple[frozenset[str], str, str]]] = dataclasses.field(default_factory=dict)
+    default_features: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    build_scripts: dict[str, list[str]] = dataclasses.field(default_factory=dict)
 
 
 def pkg_label(package: str) -> str:
     return f"//{package}"
+
+
+def label_target(label: str) -> str:
+    """`//pkg:name` -> `name`; `//pkg/name` -> `name`."""
+    return label.split(":", 1)[1] if ":" in label else label.rsplit("/", 1)[-1]
 
 
 def read_build_output(text: str, root: str) -> BuildRead:
@@ -132,6 +163,11 @@ def read_build_output(text: str, root: str) -> BuildRead:
             name = match.group("value")
         elif match := VERSION_ATTR.match(line):
             version = match.group("value")
+        elif kind == "rust_test" and (match := CRATE_ATTR.match(line)):
+            read.test_crates.setdefault(package, set()).add(label_target(match.group("value")))
+        elif kind == "rust_test" and (match := SRCS_ATTR.match(line)):
+            srcs = read.test_srcs.setdefault(package, set())
+            srcs.update(label_target(literal) for literal in STRING_LITERAL.findall(match.group("value")))
         elif match := DEP_ATTR.match(line):
             bucket = read.test if kind == "rust_test" else read.normal
             labels = bucket.setdefault(package, set())
@@ -148,12 +184,24 @@ def read_cargo_metadata(document: dict) -> CargoRead:
     normal: dict[str, set[str]] = {}
     dev: dict[str, set[str]] = {}
     own_name: dict[str, str] = {}
+    tested: dict[str, list[tuple[frozenset[str], str, str]]] = {}
+    default_features: dict[str, list[str]] = {}
+    build_scripts: dict[str, list[str]] = {}
     version = ""
     for member in document["workspace_members"]:
         package = by_id[member]
         directory = str(Path(package["manifest_path"]).parent)
         key = "" if directory == root else directory[len(root) + 1 :]
         own_name[key] = package["name"]
+        if default := package.get("features", {}).get("default"):
+            default_features[key] = default
+        for target in package.get("targets", []):
+            kinds = frozenset(target["kind"])
+            source = Path(target["src_path"]).relative_to(directory, walk_up=True).as_posix()
+            if "custom-build" in kinds:
+                build_scripts.setdefault(key, []).append(source)
+            elif target.get("test"):
+                tested.setdefault(key, []).append((kinds, target["name"], source))
         if key == "":
             version = package["version"]
         normal[key], dev[key] = set(), set()
@@ -165,14 +213,15 @@ def read_cargo_metadata(document: dict) -> CargoRead:
             if "dev" in kinds:
                 dev[key].add(dep_name)
     stems = {f"{p['name']}-{p['version']}": p["name"] for p in document["packages"]}
-    return CargoRead(normal=normal, dev=dev, own_name=own_name, stems=stems, version=version)
+    return CargoRead(normal=normal, dev=dev, own_name=own_name, stems=stems, version=version,
+                     tested=tested, default_features=default_features, build_scripts=build_scripts)
 
 
 def resolve(label: str, cargo: CargoRead) -> str | None:
     """Bazel label -> Cargo package name; None when nothing matches."""
     if label.startswith("@crates//"):
         return cargo.stems.get(label[len("@crates//") :].split(":", 1)[0])
-    target = label.split(":", 1)[1] if ":" in label else label.rsplit("/", 1)[-1]
+    target = label_target(label)
     return target if target in cargo.own_name.values() else None
 
 
@@ -228,6 +277,29 @@ def check_drift(*, build_text: str, metadata: dict, root: str) -> list[Finding]:
                     Finding("drift-dev-set", f"BUILD drift: {where} rust_test edges — dev edge in Cargo not in BUILD: {missing}; in BUILD not in Cargo: {extra}")
                 )
 
+    for package, default in sorted(cargo.default_features.items()):
+        findings.append(
+            Finding("drift-default-features", f"BUILD drift: {pkg_label(package)} Cargo `default` feature enables {default} — Bazel builds none of it; mirror it into the BUILD rules' `crate_features` first")
+        )
+    for package, scripts in sorted(cargo.build_scripts.items()):
+        findings.append(
+            Finding("drift-build-script", f"BUILD drift: {pkg_label(package)} has a Cargo build script {scripts} — Bazel runs none; mirror it into a `cargo_build_script` first")
+        )
+    if not cargo.tested:
+        findings.append(
+            Finding("drift-test-floor", "BUILD drift: no workspace member has a Cargo target with `\"test\": true` — the tested-target check read nothing and would pass vacuously; is `cargo metadata` output missing `targets`?")
+        )
+    for package, targets in sorted(cargo.tested.items()):
+        for kinds, name, source in targets:
+            if kinds & CRATE_KINDS:
+                covered, how = name in read.test_crates.get(package, set()), f'`crate = ":{name}"`'
+            else:
+                covered, how = source in read.test_srcs.get(package, set()), f'`srcs = ["{source}"]`'
+            if not covered:
+                findings.append(
+                    Finding("drift-test-target", f"BUILD drift: {pkg_label(package)} Cargo {'/'.join(sorted(kinds))} target {name} ({source}) is tested by cargo, but no rust_test in the package has {how} — it would run under nextest and nowhere under Bazel")
+                )
+
     for package, name, version in read.versions:
         if version != cargo.version:
             findings.append(
@@ -247,12 +319,9 @@ def run(command: list[str]) -> tuple[str, Finding | None]:
 
 
 def report(findings: list[Finding]) -> int:
-    sys.stdout.flush()
-    for finding in findings:
-        print(finding.message, file=sys.stderr)
     if not findings:
-        print("bazel:build:drift: every Cargo edge has a BUILD twin and back; version attrs match")
-    return 1 if findings else 0
+        print("bazel:build:drift: every Cargo edge has a BUILD twin and back; version attrs match; every tested Cargo target has a rust_test")
+    return gate_report(findings)
 
 
 # ---------------------------------------------------------------------------
@@ -278,14 +347,8 @@ MEMBERS = [
 ]
 
 
-def expect(condition: bool, problem: str) -> None:
-    """A loud exit — a bare `assert` vanishes under `python3 -O`."""
-    if not condition:
-        raise SystemExit(f"bazel build drift self-test: {problem}")
-
-
-def _rule(package: str, kind: str, name: str, deps: list[str], version: str | None = "0.6.2") -> str:
-    lines = [f"# {ROOT}/{package + '/' if package else ''}BUILD.bazel:9:13", f"{kind}(", f'  name = "{name}",']
+def _rule(package: str, kind: str, name: str, deps: list[str], version: str | None = "0.6.2", extra: tuple[str, ...] = ()) -> str:
+    lines = [f"# {ROOT}/{package + '/' if package else ''}BUILD.bazel:9:13", f"{kind}(", f'  name = "{name}",', *extra]
     lines.append("  deps = [" + ", ".join(f'"{d}"' for d in deps) + "],")
     if version is not None:
         lines.append(f'  version = "{version}",')
@@ -310,13 +373,24 @@ def sample_tree() -> tuple[str, dict]:
         if index != 7:
             dev = [TEMPFILE, "//crates/ocx_mirror_test_support:ocx_mirror_test_support"]
             # A test target also names its own lib (the self-edge) and a normal edge.
-            records.append(_rule(package, "rust_test", f"{name}_test", dev + [f"//{package}:{name}", TOKIO], version=None))
+            records.append(_rule(package, "rust_test", f"{name}_test", dev + [f"//{package}:{name}", TOKIO], version=None,
+                                 extra=(f'  crate = "//{package}:{name}",',)))
+        directory = f"{ROOT}/{package}" if package else ROOT
+        # test_support's lib is `test = false` (index 7): exempt, no rust_test.
+        targets = [{"kind": ["lib"], "name": name, "src_path": f"{directory}/src/lib.rs", "test": index != 7}]
         if package == "":
             records.append(_rule("", "rust_binary", "ocx-mirror", normal + ["//:ocx_mirror"]))
+            records.append(_rule("", "rust_test", "ocx_mirror_bin_test", dev + [TOKIO], version=None, extra=('  crate = "//:ocx-mirror",',)))
+            records.append(_rule("", "rust_test", "log_targets", dev + ["//:ocx_mirror", TOKIO], version=None,
+                                 extra=('  srcs = ["//:tests/log_targets.rs"],',)))
+            targets += [{"kind": ["bin"], "name": "ocx-mirror", "src_path": f"{ROOT}/src/main.rs", "test": True},
+                        {"kind": ["test"], "name": "log_targets", "src_path": f"{ROOT}/tests/log_targets.rs", "test": True},
+                        {"kind": ["example"], "name": "demo", "src_path": f"{ROOT}/examples/demo.rs", "test": False}]
         member_id = f"member::{name}"
         members.append(member_id)
         packages.append({"id": member_id, "name": name, "version": "0.6.2",
-                         "manifest_path": f"{ROOT}/{package + '/' if package else ''}Cargo.toml"})
+                         "manifest_path": f"{directory}/Cargo.toml", "targets": targets,
+                         "features": {"default": [], "jsonschema": []} if index % 2 == 0 else {}})
         deps = [{"pkg": label, "dep_kinds": [{"kind": None}]} for label in normal]
         deps += [{"pkg": f"member::{fp}", "dep_kinds": [{"kind": None}]} for fp in first_party]
         if dev:
@@ -402,11 +476,11 @@ def self_test() -> int:
     run_case("rust_test edge in neither normal nor dev", _in_package(text, "crates/ocx_mirror_error", f'"{TEMPFILE}", ', f'"{TEMPFILE}", "{OCX_OCI}", '),
              metadata, ["drift-dev-set"], "in BUILD not in Cargo: ['ocx_oci']")
 
-    run_case("empty query output", "", metadata, ["drift-reader-floor", "drift-set"], "members with no rust rule")
+    run_case("empty query output", "", metadata, ["drift-reader-floor", "drift-set", "drift-test-target"], "members with no rust rule")
     blocks = text.split("\n# " + ROOT)
     dropped = "\n# ".join([blocks[0]] + [ROOT + b for b in blocks[1:] if not b.startswith("/crates/ocx_mirror_source/")])
     expect(dropped.count("BUILD.bazel:9:13\n") < text.count("BUILD.bazel:9:13\n"), "package removal did not land")
-    run_case("one package missing from the Bazel read", dropped, metadata, ["drift-reader-floor", "drift-set"], "//crates/ocx_mirror_source")
+    run_case("one package missing from the Bazel read", dropped, metadata, ["drift-reader-floor", "drift-set", "drift-test-target"], "//crates/ocx_mirror_source")
     few = json.loads(json.dumps(metadata))
     few["workspace_members"] = few["workspace_members"][:3]
     few_text = "\n# ".join([blocks[0]] + [ROOT + b for b in blocks[1:] if b.startswith(("/BUILD", "/crates/ocx_mirror_http/", "/crates/ocx_mirror_report/"))])
@@ -414,6 +488,33 @@ def self_test() -> int:
     expect(len(floor) == 1 and f"floor {MIN_MEMBERS}" in floor[0].message, f"3 Cargo members must red the floor: {floor}")
     print(f"RED  : fewer Cargo members than the floor — {floor[0].message}")
     checks += 1
+    def member(meta: dict, name: str) -> dict:
+        return next(p for p in meta["packages"] if p["id"] == f"member::{name}")
+
+    added = json.loads(json.dumps(metadata))
+    member(added, "ocx_mirror")["targets"].append({"kind": ["test"], "name": "foo", "src_path": f"{ROOT}/tests/foo.rs", "test": True})
+    run_case("new tests/foo.rs with no rust_test", text, added, ["drift-test-target"], "tests/foo.rs")
+    added = json.loads(json.dumps(metadata))
+    member(added, "ocx_mirror_spec")["targets"].append({"kind": ["test"], "name": "api", "src_path": f"{ROOT}/crates/ocx_mirror_spec/tests/api.rs", "test": True})
+    run_case("a crate's first tests/ file with no rust_test", text, added, ["drift-test-target"], "//crates/ocx_mirror_spec Cargo test target api (tests/api.rs)")
+    mutated = _in_package(text, "crates/ocx_mirror_spec", '  crate = "//crates/ocx_mirror_spec:ocx_mirror_spec",\n', "")
+    expect(mutated != text, "lib crate drop did not land")
+    run_case("lib unit tests with no rust_test naming the lib", mutated, metadata, ["drift-test-target"], "lib target ocx_mirror_spec")
+    mutated = text.replace('  crate = "//:ocx-mirror",\n', "")
+    expect(mutated != text, "bin crate drop did not land")
+    run_case("bin unit tests with no rust_test naming the binary", mutated, metadata, ["drift-test-target"], "bin target ocx-mirror")
+    featured = json.loads(json.dumps(metadata))
+    member(featured, "ocx_mirror_spec")["features"]["default"] = ["jsonschema"]
+    run_case("first-party non-empty `default` feature", text, featured, ["drift-default-features"], "crate_features")
+    built = json.loads(json.dumps(metadata))
+    member(built, "ocx_mirror_http")["targets"].append({"kind": ["custom-build"], "name": "build-script-build", "src_path": f"{ROOT}/crates/ocx_mirror_http/build.rs", "test": False})
+    run_case("first-party build.rs", text, built, ["drift-build-script"], "cargo_build_script")
+
+    untargeted = json.loads(json.dumps(metadata))
+    for package in untargeted["packages"]:
+        package.pop("targets", None)
+    run_case("cargo metadata yields no tested target at all", text, untargeted, ["drift-test-floor"], "no workspace member")
+
     run_case("rule with no header", 'rust_library(\n  name = "x",\n  deps = [],\n)\n' + text, metadata, ["drift-orphan-rule"])
 
     print(f"bazel build drift self-test: {checks} checks passed")

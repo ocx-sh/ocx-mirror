@@ -63,44 +63,13 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from _gate import Finding, codes, expect, report
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ponytail: the reader floor, mirror-local. 7 `crates/*` libraries + the root
 # library; see the module docstring for why it is this low.
 MIN_TARGETS = 8
-
-
-@dataclasses.dataclass(frozen=True)
-class Finding:
-    """One exit-1 reason. `code` is what tests assert on; `message` is stderr.
-
-    Separate on purpose: asserting a substring of an English sentence is one of
-    the cheapest ways to write an assertion that also matches the opposite
-    outcome.
-    """
-
-    code: str
-    message: str
-
-
-def codes(findings: list[Finding]) -> list[str]:
-    return sorted({finding.code for finding in findings})
-
-
-def report(findings: list[Finding]) -> int:
-    """Exit 0 and silent, or exit 1 with one line per finding."""
-    # stdout is block-buffered when piped and stderr is not, so without this
-    # the findings land above the self-test lines that introduce them.
-    sys.stdout.flush()
-    for finding in findings:
-        print(finding.message, file=sys.stderr)
-    return 1 if findings else 0
-
-
-def expect(condition: bool, problem: str) -> None:
-    """A loud exit — a bare `assert` vanishes under `python3 -O`."""
-    if not condition:
-        raise SystemExit(f"bep_to_otlp self-test: {problem}")
 
 
 # ---------------------------------------------------------------------------

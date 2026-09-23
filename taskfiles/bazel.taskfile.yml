@@ -75,7 +75,7 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - cmd: |
-          set -eu
+          set -euo pipefail
           O='{{.OCX_DIR}}'
           subs() { git -C "$O" config --file .gitmodules --get-regexp '^submodule\..*\.path$' | cut -d' ' -f2; }
           dirty() {
@@ -284,8 +284,8 @@ tasks:
       C-010. Changed = `git diff --name-only $(git merge-base BASE HEAD)`
       (committed and working-tree) plus untracked files.
 
-        escalate   MODULE.bazel(.lock), .bazelversion, .bazelrc, Cargo.lock,
-                   any Cargo.toml or BUILD.bazel, external/ocx → `bazel:test`
+        escalate   MODULE.bazel(.lock), .bazelversion, .bazelrc, .bazelignore,
+                   Cargo.lock, any Cargo.toml or BUILD.bazel, external/ocx → `bazel:test`
         test/**    `//test:acceptance`
         otherwise  each file as a label of its owning package (a deleted
                    file: that package's `:all`); files that are no target —
@@ -293,8 +293,11 @@ tasks:
                    `--keep_going` resolve, then
                    `kind(test, rdeps(//..., set(<labels>)))`
 
-      The selection is written to target/bazel/scoped-targets.txt. An empty
-      one prints "nothing to test" and exits 0.
+      `scripts/bazel_scoped.py` decides (its `--self-test` is
+      `task scripts:self-test`'s). The selection is written to
+      target/bazel/scoped-targets.txt. An empty one prints "nothing to test"
+      and exits 0; an escalation re-enters `bazel:test` with JOBS and
+      CLI_ARGS.
     dir: '{{.ROOT_DIR}}'
     vars:
       BASE: '{{.BASE | default "origin/main"}}'
@@ -304,73 +307,11 @@ tasks:
       - mkdir -p '{{.ROOT_DIR}}/target/bazel'
       - silent: true
         cmd: |
-          python3 - '{{.BASE}}' '{{.TARGETS}}' <<'PY'
-          import shlex, subprocess, sys
-          from pathlib import Path
-
-          base, out = sys.argv[1], Path(sys.argv[2])
-          BAZEL = shlex.split("{{.BAZEL}}")
-          ESCALATE = {"MODULE.bazel", "MODULE.bazel.lock", ".bazelversion", ".bazelrc", ".bazelignore", "Cargo.lock"}
-
-          def run(*cmd, check=True):
-              result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", check=False)
-              if check and result.returncode != 0:
-                  sys.exit(f"bazel test:scoped: `{' '.join(cmd)}` exited {result.returncode}: {result.stderr[-600:]}")
-              return result
-
-          def lines(text):
-              return {line for line in text.splitlines() if line}
-
-          merge_base = run("git", "merge-base", base, "HEAD").stdout.strip()
-          changed = lines(run("git", "diff", "--name-only", "--no-renames", merge_base).stdout)
-          changed |= lines(run("git", "ls-files", "--others", "--exclude-standard").stdout)
-
-          escalate = sorted(
-              f for f in changed
-              if f in ESCALATE or Path(f).name in ("BUILD.bazel", "Cargo.toml") or f == "external/ocx" or f.startswith("external/ocx/")
-          )
-          if escalate:
-              out.write_text("ESCALATE\n", encoding="utf-8")
-              print(f"bazel test:scoped: {len(changed)} changed path(s); escalating to bazel:test on {escalate}")
-              sys.exit(0)
-
-          def package(path):
-              for parent in Path(path).parents:
-                  if (parent / "BUILD.bazel").is_file():
-                      return "" if str(parent) == "." else str(parent)
-              return None
-
-          selected, labels = set(), []
-          for f in sorted(changed):
-              if f.startswith("test/"):
-                  selected.add("//test:acceptance")
-                  continue
-              pkg = package(f)
-              if pkg is None:
-                  continue
-              rel = Path(f).relative_to(pkg) if pkg else Path(f)
-              labels.append(f"//{pkg}:{rel}" if Path(f).exists() else f"//{pkg}:all")
-          if labels:
-              query = "set(" + " ".join(labels) + ")"
-              # --keep_going exits 3 on a partial result (the non-target paths);
-              # anything else but 0 is a query that did not run.
-              result = run(*BAZEL, "query", "--keep_going", "--output=label", query, check=False)
-              if result.returncode not in (0, 3):
-                  sys.exit(f"bazel test:scoped: `bazel query --keep_going {query}` exited {result.returncode}: {result.stderr[-600:]}")
-              resolved = lines(result.stdout)
-              dropped = sorted(set(labels) - resolved - {l for l in labels if l.endswith(":all")})
-              if dropped:
-                  print(f"bazel test:scoped: {len(dropped)} path(s) are no Bazel target - dropped: {dropped}", file=sys.stderr)
-              if resolved:
-                  rdeps = f"kind(test, rdeps(//..., set({' '.join(sorted(resolved))})))"
-                  selected |= lines(run(*BAZEL, "query", "--output=label", rdeps).stdout)
-          out.write_text(" ".join(sorted(selected)) + "\n", encoding="utf-8")
-          print(f"bazel test:scoped: {len(changed)} changed path(s) select {len(selected)} target(s): {' '.join(sorted(selected)) or '(none)'}")
-          PY
+          python3 scripts/bazel_scoped.py --base '{{.BASE}}' --out '{{.TARGETS}}' --bazel '{{.BAZEL}}'
       - cmd: |
           selected=$(cat '{{.TARGETS}}')
           case "$selected" in
-            ESCALATE) exec '{{.TASK_EXE}}' --dir '{{.ROOT_DIR}}' bazel:test ;;
+            ESCALATE) exec '{{.TASK_EXE}}' --dir '{{.ROOT_DIR}}' bazel:test JOBS='{{.JOBS}}' -- {{.CLI_ARGS}} ;;
             '') echo 'bazel test:scoped: the change reaches no Bazel test target - nothing to test'; exit 0 ;;
           esac
           {{.BAZEL}} test --jobs={{.JOBS}} $selected {{.CLI_ARGS}}
@@ -461,7 +402,7 @@ tasks:
           EOF
 
   build:drift:
-    desc: Every Cargo dep edge has a BUILD twin and back; every rust `version` attr equals the workspace version
+    desc: Every Cargo dep edge has a BUILD twin and back; every rust `version` attr equals the workspace version; every Cargo-tested target has a rust_test; no unmirrored first-party default feature or build.rs
     dir: '{{.ROOT_DIR}}'
     cmds:
       - task: bootstrap
@@ -493,10 +434,10 @@ tasks:
       CACHE_DIR: '{{.CACHE_DIR | default (printf "%s/.cache/ocx-mirror/bazel-disk" (env "HOME"))}}'
       MAX_GB: '{{.MAX_GB | default "30"}}'
     cmd: |
-      set -eu
+      set -euo pipefail
       d='{{.CACHE_DIR}}'; max='{{.MAX_GB}}'
       case "$max" in ''|*[!0-9]*) echo "bazel:cache:gc: MAX_GB must be a whole number, got '$max'" >&2; exit 1 ;; esac
-      size() { if [ -d "$d" ]; then du -sk "$d" | cut -f1; else echo 0; fi; }
+      size() { if [ -d "$d" ]; then { du -sk "$d" 2>/dev/null || true; } | cut -f1; else echo 0; fi; }  # du exits 1 on a file another server removed mid-walk
       before=$(size)
       echo "bazel:cache:gc: before $((before / 1024)) MiB in $d (cap ${max} GiB)"
       if [ "$before" -gt $((max * 1024 * 1024)) ]; then
