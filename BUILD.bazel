@@ -69,6 +69,69 @@ rust_library(
     ],
 )
 
+# The Cargo `jsonschema` feature: the `schema` command and the plan derives.
+# Built against the featured member crates, as Cargo unifies them
+# (//crates/ocx_mirror_error:ocx_mirror_error_jsonschema says why).
+rust_library(
+    name = "ocx_mirror_jsonschema",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = [
+            "src/main.rs",
+            "src/tracing_init.rs",
+        ],
+    ),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        exclude = ["src/**/*.rs"],
+    ),
+    crate_features = ["jsonschema"],
+    crate_name = "ocx_mirror",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env_files = ["testing_provenance.env"],
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_mirror_error:ocx_mirror_error_jsonschema",
+        "//crates/ocx_mirror_http",
+        "//crates/ocx_mirror_pipeline:ocx_mirror_pipeline_jsonschema",
+        "//crates/ocx_mirror_report",
+        "//crates/ocx_mirror_source:ocx_mirror_source_jsonschema",
+        "//crates/ocx_mirror_spec:ocx_mirror_spec_jsonschema",
+        "@crates__schemars-1.2.1//:schemars",
+    ],
+)
+
+# `cargo check --workspace --features jsonschema --all-targets`, as a build:
+# every target whose code the feature changes — the root library and the spec
+# unit tests (both featured source crates are in the root's graph). The binary
+# and the other test targets hold no feature-gated code. Not a test (testonly
+# only because it names one): `bazel build //...` and the unit lane's `bazel
+# test //:all` build it, so its compiles are cached like any other.
+filegroup(
+    name = "jsonschema",
+    testonly = True,
+    srcs = [
+        ":ocx_mirror_jsonschema",
+        "//crates/ocx_mirror_spec:ocx_mirror_spec_jsonschema_test",
+    ],
+)
+
+# The one tracked `.rs` no target compiles: the provenance `build.rs`, which
+# Bazel stands in for with `rustc_env_files`. The rustfmt aspect reads a
+# target's sources and edition at analysis, so this rule is never compiled —
+# `manual` keeps it out of `//...`; `task bazel:lint:fmt` names it.
+rust_library(
+    name = "build_script_fmt",
+    srcs = ["build.rs"],
+    crate_root = "build.rs",
+    edition = "2024",
+    tags = ["manual"],
+    version = "0.6.2",
+)
+
 rust_binary(
     name = "ocx-mirror",
     srcs = [
@@ -261,6 +324,13 @@ filegroup(
     name = "pipeline_templates",
     srcs = glob(["src/command/package/pipeline/generate/templates/*"]),
     visibility = ["//test:__pkg__"],
+)
+
+# `--config=rustfmt` (.bazelrc) points rules_rust's `rustfmt.toml` label flag
+# here; the flag lives in @rules_rust, so the file is public.
+exports_files(
+    ["rustfmt.toml"],
+    visibility = ["//visibility:public"],
 )
 
 # The docs site's two root-level inputs (docs/BUILD.bazel `//docs:site`):

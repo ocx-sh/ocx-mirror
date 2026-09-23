@@ -75,17 +75,18 @@ tasks:
   verify:
     desc: Full quality gate
     summary: |
-      Phase 1 (parallel): format, clippy, gate-script self-tests, telemetry self-test
+      Phase 1 (parallel): rustfmt + clippy (`rust:lint` — the Bazel lanes on
+        Linux, cargo elsewhere), gate-script self-tests, telemetry self-test
       Phase 2 (sequential; adr_bazel_crate_split.md § C8):
-        Linux — license headers, dependency licenses, jsonschema feature,
-          cargo release build (`__testing` provenance), claude hooks test, the
-          Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift,
-          tag guard), Bazel unit tests, the Bazel coverage gate, Bazel
-          acceptance.
+        Linux — license headers, dependency licenses, cargo release build
+          (`__testing` provenance), claude hooks test, the Bazel static gates
+          (pin, lint, lockfile, fork patches, BUILD drift, tag guard), the
+          Bazel jsonschema feature build, Bazel unit tests, the Bazel
+          coverage gate, Bazel acceptance.
         elsewhere — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing`), claude hooks test, nextest unit tests,
           acceptance tests.
-      Clippy (phase 1) finishes before any Bazel command (phase 2) starts.
+      Phase 1's lint finishes before phase 2's cargo build starts.
       Use `task --force verify` to bypass caching.
       Use `task --status verify` to check freshness without running.
     cmds:
@@ -95,8 +96,7 @@ tasks:
   .verify:lint:
     internal: true
     deps:
-      - task: rust:format:check
-      - task: rust:clippy:check
+      - task: rust:lint
       - task: scripts:self-test
       - task: telemetry:self-test
 
@@ -105,7 +105,9 @@ tasks:
     cmds:
       - task: rust:license:check
       - task: rust:license:deps
+      # Linux: `bazel:build:jsonschema` in .verify:test:linux.
       - task: rust:jsonschema:check
+        if: '[ "{{OS}}" != linux ]'
       - task: rust:build
       - task: claude:hooks:test
       # `if:`, not `platforms:` — go-task 3.53 ignores `platforms:` on a
@@ -126,6 +128,7 @@ tasks:
       - task: bazel:patch:check
       - task: bazel:build:drift
       - task: bazel:tag:guard
+      - task: bazel:build:jsonschema
       - task: bazel:test:unit
       - task: bazel:test:coverage
       - task: bazel:test:accept

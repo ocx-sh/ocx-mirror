@@ -39,7 +39,16 @@ crate.from_cargo(
     lockfile = "//:Cargo.bazel.lock.json",
     manifests = ["//:Cargo.toml"],
 )
-use_repo(crate, "crates")
+
+# `crates__schemars-<v>`: the `jsonschema` feature variants' optional
+# dependency (`crates/ocx_mirror_source/BUILD.bazel`). crate_universe aliases
+# only the dependencies the default features enable, so the spoke the ocx
+# crates already link is imported by its versioned name — the same schemars
+# crate, never a second copy. A schemars bump in Cargo.lock renames the spoke
+# and fails every Bazel command (measured: an extension exception on a plain
+# query) until this line and the BUILD labels follow; `bazel:pin:check`, which
+# runs no Bazel, names the mismatch first.
+use_repo(crate, "crates", "crates__schemars-1.2.1")
 
 # rules_ocx has no BCR release with Bazel 9 support yet; same commit as ocx.
 git_override(

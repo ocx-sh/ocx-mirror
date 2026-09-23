@@ -24,6 +24,32 @@ rust_library(
     ],
 )
 
+# The Cargo `jsonschema` feature (`dep:schemars`): Bazel compiles no feature a
+# rule does not name, so the schemars derives compile only in this variant.
+# Same crate name, its own output. `//:jsonschema` builds the variant graph.
+# schemars is an optional dependency, which crate_universe gives no `@crates`
+# alias; the spoke repository is imported by name in MODULE.bazel.
+rust_library(
+    name = "ocx_mirror_source_jsonschema",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        allow_empty = True,
+        exclude = ["src/**/*.rs"],
+    ),
+    crate_features = ["jsonschema"],
+    crate_name = "ocx_mirror_source",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_source"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_mirror_http",
+        "@crates__schemars-1.2.1//:schemars",
+    ],
+)
+
 rust_test(
     name = "ocx_mirror_source_test",
     aliases = aliases(

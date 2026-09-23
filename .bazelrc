@@ -86,5 +86,39 @@ build:ci --remote_download_minimal
 build:ci --remote_download_regex=.*/test\.(xml|log)$
 build:ci --jobs=auto
 
+# Lint lanes (`task bazel:lint:clippy`, `task bazel:lint:fmt`). ocx keeps both
+# on cargo (verify-basic.yml "Check formatting"/"Clippy"); here a cargo step
+# would re-compile or restore rust-cache on every run, so no CI run could be
+# fully cached. Named configs, never bare `build`: every flag below reaches
+# only the aspects' own Clippy/Rustfmt actions, so a plain build or test keeps
+# its compile keys (and its analysis cache — adding an aspect discards it).
+#
+# The aspects skip every external target (`@crates`, the vendored ocx crates
+# and forks), which crate_universe also renders with `--cap-lints=allow`.
+# Cargo's `[workspace.lints.rust] warnings = "deny"` and `-- -D warnings` are
+# one flag: `-Dwarnings`. It must be spelled out — the aspect adds it on its
+# own only while no clippy flag is set. `--check-cfg` is what cargo passes, so
+# `unexpected_cfgs` (a mistyped feature name) fires here too; one union list
+# for every crate, where cargo lists each crate's own features.
+#
+# `clippy_checks` alone, as `cargo clippy` builds no binary: the Clippy
+# actions plus the dependency compiles they read. `--keep_going` reports every
+# failing crate in one run, as cargo does.
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=clippy_checks
+build:clippy --keep_going
+build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+build:clippy '--@rules_rust//rust/settings:clippy_flag=--check-cfg=cfg(docsrs,test)'
+build:clippy '--@rules_rust//rust/settings:clippy_flag=--check-cfg=cfg(feature,values("jsonschema","__testing"))'
+
+# `rustfmt_checks` alone: a format check compiles nothing. The label flag
+# points the aspect at this repository's rustfmt.toml; its default is
+# rules_rust's empty one, whose 100-column width would reject every line this
+# repository wraps at 120.
+build:rustfmt --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
+build:rustfmt --output_groups=rustfmt_checks
+build:rustfmt --keep_going
+build:rustfmt --@rules_rust//rust/settings:rustfmt.toml=//:rustfmt.toml
+
 # Personal overrides; must stay the last non-comment line.
 try-import %workspace%/.bazelrc.user

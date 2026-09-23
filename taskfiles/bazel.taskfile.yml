@@ -376,7 +376,7 @@ tasks:
       - python3 scripts/bazel_cache_check.py --bep '{{.BEP}}'
 
   pin:check:
-    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, MODULE.bazel rust version vs rust-toolchain.toml, MODULE.bazel version vs the workspace version
+    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, MODULE.bazel rust version vs rust-toolchain.toml, MODULE.bazel version vs the workspace version, MODULE.bazel's schemars spoke vs Cargo.lock
     silent: true
     dir: '{{.ROOT_DIR}}'
     cmd: |
@@ -390,35 +390,65 @@ tasks:
       workspace = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
       rust = re.search(r'rust\.toolchain\([^)]*versions\s*=\s*\["([^"]+)"\]', module, re.S)
       mod = re.search(r'module\([^)]*version\s*=\s*"([^"]+)"', module, re.S)
+      # The jsonschema variants' spoke import: a stale one fails every Bazel
+      # command with an extension exception, so name the fix before that.
+      spoke = re.search(r'"crates__schemars-([^"]+)"', module)
+      row = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["dependencies"]["schemars"]
+      major = (row if isinstance(row, str) else row["version"]).lstrip("=^~").split(".")[0]
+      locked = [p["version"] for p in tomllib.loads(Path("Cargo.lock").read_text())["package"]
+                if p["name"] == "schemars" and p["version"].split(".")[0] == major]
       pairs = [
           (".bazelversion", bazelversion, "ocx.toml bazel tag", ocx_tag),
           ("MODULE.bazel rust.toolchain versions", rust and rust.group(1), "rust-toolchain.toml channel", channel),
           ("MODULE.bazel module version", mod and mod.group(1), "Cargo.toml [workspace.package] version", workspace),
+          ("MODULE.bazel use_repo crates__schemars-<v>", spoke and spoke.group(1), f"Cargo.lock schemars {major}.x", ", ".join(locked)),
       ]
       bad = [f"bazel:pin:check: {a} = {x!r} but {b} = {y!r}" for a, x, b, y in pairs if x != y]
-      print("\n".join(bad) or "bazel:pin:check: 3 pin pairs agree", file=sys.stderr if bad else sys.stdout)
+      print("\n".join(bad) or "bazel:pin:check: 4 pin pairs agree", file=sys.stderr if bad else sys.stdout)
       sys.exit(1 if bad else 0)
       EOF
 
   patch:check:
-    desc: The [patch.crates-io] forks bind under Bazel — exactly one Cargo.bazel.lock.json entry each for oci-client, docker_credential, sigstore, each a Path into external/ocx/external/<fork>
+    desc: The [patch.crates-io] forks bind, in both graphs — Bazel's Cargo.bazel.lock.json and cargo's Cargo.toml + Cargo.lock — for oci-client, docker_credential, sigstore
     summary: |
       ADR Q2. Nothing in MODULE.bazel names the forks; the splice reads the
       Cargo patch table. Dropping that table does not error — the splice
       resolves the crates.io releases — so this asserts the binding in the
-      generated lockfile. `LOCK=<file>` checks another file (red proofs).
+      generated lockfile: exactly one entry per fork, a Path into
+      external/ocx/external/<fork>.
+
+      The cargo half guards the release binaries, which build-matrix.yml
+      still builds with cargo: Cargo.toml's `[patch.crates-io]` row points
+      at the same directory, and Cargo.lock holds exactly one entry of each
+      fork, with no `source` — cargo records none for a path package, and a
+      registry resolve would record `registry+…`. It replaced a `cargo tree
+      -i` CI step, which is no lockfile read: it installed the pinned
+      toolchain through rustup and downloaded every crate first.
+
+      `LOCK=`, `CARGO_TOML=`, `CARGO_LOCK=` check other files (red proofs).
     silent: true
     dir: '{{.ROOT_DIR}}'
     vars:
       LOCK: '{{.LOCK | default "Cargo.bazel.lock.json"}}'
+      CARGO_TOML: '{{.CARGO_TOML | default "Cargo.toml"}}'
+      CARGO_LOCK: '{{.CARGO_LOCK | default "Cargo.lock"}}'
     cmds:
       - task: bootstrap
       - cmd: |
-          python3 - '{{.LOCK}}' <<'EOF'
-          import json, sys
+          python3 - '{{.LOCK}}' '{{.CARGO_TOML}}' '{{.CARGO_LOCK}}' <<'EOF'
+          import json, sys, tomllib
           forks = {"oci-client": "rust-oci-client", "docker_credential": "docker_credential", "sigstore": "sigstore-rs"}
           crates = json.load(open(sys.argv[1]))["crates"]
+          patch = tomllib.load(open(sys.argv[2], "rb")).get("patch", {}).get("crates-io", {})
+          locked = tomllib.load(open(sys.argv[3], "rb")).get("package", [])
           bad = []
+          for name, fork in forks.items():
+              row = patch.get(name, {}).get("path")
+              if row != "external/ocx/external/" + fork:
+                  bad.append(f"{sys.argv[2]} [patch.crates-io] {name} = {row!r}, expected path external/ocx/external/{fork}")
+              entries = [e for e in locked if e.get("name") == name]
+              if len(entries) != 1 or "source" in entries[0]:
+                  bad.append(f"{sys.argv[3]} {name}: {[e.get('source', 'path') for e in entries]}, expected exactly one path entry (no `source`) - cargo does not resolve the fork")
           for name, fork in forks.items():
               hits = [(k, v) for k, v in crates.items() if k.startswith(name + " ")]
               if len(hits) != 1:
@@ -431,7 +461,7 @@ tasks:
           for line in bad:
               print(f"bazel:patch:check: {line}", file=sys.stderr)
           if not bad:
-              print(f"bazel:patch:check: {', '.join(forks)} bind to external/ocx/external/*")
+              print(f"bazel:patch:check: {', '.join(forks)} bind to external/ocx/external/* in Cargo.bazel.lock.json, Cargo.toml and Cargo.lock")
           sys.exit(1 if bad else 0)
           EOF
 
@@ -440,7 +470,9 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - task: bootstrap
-      - '{{.NO_OTEL}} ocx exec bazel -- python3 scripts/bazel_build_drift.py'
+      # `cargo metadata` runs through the Bazel toolchain's cargo (the script's
+      # `bazel run @rules_rust//tools/upstream_wrapper:cargo`): no host Rust.
+      - python3 scripts/bazel_build_drift.py --bazel '{{.BAZEL}}'
 
   tag:guard:
     desc: Every test stays remotely cacheable and honestly keyed — no cache-suppressing tag, acceptance's inputs declared, no stray env_inherit, no volatile .bazelrc flag
@@ -461,6 +493,38 @@ tasks:
       # The root package loads @crates, which a fresh worktree has no lockfile for.
       - task: bootstrap
       - '{{.BAZEL}} run --jobs={{.JOBS}} //:buildifier.check'
+
+  lint:clippy:
+    desc: Clippy over every first-party Rust target, warnings denied — `cargo clippy --all-targets -- -D warnings` under Bazel
+    summary: |
+      `--config=clippy` (.bazelrc says what it carries and why it is a named
+      config). The aspect runs on every rust target `//...` expands to — each
+      library, binary and rust_test, the jsonschema variants included — and on
+      no external one. Linux and CI; `rust:clippy:check` stays cargo elsewhere.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} --config=clippy //... {{.CLI_ARGS}}'
+
+  lint:fmt:
+    desc: rustfmt --check over every tracked first-party `.rs`, against rustfmt.toml — `cargo fmt --check` under Bazel
+    summary: |
+      `--config=rustfmt`: one cached Rustfmt action per target, compiling
+      nothing. `//:build_script_fmt` is named because `manual` keeps it out of
+      `//...` — it is build.rs, the one tracked `.rs` no target compiles.
+      Unlike `cargo fmt --all`, it never reaches the path dependencies under
+      external/ocx. The fixer stays `task rust:format:apply`.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} --config=rustfmt //... //:build_script_fmt {{.CLI_ARGS}}'
+
+  build:jsonschema:
+    desc: Compile the `jsonschema` feature graph (`//:jsonschema`) — `cargo check --features jsonschema --all-targets` under Bazel
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} //:jsonschema {{.CLI_ARGS}}'
 
   mod:check:
     desc: MODULE.bazel.lock is fresh — `bazel mod deps --lockfile_mode=error`

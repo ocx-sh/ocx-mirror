@@ -26,6 +26,31 @@ rust_library(
     ],
 )
 
+# This crate has no `jsonschema` feature, but it names ocx_mirror_source, and
+# Cargo unifies features: under `--features jsonschema` it compiles against the
+# featured source crate. Mixing the two source crates in one graph is a type
+# error, so the variant graph (`//:jsonschema`) needs this twin.
+rust_library(
+    name = "ocx_mirror_error_jsonschema",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        allow_empty = True,
+        exclude = ["src/**/*.rs"],
+    ),
+    crate_name = "ocx_mirror_error",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_error"},
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_mirror_http",
+        "//crates/ocx_mirror_report",
+        "//crates/ocx_mirror_source:ocx_mirror_source_jsonschema",
+    ],
+)
+
 rust_test(
     name = "ocx_mirror_error_test",
     aliases = aliases(
