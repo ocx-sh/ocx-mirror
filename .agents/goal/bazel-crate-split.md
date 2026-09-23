@@ -61,6 +61,12 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 
 ## Decisions
 
+- Owner request 2026-09-23 (post-finalize, lands on #89): add `ocx-mirror version` like ocx
+  (`build.rs` provenance + `app::build_info`, `--verbose`, `--format json`) with ocx's `__testing`
+  feature (fixed provenance in test builds) so the Bazel/acceptance cache stays stable; prove the
+  cache (no-change rerun fully cached; docs-only commit keeps acceptance cached; src change reruns).
+  Wire `GIT_SHA_SHORT` in `generate ci` to the build info (dead `option_env!` today).
+
 - Owner requirement added 2026-09-23 (scope of Loop 3): ocx-mirror pushes CI/test telemetry to
   otel.ocx.sh exactly like ocx — port `../ocx/.github/actions/test-telemetry/action.yml`,
   `scripts/bep_to_otlp.py`, `taskfiles/telemetry.taskfile.yml` (+ Bazel BEP→OTLP wiring in
@@ -189,6 +195,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 | 5 | 2026-09-23 | sub-orchestrator phase2-loop | opus | Loop 2 (`ocx_python` promotion, ocx PR, pointer, oracle, e2e tier 2) | done 8e62543 (+ ledger commit); ocx-sh/ocx#503 open, green |
 | 6 | 2026-09-23 | sub-orchestrator phase3-loop | opus | Loop 3 (Bazel Linux loop, JUnit, CI bar C11, OTEL telemetry + Grafana repo filter, final oracle) | done 4b1f40f (+ ledger commit); C11 NO-GO; telemetry live |
 | 7 | 2026-09-23 | sub-orchestrator refine-finalize | opus | R (≤3 turns /hex-review + /hex-execute on whole branch) + F (/hex-finalize, mirror PR, green pipeline, Verification items) | done — [#89](https://github.com/ocx-sh/ocx-mirror/pull/89) |
+| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | pending |
 
 ## Verification checklist (artifact § Verification + ADR § Phase plan and gates)
 
