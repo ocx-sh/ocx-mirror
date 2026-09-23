@@ -52,6 +52,12 @@ rust_library(
     crate_root = "src/lib.rs",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
+    # Stand-in for the package's `build.rs`, which Bazel never runs (as in
+    # ocx): the fixed provenance a cargo `__testing` build bakes, read from
+    # the same file. Every Bazel build is a test build, so no commit, dirty
+    # flag or CI variable reaches the binary and nothing re-keys per commit.
+    # `rust_test(crate = ":ocx_mirror")` inherits it.
+    rustc_env_files = ["testing_provenance.env"],
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_mirror_error",

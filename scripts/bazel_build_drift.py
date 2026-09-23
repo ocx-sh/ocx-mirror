@@ -37,7 +37,13 @@ Two things the edge comparison cannot see, each its own finding:
   `custom-build` target (`build.rs`) reds: Bazel builds no feature a BUILD
   `crate_features` does not name and runs no build script without a
   `cargo_build_script`, so either compiles a different crate under Bazel.
-  Mirror it into BUILD first, then widen this gate.
+  Mirror it into BUILD first, then widen this gate. Widened exactly once
+  (ADMITTED_BUILD_SCRIPT): the root package's provenance `build.rs`, whose
+  `__testing` output Bazel reads as `rustc_env_files` instead of running it
+  (as ocx's graph does for `ocx_cli`) — admitted only while a root rule
+  still names that file, so dropping the stand-in reds. The admission is by
+  path only: what the script emits is not read, so a new `rustc-cfg` or
+  link line in it would stay green here — keep that script to `rustc-env`.
 * Every Cargo target that `cargo test` builds (`"test": true` — the lib and
   bin unit tests, each `tests/*.rs`) needs a `rust_test` in its package: a
   lib/bin one whose `crate` names a rule of the Cargo target's name, any
@@ -82,6 +88,9 @@ CRATE_KINDS = frozenset({"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-ma
 STRING_LITERAL = re.compile(r'"([^"]*)"')
 DEP_LABEL_PREFIX = ("@crates//", "//")
 VERSIONED_KINDS = ("rust_library", "rust_binary", "rust_proc_macro")
+ENV_FILES_ATTR = re.compile(r"^  rustc_env_files = (?P<value>.*)$")
+#: (package, script, env file): the one build script Bazel stands in for.
+ADMITTED_BUILD_SCRIPT = ("", "build.rs", "testing_provenance.env")
 
 
 @dataclasses.dataclass
@@ -93,6 +102,8 @@ class BuildRead:
     #: package-relative paths they name as `srcs`.
     test_crates: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     test_srcs: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    #: Per package: files the rules name as `rustc_env_files`.
+    env_files: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     targets: int = 0
     orphan_rules: int = 0
 
@@ -168,6 +179,9 @@ def read_build_output(text: str, root: str) -> BuildRead:
         elif kind == "rust_test" and (match := SRCS_ATTR.match(line)):
             srcs = read.test_srcs.setdefault(package, set())
             srcs.update(label_target(literal) for literal in STRING_LITERAL.findall(match.group("value")))
+        elif kind in VERSIONED_KINDS and (match := ENV_FILES_ATTR.match(line)):
+            files = read.env_files.setdefault(package, set())
+            files.update(label_target(literal) for literal in STRING_LITERAL.findall(match.group("value")))
         elif match := DEP_ATTR.match(line):
             bucket = read.test if kind == "rust_test" else read.normal
             labels = bucket.setdefault(package, set())
@@ -281,7 +295,15 @@ def check_drift(*, build_text: str, metadata: dict, root: str) -> list[Finding]:
         findings.append(
             Finding("drift-default-features", f"BUILD drift: {pkg_label(package)} Cargo `default` feature enables {default} — Bazel builds none of it; mirror it into the BUILD rules' `crate_features` first")
         )
+    admitted_package, admitted_script, stand_in = ADMITTED_BUILD_SCRIPT
     for package, scripts in sorted(cargo.build_scripts.items()):
+        if (package, scripts) == (admitted_package, [admitted_script]):
+            if stand_in in read.env_files.get(package, set()):
+                continue
+            findings.append(
+                Finding("drift-build-script", f"BUILD drift: {pkg_label(package)} {scripts} is admitted only while a rule in the package names `rustc_env_files = [\"{stand_in}\"]` — without it Bazel builds the crate with no provenance at all")
+            )
+            continue
         findings.append(
             Finding("drift-build-script", f"BUILD drift: {pkg_label(package)} has a Cargo build script {scripts} — Bazel runs none; mirror it into a `cargo_build_script` first")
         )
@@ -509,6 +531,18 @@ def self_test() -> int:
     built = json.loads(json.dumps(metadata))
     member(built, "ocx_mirror_http")["targets"].append({"kind": ["custom-build"], "name": "build-script-build", "src_path": f"{ROOT}/crates/ocx_mirror_http/build.rs", "test": False})
     run_case("first-party build.rs", text, built, ["drift-build-script"], "cargo_build_script")
+    rooted = json.loads(json.dumps(metadata))
+    member(rooted, "ocx_mirror")["targets"].append({"kind": ["custom-build"], "name": "build-script-build", "src_path": f"{ROOT}/build.rs", "test": False})
+    # The root library is the first record, ahead of any split point `_in_package` uses.
+    stand_in = text.replace('  name = "ocx_mirror",\n', '  name = "ocx_mirror",\n  rustc_env_files = ["//:testing_provenance.env"],\n', 1)
+    expect(stand_in.count("rustc_env_files") == 1, "stand-in insert did not land")
+    run_case("root build.rs admitted: a root rule names the stand-in env file", stand_in, rooted, [])
+    run_case("root build.rs without the rustc_env_files stand-in", text, rooted, ["drift-build-script"], "rustc_env_files")
+    twice = json.loads(json.dumps(rooted))
+    member(twice, "ocx_mirror")["targets"].append({"kind": ["custom-build"], "name": "build-script-build", "src_path": f"{ROOT}/build/extra.rs", "test": False})
+    run_case("a second root build script next to the admitted one", stand_in, twice, ["drift-build-script"], "cargo_build_script")
+    elsewhere = json.loads(json.dumps(built))
+    run_case("a member build.rs even with the root stand-in present", stand_in, elsewhere, ["drift-build-script"], "ocx_mirror_http")
 
     untargeted = json.loads(json.dumps(metadata))
     for package in untargeted["packages"]:

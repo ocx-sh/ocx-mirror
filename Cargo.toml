@@ -171,6 +171,14 @@ hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system
 # `thiserror` matches ocx's pin; the local error enums of the extracted crates
 # use it (adr_bazel_crate_split.md § C3).
 thiserror = "2.0.18"
+# Build-only: the root package's `build.rs` bakes git + build provenance for
+# `ocx-mirror version` and the `generate ci` rev stamp. Row copied EXACTLY from
+# `ocx_cli`'s `[build-dependencies]` (ocx declares it per crate, not in its
+# workspace table), including its reason for the `=` pin: ~31 transitive
+# gix-family crates that a floating `^9.1` would let `cargo update` move
+# unreviewed. `gix` compiles whatever the features say; they only choose which
+# `VERGEN_*` variables are emitted.
+vergen-gix = { version = "=9.1.0", default-features = false, features = ["build", "cargo", "rustc"] }
 # Dev-only: `tests/workspace_structure.rs` reads member manifests as TOML.
 # Copied from ocx's [workspace.dependencies].
 toml = "1.1.2"
@@ -193,6 +201,16 @@ path = "src/main.rs"
 [features]
 default = []
 jsonschema = ["dep:schemars", "ocx_mirror_spec/jsonschema", "ocx_mirror_source/jsonschema"]
+# Test builds only — NEVER enable in a release build. `build.rs` then bakes the
+# fixed placeholders of `testing_provenance.env` instead of git/CI state, so
+# the acceptance binary is a function of source and toolchain alone (ocx
+# `adr_test_speed_tiers.md` § C-PROV). `task rust:build` and the acceptance
+# harness build pass it; the release build action never does. The Bazel graph
+# runs no build script and reads the same file (`BUILD.bazel`).
+__testing = []
+
+[build-dependencies]
+vergen-gix.workspace = true
 
 [dependencies]
 ocx_config.workspace = true

@@ -19,7 +19,8 @@ tasks:
     internal: true
     dir: '{{.REPO_ROOT}}'
     cmds:
-      - cargo build --release --locked
+      # `__testing`: fixed placeholder provenance (see `rust:build`).
+      - cargo build --release --locked --features __testing
       - mkdir -p {{.BIN_DIR}}
       - cp {{.REPO_ROOT}}/target/release/ocx-mirror{{exeExt}} {{.OCX_MIRROR_BINARY}}
     status:

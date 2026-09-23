@@ -11,6 +11,8 @@ x-shared:
     - '{{.ROOT_DIR}}/crates/crate_map.toml'
     - '{{.ROOT_DIR}}/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.lock'
+    - '{{.ROOT_DIR}}/build.rs'
+    - '{{.ROOT_DIR}}/testing_provenance.env'
     - '{{.ROOT_DIR}}/rustfmt.toml'
     - exclude: '{{.ROOT_DIR}}/target/**'
     - exclude: '{{.ROOT_DIR}}/external/**'
@@ -72,12 +74,18 @@ tasks:
     cmd: cargo check --workspace --locked --features jsonschema --all-targets
 
   build:
-    desc: Build release binary
+    desc: Build the release-profile test binary (`--features __testing`)
+    summary: |
+      The binary acceptance runs (non-Linux `task test:parallel`, CI's
+      Acceptance job). `__testing` bakes fixed placeholder provenance instead
+      of the commit, dirty flag and CI variables (`build.rs`), so the binary
+      does not change per commit. Shipped binaries come from
+      `.github/workflows/build-matrix.yml`, which enables no feature.
     sources: *rust-sources
     status:
       - test -f {{.ROOT_DIR}}/target/release/ocx-mirror
     method: timestamp
-    cmd: cargo build --release --locked
+    cmd: cargo build --release --locked --features __testing
 
   install:nextest:
     internal: true

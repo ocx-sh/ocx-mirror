@@ -96,6 +96,8 @@ document the four-line job, let them own the pipeline.
   trusted. `crates/ocx_mirror_http/src/lib.rs` now calls `ocx_util::tls::seed_embedded_roots`
   directly. **Since v0.6.1** ocx adds `system-proxy` (its SSRF guard consults
   reqwest's own proxy matcher), so the mirror carries it too — copy-exactly.
+- `vergen-gix` (root `[build-dependencies]`, the provenance `build.rs`) is
+  copy-exactly from `ocx_cli`'s own row, `=` pin included.
 - Clone/checkout always `--recurse-submodules`.
 
 ## Build & Development
@@ -105,6 +107,13 @@ Task runner [`task`](https://taskfile.dev). `task` (fast check),
 `task test:parallel` (acceptance), `task docs:serve`. Toolchain via direnv +
 `ocx direnv export` (`ocx.toml`). Always `cargo fmt` before commit,
 `task verify` after implementation.
+
+Test builds carry the `__testing` feature (`task rust:build`, the harness
+build): `build.rs` then bakes the placeholders of `testing_provenance.env`
+instead of git/CI provenance, so the acceptance binary — and the Bazel cache
+keyed on it — is stable across commits. The Bazel graph runs no build script
+and reads the same file. Release builds (`build-matrix.yml`) never enable it;
+`ocx-mirror version --format json` saying `"channel": "test"` is a test build.
 
 Single acceptance test:
 

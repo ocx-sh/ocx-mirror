@@ -41,6 +41,7 @@
 //!   because the binary runs it *before* [`Command`] dispatch and must
 //!   classify the `TlsError` it raises into an exit code itself.
 
+mod build_info;
 mod command;
 
 // Private aliases (D-P1): the workspace crates bound under their pre-split
