@@ -1,16 +1,21 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 #
-# The Bazel Linux loop (adr_bazel_crate_split.md § C7, C8, A-4, A-8). Ported
-# from ocx's taskfiles/bazel.taskfile.yml; ocx-only material (remote cache,
-# tag guard, doctor) is not carried.
+# The Bazel lane — the Linux dev loop and CI's `Smoke (Linux)` job
+# (adr_bazel_crate_split.md § C7, C8, A-4, A-8). Ported from ocx's
+# taskfiles/bazel.taskfile.yml, remote-cache credential wiring included; ocx's
+# `doctor` (a 1.7k-line host probe of ocx's own paths) is not carried.
 #
 # Every Bazel call goes through `ocx exec bazel -- bazel …` (the `bazel` row in
 # ocx.toml) and passes `--jobs={{.JOBS}}` where the command takes it: the host
-# ~/.bazelrc outranks the workspace rc. CI and the C11 lane pass JOBS=auto.
+# ~/.bazelrc outranks the workspace rc. CI passes JOBS=auto.
 #
 # `{{.BAZEL}}` drops the telemetry credential from the client environment:
 # Bazel writes that environment into every BEP and hands it to repository
 # rules. `telemetry:bazel` still reads both from the task env.
+#
+# Tasks CI calls append `{{.CLI_ARGS}}` after the command word, so verify.yml
+# can hand a *build* option through — `--config=ci`, the execution log, and on
+# the `main` push alone `--remote_upload_local_results=true`.
 #
 # Gates are `cmds:`, never `preconditions:` or `status:` — `task --force`
 # skips those, and a cached green cannot be told from a gate that never ran.
@@ -21,7 +26,34 @@ vars:
   JOBS: '{{.JOBS | default "6"}}'
   OCX_DIR: '{{.ROOT_DIR}}/external/ocx'
   NO_OTEL: env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT
-  BAZEL: '{{.NO_OTEL}} ocx exec bazel -- bazel'
+  # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string — ocx's
+  # `CACHE_RC`, verbatim in its derivation. That file is the cache credential
+  # `.github/actions/bazel-cache-rc` writes; without it a CI request to the
+  # shared cache is an anonymous 401 and the lane compiles cold.
+  #
+  # **Derived from the file existing, never from a lane naming it.** `--bazelrc`
+  # on a missing path is a HARD error (ocx measured on 9.2.0: exit 2, `Unable
+  # to read .bazelrc file`), a fork PR is given no secrets so the action writes
+  # nothing, and a developer shell has no $RUNNER_TEMP (its read credential is
+  # a `--remote_header` in ~/.bazelrc). It is a *startup* option, so it sits
+  # before the command word; it adds to the workspace rc, it does not replace
+  # it, so `--remote_upload_local_results=false` still holds on every lane.
+  #
+  # `printf '%s'`, never `printf -- '%s'`: go-task's `sh:` shell (mvdan/sh)
+  # takes `--` as the format string and emits two dashes, silently dropping the
+  # credential (ocx measured it through `task --dry`).
+  #
+  # Divergence from ocx: ocx computes it in `test:unit` and `test:accept` alone;
+  # here it is part of `{{.BAZEL}}`, so every Bazel command of the CI job runs
+  # with one startup-option set (one server, and `bazel:lint`'s buildifier
+  # build reads the cache too).
+  #
+  # ponytail: unquoted at the expansion — `$RUNNER_TEMP` is
+  # `/home/runner/work/_temp` on every GitHub runner. A path with a space would
+  # need the flag built inside each `cmd:` body.
+  CACHE_RC:
+    sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
+  BAZEL: '{{.NO_OTEL}} ocx exec bazel -- bazel {{.CACHE_RC}}'
 
 tasks:
   bep:mode:

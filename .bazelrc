@@ -1,8 +1,8 @@
 # ocx-mirror .bazelrc — adr_bazel_crate_split.md § C7. Every flag checked
 # against `bazel help build --long` / `bazel help startup_options` on 9.2.0.
-# No stamping, no remote cache, no credential, no --lockfile_mode (that is
-# `task bazel:mod:check`'s job). Tasks pass --jobs explicitly: a home
-# ~/.bazelrc outranks this file.
+# No stamping and no credential in this file (the remote cache block below is
+# read-only), no --lockfile_mode (that is `task bazel:mod:check`'s job). Tasks
+# pass --jobs explicitly: a home ~/.bazelrc outranks this file.
 
 # The server is a scheduler; left alone the JVM sizes its heap off host RAM.
 startup --host_jvm_args=-Xmx2g
@@ -19,8 +19,69 @@ build --compilation_mode=opt
 build --disk_cache=~/.cache/ocx-mirror/bazel-disk
 common --repository_cache=~/.cache/ocx-mirror/bazel-repo
 
+# Remote cache — read-only everywhere this file reaches. Ported verbatim from
+# ocx's .bazelrc; the mirror SHARES ocx's cache generation (same host, same
+# `/v1`, same reader/writer realm and org secrets), so third-party crates and
+# toolchains built on either repository's `main` push hit for the other.
+#
+# The scheme is explicit: both remote flags default to `grpcs` on a scheme-less
+# URI, which silently talks the wrong protocol to an HTTP cache.
+#
+# `/v1` is the cache GENERATION, and it is a URI path prefix on purpose.
+# `--remote_instance_name` is inert over an HTTP remote cache — Bazel's HTTP
+# client never puts the instance name in the URL — so rotating a generation
+# through that flag changes nothing at all. Do not re-add it here. The server
+# side of the same exit is `--enable_ac_key_instance_mangling` on the
+# bazel-remote unit; that is a server flag and no Bazel binary carries it.
+build --remote_cache=https://bazel-cache.ocx.sh/v1
+
+# Writes are granted per-lane, never by this file. A contributor, a fork PR and
+# a non-main CI lane all read and none of them write. The one grant is
+# verify.yml's `main` push, as a command-line override on its test steps.
+build --remote_upload_local_results=false
+
+# The default is 60s PER OPERATION. A single slow box with no failover, serving
+# thousands of lookups per build, makes a build slower than no cache at all —
+# green, with nothing noticing. A per-operation wait longer than the action it
+# is trying to avoid is never a win.
+build --remote_timeout=30s
+
+# Stated rather than inherited so the worst case per operation is readable.
+# This is not `--experimental_remote_cache_eviction_retries`, which stays at
+# its default of 5 and is deliberately absent from this file.
+build --remote_retries=2
+
+# Do NOT enable `--experimental_remote_cache_chunking`. It is present on 9.2.0
+# and defaults false; turning it on re-keys CAS uploads and splits this
+# workspace's cache population across two incompatible encodings for no
+# measured win.
+
+# No credential of any kind here, and no flag whose value is EXECUTED: Bazel
+# spawns a `--credential_helper` with the full client environment, before the
+# sandbox, on any command (bazel#30439). CI's credential is written by
+# `.github/actions/bazel-cache-rc` into `$RUNNER_TEMP/bazel-cache.rc`, outside
+# the workspace, and passed as `--bazelrc=` by `taskfiles/bazel.taskfile.yml`'s
+# `{{.BAZEL}}` only when that file exists. A developer's read credential is a
+# `--remote_header` line in `~/.bazelrc`, never `.bazelrc.user` — host state
+# must not need a per-checkout file, because this machine carries many
+# worktrees and disposable ones.
+
 # CI consumes no build outputs, except the test reports (a cached target
-# otherwise leaves no test.xml on disk under minimal).
+# otherwise leaves no test.xml on disk under minimal). verify.yml passes
+# `--config=ci` on its two test steps, so a fully cached run downloads the
+# reports and nothing else; ocx carries this block latent (no lane passes it).
+# The report consumers read files off disk (`bazel_test_floor.py` the
+# test.log URIs of the BEP, the acceptance publish the copied test.xml),
+# which this regex keeps local.
+#
+# ocx's paired position (BZL-CACHE-12), verbatim, because `minimal` maximises
+# exposure to the evicted-intermediate class: never key CI retry or alerting
+# logic on exit code 39 — it was never observed reaching the caller. Match the
+# log text instead: `lost inputs with digests:`, `Found transient remote cache
+# error, retrying the build...`, `Lost inputs no longer available remotely:`,
+# `lost input too many times (#21)`. And `--experimental_remote_cache_ttl`
+# stays unset (3h default) until the server's real eviction window is known and
+# shorter.
 build:ci --remote_download_minimal
 build:ci --remote_download_regex=.*/test\.(xml|log)$
 build:ci --jobs=auto
