@@ -89,8 +89,8 @@ tasks:
         Linux, cargo elsewhere); off Linux also the gate-script and telemetry
         self-tests
       Phase 2 (sequential; adr_bazel_crate_split.md § C8):
-        Linux — license headers, dependency licenses, cargo release build
-          (`__testing` provenance), claude hooks test, the Bazel static gates
+        Linux — license headers, dependency licenses, claude hooks test,
+          the Bazel static gates
           (pin, lint, lockfile, fork patches, BUILD drift, tag guard), the
           Bazel jsonschema feature build, the gate-script + telemetry
           self-tests (Bazel), Bazel unit tests, the Bazel coverage gate,
@@ -122,7 +122,10 @@ tasks:
       # Linux: `bazel:build:jsonschema` in .verify:test:linux.
       - task: rust:jsonschema:check
         if: '[ "{{OS}}" != linux ]'
+      # Linux tests the Bazel-built //:ocx-mirror; the cargo release build
+      # feeds only the non-Linux `test:parallel`.
       - task: rust:build
+        if: '[ "{{OS}}" != linux ]'
       - task: claude:hooks:test
       # `if:`, not `platforms:` — go-task 3.53 ignores `platforms:` on a
       # `task:` call (measured), and would run both arms.
