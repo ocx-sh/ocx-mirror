@@ -1,6 +1,6 @@
 # CLI Reference
 
-`ocx-mirror` mirrors upstream binary releases into OCI registries. Package-mirroring commands live under the `package` namespace and take a [`mirror.yml`][ref-mirror-yml] spec: `package sync`, `package check`, and `package validate` form the local loop, while the `package pipeline` family implements the generated CI pipeline job by job. `schema` is a top-level utility. A sibling `registry` namespace mirrors a whole upstream index into a corporate registry instead of one tool at a time — [`registry sync`](#registry-sync) takes a [`registry.yml`][ref-registry-yml] spec. A third `dist` namespace mirrors the bootstrap layer — ocx's own release archives and the `dist.json` manifest naming them — into a generic HTTP store rather than a registry; [`dist sync`](#dist-sync) takes a [`dist.yml`][ref-dist-yml] spec.
+`ocx-mirror` mirrors upstream binary releases into OCI registries. Package-mirroring commands live under the `package` namespace and take a [`mirror.yml`][ref-mirror-yml] spec: `package sync`, `package check`, and `package validate` form the local loop, while the `package pipeline` family implements the generated CI pipeline job by job. `schema` and [`version`](#version) are top-level utilities. A sibling `registry` namespace mirrors a whole upstream index into a corporate registry instead of one tool at a time — [`registry sync`](#registry-sync) takes a [`registry.yml`][ref-registry-yml] spec. A third `dist` namespace mirrors the bootstrap layer — ocx's own release archives and the `dist.json` manifest naming them — into a generic HTTP store rather than a registry; [`dist sync`](#dist-sync) takes a [`dist.yml`][ref-dist-yml] spec.
 
 ## Global flags {#global-flags}
 
@@ -64,6 +64,34 @@ ocx-mirror schema <TARGET>
 | `url-index` | The [`url_index`](./mirror-yml.md#source) source document | `https://ocx.sh/schemas/url-index/v1.json` |
 | `dist` | [`dist.yml`](./dist-yml.md) | `https://ocx.sh/schemas/dist/v1.json` |
 | `plan` | [`plan.json`](./plan-json.md) — the document [`pipeline plan`](#pipeline-plan) writes | `https://ocx.sh/schemas/plan/v4.json` |
+
+## `version` {#version}
+
+Print the `ocx-mirror` version, and with `--verbose` or `--format json` the build provenance baked into the binary.
+
+```sh
+ocx-mirror version [--verbose] [--format <FMT>]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-v`, `--verbose` | off | Plain output only: add `host:`, `commit:`, `built:`/`target:`/`rustc:` and `ci:` rows for the provenance the build recorded |
+| `--format <FMT>` | `plain` | `plain` prints the bare version token (one line, for scripts); `json` prints the document below, identical with or without `--verbose` |
+
+```json
+{
+  "version": "0.7.0-dev+20260923094225",
+  "cargo_pkg_version": "0.7.0",
+  "channel": "dev",
+  "commit": { "sha": "…40 hex…", "short": "4da84558", "describe": "…", "dirty": false, "timestamp": "…" },
+  "build": { "timestamp": "…", "profile": "release", "target": "x86_64-unknown-linux-musl", "rustc": "1.95.0" },
+  "ci": { "provider": "github-actions", "run_url": "https://github.com/ocx-sh/ocx-mirror/actions/runs/…", "workflow": "…", "ref": "…", "sha": "…" }
+}
+```
+
+Every key but `version` is optional and absent when the build could not record it: `cargo_pkg_version` appears only when a release or dev build overrode the version, `commit` needs a git checkout (`describe` falls back to the SHA on a checkout without tags, which is what CI builds from), `build` is recorded by CI builds, `ci` by GitHub Actions builds. A build from a source tarball prints `version` alone. The `commit.short` value is also the `rev` in the header of every workflow [`pipeline generate ci`](#pipeline-generate-ci) writes (`unknown` without a checkout).
+
+Test builds (the acceptance suite's binary, and every Bazel build) report fixed placeholders instead — `channel: "test"`, an all-zero commit SHA, `describe: "placeholder-g00000000"`, a `https://ci.invalid/…` run URL — so the binary does not change from one commit to the next. A binary that says `channel: test` was never released.
 
 ## `package pipeline` {#pipeline}
 

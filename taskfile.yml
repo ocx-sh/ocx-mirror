@@ -72,12 +72,12 @@ tasks:
       Phase 1 (parallel): format, clippy, gate-script self-tests, telemetry self-test
       Phase 2 (sequential; adr_bazel_crate_split.md § C8):
         Linux — license headers, dependency licenses, jsonschema feature,
-          cargo release build (the shipped artifact), claude hooks test, the
+          cargo release build (`__testing` provenance), claude hooks test, the
           Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift),
           Bazel unit tests, the Bazel coverage gate, the Bazel-excluded rows
           under nextest, Bazel acceptance.
         elsewhere — license headers, dependency licenses, jsonschema feature,
-          cargo release build, claude hooks test, nextest unit tests,
+          cargo release build (`__testing`), claude hooks test, nextest unit tests,
           acceptance tests.
       Clippy (phase 1) finishes before any Bazel command (phase 2) starts.
       Use `task --force verify` to bypass caching.

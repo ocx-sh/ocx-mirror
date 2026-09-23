@@ -6,6 +6,7 @@ pub(crate) mod package;
 pub(crate) mod registry;
 #[cfg(feature = "jsonschema")]
 mod schema;
+mod version;
 
 use ocx_console::DataInterface;
 use ocx_console::progress::ProgressManager;
@@ -30,6 +31,9 @@ pub enum Command {
     /// Generate JSON Schema for mirror types
     #[cfg(feature = "jsonschema")]
     Schema(schema::Schema),
+
+    /// Print the ocx-mirror version and the build provenance baked into it
+    Version(version::Version),
 }
 
 impl Command {
@@ -40,6 +44,7 @@ impl Command {
             Self::Dist(cmd) => cmd.execute(printer).await,
             #[cfg(feature = "jsonschema")]
             Self::Schema(cmd) => cmd.execute().await,
+            Self::Version(cmd) => cmd.execute(printer),
         }
     }
 }

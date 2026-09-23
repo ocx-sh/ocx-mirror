@@ -15,7 +15,7 @@ use super::permissions::{
     render_registry_write_permissions, render_sign_env,
 };
 use super::slot::{SpecSlot, indent_entries, slash_path, trigger_paths};
-use super::{GIT_SHA_SHORT, VERSION};
+use super::{VERSION, git_sha_short};
 use crate::spec::MirrorSpec;
 
 pub const DESCRIBE_TEMPLATE: &str = include_str!("../templates/describe.yml");
@@ -44,7 +44,7 @@ pub fn render_describe(spec: &MirrorSpec, slot: &SpecSlot) -> String {
 
     DESCRIBE_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{OCX_MIRROR_REV}", git_sha_short())
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
@@ -77,7 +77,7 @@ pub fn render_describe(spec: &MirrorSpec, slot: &SpecSlot) -> String {
 pub fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     ANNOUNCE_FROM_REGISTRY_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{OCX_MIRROR_REV}", git_sha_short())
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
@@ -111,7 +111,7 @@ pub fn render_announce_from_registry(spec: &MirrorSpec, slot: &SpecSlot) -> Stri
 pub fn render_patch(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     PATCH_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{OCX_MIRROR_REV}", git_sha_short())
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
@@ -164,7 +164,7 @@ pub fn schedule_block(cron: Option<&String>) -> String {
 pub fn render_cascade(spec: &MirrorSpec, slot: &SpecSlot) -> String {
     CASCADE_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{OCX_MIRROR_REV}", git_sha_short())
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{WORKFLOW_SUFFIX}", &slot.suffix())
@@ -224,7 +224,7 @@ pub fn render_verify_generated(slots: &[&SpecSlot]) -> String {
 
     VERIFY_GENERATED_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{OCX_MIRROR_REV}", git_sha_short())
         .replace("{SPEC_SOURCE}", &sources)
         .replace("{SPEC_ARGS}", &verify_spec_args(slots))
         .replace("{TRIGGER_PATHS}", &indent_entries(&entries))

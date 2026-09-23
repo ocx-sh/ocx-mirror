@@ -90,8 +90,9 @@ const NATIVE_FIXTURES: &[&str] = &[
 /// Render every generated file for `fixture` into one comparable blob,
 /// with the build-stamped header values masked.
 ///
-/// `VERSION` bumps each release and `GIT_SHA_SHORT` changes on every commit,
-/// so both are replaced by fixed tokens — masking the stamps is what lets the
+/// `VERSION` bumps each release and the rev stamp changes on every commit
+/// (`git_sha_short()`; the test-build placeholder is `00000000`), so both
+/// are replaced by fixed tokens — masking the stamps is what lets the
 /// golden assert on the parts a renderer change can actually break.
 fn render_all_masked(fixture: &str) -> String {
     let dir = tempdir().unwrap();
@@ -120,7 +121,9 @@ fn render_all_masked(fixture: &str) -> String {
         blob.push_str(
             &content
                 .replace(&format!("ocx-mirror v{VERSION}"), "ocx-mirror v{VERSION}")
-                .replace(GIT_SHA_SHORT, "{REV}"),
+                // Anchored too: a bare `00000000` would also mask any digest
+                // that happens to contain eight zeros.
+                .replace(&format!("(rev {})", git_sha_short()), "(rev {REV})"),
         );
     }
     blob

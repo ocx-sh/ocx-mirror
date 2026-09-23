@@ -50,12 +50,12 @@ use crate::spec::{self, MirrorSpec};
 /// OCX-mirror crate version baked in at compile time.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Short git SHA injected by `build.rs` via `OCX_GIT_SHA_SHORT`.
-/// Falls back to `"unknown"` when the build environment has no git context.
-const GIT_SHA_SHORT: &str = match option_env!("OCX_GIT_SHA_SHORT") {
-    Some(sha) => sha,
-    None => "unknown",
-};
+/// Short git SHA `build.rs` baked into this binary (`build_info::short_sha`),
+/// or `"unknown"` when the build had no git context (a source tarball).
+/// Test builds carry the fixed placeholder `00000000`.
+fn git_sha_short() -> &'static str {
+    crate::build_info::short_sha().unwrap_or("unknown")
+}
 
 // ── Baked-in templates ───────────────────────────────────────────────────────
 
@@ -356,7 +356,7 @@ fn render_workflow(spec: &MirrorSpec, slot: &SpecSlot) -> String {
 
     WORKFLOW_TEMPLATE
         .replace("{OCX_MIRROR_VERSION}", VERSION)
-        .replace("{OCX_MIRROR_REV}", GIT_SHA_SHORT)
+        .replace("{OCX_MIRROR_REV}", git_sha_short())
         .replace("{SPEC_SOURCE}", &slot.source())
         .replace("{SPEC_ARG}", &slot.spec_arg())
         .replace("{TRIGGER_PATHS}", &triggers)
