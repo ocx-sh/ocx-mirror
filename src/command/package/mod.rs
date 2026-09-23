@@ -44,6 +44,15 @@ pub enum PackageCommand {
 }
 
 impl PackageCommand {
+    pub fn apply_format(&mut self, global: crate::pipeline::options::OutputFormat) {
+        match self {
+            Self::Sync(cmd) => cmd.options.format = super::with_global(cmd.options.format, global),
+            Self::Check(cmd) => cmd.options.format = super::with_global(cmd.options.format, global),
+            Self::Validate(_) => {}
+            Self::Pipeline(cmd) => cmd.apply_format(global),
+        }
+    }
+
     pub async fn execute(&self, printer: &DataInterface, progress: &ProgressManager) -> Result<(), MirrorError> {
         match self {
             Self::Sync(cmd) => cmd.execute(printer, progress).await,

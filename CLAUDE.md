@@ -113,7 +113,7 @@ build): `build.rs` then bakes the placeholders of `testing_provenance.env`
 instead of git/CI provenance, so the acceptance binary — and the Bazel cache
 keyed on it — is stable across commits. The Bazel graph runs no build script
 and reads the same file. Release builds (`build-matrix.yml`) never enable it;
-`ocx-mirror version --format json` saying `"channel": "test"` is a test build.
+`ocx-mirror --json version` saying `"channel": "test"` is a test build.
 
 Single acceptance test:
 

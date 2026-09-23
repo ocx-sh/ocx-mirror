@@ -24,6 +24,11 @@ struct Cli {
     #[arg(short, long, value_enum, global = true)]
     log_level: Option<LogLevel>,
 
+    // ocx's root output group (`ocx_console::Format`): `--format plain|json`
+    // and its `--json` shorthand, before the subcommand, as in ocx.
+    #[command(flatten)]
+    format: ocx_console::Format,
+
     // Parsed early in main() via ColorMode::from_args(); this field exists
     // so clap recognizes --color and shows it in --help.
     /// When to use ANSI colors in output.
@@ -43,7 +48,7 @@ async fn main() -> ExitCode {
 
     let styles = clap_styles(color_config.stdout);
     let matches = Cli::command().color(color_mode.into()).styles(styles).get_matches();
-    let cli = match Cli::from_arg_matches(&matches) {
+    let mut cli = match Cli::from_arg_matches(&matches) {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
@@ -84,6 +89,7 @@ async fn main() -> ExitCode {
     }
 
     let printer = DataInterface::new(Printer::new(color_config.stdout, color_config.stderr));
+    cli.command.apply_format(cli.format.requested());
     match cli.command.execute(&printer, &progress).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

@@ -2,10 +2,10 @@
 // Copyright 2026 The OCX Authors
 
 //! `ocx-mirror version` — a copy of ocx's `version` command and its
-//! `VersionData` / `VerboseVersionData` rendering. `--format` is this
-//! command's own flag (the mirror has no global one), and the verbose `host:`
-//! row names os/arch only: ocx adds the libc family from its state store,
-//! which the mirror does not keep.
+//! `VersionData` / `VerboseVersionData` rendering. JSON comes from the root
+//! `--format json` / `--json` (ocx's `ocx_console::Format`), as in ocx; the
+//! verbose `host:` row names os/arch only: ocx adds the libc family from its
+//! state store, which the mirror does not keep.
 
 use ocx_console::DataInterface;
 use serde::Serialize;
@@ -23,15 +23,15 @@ pub struct Version {
     #[arg(short, long)]
     verbose: bool,
 
-    /// Output format
-    #[arg(long, value_enum, default_value = "plain")]
-    format: OutputFormat,
+    /// The root `--format` / `--json`, set by `Command::apply_format`.
+    #[arg(skip)]
+    pub(super) format: Option<OutputFormat>,
 }
 
 impl Version {
     pub fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
         let data = VersionData::enriched(build_info::version(), env!("CARGO_PKG_VERSION"));
-        match self.format {
+        match self.format.unwrap_or(OutputFormat::Plain) {
             OutputFormat::Json => {
                 let json = serde_json::to_string_pretty(&data).map_err(|e| {
                     MirrorError::ExecutionFailed(vec![format!("cannot render the version as JSON: {e}")])

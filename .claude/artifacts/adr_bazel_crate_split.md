@@ -947,6 +947,23 @@ open question.
   with 11 cached. Reverting served all 15 from cache again, 4 of them as disk-cache hits. A
   cargo `__testing` binary is byte-identical across a new commit plus a dirty tree
   (`f37a2634…`, 0 crates recompiled).
+  (7) **Output format is a root option, as in ocx** (owner correction). This is the
+  decision the owner's relay called "A-10"; that number was already taken by refine-finalize,
+  so it is recorded here. `version` has no `--format` of its own. `ocx-mirror --format
+  plain|json <cmd>` and its `--json` shorthand (POSIX last-wins) are ocx's `Format` group,
+  **promoted** from `ocx_cli::options::format` into the ecosystem crate `ocx_console` (ocx
+  PR `feat/console-format-options`) so both binaries flatten one type. The mirror still links
+  no `ocx_cli`. ocx keeps the `options::Format` path through a re-export. The promoted type
+  gains `Format::requested()`, which returns `None` when neither flag was given; the mirror
+  needs it because `pipeline plan` has a default of its own (JSON under GitHub Actions).
+  `ocx_console` now takes `clap` with `derive` in addition to `clap_builder`. The type moves
+  verbatim, so ocx's help output (`help_surface`) is unchanged. **Overlap with the mirror's
+  per-command `--format`** (`package sync`/`check`, `pipeline plan`/`sign`, `registry sync`,
+  `dist sync`): those flags are kept and behave as before whenever the root flag is absent.
+  When both flags are given, the output is JSON if either asks for JSON. A defaulted
+  per-command flag cannot tell a typed `plain` from its default. For `plan`, an explicit root
+  `plain` also turns off the GitHub Actions JSON default. The fold happens once, in
+  `Command::apply_format`, before dispatch; no `execute` signature changed.
 
 ---
 

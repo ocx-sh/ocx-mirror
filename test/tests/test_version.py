@@ -36,8 +36,9 @@ def test_plain_prints_the_bare_version_token(runner: MirrorRunner) -> None:
     assert result.stdout.count("\n") == 1, repr(result.stdout)
 
 
-def test_json_carries_the_placeholder_provenance(runner: MirrorRunner) -> None:
-    result = runner.run("version", "--format", "json", check=False)
+@pytest.mark.parametrize("flags", [("--format", "json"), ("--json",)], ids=["format-json", "json"])
+def test_json_carries_the_placeholder_provenance(runner: MirrorRunner, flags: tuple[str, ...]) -> None:
+    result = runner.run(*flags, "version", check=False)
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
 
@@ -64,8 +65,8 @@ def test_json_carries_the_placeholder_provenance(runner: MirrorRunner) -> None:
 
 
 def test_verbose_json_is_the_same_document(runner: MirrorRunner) -> None:
-    plain = runner.run("version", "--format", "json", check=False)
-    verbose = runner.run("version", "--verbose", "--format", "json", check=False)
+    plain = runner.run("--json", "version", check=False)
+    verbose = runner.run("--json", "version", "--verbose", check=False)
     assert plain.returncode == verbose.returncode == 0, verbose.stderr
     assert json.loads(verbose.stdout) == json.loads(plain.stdout)
 
@@ -77,6 +78,20 @@ def test_verbose_plain_names_the_placeholder_commit_and_channel(runner: MirrorRu
     assert re.match(r"^ocx-mirror \S+ \(channel: test\)$", lines[0]), lines
     assert f"commit:   00000000 (dirty) - {EPOCH}" in lines, lines
     assert "ci:       https://ci.invalid/placeholder/placeholder/actions/runs/0" in lines, lines
+
+
+def test_root_format_plain_is_the_bare_token(runner: MirrorRunner) -> None:
+    """POSIX last-wins, as in ocx: `--json --format plain` is plain."""
+    result = runner.run("--json", "--format", "plain", "version", check=False)
+    assert result.returncode == 0, result.stderr
+    assert SEMVER.match(result.stdout.strip()), repr(result.stdout)
+
+
+@pytest.mark.parametrize("flags", [("--format", "json"), ("--json",)], ids=["format-json", "json"])
+def test_format_is_a_root_option_not_a_version_flag(runner: MirrorRunner, flags: tuple[str, ...]) -> None:
+    """Output format is the root group, as in ocx: `ocx-mirror version --json` is a usage error."""
+    result = runner.run("version", *flags, check=False)
+    assert result.returncode == 2, (result.returncode, result.stderr)
 
 
 def test_an_unknown_flag_is_a_usage_error(runner: MirrorRunner) -> None:
