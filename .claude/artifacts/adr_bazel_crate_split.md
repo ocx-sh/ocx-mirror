@@ -610,7 +610,7 @@ all of it. Phase-0 components: `crate-placement` rule (author time), `ocx-upstre
 | NFR | Decision / check |
 |---|---|
 | Build latency | Local warm fresh-server `bazel test` and `bazel:cache:check` timings recorded in the measurement artifact — a non-gating local measurement (deferred review item); CI moves only on C11 |
-| Cache correctness | No stamping (no `build.rs`, none added; release stays cargo/cargo-dist); acceptance keyed on the binary, `@tools` ocx, `ocx.lock`/`ocx.toml` and the stamp; inherited env named, not in the key; per-target floors, per-case JUnit, coverage gate; cache hits judged on `strategy` |
+| Cache correctness | No stamping (**A-11**: one `build.rs`, provenance only; Bazel never runs it and reads its fixed `__testing` placeholders from `testing_provenance.env`, so no commit/CI state reaches an action key; release stays cargo); acceptance keyed on the binary, `@tools` ocx, `ocx.lock`/`ocx.toml` and the stamp; inherited env named, not in the key; per-target floors, per-case JUnit, coverage gate; cache hits judged on `strategy` |
 | Operability | Everything via `task`; `bazel:bootstrap` makes a fresh clone/worktree queryable; `Bazel graph (Linux)` keeps the graph alive under NO-GO |
 | Security (threat model) | Build tooling is the trusted environment. In scope: anything leaving the machine — the BEP carries the client environment, so it lives in a 0700 `mktemp -d`, is deleted by `defer`, and is never a CI artifact; crates stay sha256-pinned via Cargo.lock/crate_universe; uv git deps pinned by rev |
 | Cost / RAM / disk | `-Xmx2g`, `--local_resources=memory=HOST_RAM*.3`, `--jobs=6` (ocx's server may be up concurrently); phase 3 records peak RSS of a cold `bazel build //...` (`/usr/bin/time -v`) and adjusts; disk cache capped by `bazel:cache:gc` |
@@ -918,6 +918,36 @@ open question.
   base only when that base lies outside the submodule; `ocx run|exec … --` and `uv run --` are
   seen through as wrappers.
 
+### 2026-09-23 — owner request, `version` command and build provenance
+
+- **A-11 — one build script, kept out of every cache key.** Owner request after finalize: an
+  `ocx-mirror version` like ocx's, backed by ocx's `build.rs` (vergen-gix, `=9.1.0`) and its
+  `__testing` feature. This amends the NFR "Cache correctness" row ("no `build.rs`, none added")
+  and A-10 (2) (build drift reds on every `build.rs`).
+  (1) **Root package only**: `option_env!` sees a build script's `rustc-env` only inside the
+  package that owns it, so `build.rs`, `src/build_info.rs` and `command/version.rs` live in
+  `ocx_mirror`. (2) **`__testing`** (`CARGO_FEATURE___TESTING`) skips git and `CI`/`GITHUB_*`
+  and bakes `testing_provenance.env` (ocx's placeholder table, moved from a `const` into a file).
+  `task rust:build` and the harness build pass it, as ocx's AM-2 does. Release builds
+  (`build-matrix.yml`) pass no feature. (3) **Bazel runs no build script**, as ocx's `ocx_cli`
+  graph runs none. The root `rust_library` names the same file as `rustc_env_files`, and
+  `rust_test(crate = …)` inherits it (rules_rust `rust.bzl`). Every Bazel binary is therefore a
+  test build with the placeholders. It lacks only the toolchain `build` block, which cargo
+  `__testing` bakes. (4) **Build drift** admits exactly `("", build.rs)`, and only while a root
+  `rust_library`/`rust_binary` names `testing_provenance.env`. The admission reads the path, not
+  the script's output. Any other build script still reds. (5) **Divergences from ocx's
+  `build.rs`**: gix runs on its own `fail_on_error` emitter, because vergen reports a missing
+  `.git` in `add_instructions` and otherwise bakes `VERGEN_IDEMPOTENT_OUTPUT` as the SHA (ocx
+  still does). An empty `describe` (tagless shallow clone) falls back to the SHA. (6) **Cache
+  proof** (Bazel, `bazel:cache:check`, decided on `cachedLocally`/`strategy`): a no-change
+  rerun served 15/15 from cache, and so did an empty commit (new HEAD) and a dirty
+  `docs/index.md` + `README.md`. A doc that is a declared input (`docs/reference/cli.md`, read
+  by `//:log_targets`) re-runs that target alone. A `src/command/version.rs` edit re-ran
+  `//:ocx_mirror_test`, `//:ocx_mirror_bin_test`, `//:source_scan` and `//test:acceptance`,
+  with 11 cached. Reverting served all 15 from cache again, 4 of them as disk-cache hits. A
+  cargo `__testing` binary is byte-identical across a new commit plus a dirty tree
+  (`f37a2634…`, 0 crates recompiled).
+
 ---
 
 ## Changelog
@@ -934,3 +964,4 @@ open question.
 | 2026-09-23 | phase 3 (Loop 3) | Amendment A-8 (C12 telemetry: own service names, `vcs.repository.name`, Grafana `repo` variable default `ocx`) |
 | 2026-09-23 | phase 3 (Loop 3) | Amendment A-9 (C7/C8 as executed: exec form, restore-by-header, stale-lock repin, runner binary, widened stamp, extra acceptance inputs, wiring) |
 | 2026-09-23 | refine-finalize | Amendment A-10 (five gate self-tests, `_gate.py`, drift reds on default features / build scripts / untested Cargo targets, acceptance globs `test/**`) |
+| 2026-09-23 | version-cmd (owner request) | Amendment A-11 (root `build.rs` provenance + `__testing`; Bazel reads the placeholders as `rustc_env_files`; drift admits that one script; cache proof) |
