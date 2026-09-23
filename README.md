@@ -38,8 +38,8 @@ The `ocx_*` crates are not published — their version is whatever the submodule
 points at. To advance:
 
 ```sh
-git -C external/ocx fetch origin && git -C external/ocx checkout origin/main
-git -C external/ocx submodule update --init --recursive   # nested fork submodules
+git -C "$(git rev-parse --show-toplevel)/external/ocx" fetch origin && git -C "$(git rev-parse --show-toplevel)/external/ocx" checkout origin/main
+git -C "$(git rev-parse --show-toplevel)/external/ocx" submodule update --init --recursive   # nested fork submodules
 cargo check                                               # refreshes Cargo.lock
 task verify
 git add external/ocx Cargo.lock && git commit -m "chore(deps): bump external/ocx"

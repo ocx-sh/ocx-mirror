@@ -48,3 +48,6 @@ venv/
 # Agent worktrees (see workflow-swarm.md) — never committed.
 # Only the transient checkouts; .agents/memory/ is team-shared and tracked.
 .agents/worktrees/
+
+# Goal-run drafts and long-job logs (survive the hourly target/ and /tmp wipes).
+/.tmp/

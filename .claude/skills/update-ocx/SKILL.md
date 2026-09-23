@@ -52,17 +52,17 @@ added files means superseded.
 ## Phase 1 — the range
 
 ```sh
-cd external/ocx && git fetch origin --tags
-NEW=$(git rev-parse origin/main)       # or a release tag: git rev-parse v0.6.3
-git log --oneline $OLD..$NEW
-git diff --stat $OLD..$NEW | tail -5
+git -C "$(git rev-parse --show-toplevel)/external/ocx" fetch origin --tags
+NEW=$(git -C "$(git rev-parse --show-toplevel)/external/ocx" rev-parse origin/main)   # or a release tag: git -C "$(git rev-parse --show-toplevel)/external/ocx" rev-parse v0.6.3
+git -C "$(git rev-parse --show-toplevel)/external/ocx" log --oneline $OLD..$NEW
+git -C "$(git rev-parse --show-toplevel)/external/ocx" diff --stat $OLD..$NEW | tail -5
 ```
 
 Then narrow to what the mirror actually links — everything else is noise:
 
 ```sh
 for c in ocx_config ocx_console ocx_exit ocx_index ocx_oci ocx_package ocx_sign ocx_util; do
-  echo "=== $c ==="; git diff --stat $OLD..$NEW -- crates/$c | tail -20
+  echo "=== $c ==="; git -C "$(git rev-parse --show-toplevel)/external/ocx" diff --stat $OLD..$NEW -- crates/$c | tail -20
 done
 ```
 
@@ -70,9 +70,9 @@ Public-API delta, both directions (the second command is the one that finds
 silent breakage — a `pub` demoted to `pub(crate)`):
 
 ```sh
-git diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,sign,util} \
+git -C "$(git rev-parse --show-toplevel)/external/ocx" diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,sign,util} \
   | grep -E '^\+\s*pub (fn|struct|enum|const|trait|type|mod)' | sort -u
-git diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,sign,util} \
+git -C "$(git rev-parse --show-toplevel)/external/ocx" diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,sign,util} \
   | grep -E '^-\s*pub ' | sort -u
 ```
 
@@ -84,8 +84,8 @@ from the root it re-resolves the superproject gitlink and silently reverts the
 checkout you just made.
 
 ```sh
-cd external/ocx && git checkout $NEW && git submodule update --init --recursive
-cd .. && cargo check --all-targets     # refreshes Cargo.lock; must be clean
+git -C "$(git rev-parse --show-toplevel)/external/ocx" checkout $NEW && git -C "$(git rev-parse --show-toplevel)/external/ocx" submodule update --init --recursive
+cargo check --all-targets     # refreshes Cargo.lock; must be clean
 git add external/ocx Cargo.lock
 ```
 
@@ -103,7 +103,7 @@ Four checks, none of which `cargo check` catches.
    version and feature list in the mirror's `Cargo.toml` must match ocx's
    `[workspace.dependencies]` byte for byte:
    ```sh
-   git -C external/ocx diff $OLD..$NEW -- Cargo.toml
+   git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..$NEW -- Cargo.toml
    ```
    Empty diff = nothing to sync *for this bump*. Pre-existing drift is a
    separate finding — report it, do not fold it into the bump commit.
@@ -145,9 +145,10 @@ Ask each for exactly four things, with `file:line` cites:
    same defect?* An upstream fix inside a crate the mirror links is inherited
    for free; an upstream fix to a pattern the mirror re-implements is not.
 
-Prompt hygiene for those agents: absolute `cd` in every command (the shell CWD
-persists and will strand them inside `external/ocx`), and `/usr/bin/git`, since
-the `git` alias truncates long output.
+Prompt hygiene for those agents: every git command against the submodule uses
+`git -C "$(git rev-parse --show-toplevel)/external/ocx" …` — the guard hook
+blocks a bare `cd` into the submodule followed by a `git` command — and
+`/usr/bin/git`, since the `git` alias truncates long output.
 
 ## Phase 5 — consolidation
 
@@ -170,7 +171,7 @@ whose contract needs ocx-resolved state the mirror never builds (an
 ## Phase 6 — upstream issue cross-check
 
 ```sh
-git -C external/ocx log --format='%s%n%b' $OLD..$NEW | grep -oE '#[0-9]+' | sort -u
+git -C "$(git rev-parse --show-toplevel)/external/ocx" log --format='%s%n%b' $OLD..$NEW | grep -oE '#[0-9]+' | sort -u
 gh issue view <N> --repo ocx-sh/ocx --json number,title,state,labels
 gh issue list --repo ocx-sh/ocx-mirror --state open --limit 100 --json number,title
 ```
@@ -235,7 +236,7 @@ Everything else is working notes.
 - **A doc-comment edit reads like a behaviour change.** A diff line moving
   "30 s" to "120 s" in a doc comment may be a stale-doc fix, not a retune.
   Always confirm a constant's value at *both* revs before reporting it:
-  `git grep -n '<CONST>' $OLD -- crates/` against the working tree.
+  `git -C "$(git rev-parse --show-toplevel)/external/ocx" grep -n '<CONST>' $OLD -- crates/` against the working tree.
 - **Test-only churn dominates the line count.** ocx invests heavily in test
   infrastructure; a crate can show ±400 lines with zero production delta.
   Check whether the changed hunks are inside `#[cfg(test)]` before drawing
@@ -246,7 +247,10 @@ Everything else is working notes.
   `cargo check --all-targets` is the only reliable detector.
 - **A `feat(...)!:` in the log is usually not your break.** It is a CLI
   contract change (surface 2). Read the two-surfaces table before escalating.
-- **The bash CWD persists into `external/ocx`.** Every command gets an
-  absolute `cd`, or a later `git` command runs against the submodule and its
-  work lands on the wrong branch.
+- **The bash CWD persists into the submodule.** Every git command targeting
+  it is spelled `git -C "$(git rev-parse --show-toplevel)/external/ocx" …` in
+  full, never a `cd` into it followed by a bare `git …` — the repo's
+  `.claude/hooks/pre_tool_use_guard.py` PreToolUse guard blocks that `cd`
+  form outright (rule G2), so a later `git` command cannot silently run
+  against the submodule and land work on the wrong branch.
 - **`task verify | tail` reports `tail`'s exit code.** A red gate reads green.

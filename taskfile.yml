@@ -57,7 +57,7 @@ tasks:
   verify:
     desc: Full quality gate
     summary: |
-      Phase 1 (parallel): format, clippy
+      Phase 1 (parallel): format, clippy, claude hooks test
       Phase 2 (sequential): license, jsonschema feature, build, unit tests, acceptance tests
       Use `task --force verify` to bypass caching.
       Use `task --status verify` to check freshness without running.
@@ -70,6 +70,7 @@ tasks:
     deps:
       - task: rust:format:check
       - task: rust:clippy:check
+      - task: claude:hooks:test
 
   .verify:build-test:
     internal: true
