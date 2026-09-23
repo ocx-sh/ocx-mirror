@@ -13,7 +13,7 @@ commands with `ocx exec --`). Tasks run through [Task](https://taskfile.dev):
 | Command | What it does |
 |---|---|
 | `task` | Fast check: format, clippy, `cargo check` |
-| `task rust:verify` | Loop gate: format, clippy, unit tests |
+| `task rust:verify` | Loop gate: format, clippy, unit tests (Bazel on Linux, cargo elsewhere) |
 | `task verify` | Full gate: lint, licenses, release build, unit and acceptance tests; on Linux also the Bazel static gates and the coverage gate |
 | `task test:parallel` | Acceptance suite under cargo (needs Docker for the local registry) |
 | `task docs:serve` | This site, locally, from the pinned toolchain |
@@ -21,13 +21,17 @@ commands with `ocx exec --`). Tasks run through [Task](https://taskfile.dev):
 
 ## The Bazel loop (Linux)
 
-On Linux the unit and acceptance tests run under [Bazel](https://bazel.build),
-which caches results per target: an unchanged crate is not re-tested. macOS,
-Windows, CI's test lanes and the release build stay on cargo.
+On Linux the lint lanes and the unit and acceptance tests run under
+[Bazel](https://bazel.build), which caches results per target: an unchanged
+crate is not re-tested or re-linted. CI runs the same Bazel lanes. macOS,
+Windows and the release build stay on cargo.
 
 | Command | What it does |
 |---|---|
 | `task bazel:bootstrap` | Once per fresh worktree: generate `Cargo.bazel.lock.json` |
+| `task bazel:lint:fmt` | rustfmt check against `rustfmt.toml`; fix with `task rust:format:apply` |
+| `task bazel:lint:clippy` | Clippy over every first-party target, warnings denied |
+| `task bazel:build:jsonschema` | Compile the `jsonschema` feature (the `schema` command and its derives) |
 | `task bazel:test:unit` | Unit tests; per-case JUnit at `target/bazel/junit.xml` |
 | `task bazel:test:accept` | The acceptance suite as one cached test, against its own Sigstore stack from `external/ocx` (no registry or port overrides — use `task test:parallel` for those) |
 | `task bazel:test:scoped` | Only the tests affected by what changed against `origin/main` |

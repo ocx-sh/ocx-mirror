@@ -106,8 +106,13 @@ document the four-line job, let them own the pipeline.
 Task runner [`task`](https://taskfile.dev). `task` (fast check),
 `task verify` (full gate), `task rust:verify` (Rust-only loop gate),
 `task test:parallel` (acceptance), `task docs:serve`. Toolchain via direnv +
-`ocx direnv export` (`ocx.toml`). Always `cargo fmt` before commit,
-`task verify` after implementation.
+`ocx direnv export` (`ocx.toml`). Always `cargo fmt` (`task
+rust:format:apply`) before commit, `task verify` after implementation.
+On Linux and in CI, fmt, clippy and the `jsonschema` feature check are Bazel
+lanes too — `bazel:lint:fmt`, `bazel:lint:clippy` (`.bazelrc` configs
+`rustfmt`/`clippy`, first-party targets only, warnings denied),
+`bazel:build:jsonschema` (the `*_jsonschema` variant rules); `task
+rust:lint` dispatches, cargo stays the macOS/Windows arm.
 
 Test builds carry the `__testing` feature (`task rust:build`, the harness
 build): `build.rs` then bakes the placeholders of `testing_provenance.env`
@@ -123,7 +128,7 @@ cd test && uv run pytest tests/test_mirror.py::<name> -v
 ```
 
 **Bazel loop (Linux).** `task rust:test:unit` and `task rust:verify` run
-`bazel:test:unit` on Linux (nextest elsewhere; CI runs `bazel:test:unit` and `bazel:test:accept`). Bazel runs
+`bazel:test:unit` on Linux (nextest elsewhere; CI runs `bazel:test:unit` and `bazel:test:accept`, and no cargo at all). Bazel runs
 via `ocx exec bazel -- bazel`. `task bazel:bootstrap` first in a fresh
 worktree (generates `Cargo.bazel.lock.json`, restores `external/ocx`);
 `bazel:test:unit`, `bazel:test:accept` (acceptance, remote-cacheable: the

@@ -64,12 +64,32 @@ Consequence, as in ocx (plan DX-93): a pull request can only hit what a `main` p
   `pip.parse`, sandboxed, offline, byte-deterministic (`SOURCE_DATE_EPOCH=0`, sorted tar). `docs.yml`
   builds the same target read-only and deploys the archive.
 
-**C5 — What stays on cargo, each because ocx keeps the same thing on cargo.** `cargo fmt --check` and
-`cargo clippy` (ocx `verify-basic.yml` "Check formatting"/"Clippy"), the jsonschema feature check (ocx
-keeps `schema:generate` on cargo), release and cross-platform builds (`build-matrix.yml`; ocx
-`release.yml` has no Bazel, and ocx's darwin/windows legs keep nextest, ADR § Stage 2 ruling 1). The
-`cargo tree -i` fork-binding assertion stays too: a lockfile read, guarding the cargo-built release
-binaries' `[patch.crates-io]` table, which only this repository re-declares.
+**C5 — Only release and cross-platform builds stay on cargo** (owner ruling 2026-09-24, overruling the
+first cut of this clause, which kept fmt, clippy and the jsonschema check on cargo because ocx does). A
+cargo step in `verify.yml` re-compiles or restores rust-cache on every run, so the job could never be
+fully cached (C1). What stays: release and cross-platform builds (`build-matrix.yml`; ocx `release.yml`
+has no Bazel, and ocx's darwin/windows legs keep nextest, ADR § Stage 2 ruling 1), and the macOS/Windows
+arms of `task rust:lint` / `rust:verify` / `verify`. What moved:
+- **Clippy:** `rust_clippy_aspect` under `.bazelrc` `build:clippy` (`task bazel:lint:clippy`), over
+  `//...` — every first-party library, binary and test, no external target. Cargo's
+  `warnings = "deny"` + `-D warnings` is `-Dwarnings`, and cargo's `--check-cfg` is passed too
+  (`unexpected_cfgs`). A named config, not `rust_lint_config`: `lint_config` also adds its flags to
+  the normal Rustc actions, re-keying every compile; aspect-only flags leave them unchanged (aquery:
+  identical Rustc action key and output path with and without `--config=clippy`).
+- **rustfmt:** `rustfmt_aspect` under `build:rustfmt` with `rustfmt.toml` as the label flag
+  (`task bazel:lint:fmt`); `//:build_script_fmt` (manual, never compiled) carries build.rs, the one
+  tracked `.rs` no target compiles. The fixer is `task rust:format:apply` — rustfmt over the tracked
+  first-party files, no longer `cargo fmt --all`, which also rewrites every path dependency under
+  external/ocx.
+- **jsonschema:** `*_jsonschema` twins of the root, source, spec, error and pipeline libraries (the
+  last two for Cargo's feature unification) plus a `manual` spec test twin, gathered by the
+  `//:jsonschema` filegroup (`task bazel:build:jsonschema`). The optional `schemars` dependency is
+  imported by its spoke name (`crates__schemars-<v>` in MODULE.bazel); `bazel:build:drift` reds a
+  member feature without its variant rule.
+- **Fork binding:** `bazel:patch:check` also reads Cargo.toml `[patch.crates-io]` and Cargo.lock
+  (one path entry per fork, no `source`). The `cargo tree -i` step was no lockfile read: through the
+  runner's rustup it installed the toolchain and downloaded every crate. `bazel:build:drift` reads
+  `cargo metadata` through the Bazel toolchain's cargo (`@rules_rust//tools/upstream_wrapper:cargo`).
 
 ## Deviations from ocx
 
@@ -82,11 +102,14 @@ binaries' `[patch.crates-io]` table, which only this repository re-declares.
 | `github.workflow == 'Verify'` in the write gate | not needed (verify-basic is not reusable) | ocx ruling 5a |
 | Execution-log key artifact per run | none | pre-merge evidence that two runs ask for identical keys (C1 needs a `main` push for hits) |
 | rules_python for the docs interpreter | ocx fetches no interpreter via http_archive | `@tools` exposes executables only, no site-packages |
+| fmt, clippy, jsonschema check as Bazel lanes (aspects, `*_jsonschema` variants) | cargo steps in `verify-basic.yml` ("Check formatting", "Clippy"), `schema:generate` on cargo | C1: a cargo step re-compiles every run (C5) |
+| Clippy/rustfmt scope = first-party targets | `cargo fmt --all` also checks the path dependencies; ocx's own crates are its members | the vendored ocx crates are ocx's to lint and format |
+| `cargo metadata` for the drift gate via the Bazel toolchain | ocx's `bazel_build_drift.py` calls the host cargo | no host Rust toolchain in the CI job |
 
 ## Consequences
 
-- CI no longer builds with cargo except the C5 steps; `Smoke (Linux)` replaces `acceptance-tests` and
-  `bazel-graph`.
+- `verify.yml` runs no cargo and sets up no Rust toolchain; `Smoke (Linux)` replaces `acceptance-tests`
+  and `bazel-graph`. Only `build-matrix.yml` / `release.yml` build with cargo (C5).
 - A cache outage degrades to a cold build (timeout 30 s, 2 retries), never a red.
 - Residual acceptance under-declaration, stated plainly: running containers' state and mutable image tags
   (`registry:2`, tag-pinned images in ocx's compose file) are not in the key. Bounded by the host-wide flock
