@@ -500,4 +500,85 @@ SQAwRgIhAIimfmMHX7/vmMP25byiTv2805OMtA09CIveorIXnd22AiEA3cW26Dqb
             "a value that is neither PEM nor a readable path is refused"
         );
     }
+
+    // ── E4 characterization: `read_capped` messages and exit codes ──────────
+    //
+    // Pinned byte for byte before the crate split moves this module, so the
+    // move is provably message-preserving. `client()`'s own failure arm is not
+    // pinned: `builder()` takes no input, and the only way `build()` fails is a
+    // TLS backend that cannot initialise, which a test cannot provoke.
+
+    /// Serve `raw` verbatim to the first connection, then hang up.
+    async fn serve_raw(raw: &'static str) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("a bound address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("one connection");
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream.write_all(raw.as_bytes()).await;
+            let _ = stream.shutdown().await;
+        });
+        format!("http://{address}/versions.json")
+    }
+
+    /// `read_capped`'s error for the response `raw` under `cap`.
+    async fn read_capped_error(raw: &'static str, cap: usize) -> MirrorError {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let url = serve_raw(raw).await;
+        let mut response = client()
+            .expect("the mirror HTTP client must build")
+            .get(url)
+            .send()
+            .await
+            .expect("the fixture answers with headers");
+        read_capped(&mut response, "versions document", cap)
+            .await
+            .expect_err("the fixture body must be refused")
+    }
+
+    #[tokio::test]
+    async fn a_declared_oversize_body_is_refused_with_its_declared_length() {
+        let error = read_capped_error(
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+            4,
+        )
+        .await;
+        assert_eq!(
+            error.to_string(),
+            "source error: versions document declares 10 bytes, over the 4-byte cap"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn a_streamed_oversize_body_is_refused_at_the_cap() {
+        let error = read_capped_error(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n",
+            8,
+        )
+        .await;
+        assert_eq!(
+            error.to_string(),
+            "source error: versions document exceeds the 8-byte cap"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn a_body_cut_short_is_a_read_failure() {
+        let error = read_capped_error(
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc",
+            100,
+        )
+        .await;
+        assert_eq!(
+            error.to_string(),
+            "source error: cannot read versions document: error decoding response body"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
+    }
 }

@@ -87,7 +87,7 @@ in a mirror-native file — never bolt it onto a port.
 - **Authoring conventions** (mirror small set): rules `<200` lines, `paths:` scope unless
   truly global; SKILL.md `<500` lines with progressive disclosure; skill `description` =
   what + when (≤1024 chars); action skills with side effects set
-  `disable-model-invocation: true`; agents pick model by role (haiku explore, sonnet
+  `disable-model-invocation: true` (sole exception: `ocx-upstream-pr`, owner ruling 2026-09-23); agents pick model by role (haiku explore, sonnet
   implement/review, opus architect) and minimal `tools`.
 
 ## Gate

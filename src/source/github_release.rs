@@ -602,6 +602,54 @@ mod tests {
         super::client("https://api.github.com", None).expect("a full root builds");
     }
 
+    // ── E4 characterization: exact messages and exit codes ─────────────────
+    //
+    // Pinned byte for byte before the crate split moves this module. The
+    // client-build arm (`cannot build an HTTP client`) is not pinned:
+    // `crate::http::builder` takes no input, and `build()` fails only when the
+    // TLS backend cannot initialise, which a test cannot provoke.
+
+    /// `client`'s refusal for `base`/`token`, which must never reach octocrab.
+    fn client_error(base: &str, token: Option<&str>) -> crate::error::MirrorError {
+        super::client(base, token).expect_err("the client must be refused")
+    }
+
+    #[test]
+    fn an_api_root_that_is_not_a_uri_renders_the_parser_error() {
+        let error = client_error("https://api github.com", None);
+        assert_eq!(
+            error.to_string(),
+            "mirror execution failed:\n  - invalid GitHub API root 'https://api github.com': invalid uri character\n"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::Failure);
+    }
+
+    #[test]
+    fn an_api_root_without_a_scheme_renders_the_expected_shape() {
+        let error = client_error("api.github.com", None);
+        assert_eq!(
+            error.to_string(),
+            "mirror execution failed:\n  - invalid GitHub API root 'api.github.com': expected a scheme and a host, as in https://api.github.com\n"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::Failure);
+    }
+
+    #[test]
+    fn a_token_that_is_not_a_header_value_is_refused_without_echoing_it() {
+        let error = client_error("https://api.github.com", Some("ghp_secret\nX-Injected: 1"));
+        assert_eq!(
+            error.to_string(),
+            "mirror execution failed:\n  - GITHUB_TOKEN is not a valid HTTP header value\n"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::Failure);
+    }
+
+    #[test]
+    fn the_user_agent_names_the_mirror_and_its_version() {
+        assert_eq!(USER_AGENT, format!("ocx-mirror/{}", env!("CARGO_PKG_VERSION")));
+        assert!(USER_AGENT.starts_with("ocx-mirror/"));
+    }
+
     /// Without a token the header is absent rather than empty — an empty
     /// `Authorization` is a 401, not an unauthenticated request.
     #[tokio::test]

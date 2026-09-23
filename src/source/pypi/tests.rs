@@ -236,7 +236,7 @@ async fn absent_from_every_index_is_a_pypi_error() {
     let (first, first_server) = spawn_index(vec![not_found()]).await;
     let (second, second_server) = spawn_index(vec![not_found()]).await;
 
-    let error = list_versions("nonexistent-package", &[first, second])
+    let error = list_versions("nonexistent-package", &[first, second.clone()])
         .await
         .unwrap_err();
     first_server.await.unwrap();
@@ -247,6 +247,15 @@ async fn absent_from_every_index_is_a_pypi_error() {
         matches!(mirror_error, MirrorError::PypiError(_)),
         "got: {mirror_error:?}"
     );
+    // Exact bytes: pinned before the crate split moves this module (E4). The
+    // last index's 404 is the one reported.
+    assert_eq!(
+        mirror_error.to_string(),
+        format!(
+            "pypi error: failed to list PyPI releases: HTTP status client error (404 Not Found) for url ({second}/nonexistent-package/)"
+        )
+    );
+    assert_eq!(mirror_error.kind_exit_code(), ocx_exit::ExitCode::DataError);
 }
 
 /// A 500 means "unknown", not "absent" — it must not silently fall through to
@@ -257,7 +266,7 @@ async fn a_server_error_aborts_instead_of_falling_through() {
     let (broken, broken_server) = spawn_index(vec![response("500 Internal Server Error", "text/plain", "")]).await;
     let (other, other_server) = spawn_index(vec![json_ok(PROJECT_JSON)]).await;
 
-    let error = list_versions("pycowsay", &[broken, other]).await.unwrap_err();
+    let error = list_versions("pycowsay", &[broken.clone(), other]).await.unwrap_err();
     broken_server.await.unwrap();
 
     let mirror_error = classify_error("failed to list PyPI releases", error);
@@ -265,6 +274,14 @@ async fn a_server_error_aborts_instead_of_falling_through() {
         matches!(mirror_error, MirrorError::SourceError(_)),
         "got: {mirror_error:?}"
     );
+    // Exact bytes: pinned before the crate split moves this module (E4).
+    assert_eq!(
+        mirror_error.to_string(),
+        format!(
+            "source error: failed to list PyPI releases: HTTP status server error (500 Internal Server Error) for url ({broken}/pycowsay/)"
+        )
+    );
+    assert_eq!(mirror_error.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
     other_server.abort();
 }
 
