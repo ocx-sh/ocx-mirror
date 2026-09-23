@@ -49,3 +49,11 @@ rust_test(
         "//crates/ocx_mirror_test_support",
     ],
 )
+
+# Every Rust source plus the manifest, for the root's cross-crate scans
+# (//:source_scan walks `src/`, //:workspace_structure runs `cargo metadata`
+# and reads every `.rs`).
+filegroup(
+    name = "rust_sources",
+    srcs = glob(["**/*.rs"]) + ["Cargo.toml"],
+)

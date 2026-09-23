@@ -133,7 +133,21 @@ rust_test(
     ],
 )
 
-# One rust_test per `tests/*.rs`, with the data each one reads.
+# Every workspace member's Rust sources and manifest, for the two scans that
+# see the whole workspace. Both targets link every first-party crate anyway,
+# so declaring the sources adds no rdep edge they did not already have.
+_MEMBER_SOURCES = [
+    "//crates/ocx_mirror_error:rust_sources",
+    "//crates/ocx_mirror_http:rust_sources",
+    "//crates/ocx_mirror_pipeline:rust_sources",
+    "//crates/ocx_mirror_report:rust_sources",
+    "//crates/ocx_mirror_source:rust_sources",
+    "//crates/ocx_mirror_spec:rust_sources",
+    "//crates/ocx_mirror_test_support:rust_sources",
+]
+
+# One rust_test per `tests/*.rs`, with the data and environment each one reads.
+# Every case runs here: crates/TEST_TARGET_MAP.toml has no `[[excluded]]` row.
 [
     rust_test(
         name = name,
@@ -146,15 +160,15 @@ rust_test(
         ),
         # No `--test-threads=1`: no case in tests/*.rs mutates the process
         # environment; the first one that does needs it (see :ocx_mirror_test).
-        args = args,
         data = data,
         edition = "2024",
+        env = env,
         proc_macro_deps = all_crate_deps(
             proc_macro = True,
             proc_macro_dev = True,
         ),
-        # `CARGO`: `workspace_structure` names `env!("CARGO")` at compile time;
-        # the one case reading it is skipped below, so any value compiles.
+        # `CARGO`: `workspace_structure` falls back to `env!("CARGO")` when the
+        # runtime `CARGO` is unset; under Bazel `env` below always sets it.
         rustc_env = {
             "CARGO": "cargo",
             "CARGO_MANIFEST_DIR": ".",
@@ -167,47 +181,52 @@ rust_test(
             "//crates/ocx_mirror_test_support",
         ],
     )
-    for name, args, data in [
+    for name, data, env in [
         (
             "log_targets",
-            [],
             [
                 "crates/crate_map.toml",
                 "docs/reference/cli.md",
             ],
+            {},
         ),
         (
             "registry_spec_validation",
-            [],
             [":test_fixtures"],
+            {},
         ),
-        # C4 exclusions (`[[excluded]]` rows in crates/TEST_TARGET_MAP.toml,
-        # run by `task rust:test:bazel-excluded`): a walk of every crate's
-        # `src/` (this target would otherwise be an rdep of every crate), and
-        # a byte comparison against the external/ocx submodule tree.
+        # The factory walk reads `src/` and every `crates/*/src`; the wheel
+        # comparison reads ocx_python's original through @ocx_python_wheels,
+        # handed over by runfiles path (the submodule is no `_main` path).
         (
             "source_scan",
-            [
-                "--exact",
-                "--skip=every_production_client_is_built_through_the_factory",
-                "--skip=the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons",
+            glob(["src/**"]) + _MEMBER_SOURCES + [
+                "tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
+                "@ocx_python_wheels//:console_pkg-1.0.0-py3-none-any.whl",
             ],
-            glob(["src/**"]),
+            {"OCX_PYTHON_WHEEL": "$(rootpath @ocx_python_wheels//:console_pkg-1.0.0-py3-none-any.whl)"},
         ),
         (
             "spec_validation",
-            [],
             [":test_fixtures"],
+            {},
         ),
-        # C4 exclusion: `real_workspace_has_no_violations` runs `cargo
-        # metadata` from the checkout; the synthetic red proofs run here.
+        # `real_workspace_has_no_violations` runs `cargo metadata --no-deps
+        # --offline` over the declared manifests with the toolchain's own
+        # cargo (never a host one), then scans every `.rs` under src/, crates/
+        # and tests/. `--no-deps` needs no registry and no external/ocx
+        # manifest; the member view it returns equals the resolved one.
         (
             "workspace_structure",
-            [
-                "--exact",
-                "--skip=real_workspace_has_no_violations",
+            glob([
+                "src/**/*.rs",
+                "tests/**/*.rs",
+            ]) + _MEMBER_SOURCES + [
+                "Cargo.toml",
+                "crates/crate_map.toml",
+                "@rules_rust//rust/toolchain:current_cargo_files",
             ],
-            [],
+            {"CARGO": "$(rootpath @rules_rust//rust/toolchain:current_cargo_files)"},
         ),
     ]
 ]

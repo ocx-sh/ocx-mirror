@@ -6,8 +6,6 @@
     scripts/bazel_test_floor.py --self-test
     scripts/bazel_test_floor.py --bep <bep.json> [--junit target/bazel/junit.xml] [--update]
     scripts/bazel_test_floor.py --bep <bep.json> --coverage <nextest-list.json>
-    scripts/bazel_test_floor.py --excluded-filter
-    scripts/bazel_test_floor.py --excluded-check <nextest-list.json>
 
 Port of ocx's `scripts/bazel_test_floor.py` (adr_bazel_crate_split.md § C4, C7;
 plan C-006, C-009). The helpers ocx imports from `bazel_gate_proofs` (`Finding`,
@@ -25,13 +23,11 @@ plan C-006, C-009). The helpers ocx imports from `bazel_gate_proofs` (`Finding`,
   `testcase` per *target*, so a cached target whose `test.xml` was not
   downloaded still gets its per-case JUnit, rebuilt from the log.
 * `--update` rewrites the map from a run: counts rise only.
-* `--coverage` is C4's gate: every case `cargo nextest list` names is either
-  executed by a Bazel target or an `[[excluded]]` row; every row names a real
-  case that Bazel does not execute (a row Bazel runs is stale — the list only
-  shrinks, so delete it).
-* `--excluded-filter` / `--excluded-check` drive `task rust:test:bazel-excluded`:
-  the nextest filterset generated from the `[[excluded]]` rows, and a red for
-  a row that matches no test.
+* `--coverage` is C4's gate: every case `cargo nextest list` names is
+  executed by a Bazel target. There is no exclusion list any more (the
+  `[[excluded]]` rows it once honoured all moved under Bazel, and nothing
+  else runs a skipped case), so a map still carrying one reds as
+  `map-excluded`.
 
 Why `test.log` and not `test.xml`, and why per target rather than a sum: see
 ocx's copy of this file; both measured there and unchanged here.
@@ -97,11 +93,9 @@ MAP_HEADER = """\
 #   cases    executed (passed + failed); excludes `--skip`ped ones
 #   skipped  how many the target's `args` filter out (libtest `filtered out`)
 #
-# `[[excluded]]` rows are hand-written: the cases a `rust_test` `--skip`s
-# (C4 — own process, cwd, `cargo metadata`, a cross-crate source walk). They
-# run under `task rust:test:bazel-excluded` (cargo nextest) instead, and
-# `task bazel:test:coverage` proves nextest's list == Bazel-executed + these.
-# **This list only shrinks.**
+# There are no `[[excluded]]` rows: every case `cargo nextest list` names runs
+# under Bazel, and `task bazel:test:coverage` proves it (nothing else would run
+# a case a target `--skip`s). The last four moved in the full Bazel adoption.
 """
 
 EMPTY_MSG = (
@@ -137,6 +131,10 @@ UNLISTED_MSG = (
     "`task bazel:test:unit FLOOR_ARGS=--update`"
 )
 MAP_UNREADABLE_MSG = "bazel test floor: {path} does not read as TOML ({error}) — nothing is judged or rewritten"
+MAP_EXCLUDED_MSG = (
+    "bazel test floor: {path} carries an [[excluded]] row — nothing runs a case a Bazel "
+    "target skips any more; run it under Bazel (its own rust_test, declared data) and delete the row"
+)
 JUNIT_EMPTY_MSG = "bazel junit: not one testcase from {targets} target(s); {path} not written"
 UNREADABLE_CASE_MSG = (
     "no `test <name> ... <outcome>` line and no libtest summary in this target's test.log; "
@@ -195,25 +193,21 @@ class Row:
     ignored: int = 0
 
 
-@dataclasses.dataclass(frozen=True)
-class Excluded:
-    suite: str
-    name: str
-    reason: str
-
-
 # ---------------------------------------------------------------------------
 # Readers
 # ---------------------------------------------------------------------------
 
 
-def read_map(path: Path) -> tuple[list[Row], list[Excluded], list[Finding]]:
+def read_map(path: Path) -> tuple[list[Row], list[Finding]]:
     """An absent or unparseable map is a `map-unreadable` finding, never an empty
-    map: `--update` would otherwise rewrite it and lose every `[[excluded]]` row."""
+    map: `--update` would otherwise rewrite it from one run's targets alone. An
+    `[[excluded]]` row is `map-excluded`: nothing runs a case Bazel skips."""
     try:
         payload = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
-        return [], [], [Finding("map-unreadable", MAP_UNREADABLE_MSG.format(path=path, error=error))]
+        return [], [Finding("map-unreadable", MAP_UNREADABLE_MSG.format(path=path, error=error))]
+    if payload.get("excluded"):
+        return [], [Finding("map-excluded", MAP_EXCLUDED_MSG.format(path=path))]
     rows = [
         Row(
             label=str(entry["label"]),
@@ -226,12 +220,7 @@ def read_map(path: Path) -> tuple[list[Row], list[Excluded], list[Finding]]:
         for entry in payload.get("target", [])
         if "label" in entry
     ]
-    excluded = [
-        Excluded(suite=str(entry["suite"]), name=str(entry["name"]), reason=str(entry.get("reason", "")))
-        for entry in payload.get("excluded", [])
-        if "suite" in entry and "name" in entry
-    ]
-    return rows, excluded, []
+    return rows, []
 
 
 def _log_path(uri: str) -> Path:
@@ -443,7 +432,7 @@ def _toml_str(value: str) -> str:
     return json.dumps(value)  # a JSON string is a valid TOML basic string
 
 
-def render_map(rows: list[Row], excluded: list[Excluded]) -> str:
+def render_map(rows: list[Row]) -> str:
     out = [MAP_HEADER]
     for row in sorted(rows, key=lambda r: r.label):
         out += ["", "[[target]]", f"label = {_toml_str(row.label)}", f"crate = {_toml_str(row.crate)}"]
@@ -452,9 +441,6 @@ def render_map(rows: list[Row], excluded: list[Excluded]) -> str:
             out.append(f"skipped = {row.skipped}")
         if row.ignored:
             out.append(f"ignored = {row.ignored}")
-    for entry in excluded:
-        out += ["", "[[excluded]]", f"suite = {_toml_str(entry.suite)}", f"name = {_toml_str(entry.name)}"]
-        out.append(f"reason = {_toml_str(entry.reason)}")
     return "\n".join(out) + "\n"
 
 
@@ -489,7 +475,7 @@ def updated_rows(observed: dict[str, Counts], rows: list[Row]) -> tuple[list[Row
 
 
 # ---------------------------------------------------------------------------
-# --coverage / --excluded-*
+# --coverage
 # ---------------------------------------------------------------------------
 
 
@@ -522,52 +508,19 @@ def executed_cases(runs: dict[str, Run], rows: list[Row]) -> tuple[dict[str, set
     return out, findings
 
 
-def coverage_findings(
-    listing: dict[str, set[str]], executed: dict[str, set[str]], excluded: list[Excluded]
-) -> list[Finding]:
-    findings: list[Finding] = []
-    rows = {(entry.suite, entry.name) for entry in excluded}
+def coverage_findings(listing: dict[str, set[str]], executed: dict[str, set[str]]) -> list[Finding]:
     wanted = {(suite, name) for suite, names in listing.items() for name in names}
     ran = {(suite, name) for suite, names in executed.items() for name in names}
-    gap = sorted(wanted - ran - rows)
-    if gap:
-        names = "\n  ".join(f"{suite} {name}" for suite, name in gap)
-        findings.append(
-            Finding(
-                "coverage-gap",
-                f"bazel test coverage: {len(gap)} case(s) `cargo nextest list` names are neither "
-                f"executed by Bazel nor an [[excluded]] row:\n  {names}",
-            )
+    gap = sorted(wanted - ran)
+    if not gap:
+        return []
+    names = "\n  ".join(f"{suite} {name}" for suite, name in gap)
+    return [
+        Finding(
+            "coverage-gap",
+            f"bazel test coverage: {len(gap)} case(s) `cargo nextest list` names are not executed by Bazel:\n  {names}",
         )
-    for suite, name in sorted(rows - wanted):
-        findings.append(
-            Finding("coverage-stale-row", f"bazel test coverage: [[excluded]] {suite} {name} matches no nextest case")
-        )
-    for suite, name in sorted(rows & ran):
-        findings.append(
-            Finding(
-                "coverage-row-runs",
-                f"bazel test coverage: [[excluded]] {suite} {name} is executed by Bazel — "
-                "the list only shrinks; delete the row",
-            )
-        )
-    return findings
-
-
-def excluded_filter(excluded: list[Excluded]) -> str:
-    """A nextest filterset naming exactly the rows. `=` is exact match."""
-    return " | ".join(f"(binary_id({entry.suite}) & test(={entry.name}))" for entry in excluded)
-
-
-def excluded_check(listing: dict[str, set[str]], excluded: list[Excluded]) -> list[Finding]:
-    findings = [
-        Finding("excluded-no-match", f"bazel excluded: [[excluded]] {entry.suite} {entry.name} matches no test")
-        for entry in excluded
-        if entry.name not in listing.get(entry.suite, set())
     ]
-    if not excluded:
-        findings.append(Finding("excluded-empty", "bazel excluded: crates/TEST_TARGET_MAP.toml has no [[excluded]] row"))
-    return findings
 
 
 # ---------------------------------------------------------------------------
@@ -588,7 +541,7 @@ def run_check(bep: Path, map_path: Path, junit: Path | None = None, update: bool
     runs, findings = read_bep(bep)
     if findings:
         return report(findings)
-    rows, excluded, map_red = read_map(map_path)
+    rows, map_red = read_map(map_path)
     observed, findings = count_results(runs)
     findings = map_red + findings
     written, count_red = count_findings(runs, observed)
@@ -597,7 +550,7 @@ def run_check(bep: Path, map_path: Path, junit: Path | None = None, update: bool
         rows, shrank = updated_rows(observed, rows)
         findings += shrank
         if not findings:
-            map_path.write_text(render_map(rows, excluded), encoding="utf-8")
+            map_path.write_text(render_map(rows), encoding="utf-8")
             print(f"bazel test floor: {map_path} rewritten — {len(rows)} target row(s)")
     findings += floor_findings(observed, rows)
     findings += [
@@ -633,17 +586,17 @@ def run_coverage(bep: Path, map_path: Path, listing_path: Path) -> int:
     runs, findings = read_bep(bep)
     if findings:
         return report(findings)
-    rows, excluded, findings = read_map(map_path)
+    rows, findings = read_map(map_path)
     if findings:
         return report(findings)
     listing = read_listing(listing_path)
     executed, findings = executed_cases(runs, rows)
-    findings += coverage_findings(listing, executed, excluded)
+    findings += coverage_findings(listing, executed)
     listed = sum(len(names) for names in listing.values())
     ran = sum(len(names) for names in executed.values())
     print(
         f"bazel test coverage: nextest lists {listed} case(s) in {len(listing)} suite(s); "
-        f"Bazel executed {ran} + {len(excluded)} [[excluded]] = {ran + len(excluded)}"
+        f"Bazel executed {ran}"
     )
     return report(findings)
 
@@ -843,7 +796,7 @@ def prove_junit(work: Path, rows: list[Row]) -> None:
     print("JUNIT RED   : nothing to report -> junit-empty, no file written")
 
 
-def prove_update(work: Path, rows: list[Row], excluded: list[Excluded]) -> None:
+def prove_update(work: Path, rows: list[Row]) -> None:
     runs = read_runs(_fixture(work, rows, "update"))
     observed, _ = count_results(runs)
     grown = dict(observed)
@@ -856,10 +809,9 @@ def prove_update(work: Path, rows: list[Row], excluded: list[Excluded]) -> None:
     new = by_label["//crates/ocx_mirror_new:ocx_mirror_new_test"]
     expect(new.cases == 5 and new.suite == "ocx_mirror_new", f"a new target gets a row, got {new}")
     rendered = work / "map.toml"
-    rendered.write_text(render_map(new_rows, excluded), encoding="utf-8")
-    reread_rows, reread_excluded, _ = read_map(rendered)
-    expect(reread_rows == sorted(new_rows, key=lambda r: r.label) and reread_excluded == excluded,
-           "the rendered map must round-trip, [[excluded]] rows included")
+    rendered.write_text(render_map(new_rows), encoding="utf-8")
+    reread_rows, _ = read_map(rendered)
+    expect(reread_rows == sorted(new_rows, key=lambda r: r.label), "the rendered map must round-trip")
     print(f"UPDATE GREEN: +2 on {victim} and one new target written; map round-trips")
 
     shrunk = dict(observed)
@@ -869,9 +821,9 @@ def prove_update(work: Path, rows: list[Row], excluded: list[Excluded]) -> None:
     print("UPDATE RED  : a falling count is refused, not written")
 
     broken = work / "broken.toml"
-    text = render_map(rows, excluded).replace("\n[[excluded]]\n", "\n[[excluded]\n", 1)
+    text = render_map(rows).replace("\n[[target]]\n", "\n[[target]\n", 1)
     broken.write_text(text, encoding="utf-8")
-    _, _, red = read_map(broken)
+    _, red = read_map(broken)
     expect(codes(red) == ["map-unreadable"] and str(broken) in red[0].message, f"a broken map must red, got {codes(red)}")
     bep = _fixture(work, rows, "broken-map")
     expect(run_check(bep, broken, update=True) == 1, "--update over a broken map must exit 1")
@@ -879,40 +831,27 @@ def prove_update(work: Path, rows: list[Row], excluded: list[Excluded]) -> None:
     print("UPDATE RED  : a syntax-broken map -> map-unreadable, exit 1, file untouched")
 
 
-def prove_coverage(rows: list[Row], excluded: list[Excluded]) -> None:
-    expect(excluded, "crates/TEST_TARGET_MAP.toml has no [[excluded]] row to prove against")
+def prove_coverage(work: Path, rows: list[Row]) -> None:
     executed = {row.suite: {f"case_{i}" for i in range(3)} for row in rows}
     listing = {suite: set(names) for suite, names in executed.items()}
-    for entry in excluded:
-        listing.setdefault(entry.suite, set()).add(entry.name)
-    expect(not coverage_findings(listing, executed, excluded), "listing == executed + excluded must be green")
-    print("COVER GREEN : nextest list == Bazel executed + [[excluded]]")
+    expect(not coverage_findings(listing, executed), "listing == executed must be green")
+    print("COVER GREEN : nextest list == Bazel executed")
 
     thin = {suite: set(names) for suite, names in executed.items()}
     thin[rows[0].suite].discard("case_0")
-    red = coverage_findings(listing, thin, excluded)
+    red = coverage_findings(listing, thin)
     expect(codes(red) == ["coverage-gap"] and "case_0" in red[0].message, f"a dropped case must red by name, got {codes(red)}")
     print(f"COVER RED   : {red[0].message.splitlines()[0][:100]} ... case_0")
 
-    stale = [*excluded, Excluded(suite=rows[0].suite, name="no::such::case", reason="bogus")]
-    expect(codes(coverage_findings(listing, executed, stale)) == ["coverage-stale-row"], "a bogus row must red")
-    running = {suite: set(names) for suite, names in executed.items()}
-    running.setdefault(excluded[0].suite, set()).add(excluded[0].name)
-    expect(codes(coverage_findings(listing, running, excluded)) == ["coverage-row-runs"],
-           "a row Bazel executes must red")
-    print("COVER RED   : a row matching no case, and a row Bazel runs")
-
-    expect(not excluded_check(listing, excluded), "every row matches a listed case")
-    expect(codes(excluded_check(listing, stale)) == ["excluded-no-match"], "a bogus row must red")
-    expect(codes(excluded_check(listing, [])) == ["excluded-empty"], "no rows must red")
-    expr = excluded_filter(excluded)
-    expect(expr.count("binary_id(") == len(excluded) and all(f"test(={e.name})" in expr for e in excluded),
-           "the filterset names every row exactly")
-    print(f"EXCL GREEN/RED: filterset of {len(excluded)} row(s); a bogus row and an empty list both red")
+    excluded = work / "excluded.toml"
+    excluded.write_text(render_map(rows) + '\n[[excluded]]\nsuite = "s"\nname = "n"\n', encoding="utf-8")
+    _, red = read_map(excluded)
+    expect(codes(red) == ["map-excluded"], f"an [[excluded]] row must red, got {codes(red)}")
+    print("COVER RED   : a map carrying an [[excluded]] row -> map-excluded")
 
 
 def self_test() -> int:
-    rows, excluded, red = read_map(TEST_TARGET_MAP)
+    rows, red = read_map(TEST_TARGET_MAP)
     expect(not red, f"{TEST_TARGET_MAP} must read: {codes(red)}")
     expect(rows, f"{TEST_TARGET_MAP} has no [[target]] rows — the fixture would be empty")
     scratch = REPO_ROOT / ".tmp"
@@ -922,8 +861,8 @@ def self_test() -> int:
         prove_floor(work, rows)
         prove_edge_cases(work)
         prove_junit(work, rows)
-        prove_update(work, rows, excluded)
-        prove_coverage(rows, excluded)
+        prove_update(work, rows)
+        prove_coverage(work, rows)
     print("bazel test floor self-test: every finding shown red, the live map shown green")
     return 0
 
@@ -933,8 +872,6 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--self-test", action="store_true")
     mode.add_argument("--bep", type=Path, help="the --build_event_json_file to judge")
-    mode.add_argument("--excluded-filter", action="store_true", help="print the nextest filterset of [[excluded]]")
-    mode.add_argument("--excluded-check", type=Path, metavar="LISTING", help="red on a row the listing lacks")
     parser.add_argument("--map", type=Path, default=TEST_TARGET_MAP, help="the target map (red proofs)")
     parser.add_argument("--junit", type=Path, help="with --bep: write the per-case JUnit report here")
     parser.add_argument("--update", action="store_true", help="with --bep: rewrite [[target]] rows (rise only)")
@@ -942,19 +879,6 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_test:
         return self_test()
-    if args.excluded_filter or args.excluded_check:
-        _, excluded, red = read_map(args.map)
-        if red:
-            return report(red)
-        if args.excluded_filter:
-            if not excluded:
-                return report(excluded_check({}, excluded))
-            print(excluded_filter(excluded))
-            return 0
-        findings = excluded_check(read_listing(args.excluded_check), excluded)
-        if not findings:
-            print(f"bazel excluded: all {len(excluded)} [[excluded]] row(s) match a test")
-        return report(findings)
     if args.coverage is not None:
         return run_coverage(args.bep, args.map, args.coverage)
     return run_check(args.bep, args.map, args.junit, args.update)

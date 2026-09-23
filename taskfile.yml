@@ -79,8 +79,7 @@ tasks:
         Linux — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing` provenance), claude hooks test, the
           Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift),
-          Bazel unit tests, the Bazel coverage gate, the Bazel-excluded rows
-          under nextest, Bazel acceptance.
+          Bazel unit tests, the Bazel coverage gate, Bazel acceptance.
         elsewhere — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing`), claude hooks test, nextest unit tests,
           acceptance tests.
@@ -126,5 +125,4 @@ tasks:
       - task: bazel:build:drift
       - task: bazel:test:unit
       - task: bazel:test:coverage
-      - task: rust:test:bazel-excluded
       - task: bazel:test:accept

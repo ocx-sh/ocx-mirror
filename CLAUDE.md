@@ -37,7 +37,7 @@ document the four-line job, let them own the pipeline.
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
 | `MODULE.bazel` (+ `.lock`), `.bazelrc`, `.bazelversion` | Bazel module (Linux dev loop and CI's `Smoke (Linux)` job; release and non-Linux stay cargo, as in ocx). Remote cache `bazel-cache.ocx.sh/v1`, shared with ocx; CI writes on the `main` push only. Third-party crates come from `Cargo.toml`/`Cargo.lock` via `crate.from_cargo`; the generated `Cargo.bazel.lock.json` is gitignored |
 | `BUILD.bazel`, `crates/*/BUILD.bazel`, `test/BUILD.bazel` | Hand-written Bazel packages (root lib/bin + tests, the seven crates, the acceptance suite as one `sh_test`); `bazel:build:drift` keeps their edges equal to Cargo's |
-| `crates/TEST_TARGET_MAP.toml` | Per-target Bazel test counts (rise only) + `[[excluded]]` cases Bazel skips and nextest runs |
+| `crates/TEST_TARGET_MAP.toml` | Per-target Bazel test counts (rise only); no `[[excluded]]` rows — every nextest case runs under Bazel (`bazel:test:coverage`) |
 | `scripts/` | Gate tooling: `bazel_test_floor.py`, `bazel_build_drift.py`, `bazel_cache_check.py`, `bep_to_otlp.py`, `bazel_scoped.py`, `bazel_execlog_keys.py` (each has `--self-test`; `task scripts:self-test` runs all six, plus `.github/actions/bazel-cache-rc/selftest.sh`) |
 | `scripts/test_telemetry_names.py` | pytest (not `--self-test`) for the telemetry names + never-fail contract; `task telemetry:self-test` |
 | `test/bazel_accept.sh` | The `//test:acceptance` `sh_test` runner: points the harness at the Bazel-built `ocx-mirror` and the pinned `ocx`, then `pytest -n auto` |

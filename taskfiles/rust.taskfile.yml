@@ -19,7 +19,7 @@ x-shared:
 
 tasks:
   verify:
-    desc: Rust loop gate (format, clippy, BUILD drift on Linux, unit tests — Bazel on Linux, nextest elsewhere); skips the [[excluded]] rows
+    desc: Rust loop gate (format, clippy, BUILD drift on Linux, unit tests — Bazel on Linux, nextest elsewhere)
     summary: |
       adr_bazel_crate_split.md § C8 — sequential, fail-fast:
         1. cargo fmt --all --check
@@ -29,10 +29,6 @@ tasks:
            test target (a new `tests/foo.rs`, a crate's first `tests/`) with
            no `rust_test`, which the Bazel run below would never notice.
         4. test:unit — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
-      NOT run: `rust:test:bazel-excluded`, the crates/TEST_TARGET_MAP.toml
-      `[[excluded]]` rows Bazel `--skip`s — a release-profile nextest build of
-      every test binary, too heavy for the loop. On Linux those cases run only
-      under `task verify`; run that task by hand after touching them.
       Use during review-fix loops when only Rust code changed; license,
       jsonschema, the release build and acceptance are `task verify`'s.
     cmds:
@@ -137,30 +133,6 @@ tasks:
         vars:
           JUNIT: '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
           SUITE: unit
-
-  test:bazel-excluded:
-    desc: Run exactly the crates/TEST_TARGET_MAP.toml [[excluded]] rows under cargo nextest (C4)
-    summary: |
-      The cases Bazel `--skip`s run here instead. The nextest filterset is
-      generated from the rows by `scripts/bazel_test_floor.py`; a row that
-      matches no test is red before anything runs (a stale row would
-      otherwise shrink the run silently). `MAP=<file>` judges another map
-      (red proofs).
-    dir: '{{.ROOT_DIR}}'
-    deps:
-      - install:nextest
-    vars:
-      MAP: '{{.MAP | default "crates/TEST_TARGET_MAP.toml"}}'
-      LISTING:
-        sh: mktemp -t ocx-mirror-excluded.XXXXXXXX
-    cmds:
-      - defer: rm -f '{{.LISTING}}'
-      - cmd: |
-          set -eu
-          filter=$(python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-filter)
-          cargo nextest list --workspace --release --locked --features ocx_mirror/__testing --message-format json -E "$filter" > '{{.LISTING}}'
-          python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-check '{{.LISTING}}'
-          cargo nextest run --workspace --release --locked --features ocx_mirror/__testing -E "$filter" {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true

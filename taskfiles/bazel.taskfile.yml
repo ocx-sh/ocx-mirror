@@ -302,14 +302,14 @@ tasks:
           exit "$status"
 
   test:coverage:
-    desc: C4 coverage gate — Bazel-executed cases ⊇ `cargo nextest list` minus the [[excluded]] rows
+    desc: C4 coverage gate — Bazel-executed cases ⊇ `cargo nextest list`
     summary: |
       C-009. Runs `bazel test //crates/... //:all` with a BEP (a cache replay
       on an unchanged tree), then `cargo nextest list --workspace --release
       --locked` — sequentially: cargo and Bazel never build at once. Red on
-      any case nextest names that no Bazel target executed and no
-      `[[excluded]]` row covers (the names are printed), on a row matching no
-      case, and on a row Bazel executes (the list only shrinks).
+      any case nextest names that no Bazel target executed (the names are
+      printed): nothing else runs a case a target skips, so there is no
+      exclusion list, and crates/TEST_TARGET_MAP.toml carrying one reds too.
     dir: '{{.ROOT_DIR}}'
     platforms: [linux]
     vars:
