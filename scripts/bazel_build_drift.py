@@ -687,6 +687,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--self-test", action="store_true", help="prove the gate red and green on synthetic readings")
     parser.add_argument("--bazel", default="bazel", help="the Bazel command, shell-quoted (the task passes its `{{.BAZEL}}`)")
+    parser.add_argument(
+        "--run-flags",
+        default="",
+        help="build options for the cargo wrapper's `bazel run`, shell-quoted — CI's main-push lane passes its upload grant, so the wrapper it compiles reaches the shared cache",
+    )
     args = parser.parse_args()
     if args.self_test:
         return self_test()
@@ -696,7 +701,7 @@ def main() -> int:
     build_text, build_red = run([*bazel, "query", QUERY, "--output=build"])
     # The wrapper runs cargo in the client's working directory (REPO_ROOT)
     # with the toolchain's rustc first on PATH; Bazel's own output is stderr.
-    metadata_text, metadata_red = run([*bazel, "run", "@rules_rust//tools/upstream_wrapper:cargo", "--",
+    metadata_text, metadata_red = run([*bazel, "run", *shlex.split(args.run_flags), "@rules_rust//tools/upstream_wrapper:cargo", "--",
                                        "metadata", "--locked", "--format-version", "1"])
     findings += [finding for finding in (build_red, metadata_red) if finding]
     if build_red or metadata_red:

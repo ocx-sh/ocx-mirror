@@ -492,7 +492,10 @@ tasks:
       - task: bootstrap
       # `cargo metadata` runs through the Bazel toolchain's cargo (the script's
       # `bazel run @rules_rust//tools/upstream_wrapper:cargo`): no host Rust.
-      - python3 scripts/bazel_build_drift.py --bazel '{{.BAZEL}}'
+      # RUN_FLAGS: build options for that `bazel run` — verify.yml's main-push
+      # lane passes its upload grant, or the wrapper compile never reaches the
+      # shared cache and every later run rebuilds it.
+      - python3 scripts/bazel_build_drift.py --bazel '{{.BAZEL}}' --run-flags='{{.RUN_FLAGS}}'
 
   tag:guard:
     desc: Every test stays remotely cacheable and honestly keyed — no cache-suppressing tag, acceptance's inputs declared, no stray env_inherit, no volatile .bazelrc flag

@@ -149,7 +149,11 @@ jobs:
         # rustup it installed the rust-toolchain.toml channel (11 s) and
         # downloaded every crate first (18 s). `bazel:build:drift` reads
         # `cargo metadata` through the Bazel toolchain's cargo.
-        run: task bazel:pin:check bazel:lint bazel:mod:check bazel:patch:check bazel:build:drift bazel:tag:guard JOBS=auto
+        # RUN_FLAGS carries the upload grant into the drift gate's one build
+        # (the cargo wrapper it `bazel run`s) — the write-lane expression below.
+        run: >-
+          task bazel:pin:check bazel:lint bazel:mod:check bazel:patch:check bazel:build:drift bazel:tag:guard JOBS=auto
+          RUN_FLAGS='${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}'
       # Per-target analysis timings to otel.ocx.sh are pushed from inside this
       # step, by `telemetry:bazel` at the tail of `bazel:build:nobuild`. The
       # BEP holds the whole client environment, so it lives in a 0700 mktemp
