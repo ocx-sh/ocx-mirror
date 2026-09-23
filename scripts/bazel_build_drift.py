@@ -91,6 +91,9 @@ VERSIONED_KINDS = ("rust_library", "rust_binary", "rust_proc_macro")
 ENV_FILES_ATTR = re.compile(r"^  rustc_env_files = (?P<value>.*)$")
 #: (package, script, env file): the one build script Bazel stands in for.
 ADMITTED_BUILD_SCRIPT = ("", "build.rs", "testing_provenance.env")
+#: Root BUILD.bazel's hand-kept `source_scan`/`workspace_structure` data list.
+MEMBER_SOURCES_ATTR = re.compile(r"_MEMBER_SOURCES = \[(?P<body>.*?)\]", re.DOTALL)
+RUST_SOURCES_NAME = re.compile(r'name\s*=\s*"rust_sources"')
 
 
 @dataclasses.dataclass
@@ -237,6 +240,44 @@ def resolve(label: str, cargo: CargoRead) -> str | None:
         return cargo.stems.get(label[len("@crates//") :].split(":", 1)[0])
     target = label_target(label)
     return target if target in cargo.own_name.values() else None
+
+
+def check_member_sources(*, root_build_text: str, crate_names: list[str], crate_build_texts: dict[str, str | None]) -> list[Finding]:
+    """Root `_MEMBER_SOURCES` == one `//crates/<d>:rust_sources` per `crates/<d>/Cargo.toml`.
+
+    A crate absent from the list is silently skipped by `//:source_scan` and
+    `//:workspace_structure` (`source_scan.rs`, `workspace_structure.rs`) —
+    their data comes from this list, not a glob.
+    """
+    findings: list[Finding] = []
+    match = MEMBER_SOURCES_ATTR.search(root_build_text)
+    listed = set(STRING_LITERAL.findall(match.group("body"))) if match else set()
+    wanted = {f"//crates/{name}:rust_sources" for name in crate_names}
+    missing, extra = sorted(wanted - listed), sorted(listed - wanted)
+    if missing or extra:
+        findings.append(
+            Finding(
+                "drift-member-sources",
+                f"BUILD drift: root BUILD.bazel _MEMBER_SOURCES — crates/*/Cargo.toml with no listed label: {missing}; listed labels with no matching crate: {extra}",
+            )
+        )
+    for name in sorted(crate_names):
+        text = crate_build_texts.get(name)
+        if text is None:
+            findings.append(Finding("drift-member-sources", f"BUILD drift: crates/{name} has no BUILD.bazel"))
+        elif not RUST_SOURCES_NAME.search(text):
+            findings.append(Finding("drift-member-sources", f"BUILD drift: crates/{name}/BUILD.bazel defines no rust_sources target"))
+    return findings
+
+
+def read_member_sources_inputs(root: Path) -> tuple[str, list[str], dict[str, str | None]]:
+    root_build_text = (root / "BUILD.bazel").read_text(encoding="utf-8")
+    crate_names = sorted(p.parent.name for p in (root / "crates").glob("*/Cargo.toml"))
+    crate_build_texts: dict[str, str | None] = {}
+    for name in crate_names:
+        build_path = root / "crates" / name / "BUILD.bazel"
+        crate_build_texts[name] = build_path.read_text(encoding="utf-8") if build_path.exists() else None
+    return root_build_text, crate_names, crate_build_texts
 
 
 def check_drift(*, build_text: str, metadata: dict, root: str) -> list[Finding]:
@@ -551,6 +592,36 @@ def self_test() -> int:
 
     run_case("rule with no header", 'rust_library(\n  name = "x",\n  deps = [],\n)\n' + text, metadata, ["drift-orphan-rule"])
 
+    def run_member_case(label: str, root_text: str, names: list[str], build_texts: dict[str, str | None], want: list[str], needle: str = "") -> None:
+        nonlocal checks
+        got = check_member_sources(root_build_text=root_text, crate_names=names, crate_build_texts=build_texts)
+        codes = sorted({f.code for f in got})
+        expect(codes == want, f"{label}: expected {want}, got {codes}: {[f.message for f in got]}")
+        if needle:
+            expect(any(needle in f.message for f in got), f"{label}: no finding names {needle!r}: {[f.message for f in got]}")
+        print(f"{'GREEN' if not want else 'RED  '}: {label}" + (f" — {got[0].message}" if got else ""))
+        checks += 1
+
+    member_names = sorted(name for _, name in MEMBERS if name != "ocx_mirror")
+    member_root = "_MEMBER_SOURCES = [\n" + "".join(f'    "//crates/{n}:rust_sources",\n' for n in member_names) + "]\n"
+    member_builds = {n: f'filegroup(\n    name = "rust_sources",\n    srcs = glob(["**/*.rs"]) + ["Cargo.toml"],\n)\n' for n in member_names}
+    run_member_case("agreeing member-sources tree (every crate listed, every BUILD defines rust_sources)", member_root, member_names, member_builds, [])
+
+    missing_root = member_root.replace(f'    "//crates/{member_names[0]}:rust_sources",\n', "")
+    expect(missing_root != member_root, "member drop did not land")
+    run_member_case("a new crates/<d>/Cargo.toml absent from _MEMBER_SOURCES", missing_root, member_names, member_builds, ["drift-member-sources"], f"//crates/{member_names[0]}:rust_sources")
+
+    stale_names = member_names[1:]
+    run_member_case("a stale label in _MEMBER_SOURCES for a crate that no longer exists", member_root, stale_names, {n: v for n, v in member_builds.items() if n != member_names[0]}, ["drift-member-sources"], f"//crates/{member_names[0]}:rust_sources")
+
+    unbuilt = dict(member_builds)
+    unbuilt[member_names[0]] = None
+    run_member_case("a listed crate with no BUILD.bazel at all", member_root, member_names, unbuilt, ["drift-member-sources"], f"crates/{member_names[0]} has no BUILD.bazel")
+
+    untargeted = dict(member_builds)
+    untargeted[member_names[0]] = 'rust_library(\n    name = "%s",\n)\n' % member_names[0]
+    run_member_case("a listed crate whose BUILD.bazel defines no rust_sources target", member_root, member_names, untargeted, ["drift-member-sources"], f"crates/{member_names[0]}/BUILD.bazel defines no rust_sources")
+
     print(f"bazel build drift self-test: {checks} checks passed")
     return 0
 
@@ -561,13 +632,15 @@ def main() -> int:
     args = parser.parse_args()
     if args.self_test:
         return self_test()
+    root_build_text, crate_names, crate_build_texts = read_member_sources_inputs(REPO_ROOT)
+    findings = check_member_sources(root_build_text=root_build_text, crate_names=crate_names, crate_build_texts=crate_build_texts)
     # `bazel` from PATH, as `ocx exec bazel --` leaves it.
     build_text, build_red = run(["bazel", "query", QUERY, "--output=build"])
     metadata_text, metadata_red = run(["cargo", "metadata", "--locked", "--format-version", "1"])
-    findings = [finding for finding in (build_red, metadata_red) if finding]
-    if findings:
+    findings += [finding for finding in (build_red, metadata_red) if finding]
+    if build_red or metadata_red:
         return report(findings)
-    return report(check_drift(build_text=build_text, metadata=json.loads(metadata_text), root=str(REPO_ROOT)))
+    return report(findings + check_drift(build_text=build_text, metadata=json.loads(metadata_text), root=str(REPO_ROOT)))
 
 
 if __name__ == "__main__":

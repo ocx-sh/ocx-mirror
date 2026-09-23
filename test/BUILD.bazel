@@ -42,6 +42,7 @@ sh_test(
         "//:ocx.lock",
         "//:ocx.toml",
         "//:ocx-mirror",
+        "//:pipeline_templates",
         "//:renovate.json",
         "//:src/command/package/pipeline/generate/ci/matrix.rs",
         "//:tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
@@ -76,9 +77,10 @@ sh_test(
             "results/**",
         ],
     ),
-    # NOT part of the action key: a result recorded under one value is served
-    # under another (remotely too). So this list holds only what cannot pick a
-    # verdict — what the runner itself needs, and how to reach the Docker
+    # Resolved values ARE part of the test action's key (they are its spawn
+    # environment), so a differing value over-keys — a re-run, never a stale
+    # verdict; CI runners agree on every one. The list still holds only what
+    # cannot pick a verdict — what the runner itself needs, and how to reach the Docker
     # daemon; the suite gets none of its knobs from here (the runner pins the
     # registries' defaults, the Sigstore compose file, project and ports):
     #   HOME            the runner's own roots (uv cache, TMPDIR, lock); the

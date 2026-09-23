@@ -6,7 +6,19 @@ on:
   pull_request:
     branches: [main, 'announce/**']
   # release.yml reuses this workflow as its quality gate on the tag.
-  workflow_call: {}
+  workflow_call:
+    # A called workflow sees only the secrets its caller maps; every secret
+    # this file names is declared, all optional. release.yml maps the READ
+    # credential alone: the tag run reads the shared cache and never writes
+    # it — under `workflow_call` the write-lane expression is false anyway
+    # (`github.workflow` is the caller's).
+    secrets:
+      BAZEL_CACHE_READ_AUTH:
+        required: false
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+      OTEL_OTLP_AUTH:
+        required: false
 
 permissions:
   contents: read

@@ -26,6 +26,10 @@ jobs:
       contents: read
       checks: write
       pull-requests: write
+    # The read credential only (verify.yml `workflow_call.secrets`): the tag
+    # run reads the shared cache and never writes it.
+    secrets:
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
 
   verify-version:
     name: Verify tag matches Cargo.toml

@@ -22,8 +22,9 @@ two the upload adds:
 * `accept-undeclared` — `//test:acceptance`'s input closure still holds the
   binary under test, the pinned ocx, and both compose files with the Sigstore
   tree. ocx's `tag-acceptance-undeclared`, for this target's inputs.
-* `env-inherit` — `env_inherit` values are outside the action key, so a
-  result recorded under one value is served under another, on any machine.
+* `env-inherit` — an inherited value is the test's spawn environment, so it
+  keys the result: a host-specific value splits CI's entries from a
+  developer's, and one that picks a verdict has no place in a shared key.
   Only `//test:acceptance` may inherit, and only `INHERIT_ALLOWED`
   (test/BUILD.bazel says why each cannot pick a verdict).
 * `rc-volatile` — the checked-in `.bazelrc` passes no ambient value into an

@@ -243,8 +243,7 @@ filegroup(
 
 # Bazel 9 exports no source file implicitly; the acceptance target reads these.
 # renovate.json and matrix.rs: test_renovate_managers.py greps them (the
-# templates it also greps are `include_str!`-embedded, so the binary carries
-# them); the wheel: test_mirror_{pypi,mount,libc}.py push it. Undeclared, an
+# templates it greps too are `:pipeline_templates` below); the wheel: test_mirror_{pypi,mount,libc}.py push it. Undeclared, an
 # edit to any of them would be served a cached acceptance green.
 exports_files([
     "ocx.lock",
@@ -253,6 +252,16 @@ exports_files([
     "src/command/package/pipeline/generate/ci/matrix.rs",
     "tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
 ])
+
+# The workflow templates test_renovate_managers.py matches by PATH. The binary
+# embeds their content (`include_str!`) but not their names, so a rename that
+# stops Renovate's managerFilePatterns matching would leave //:ocx-mirror —
+# and a cached acceptance verdict — unchanged. Declared by name here.
+filegroup(
+    name = "pipeline_templates",
+    srcs = glob(["src/command/package/pipeline/generate/templates/*"]),
+    visibility = ["//test:__pkg__"],
+)
 
 # The docs site's two root-level inputs (docs/BUILD.bazel `//docs:site`):
 # mkdocs.yml, and CHANGELOG.md, which docs/changelog.md snippet-includes.
