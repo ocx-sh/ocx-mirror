@@ -1,0 +1,148 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+#
+# Build and test telemetry, pushed to https://otel.ocx.sh as OTLP traces.
+# Ported from ocx's `taskfiles/telemetry.taskfile.yml` (ADR
+# `adr_bazel_crate_split.md` § A-8, contract C-013); behaviour identical except
+# the repo discriminator:
+#
+#   * JUnit spans: `service.name = ocx-mirror-tests`, trace name
+#     `ocx-mirror-<suite>`, extra span attribute `vcs.repository.name=ocx-mirror`;
+#   * BEP spans: `service.name = ocx-mirror-bazel-build` and resource
+#     `vcs.repository.name = ocx-mirror` (set in `scripts/bep_to_otlp.py`).
+#
+# Every `ocx.*` attribute keeps ocx's name and value vocabulary, so the Grafana
+# `suite/source/os/run` filters apply unchanged; the dashboards' `repo`
+# variable selects on the service name.
+#
+#   * `push` — per-test timings from a JUnit report, so Grafana can name the
+#     tests that accumulate the most wall clock. Its CI half is
+#     `.github/actions/test-telemetry`.
+#   * `bazel` — per-target timings from a Bazel Build Event Protocol stream.
+#     It has no CI half: it runs at the tail of `bazel:build:nobuild` in both
+#     lanes. A step of its own would need the BEP to outlive the build, and the
+#     BEP carries the whole client environment (see `scripts/bep_to_otlp.py`).
+#   * `self-test` — the reader's proofs and the name/never-fail pytest.
+#
+# OFF BY DEFAULT, and silently: with no endpoint configured these tasks print
+# nothing and change nothing, so `task verify` on a fresh checkout is
+# unaffected. `push` needs `junit2otlp` on PATH as well and is a no-op without
+# it; `bazel` needs only python3. TELEMETRY NEVER DECIDES A TASK: every failure
+# is one `telemetry:` line on stderr and exit 0.
+#
+# To turn it on for this machine (the same file ocx reads):
+#
+#   1. For `push` only: install junit2otlp 0.1.2 onto PATH, from the release
+#      tarball for your platform
+#      (`junit2otlp_{linux,darwin,windows}_{x86_64,arm64}.tar.gz`):
+#
+#        https://github.com/mdelapenya/junit2otlp/releases/tag/v0.1.2
+#
+#   2. Write ~/.config/ocx-telemetry/env, mode 600 — it holds a password:
+#
+#        OTEL_EXPORTER_OTLP_ENDPOINT=https://otel.ocx.sh:443
+#        OTEL_EXPORTER_OTLP_HEADERS=Authorization=Basic <base64 of ci:password>
+#
+#      The scheme and port are load-bearing. junit2otlp speaks OTLP over gRPC
+#      only, and the Go SDK reads the endpoint as a URL: `https` selects TLS,
+#      `http` selects plaintext, and a bare `host:port` fails outright with
+#      `dns resolver: missing address`. `bep_to_otlp.py` appends `/v1/traces`
+#      to the same base and POSTs OTLP/HTTP-JSON, so one value serves both.
+#
+# The file is sourced by these tasks, so it works whether or not the shell you
+# run `task` from has it loaded. Nothing here echoes its contents.
+
+version: '3'
+
+tasks:
+  push:
+    desc: >-
+      Push one JUnit report to otel.ocx.sh as OTLP traces (JUNIT=<path>
+      SUITE=unit|acceptance|smoke). A no-op, silently, unless the machine is
+      configured for it — see the header of this file.
+    # The body is long and this task runs at the tail of a test task; go-task
+    # would otherwise echo the whole script on each one.
+    silent: true
+    cmd: >-
+      set -u;
+      set -o pipefail;
+      if [ -f "$HOME/.config/ocx-telemetry/env" ]; then
+        set -a; . "$HOME/.config/ocx-telemetry/env"; set +a;
+      fi;
+      [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] || exit 0;
+      command -v junit2otlp >/dev/null 2>&1 || exit 0;
+      [ -f "{{.JUNIT}}" ] || exit 0;
+      interpreter=$(command -v python3 || command -v python)
+      || { echo "telemetry: no python on PATH to re-emit the report" >&2; exit 0; };
+      branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown);
+      sha=$(git rev-parse HEAD 2>/dev/null || echo unknown);
+      host=$(uname -n 2>/dev/null || echo unknown);
+      case "$(uname -s)" in
+        Linux) os=linux;; Darwin) os=macos;; *) os=windows;;
+      esac;
+      norepo=$(mktemp -d);
+      log=$(mktemp);
+      pretty=$(mktemp);
+      trap 'rm -rf "$norepo" "$log" "$pretty"' EXIT;
+      cases=$("$interpreter" -c 'import sys, xml.dom.minidom; d = xml.dom.minidom.parse(sys.argv[1]); open(sys.argv[2], "wb").write(d.toprettyxml(encoding="utf-8")); print(len(d.getElementsByTagName("testcase")))' "{{.JUNIT}}" "$pretty")
+      || { echo "telemetry: could not re-emit {{.JUNIT}}" >&2; exit 0; };
+      export OTEL_BSP_MAX_QUEUE_SIZE=$((cases + 1024));
+      junit2otlp
+      --service-name ocx-mirror-tests
+      --trace-name "ocx-mirror-{{.SUITE}}"
+      --repository-path "$norepo"
+      --batch-size 512
+      --additional-attributes "ocx.suite={{.SUITE}},ocx.source=local,ocx.os=$os,ocx.git.sha=$sha,ocx.git.branch=$branch,host.name=$host,vcs.repository.name=ocx-mirror"
+      < "$pretty" > "$log" 2>&1
+      || { echo "telemetry: junit2otlp failed: $(tail -n 3 "$log")" >&2; exit 0; };
+      if grep -q 'traces export:' "$log"; then
+        echo "telemetry: push did not land: $(grep -m1 'traces export:' "$log")" >&2; exit 0;
+      fi;
+      echo "telemetry: pushed {{.SUITE}} timings from {{.JUNIT}}"
+    requires:
+      vars: [JUNIT, SUITE]
+
+  bazel:
+    desc: >-
+      Push one Bazel BEP to otel.ocx.sh as OTLP traces (BEP=<path>). A no-op,
+      silently, unless the machine is configured for it — see the header of
+      this file.
+    summary: |
+      The reader is `scripts/bep_to_otlp.py`, whose `--self-test` (run by
+      `telemetry:self-test`) is where its red states are proved; this task is
+      the wiring and nothing else.
+
+      `{{.BEP}}` is a scratch path the caller owns and deletes — this task
+      neither creates nor removes it. `bazel:build:nobuild` is the only
+      caller, and its `defer:` is what guarantees the removal.
+
+      The floor is the script's own default, `MIN_TARGETS` (8: the seven
+      `crates/*` libraries + the root library), and no `--min-targets` is
+      passed here, so the number has one home.
+
+      Failure is loud and non-fatal, the contract `push` above already has:
+      the script prints one line per finding on stderr and exits 1, and this
+      wrapper names the swallow and exits 0. `task verify` must not red because
+      otel.ocx.sh is down.
+    silent: true
+    cmd: >-
+      set -u;
+      if [ -f "$HOME/.config/ocx-telemetry/env" ]; then
+        set -a; . "$HOME/.config/ocx-telemetry/env"; set +a;
+      fi;
+      [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT:-}" ] || exit 0;
+      [ -s "{{.BEP}}" ] || {
+        echo "telemetry: no build event stream at {{.BEP}}, nothing pushed" >&2; exit 0;
+      };
+      python3 "{{.TASKFILE_DIR}}/../scripts/bep_to_otlp.py" --bep "{{.BEP}}"
+      || {
+        echo "telemetry: bep_to_otlp.py failed (above); the build is unaffected" >&2; exit 0;
+      }
+    requires:
+      vars: [BEP]
+
+  self-test:
+    desc: Prove the BEP reader red and green, and the telemetry names + never-fail contract
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - python3 scripts/bep_to_otlp.py --self-test
+      - uv run --project test pytest scripts -q -p no:cacheprovider

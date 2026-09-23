@@ -10,6 +10,8 @@ includes:
   release: ./taskfiles/release.taskfile.yml
   docs: ./taskfiles/docs.taskfile.yml
   git: ./taskfiles/git.taskfile.yml
+  bazel: ./taskfiles/bazel.taskfile.yml
+  telemetry: ./taskfiles/telemetry.taskfile.yml
   claude:
     taskfile: ./.claude/taskfile.yml
     dir: ./.claude
