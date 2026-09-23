@@ -107,7 +107,7 @@ pub use wheels::{WheelPatterns, base_platform_key, libc_feature};
 // moving a byte of the schema (adr_bazel_crate_split.md § C2, S-004); it goes
 // with the promotion-time wording cleanup. Doc links are its only readers,
 // which rustc does not count as a use.
-#[allow(unused_imports)]
+#[expect(unused_imports, reason = "doc-link alias for the dist schema bytes (ADR C2)")]
 use crate as spec;
 
 use ocx_package::version::Version;

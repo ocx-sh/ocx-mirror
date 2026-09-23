@@ -282,7 +282,7 @@ fn every_production_client_is_built_through_the_factory() {
     );
     assert!(
         state.offenders.is_empty(),
-        "these legs bypass `crate::http` and so drop the trust roots a corporate CA needs: {:#?}",
+        "these legs bypass `ocx_mirror_http` and so drop the trust roots a corporate CA needs: {:#?}",
         state.offenders
     );
 }

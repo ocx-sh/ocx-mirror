@@ -184,7 +184,7 @@ fn a_transient_push_failure_is_retried_and_the_tile_still_lands() {
 
 #[cfg(unix)]
 #[test]
-fn push_retries_stop_at_the_spec_max_retries() {
+fn push_retries_stop_at_the_budget_handed_in() {
     // The ladder is bounded (a registry that is down stays down — the run
     // must not sit there forever), and its length is the budget passed in.
     // The fixture's `max_retries: 2` is a value no plausible hardcoding
@@ -195,8 +195,12 @@ fn push_retries_stop_at_the_spec_max_retries() {
     let dir = tempdir().unwrap();
     let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::TempFail as u8, PUSH_RETRY_VERSION);
 
-    let error = push_retry_fixture(&script, retry_fixture_max_retries())
-        .expect_err("an exhausted retry ladder must still fail the push");
+    let budget = retry_fixture_max_retries();
+    assert_eq!(
+        budget, 2,
+        "the attempt count below assumes the fixture's `max_retries: 2`"
+    );
+    let error = push_retry_fixture(&script, budget).expect_err("an exhausted retry ladder must still fail the push");
 
     assert_eq!(
         push_attempts(dir.path()),
