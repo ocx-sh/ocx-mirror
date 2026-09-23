@@ -66,15 +66,9 @@ pub fn resolve_compression_threads(compression_threads: usize, max_bundles: usiz
     (default_compression_threads() / max_bundles as u32).max(1)
 }
 
-/// The core count one bundle would compress with on its own.
-///
-/// A three-line copy of `ocx_util::compression::default_threads`, which is
-/// `pub(crate)` there: the same all-cores-capped-at-16 rule, so dividing it
-/// across `max_bundles` yields the share of the budget ocx itself would have
-/// spent on a single bundle. Kept in step by value, not by import — a change
-/// to the cap upstream is a change to make here.
+/// The core count one bundle would compress with on its own — ocx's own
+/// all-cores-capped-at-16 rule, so dividing it across `max_bundles` yields the
+/// share of the budget ocx itself would have spent on a single bundle.
 fn default_compression_threads() -> u32 {
-    std::thread::available_parallelism()
-        .map(|n| (n.get() as u32).min(16))
-        .unwrap_or(1)
+    ocx_util::compression::default_threads()
 }
