@@ -143,5 +143,15 @@ tasks:
 
   self-test:
     desc: Prove the telemetry names + never-fail contract (the BEP reader's proofs are scripts:self-test's)
+    cmds:
+      # Linux: the cached Bazel test (scripts/BUILD.bazel); elsewhere pytest
+      # through the acceptance venv. Each is a no-op off its own platforms.
+      - task: :bazel:test:scripts
+        vars: {TARGETS: //scripts:telemetry_names}
+      - task: self-test:python
+
+  self-test:python:
+    internal: true
+    platforms: [darwin, windows]
     dir: '{{.ROOT_DIR}}'
     cmd: uv run --project test pytest scripts -q -p no:cacheprovider

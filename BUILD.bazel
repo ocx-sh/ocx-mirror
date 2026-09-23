@@ -342,3 +342,23 @@ exports_files(
     ],
     visibility = ["//docs:__pkg__"],
 )
+
+# The root-package files the gate-script tests read (scripts/BUILD.bazel):
+# BEP fixtures, the live test map, the telemetry and cache-credential actions,
+# and the taskfile + workflow the BEP persistence scan reads.
+exports_files(
+    [
+        ".github/actions/bazel-cache-rc/action.yml",
+        ".github/actions/bazel-cache-rc/selftest.sh",
+        ".github/actions/bazel-cache-rc/write_rc.py",
+        ".github/actions/test-telemetry/action.yml",
+        ".github/workflows/verify.yml",
+        "crates/TEST_TARGET_MAP.toml",
+        "taskfiles/bazel.taskfile.yml",
+        "taskfiles/telemetry.taskfile.yml",
+        "tests/fixtures/bep/cache_states.json",
+        "tests/fixtures/bep/crates_build.json",
+        "tests/fixtures/bep/failed_build.json",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)

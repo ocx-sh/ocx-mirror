@@ -57,6 +57,16 @@ tasks:
 
   scripts:self-test:
     desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bazel_execlog_keys, bazel_tag_guard, bep_to_otlp, and the bazel-cache-rc action's selftest.sh
+    cmds:
+      # Linux: as cached Bazel tests (scripts/BUILD.bazel, with the telemetry
+      # pytest); elsewhere the plain python list below. Each is a no-op off
+      # its own platforms.
+      - task: bazel:test:scripts
+      - task: .scripts:self-test:python
+
+  .scripts:self-test:python:
+    internal: true
+    platforms: [darwin, windows]
     dir: '{{.ROOT_DIR}}'
     cmds:
       - python3 scripts/bazel_test_floor.py --self-test
@@ -76,13 +86,15 @@ tasks:
     desc: Full quality gate
     summary: |
       Phase 1 (parallel): rustfmt + clippy (`rust:lint` — the Bazel lanes on
-        Linux, cargo elsewhere), gate-script self-tests, telemetry self-test
+        Linux, cargo elsewhere); off Linux also the gate-script and telemetry
+        self-tests
       Phase 2 (sequential; adr_bazel_crate_split.md § C8):
         Linux — license headers, dependency licenses, cargo release build
           (`__testing` provenance), claude hooks test, the Bazel static gates
           (pin, lint, lockfile, fork patches, BUILD drift, tag guard), the
-          Bazel jsonschema feature build, Bazel unit tests, the Bazel
-          coverage gate, Bazel acceptance.
+          Bazel jsonschema feature build, the gate-script + telemetry
+          self-tests (Bazel), Bazel unit tests, the Bazel coverage gate,
+          Bazel acceptance.
         elsewhere — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing`), claude hooks test, nextest unit tests,
           acceptance tests.
@@ -97,8 +109,10 @@ tasks:
     internal: true
     deps:
       - task: rust:lint
-      - task: scripts:self-test
-      - task: telemetry:self-test
+      # Off Linux only: on Linux both are `bazel:test:scripts`, in phase 2,
+      # so no Bazel command starts while clippy builds.
+      - task: .scripts:self-test:python
+      - task: telemetry:self-test:python
 
   .verify:build-test:
     internal: true
@@ -129,6 +143,7 @@ tasks:
       - task: bazel:build:drift
       - task: bazel:tag:guard
       - task: bazel:build:jsonschema
+      - task: bazel:test:scripts
       - task: bazel:test:unit
       - task: bazel:test:coverage
       - task: bazel:test:accept

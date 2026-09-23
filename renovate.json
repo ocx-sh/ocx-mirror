@@ -9,7 +9,7 @@
     "enabled": true
   },
   "pip-compile": {
-    "managerFilePatterns": ["/^docs/requirements\\.lock$/"]
+    "managerFilePatterns": ["/^docs/requirements\\.lock$/", "/^scripts/requirements\\.lock$/"]
   },
   "packageRules": [
     {
@@ -31,6 +31,14 @@
       "description": "Docs site toolchain (docs/requirements.lock, uv pip compile) — group, chore(deps) prefix",
       "matchManagers": ["pip-compile"],
       "groupName": "docs-deps",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Gate-script test toolchain (scripts/requirements.lock, uv pip compile) — its own group, chore(deps) prefix",
+      "matchManagers": ["pip-compile"],
+      "matchFileNames": ["scripts/requirements.lock"],
+      "groupName": "scripts-deps",
       "semanticCommitType": "chore",
       "semanticCommitScope": "deps"
     },

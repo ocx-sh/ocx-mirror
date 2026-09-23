@@ -120,3 +120,15 @@ pip.parse(
     requirements_lock = "//docs:requirements.lock",
 )
 use_repo(pip, "docs_pip")
+
+# The gate-script tests' toolchain (`//scripts:*`): pytest for the telemetry
+# pytest, PyYAML for the bazel-cache-rc selftest. A hub of its own, not
+# docs_pip: one lock per consumer, so a test-tool bump never re-keys
+# //docs:site and a docs bump never re-runs the gate proofs. Same hashed-lock
+# route and interpreter as the docs block (BZL-PY-03).
+pip.parse(
+    hub_name = "scripts_pip",
+    python_version = "3.14",
+    requirements_lock = "//scripts:requirements.lock",
+)
+use_repo(pip, "scripts_pip")

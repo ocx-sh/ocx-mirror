@@ -1,0 +1,7 @@
+# The gate-script test toolchain (scripts/BUILD.bazel) — the one input
+# `scripts/requirements.lock` is compiled from. pytest runs
+# test_telemetry_names.py; pyyaml is what the bazel-cache-rc selftest.sh parses
+# action.yml with. Regenerate the lock with the command in its header
+# (Renovate runs the same command through its pip-compile manager).
+pytest
+pyyaml

@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
 import tempfile
 import tomllib
@@ -50,7 +51,10 @@ from pathlib import Path
 
 from _gate import Finding, codes, expect, report
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# `absolute()`, never `resolve()`: under `bazel test` (scripts/BUILD.bazel) this
+# file is a runfiles symlink into the source tree, and resolving it would let
+# the self-test read the checkout instead of its declared inputs.
+REPO_ROOT = Path(__file__).absolute().parent.parent
 TEST_TARGET_MAP = REPO_ROOT / "crates" / "TEST_TARGET_MAP.toml"
 
 #: libtest's summary line. `executed` is `passed + failed`: a failing test ran.
@@ -854,7 +858,8 @@ def self_test() -> int:
     rows, red = read_map(TEST_TARGET_MAP)
     expect(not red, f"{TEST_TARGET_MAP} must read: {codes(red)}")
     expect(rows, f"{TEST_TARGET_MAP} has no [[target]] rows — the fixture would be empty")
-    scratch = REPO_ROOT / ".tmp"
+    # Bazel's per-test scratch when it runs this; the checkout is read-only there.
+    scratch = Path(os.environ.get("TEST_TMPDIR") or REPO_ROOT / ".tmp")
     scratch.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(dir=scratch) as directory:
         work = Path(directory)

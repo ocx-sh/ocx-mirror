@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# The gate scripts' own proofs as cached Bazel tests: each `--self-test`, the
+# bazel-cache-rc action's selftest.sh, and the telemetry names/never-fail
+# pytest (`task bazel:test:scripts`; `task scripts:self-test` and
+# `task telemetry:self-test` on Linux). ocx runs its equivalents as plain
+# `python3` outside Bazel (its `scripts:verify`); here the owner's bar is that
+# everything Verify runs is a Bazel result a second CI run reads back.
+#
+# That result is remote-cacheable, so each target declares exactly what its
+# proof reads (measured with a Python audit hook over open/subprocess/connect):
+# the script, `_gate.py`, and the files named per target below. No self-test
+# spawns a process or reaches the network — `bep_to_otlp`'s transport proof
+# listens and posts on 127.0.0.1 only, and `bazel_execlog_keys` decodes bytes
+# it builds itself (its `zstd` call is the `--log` mode's, never the proof's).
+# The scripts read through `Path(__file__).absolute()`, not `resolve()`, so a
+# read lands in runfiles and an undeclared input fails instead of reading the
+# checkout.
+#
+# `script` bootstrap on every target: the default `system_python` stub is
+# started by the HOST `python3` before it hands over (BZL-PY-14, as
+# docs/BUILD.bazel). No tags, no `env_inherit` (`task bazel:tag:guard`).
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+_SCRIPT_BOOTSTRAP = {"@rules_python//python/config_settings:bootstrap_impl": "script"}
+
+# Imported as a top-level `_gate`, as `python3 scripts/<gate>.py` puts this
+# directory first on sys.path.
+py_library(
+    name = "gate",
+    srcs = ["_gate.py"],
+    imports = ["."],
+)
+
+# One `py_test` per gate script, `--self-test` as its argv, with the files
+# that proof reads.
+[
+    py_test(
+        name = script + "_self_test",
+        srcs = [script + ".py"],
+        args = ["--self-test"],
+        config_settings = _SCRIPT_BOOTSTRAP,
+        data = data,
+        legacy_create_init = 0,
+        main = script + ".py",
+        deps = [":gate"],
+    )
+    for script, data in [
+        ("bazel_build_drift", []),
+        (
+            "bazel_cache_check",
+            ["//:tests/fixtures/bep/cache_states.json"],
+        ),
+        ("bazel_execlog_keys", []),
+        ("bazel_scoped", []),
+        # Its self-test reads no .bazelrc — the gate mode does.
+        ("bazel_tag_guard", []),
+        # The live map is the fixture every floor case is built from.
+        (
+            "bazel_test_floor",
+            ["//:crates/TEST_TARGET_MAP.toml"],
+        ),
+        # The three BEP fixtures, and the persistence scan's live corpus: the
+        # one BEP producer's taskfile and the workflow that calls it.
+        (
+            "bep_to_otlp",
+            [
+                "//:.github/workflows/verify.yml",
+                "//:taskfiles/bazel.taskfile.yml",
+                "//:tests/fixtures/bep/cache_states.json",
+                "//:tests/fixtures/bep/crates_build.json",
+                "//:tests/fixtures/bep/failed_build.json",
+            ],
+        ),
+    ]
+]
+
+# ocx's selftest.sh, unedited, behind a runner that makes its `python3` the
+# hermetic one with the locked PyYAML (the runner's docstring says why).
+py_test(
+    name = "bazel_cache_rc_selftest",
+    srcs = ["bazel_cache_rc_selftest.py"],
+    config_settings = _SCRIPT_BOOTSTRAP,
+    data = [
+        "//:.github/actions/bazel-cache-rc/action.yml",
+        "//:.github/actions/bazel-cache-rc/selftest.sh",
+        "//:.github/actions/bazel-cache-rc/write_rc.py",
+    ],
+    legacy_create_init = 0,
+    main = "bazel_cache_rc_selftest.py",
+    deps = ["@scripts_pip//pyyaml"],
+)
+
+# The telemetry names + never-fail pytest. It drives the two telemetry tasks
+# through go-task, so `task` is the ocx.lock pin (`@tools//:task`, handed over
+# as TELEMETRY_TASK), and the `python3` the tasks spawn is this interpreter
+# (the test's scratch `bin/`). `junit2otlp` and `curl` are fakes the test
+# writes; the endpoint is a closed 127.0.0.1 port nothing dials. The push
+# task's `git rev-parse` / `uname -n` are host calls whose output reaches only
+# the fake `junit2otlp`'s argv, never an assertion.
+#
+# `@tools//:task` is a rules_ocx launcher baking this host's `$OCX_HOME`
+# store path, as `@tools//:ocx` does for //test:acceptance: the key is per
+# host path (every CI runner shares it), over-keyed, never under-keyed.
+py_test(
+    name = "telemetry_names",
+    srcs = ["test_telemetry_names.py"],
+    config_settings = _SCRIPT_BOOTSTRAP,
+    data = [
+        "_gate.py",
+        "bep_to_otlp.py",
+        "//:.github/actions/test-telemetry/action.yml",
+        "//:taskfiles/telemetry.taskfile.yml",
+        "@tools//:task",
+    ],
+    env = {"TELEMETRY_TASK": "$(rlocationpath @tools//:task)"},
+    legacy_create_init = 0,
+    main = "test_telemetry_names.py",
+    deps = ["@scripts_pip//pytest"],
+)

@@ -201,8 +201,9 @@ tasks:
           BEP: '{{.BEP}}'
 
   test:
-    desc: The whole Bazel test lane — unit, the C4 coverage gate, then acceptance
+    desc: The whole Bazel test lane — gate-script proofs, unit, the C4 coverage gate, then acceptance
     cmds:
+      - task: test:scripts
       - task: test:unit
       - task: test:coverage
       - task: test:accept
@@ -242,6 +243,25 @@ tasks:
             cp -L bazel-testlogs/test/acceptance/test.xml '{{.JUNIT}}' || echo 'bazel test:accept: no test.xml under bazel-testlogs/test/acceptance - nothing to publish' >&2
           fi
           exit "$status"
+
+  test:scripts:
+    desc: The gate-script proofs as cached Bazel tests — `bazel test //scripts/...` (TARGETS= narrows)
+    summary: |
+      scripts/BUILD.bazel: each gate script's `--self-test`, the
+      bazel-cache-rc action's selftest.sh, and the telemetry names/never-fail
+      pytest, over the hermetic interpreter and the hashed
+      scripts/requirements.lock. `task scripts:self-test` and
+      `task telemetry:self-test` are this on Linux. A target of its own, not
+      part of `test:unit`: `bazel_test_floor.py` floors libtest case counts,
+      and these are no libtest targets.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      TARGETS: '{{.TARGETS | default "//scripts/..."}}'
+    cmds:
+      # The root package these targets read exports from loads @crates.
+      - task: bootstrap
+      - '{{.BAZEL}} test --jobs={{.JOBS}} {{.TARGETS}} {{.CLI_ARGS}}'
 
   test:unit:
     desc: Unit tests under Bazel (`//crates/... //:all`), floored per target and reported per case in target/bazel/junit.xml
@@ -371,7 +391,7 @@ tasks:
       - task: bootstrap
       - cmd: |
           set -e
-          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all //test:acceptance --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
+          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all //scripts/... //test:acceptance --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
           chmod 600 '{{.BEP}}'
       - python3 scripts/bazel_cache_check.py --bep '{{.BEP}}'
 
