@@ -162,6 +162,29 @@ async fn build_env_tasks_is_empty_for_unknown_version() {
     );
 }
 
+#[tokio::test]
+async fn build_env_tasks_app_not_found_is_pylock_error_exit_65() {
+    // Characterization (plan_bazel_phase2 gate 1, S-002): the committed-lock
+    // prepare site wraps the not-found error as `PylockError` (exit 65).
+    let spec_path = pylock_fixture_spec_path();
+    let mut spec = spec::load_spec(&spec_path).await.expect("fixture spec loads");
+    // No `source.package` in the fixture → the app name falls back to `name`.
+    spec.name = "missing-app".to_string();
+    let spec_dir = spec_path.parent().unwrap();
+
+    let candidates = fake_interpreter_candidates();
+    let err = build_env_tasks(&spec, spec_dir, "1.0.0", &candidates, None)
+        .await
+        .expect_err("an app absent from the lock must fail");
+
+    assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+    assert_eq!(
+        err.to_string(),
+        "pylock error: app package 'missing-app' not found in pylock.toml (locked packages: [\"pycowsay\", \"six\"])"
+    );
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
+}
+
 #[test]
 fn plan_entry_lookup_accepts_the_bare_version_of_a_stamped_entry() {
     // The env plan ALWAYS stamps its entry tag, while a hand-run

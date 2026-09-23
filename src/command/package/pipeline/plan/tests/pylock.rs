@@ -172,6 +172,30 @@ platforms:
 }
 
 #[tokio::test]
+async fn list_upstream_versions_app_not_found_is_source_error_exit_69() {
+    // Characterization (plan_bazel_phase2 gate 1, S-002): the seam `sync`
+    // (sync.rs execute) and `pipeline plan` share. The not-found error carries
+    // no `LockError`, so `classify_error` keeps it `SourceError` (exit 69).
+    let spec_path = pylock_fixture_spec_path();
+    let mut spec = spec::load_spec(&spec_path)
+        .await
+        .expect("fixture spec must load and validate");
+    // No `source.package` in the fixture → the app name falls back to `name`.
+    spec.name = "missing-app".to_string();
+
+    let err = list_upstream_versions(&spec, spec_path.parent().unwrap())
+        .await
+        .expect_err("an app absent from the lock must fail");
+
+    assert!(matches!(err, MirrorError::SourceError(_)), "got: {err:?}");
+    assert_eq!(
+        err.to_string(),
+        "source error: failed to read pylock source: app package 'missing-app' not found in pylock.toml (locked packages: [\"pycowsay\", \"six\"])"
+    );
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
+}
+
+#[tokio::test]
 async fn build_pylock_plan_entries_accepts_pep440_version_beyond_three_components() {
     // Regression (W3.2 first-green-loop blocker): a PyPI app version with
     // more than three numeric components — pycowsay's real `0.0.0.2`, or a

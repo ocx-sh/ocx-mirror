@@ -137,6 +137,72 @@ hashes = { sha256 = "bbbb" }
         assert!(err.to_string().contains("not-in-lock"));
     }
 
+    #[test]
+    fn app_version_not_found_message_is_byte_exact() {
+        // Characterization (plan_bazel_phase2 gate 1): these bytes reach
+        // operator stderr and must survive the move onto `Pylock::find_package`.
+        // Locked names are listed as written, not normalised.
+        let lock = ocx_python::parse_pylock(
+            r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "Alpha_Pkg"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "alpha_pkg-1.0.0-py3-none-any.whl"
+url = "https://example.com/alpha_pkg-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+
+[[packages]]
+name = "beta"
+version = "2.0.0"
+
+[[packages.wheels]]
+name = "beta-2.0.0-py3-none-any.whl"
+url = "https://example.com/beta-2.0.0-py3-none-any.whl"
+hashes = { sha256 = "bbbb" }
+"#,
+        )
+        .unwrap();
+        let err = app_version(&lock, "missing-app").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "app package 'missing-app' not found in pylock.toml (locked packages: [\"Alpha_Pkg\", \"beta\"])"
+        );
+    }
+
+    #[test]
+    fn app_version_returns_first_match_in_lock_order() {
+        // Two entries normalising to the same name: the first in lock order wins.
+        let lock = ocx_python::parse_pylock(
+            r#"
+lock-version = "1.0"
+
+[[packages]]
+name = "app"
+version = "1.0.0"
+
+[[packages.wheels]]
+name = "app-1.0.0-py3-none-any.whl"
+url = "https://example.com/app-1.0.0-py3-none-any.whl"
+hashes = { sha256 = "aaaa" }
+
+[[packages]]
+name = "App"
+version = "2.0.0"
+
+[[packages.wheels]]
+name = "app-2.0.0-py3-none-any.whl"
+url = "https://example.com/app-2.0.0-py3-none-any.whl"
+hashes = { sha256 = "bbbb" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(app_version(&lock, "APP").unwrap(), "1.0.0");
+    }
+
     #[tokio::test]
     async fn list_versions_reads_and_parses_lock_file() {
         let dir = tempfile::tempdir().unwrap();

@@ -133,3 +133,35 @@ async fn build_pypi_env_tasks_errors_on_unparseable_plan_provided_lock() {
     assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
     assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
 }
+
+#[tokio::test]
+async fn build_pypi_env_tasks_app_not_found_in_plan_provided_lock_is_pylock_error_exit_65() {
+    // Characterization (plan_bazel_phase2 gate 1, S-002): the derived-lock
+    // prepare site wraps the not-found error as `PylockError` (exit 65).
+    let plan_dir = tempdir().unwrap();
+    let plan_path = write_pypi_plan(plan_dir.path(), PYPI_DERIVED_LOCK_BODY);
+
+    let mut spec = pypi_fixture_spec();
+    // No `source.package` in the fixture → the app name falls back to `name`.
+    spec.name = "missing-app".to_string();
+    let candidates = fake_interpreter_candidates();
+
+    let err = build_pypi_env_tasks(
+        &spec,
+        Path::new("."),
+        "1.0.0",
+        &candidates,
+        None,
+        Some(&plan_path),
+        Path::new("."),
+    )
+    .await
+    .expect_err("an app absent from the plan-provided lock must fail");
+
+    assert!(matches!(err, MirrorError::PylockError(_)), "got: {err:?}");
+    assert_eq!(
+        err.to_string(),
+        "pylock error: app package 'missing-app' not found in pylock.toml (locked packages: [\"pycowsay\"])"
+    );
+    assert_eq!(err.kind_exit_code(), ocx_exit::ExitCode::DataError);
+}
