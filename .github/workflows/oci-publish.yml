@@ -83,7 +83,7 @@ jobs:
           # 0.5.x rejects with exit 64. Kept level with the `external/ocx`
           # submodule pin so the CLI that publishes a release is the one the
           # release was built against.
-          version: "0.6.0"
+          version: "0.6.2"
 
       - name: Publish to registry
         env:
