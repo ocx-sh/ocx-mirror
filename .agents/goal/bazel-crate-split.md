@@ -10,6 +10,8 @@ update before and after every sub-orchestrator spawn.
 - ocx branch (in `external/ocx`): `feat/ocx-python-crate` (pushed; `delete_branch_on_merge` false)
 - ocx PR: [ocx-sh/ocx#503](https://github.com/ocx-sh/ocx/pull/503) — MERGED by owner 2026-09-23T14:56Z as `15946973` on ocx main (parent `f38d22f6`, tree identical to PR head `77ae3cc0`; unsigned — landed via the merge button, not the FF)
 - ocx merged SHA (pointer target): `159469736d6bc5a1f3d65ecf7c98a4cbac0bad9c` — pointer moved from PR head `77ae3cc0` 2026-09-23 (same tree)
+- ocx PR 2: [ocx-sh/ocx#505](https://github.com/ocx-sh/ocx/pull/505) (`Format` → `ocx_console`) — MERGED by owner 2026-09-23T19:09Z as `bda3c9d2` (tree `46fb073b` identical to verified PR head `50961421`; unsigned merge button)
+- **Current pointer:** `bda3c9d27c5b906ee58545936a3ff31640d93718` (ocx main)
 - Submodule pointer at start: `external/ocx` 191b9324
 - Drafts / long-job logs: `.tmp/` (gitignored, delete at end)
 
@@ -80,7 +82,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
   PR checks 14/14, Verify Deep [35900023849](https://github.com/ocx-sh/ocx/actions/runs/35900023849) green incl. Satellite
   Verify; owner merged it as `bda3c9d2`, same tree, unsigned via the merge button); pointer → `bda3c9d2`. Mirror:
   `Command::apply_format` folds the root value into the per-command `--format` flags (JSON if either asks; root `plain`
-  turns off plan's GitHub Actions default); ADR A-11 (7) (the relay said "A-10" — taken by refine-finalize). ocx gate ran
+  turns off plan's GitHub Actions default); ADR A-12 (the relay said "A-10" — taken by refine-finalize). ocx gate ran
   with isolated primary/mirror registries (compose project `ocxup`, ports 5100/5101); target/prod/sigstore services
   came from the sibling's running `test` stack (shared, not recreated).
 - Found: `bazel:bootstrap` did not repin when only a path crate's dependency list changed (Cargo.lock +1 line under

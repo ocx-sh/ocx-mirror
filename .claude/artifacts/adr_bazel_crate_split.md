@@ -947,9 +947,11 @@ open question.
   with 11 cached. Reverting served all 15 from cache again, 4 of them as disk-cache hits. A
   cargo `__testing` binary is byte-identical across a new commit plus a dirty tree
   (`f37a2634…`, 0 crates recompiled).
-  (7) **Output format is a root option, as in ocx** (owner correction). This is the
-  decision the owner's relay called "A-10"; that number was already taken by refine-finalize,
-  so it is recorded here. `version` has no `--format` of its own. `ocx-mirror --format
+
+### 2026-09-23 — owner correction, root output format
+
+- **A-12 — output format is a root option, as in ocx.** The owner's relay called this "A-10";
+  A-10 and A-11 were already taken. `version` has no `--format` of its own. `ocx-mirror --format
   plain|json <cmd>` and its `--json` shorthand (POSIX last-wins) are ocx's `Format` group,
   **promoted** from `ocx_cli::options::format` into the ecosystem crate `ocx_console` (ocx
   PR [ocx-sh/ocx#505](https://github.com/ocx-sh/ocx/pull/505), landed by the owner as
@@ -966,6 +968,7 @@ open question.
   per-command flag cannot tell a typed `plain` from its default. For `plan`, an explicit root
   `plain` also turns off the GitHub Actions JSON default. The fold happens once, in
   `Command::apply_format`, before dispatch; no `execute` signature changed.
+
 
 ---
 
@@ -984,3 +987,4 @@ open question.
 | 2026-09-23 | phase 3 (Loop 3) | Amendment A-9 (C7/C8 as executed: exec form, restore-by-header, stale-lock repin, runner binary, widened stamp, extra acceptance inputs, wiring) |
 | 2026-09-23 | refine-finalize | Amendment A-10 (five gate self-tests, `_gate.py`, drift reds on default features / build scripts / untested Cargo targets, acceptance globs `test/**`) |
 | 2026-09-23 | version-cmd (owner request) | Amendment A-11 (root `build.rs` provenance + `__testing`; Bazel reads the placeholders as `rustc_env_files`; drift admits that one script; cache proof) |
+| 2026-09-23 | version-cmd (owner correction) | Amendment A-12 (root `--format`/`--json` from `ocx_console`, promoted in ocx-sh/ocx#505; per-command `--format` overlap rule) |
