@@ -1,188 +1,50 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
-"""Bazel BEP -> OTLP traces, so S-013 can be asked of a real build.
+"""Bazel BEP -> OTLP traces: one `summary` span per invocation, one `target` span per `TargetComplete`.
 
     scripts/bep_to_otlp.py --self-test
-    scripts/bep_to_otlp.py --bep bep.json --min-targets 8
+    scripts/bep_to_otlp.py --bep bep.json [--min-targets 8]
 
-## Ported from ocx (ADR `adr_bazel_crate_split.md` § A-8, C-013)
-
-A copy of ocx's `scripts/bep_to_otlp.py`, behaviour identical except:
+Ported from ocx `scripts/bep_to_otlp.py` (ADR `adr_bazel_crate_split.md`
+§ A-8, C-013) — see that copy for the design history: the library search, the
+field allowlist's derivation, the cache-state measurements. Behaviour is
+identical except:
 
 * resource `service.name = ocx-mirror-bazel-build` (ocx: `bazel-build`) and a
-  resource `vcs.repository.name = ocx-mirror` — the Grafana `repo` variable
-  selects on the service name, so ocx's dashboards stay ocx-only by default;
-* the `--min-targets` floor is the mirror-local `MIN_TARGETS` (see Floors),
-  not ocx's `bazel_gate_proofs.CRATES_RULE_TARGETS`, which is not ported —
-  `REPO_ROOT`, `Finding`, `codes`, `report` and `expect` are inlined below;
+  resource `vcs.repository.name = ocx-mirror`, so ocx's dashboards stay
+  ocx-only by default;
+* the `--min-targets` floor is the mirror-local `MIN_TARGETS` — **8**, the
+  seven `crates/*` libraries plus the root library: a floor that tells "the
+  reader read nothing" from "the build was clean", not a pin on the graph;
+* `REPO_ROOT`, `Finding`, `codes`, `report` and `expect` are inlined (ocx's
+  `bazel_gate_proofs` is not ported);
 * fixtures live in `tests/fixtures/bep/`, and the persistence scan reads the
   mirror's `taskfiles/bazel.taskfile.yml` and `.github/workflows/verify.yml`.
 
-The measurements quoted below (cache-state table, `--client_env` counts,
-target counts) were taken on ocx's tree and are kept as ocx recorded them.
+Three rules the code below holds, each proved by `--self-test`:
 
-Emits, per Bazel invocation found in the BEP, one `summary` span carrying the
-target count this reader actually read, plus one `target` span per
-`TargetComplete`. `monitoring/grafana/dashboards/bazel-build.json` in
-`server-hetzner1` (WP-27) queries exactly that shape, and its divergence panel
-is S-013: **Tempo span count == BEP target count**. A build whose landed line
-sits below its declared line dropped spans, which is a class this telemetry
-pipeline has already shipped once.
+* **The input is a credential dump.** Bazel writes the whole client
+  environment and every rc flag value into the BEP (escaped: `=` is
+  `\\u003d`, so a grep for `--client_env=` finds none of it). It must never
+  persist: `bazel:build:nobuild` writes it to a 0700 `mktemp -d` outside the
+  checkout that a `defer:` removes; `bep_persistence_findings` holds that.
+* **`READ_FIELDS` is the whole read surface, per field** — `BuildStarted`
+  carries the invocation id and, in `optionsDescription`, the expanded
+  options, so an event-level allowlist would admit the secret.
+* **Cache state is keyed on `executionInfo.strategy` alone.** On Bazel 9.2.0
+  `cachedRemotely` is true for a plain `--disk_cache` hit and `cachedLocally`
+  only for the in-memory cache; the four invocations in
+  `tests/fixtures/bep/cache_states.json` (ported verbatim from ocx) show both
+  answering wrongly.
 
-## Exit criterion zero: what is NOT owned here, and why nothing is shelled to
+Exits: **0, silent** with `OTEL_EXPORTER_OTLP_ENDPOINT` unset; **0** when
+every target span was accepted (a failed build still exits 0 — telemetry,
+not a verdict); **1** on any floor (empty BEP, an invocation with no
+`started.uuid` or no `TargetComplete`, fewer than `--min-targets` targets),
+any rejected span, any transport failure — loud on stderr.
 
-`quality-core.md` § "Don't Own Non-Domain Code" makes a hand-rolled reader of an
-external wire format Block-tier, and its escape is "no library implements the
-requirement, **verified by searching**". The search ran (WP-26 report), and its
-outcome changed the design rather than excusing it:
-
-* **Bazel's own `//src/tools/execlog`** is a source-tree target. The 9.2.0
-  release ships the `bazel` binary and installers and nothing else (measured:
-  `gh api repos/bazelbuild/bazel/releases/tags/9.2.0`), so shelling to it means
-  building Bazel from source. Moot anyway — see the execution log below.
-* **`chagui/besreceiver`** (Go, Apache-2.0, alpha, maintained) is a real BEP
-  consumer, but it is an *OpenTelemetry Collector receiver*: it needs a custom
-  collector built with OCB, a long-lived gRPC service and `--bes_backend=`.
-  The ADR's terms are "No BuildBuddy, no BES backend, no new service", and its
-  span vocabulary (`bazel.build` / `bazel.target` / `bazel.action`) is not
-  WP-27's, so the dashboard would read no data from it either.
-* **`cboggs/bep-to-otel`** is the exact idea, 0 stars, last pushed 2024-01-16,
-  README one line long. **`ldx/bep2prom`** targets Prometheus,
-  **`luispadron/bazel-build-event-converter`** is Swift,
-  **`fzakaria/build-event-protocol-viewer`** is a browser viewer,
-  **`nickbreen/bes`** is a Java BES server, and **EngFlow's
-  `bazel_invocation_analyzer`** reads the JSON *profile* and emits advice, not
-  spans. No PyPI package publishes a BEP reader (`bazel-bep`,
-  `bazel-build-event-protocol`, `buildeventstream`, `bep-parser` — all 404).
-
-**So nothing fits. But the search also dissolved most of what would have been
-owned**, which is the better half of the answer:
-
-* **The BEP is already JSON.** `--build_event_json_file` is one JSON object per
-  line, written by Bazel's own proto3-JSON printer and read by stdlib `json`.
-  No codec is hand-written here at either end.
-* **The execution log is not read at all.** The ADR wanted
-  `ExecLogEntry.Spawn` for `runner` and `cache_hit`; measured, the same runner
-  name reaches the BEP on every `TestResult` as `executionInfo.strategy`, at
-  the granularity the dashboard consumes and already per target. Reading the
-  log would mean either a protobuf+zstd parser (Block-tier) or
-  `--execution_log_json_file`, whose output is **9.1 MB for a two-target
-  build**. Dropping it removes a parser and two orders of magnitude of input.
-* **OTLP is emitted over HTTP/JSON, not gRPC.** `otel.ocx.sh` proxies
-  `location /v1/` straight to `tempo:4318` and calls it "the primary path";
-  the gRPC location exists because *junit2otlp* has no other transport. So the
-  serialiser is stdlib `json` and the transport is stdlib `urllib`, and what
-  is owned is a ~40-line mapping between two documented schemas.
-
-That also deletes the contract's queue-drop budget at the root: there is no
-asynchronous export queue over HTTP, because the response is read
-synchronously. The surviving drop vector is the server's own
-`partialSuccess.rejectedSpans`, and it is checked on every request.
-
-## The input is a credential dump, and this file used to say otherwise
-
-The bullet above once ended "the single widest secret surface in the pipeline.
-Dropping it removes a parser, **a risk** and two orders of magnitude of input",
-which told the next reviewer that declining `--execution_log_json_file` had
-bought a safe input. It had not. **The BEP carries the same environment**:
-Bazel serialises the entire client environment and every rc-file flag value
-into it, unconditionally and on every invocation, a failed one included.
-Measured on this repository's own `//...` analysis, 274,298 bytes:
-
-| in the stream | occurrences |
-|---|---|
-| `--client_env` entries | 276 |
-| `AWS_ACCESS_KEY_ID`, with its value | 5 |
-| `AWS_SECRET_ACCESS_KEY`, with its 64-character value | 5 |
-| `--remote_header=authorization=Basic <credential>` | 9 |
-
-So the threat model is not "keep the secret out of the input" — it cannot be
-kept out. It is: **the input never persists**. `bazel:build:nobuild` writes it
-to a `mktemp -d` outside the checkout and removes that directory from a
-`defer:`, which go-task runs whether the build, the floor or this export
-failed. `bep_persistence_findings` below is what holds it there; before R-2 of
-the end-of-run review the path was `target/bep.json`, mode 0644, inside the
-directory `Swatinem/rust-cache` saves on a push to `main`.
-
-**A scanner keyed on `--client_env=` finds none of it.** The BEP is proto3
-JSON, and Bazel's printer escapes `=` as `\\u003d`, so the literal on disk is
-`--client_env\\u003dAWS_SECRET_ACCESS_KEY\\u003d<value>`. Measured on the same
-stream: 0 occurrences of `--client_env=`, 276 of the escaped spelling.
-`prove_bep_not_persisted` runs that scanner against bytes it plants, so the
-naive spelling is shown reporting clean over a file that carries the secret.
-
-## The field allowlist, and why it is per *field*, not per event
-
-C-019 allowlists message *types*: `TestResult`, `TargetComplete`,
-`ExecLogEntry.Spawn`, never `structured_command_line`. Measured, that is not
-sufficient. `BuildStarted` is the only carrier of the invocation id, so the
-reader must open it — and `BuildStarted.optionsDescription` holds the fully
-expanded option string, `--remote_cache=...` and all. An event-level allowlist
-that admitted `started` would have admitted the secret with it.
-
-`READ_FIELDS` below is therefore the whole read surface, field by field.
-Nothing else in the BEP is looked at, and `_wide_reader` is kept as a named
-control that copies a whole payload and is shown leaking the planted secret.
-
-## Cache state: `executionInfo.strategy`, and the two fields that lie
-
-Measured on bazel 9.2.0 over five real runs of one workspace — the BEP of each
-is `tests/fixtures/bep/cache_states.json` (ported verbatim from ocx), which carries every invocation's own
-`optionsDescription`, so each row below is checkable against the flags that
-produced it:
-
-| run | `executionInfo.strategy` | `cachedLocally` | `executionInfo.cachedRemotely` |
-|---|---|---|---|
-| cold, `--remote_cache=` empty | `linux-sandbox` | absent | absent |
-| warm, same bazel server | *`executionInfo: {}`* | **true** | absent |
-| warm, fresh server, `--disk_cache` serves, `--remote_cache=` empty | `disk cache hit` | absent | **true** |
-| cold against a live remote cache, `--disk_cache=` empty | `linux-sandbox` | absent | absent |
-| warm, fresh server, remote cache serves, `--disk_cache=` empty | `remote cache hit` | absent | **true** |
-
-Two readings of that table are load-bearing, and both are counter-intuitive:
-
-* **`cachedRemotely` is true for a `--disk_cache` hit with no remote cache
-  configured at all.** 9.2.0 classifies the disk cache as a remote tier, and
-  `BuildMetrics.actionSummary.runnerCount` agrees with it
-  (`{"name": "disk cache hit", "execKind": "Remote"}`). A reader asking "did
-  this come from the *remote* cache" via that field answers yes on a lane whose
-  remote cache is switched off.
-* **`cachedLocally` is true only for the in-memory action cache**, which an
-  ephemeral CI runner never has. It is *false* for the disk-cache hit — the
-  CI-shaped warm state — so a reader keying "was this cached" on it reports
-  nothing cached on a run where everything was.
-
-So the shipped reader keys on `executionInfo.strategy` alone, and neither
-`cachedLocally` nor `cachedRemotely` is in `READ_FIELDS`. `_cached_flag_reader`
-keeps the natural spelling of both as a named control, used nowhere else, and
-`prove_cache_state` shows it answering wrongly on the same bytes.
-
-## Floors
-
-Floored on the reader, not on its subject: a run that parsed nothing must red
-distinguishably from a clean build. Three floors, all loud:
-
-* the BEP must exist and be non-empty;
-* every invocation must yield a `started.uuid` and at least one
-  `TargetComplete`;
-* the invocations together must reach `--min-targets`, default
-  `MIN_TARGETS` — **8** — the mirror's seven `crates/*` libraries plus the
-  root library. Deliberately conservative: the mirror's `//...` target count
-  was not knowable when this was ported (the BUILD files were being written
-  in the same wave), and the floor exists to tell "the reader read nothing"
-  from "the build was clean", not to pin the graph. Any real `//...` analysis
-  clears it; raise it once `bazel query //...` has a measured answer.
-
-## Exits
-
-* **0, silent** — `OTEL_EXPORTER_OTLP_ENDPOINT` unset. The only sanctioned
-  silent exit, matching `taskfiles/telemetry.taskfile.yml:50-51`.
-* **0** — every target span the reader read was accepted by the collector.
-  A *failed build* still exits 0: this is telemetry, not a verdict.
-* **1** — any floor, any rejected span, any transport failure. Loud on stderr.
-
-`--self-test` is run by `task telemetry:self-test`; the export by
+`--self-test` runs under `task scripts:self-test`; the export under
 `task telemetry:bazel BEP=<file>`, at the tail of `bazel:build:nobuild`.
 """
 
@@ -204,7 +66,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ponytail: the reader floor, mirror-local. 7 `crates/*` libraries + the root
-# library; see the module docstring's Floors section for why it is this low.
+# library; see the module docstring for why it is this low.
 MIN_TARGETS = 8
 
 
@@ -357,7 +219,7 @@ def bep_persistence_findings(sources: dict[str, str]) -> list[Finding]:
 
     Textual, over the recipe rather than over a run, for the reason the rest of
     this file's floors are textual: the alternative is a 12-second `bazel`
-    invocation inside `task scripts:verify`. What it therefore asserts is the
+    invocation inside `task scripts:self-test`. What it therefore asserts is the
     *spelling* — a path that is not rooted at the scratch variable, or a
     scratch variable no `defer:` removes.
     """
@@ -1701,30 +1563,6 @@ _ESCAPED_BEP_LINE = (
 )
 
 
-#: Proofs that skipped with a reason. Named in the self-test's closing line and
-#: never counted as passed, so a skip cannot read as a green.
-SKIPPED: list[str] = []
-
-#: The BEP producer's task key in `taskfiles/bazel.taskfile.yml`. Its absence
-#: is the one state in which the live-corpus scan skips rather than runs.
-PRODUCER_TASK = re.compile(r"^  build:nobuild:", re.MULTILINE)
-
-#: ocx's producer shape, which A-8 has the mirror copy: a `BEP_DIR` scratch
-#: directory, its `defer:` removal, and the stream path under it. The mutation
-#: legs run on this while the live producer does not exist yet, so their red
-#: states are shown on every run rather than only after WP-A lands.
-_REFERENCE_RECIPE = """\
-  build:nobuild:
-    vars:
-      BEP_DIR:
-        sh: mktemp -d -t ocx-mirror-bep.XXXXXXXX
-      BEP: '{{.BEP_DIR}}/bep.json'
-    cmds:
-      - defer: rm -rf '{{.BEP_DIR}}'
-      - bazel build --nobuild --build_event_json_file={{.BEP}} //...
-"""
-
-
 def prove_bep_not_persisted() -> int:
     """R-2: the stream never survives the task, and the obvious scanner lies.
 
@@ -1760,41 +1598,25 @@ def prove_bep_not_persisted() -> int:
     # `bazel:test:unit`'s floor stream) and the workflow that calls it.
     taskfile = REPO_ROOT / "taskfiles" / "bazel.taskfile.yml"
     workflow = REPO_ROOT / ".github" / "workflows" / "verify.yml"
-    live = {
-        path.name: path.read_text(encoding="utf-8")
-        for path in (taskfile, workflow)
-        if path.is_file()
-    }
-    recipe = live.get(taskfile.name, "")
-    if not PRODUCER_TASK.search(recipe):
-        # Skip, never pass: the producer lands with the Bazel taskfile (WP-A),
-        # and until it does there is no stream to hold. The line says SKIP so
-        # a reader of the gate log cannot mistake it for the green below. The
-        # rest of the corpus is still scanned: a stream path appearing there
-        # without a producer is exactly the drift this proof exists for.
-        others = {name: text for name, text in live.items() if name != taskfile.name}
-        findings = bep_persistence_findings(others)
-        expect(findings == [], f"the live corpus must be silent, got {[f.message for f in findings]}")
-        print(
-            f"R-2 SKIP  : {taskfile.relative_to(REPO_ROOT)} has no `build:nobuild:` task yet — "
-            "the live-corpus scan runs once the BEP producer exists; the mutation legs "
-            "below run on the reference recipe instead"
-        )
-        SKIPPED.append("R-2 live corpus (no `build:nobuild` producer yet)")
-        recipe = _REFERENCE_RECIPE
-    else:
-        expect(
-            any(BEP_ARG.search(text) for text in live.values()),
-            "`build:nobuild` exists but no source in the live corpus names a build event "
-            "stream — the producer dropped `--build_event_json_file`, or the reader drifted",
-        )
-        findings = bep_persistence_findings(live)
-        expect(findings == [], f"the live corpus must be silent, got {[f.message for f in findings]}")
-        print(
-            f"R-2 GREEN : {len(live)} live source(s) — every `--build_event_json_file=` is rooted "
-            f"at a `mktemp -d` outside the checkout and a `defer:` removes it"
-        )
-        checks += 1
+    live = {path.name: path.read_text(encoding="utf-8") for path in (taskfile, workflow)}
+    recipe = live[taskfile.name]
+    expect(
+        re.search(r"^  build:nobuild:", recipe, re.MULTILINE),
+        f"{taskfile.relative_to(REPO_ROOT)} has no `build:nobuild:` task — the BEP producer "
+        "this proof reads was renamed or dropped",
+    )
+    expect(
+        any(BEP_ARG.search(text) for text in live.values()),
+        "`build:nobuild` exists but no source in the live corpus names a build event "
+        "stream — the producer dropped `--build_event_json_file`, or the reader drifted",
+    )
+    findings = bep_persistence_findings(live)
+    expect(findings == [], f"the live corpus must be silent, got {[f.message for f in findings]}")
+    print(
+        f"R-2 GREEN : {len(live)} live source(s) — every `--build_event_json_file=` is rooted "
+        f"at a `mktemp -d` outside the checkout and a `defer:` removes it"
+    )
+    checks += 1
 
     in_tree = recipe.replace("{{.BEP_DIR}}/bep.json", "{{.ROOT_DIR}}/target/bep.json")
     expect(
@@ -1831,20 +1653,6 @@ def prove_bep_not_persisted() -> int:
     return checks
 
 
-def prove_counts() -> int:
-    """The floor has one home, and this pins it so a change to it is deliberate."""
-    expect(
-        MIN_TARGETS == 8,
-        f"the mirror's reader floor is {MIN_TARGETS}; it is declared as 8 (7 crates/* "
-        "libraries + the root library) — change this proof with the constant",
-    )
-    print(
-        "counts  OK : min-targets defaults to MIN_TARGETS = 8 (7 crates/* rust_library + "
-        "the root library), a conservative floor: the mirror's //... count is not yet measured"
-    )
-    return 1
-
-
 def self_test() -> int:
     """Every pair, on fixtures this repository owns."""
     scratch = REPO_ROOT / ".tmp"
@@ -1865,10 +1673,8 @@ def self_test() -> int:
         checks += prove_silent_exit(work)
         checks += prove_live_transport(work)
         checks += prove_bep_not_persisted()
-        checks += prove_counts()
     print(
-        f"bep_to_otlp self-test: {checks} checks passed, {len(SKIPPED)} skipped"
-        f"{' (' + '; '.join(SKIPPED) + ')' if SKIPPED else ''} — a failing build parsed, a dropped "
+        f"bep_to_otlp self-test: {checks} checks passed — a failing build parsed, a dropped "
         "span caught, no span carrying the planted credential, the stream itself held outside "
         "the checkout and deleted from a `defer:`, the reader floor red on an "
         "empty and on a target-poor BEP, two appended streams read whole, WP-27's panel "

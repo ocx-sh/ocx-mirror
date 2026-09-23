@@ -1,0 +1,12 @@
+# Workspace-relative directory paths, not globs (Bazel never reads .gitignore).
+# Agent worktrees are parallel checkouts of this repo — they would otherwise
+# load as duplicate packages.
+.agents
+.claude/state
+.claude/worktrees
+.ocx
+.task
+.tmp
+out
+target
+test/.venv

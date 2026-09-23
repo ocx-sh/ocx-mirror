@@ -17,24 +17,18 @@ x-shared:
 
 tasks:
   verify:
-    desc: Rust quality gate (format, clippy, license, build, unit tests)
+    desc: Rust loop gate (format, clippy, unit tests — Bazel on Linux, nextest elsewhere)
     summary: |
-      Runs all Rust-specific checks sequentially (fail-fast):
+      adr_bazel_crate_split.md § C8 — sequential, fail-fast:
         1. cargo fmt --all --check
-        2. cargo clippy
-        3. hawkeye license headers
-        4. cargo-deny license audit
-        5. cargo check --workspace --features jsonschema
-        6. cargo build --release
-        7. cargo nextest run
-      Use during review-fix loops when only Rust code changed.
+        2. cargo clippy (stays cargo; finishes before Bazel starts, so the
+           two never build at once)
+        3. test:unit — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
+      Use during review-fix loops when only Rust code changed; license,
+      jsonschema, the release build and acceptance are `task verify`'s.
     cmds:
       - task: format:check
       - task: clippy:check
-      - task: license:check
-      - task: license:deps
-      - task: jsonschema:check
-      - task: build
       - task: test:unit
 
   format:check:
@@ -82,13 +76,69 @@ tasks:
         vars: { TOOL: cargo-nextest, CRATE: cargo-nextest }
 
   test:unit:
-    desc: Run unit tests
-    sources: *rust-sources
+    desc: Run unit tests — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
+    summary: |
+      adr_bazel_crate_split.md § C8: dispatch on OS only. Bazel is the Linux
+      loop; macOS and Windows (and CI's `Test` step, which calls
+      `rust:test:nextest` by name) stay on cargo nextest. `{{.CLI_ARGS}}` reaches
+      whichever arm runs — nextest flags off Linux, Bazel flags on it.
+    # No `sources:` — Bazel's action cache decides what re-executes, and a
+    # fingerprint over the Rust sources alone would serve a stale green after
+    # a BUILD.bazel or MODULE.bazel edit.
+    # `if:`, not `platforms:` — go-task 3.53 ignores `platforms:` on a
+    # `task:` call (measured), and would run both arms.
+    cmds:
+      - task: :bazel:test:unit
+        if: '[ "{{OS}}" = linux ]'
+      - task: test:nextest
+        if: '[ "{{OS}}" != linux ]'
+
+  test:nextest:
+    desc: Unit tests under cargo nextest, then push the per-test JUnit to telemetry
+    summary: |
+      `test:unit`'s body (the non-Linux and CI lane, adr_bazel_crate_split.md
+      § C8), plus plan D-B5: local unit telemetry comes from nextest only.
+      `.config/nextest.toml` writes the default profile's JUnit; the push is a
+      silent no-op unless this machine is configured for it. That report is
+      deleted before the run, so a `-- --profile ci` run (which writes
+      target/nextest/ci/) leaves nothing here and pushes nothing — never a
+      stale default-profile report. In CI the push is the `test-telemetry`
+      action's.
     deps:
       - install:nextest
-    # --workspace: the root package plus every crates/* member (external/ocx is
-    # workspace-excluded); without it only the root package's tests run.
-    cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+    cmds:
+      # --workspace: the root package plus every crates/* member (external/ocx
+      # is workspace-excluded); without it only the root package's tests run.
+      - rm -f '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
+      - cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
+      - task: :telemetry:push
+        vars:
+          JUNIT: '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
+          SUITE: unit
+
+  test:bazel-excluded:
+    desc: Run exactly the crates/TEST_TARGET_MAP.toml [[excluded]] rows under cargo nextest (C4)
+    summary: |
+      The cases Bazel `--skip`s run here instead. The nextest filterset is
+      generated from the rows by `scripts/bazel_test_floor.py`; a row that
+      matches no test is red before anything runs (a stale row would
+      otherwise shrink the run silently). `MAP=<file>` judges another map
+      (red proofs).
+    dir: '{{.ROOT_DIR}}'
+    deps:
+      - install:nextest
+    vars:
+      MAP: '{{.MAP | default "crates/TEST_TARGET_MAP.toml"}}'
+      LISTING:
+        sh: mktemp -t ocx-mirror-excluded.XXXXXXXX
+    cmds:
+      - defer: rm -f '{{.LISTING}}'
+      - cmd: |
+          set -eu
+          filter=$(python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-filter)
+          cargo nextest list --workspace --release --locked --message-format json -E "$filter" > '{{.LISTING}}'
+          python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-check '{{.LISTING}}'
+          cargo nextest run --workspace --release --locked -E "$filter" {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true

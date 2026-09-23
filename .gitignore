@@ -51,3 +51,10 @@ venv/
 
 # Goal-run drafts and long-job logs (survive the hourly target/ and /tmp wipes).
 /.tmp/
+
+# Bazel (adr_bazel_crate_split.md § C7). The crate_universe lockfile records
+# the generating checkout's absolute paths — `task bazel:bootstrap` regenerates it.
+/Cargo.bazel.lock.json
+/bazel-*
+/.bazelrc.user
+/test/acceptance.stamp

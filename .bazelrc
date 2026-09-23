@@ -1,0 +1,29 @@
+# ocx-mirror .bazelrc — adr_bazel_crate_split.md § C7. Every flag checked
+# against `bazel help build --long` / `bazel help startup_options` on 9.2.0.
+# No stamping, no remote cache, no credential, no --lockfile_mode (that is
+# `task bazel:mod:check`'s job). Tasks pass --jobs explicitly: a home
+# ~/.bazelrc outranks this file.
+
+# The server is a scheduler; left alone the JVM sizes its heap off host RAM.
+startup --host_jvm_args=-Xmx2g
+
+build --jobs=6
+# ocx's Bazel server may run concurrently on the same host.
+build --local_resources=memory=HOST_RAM*.3
+# Tests run --release under cargo too; one configuration = one cache for the
+# tests and the binary under test.
+build --compilation_mode=opt
+
+# `~`-rooted: `%workspace%` is literal outside import lines, and a relative
+# path resolves against the client cwd. Never /tmp (tmpfs, reaped hourly).
+build --disk_cache=~/.cache/ocx-mirror/bazel-disk
+common --repository_cache=~/.cache/ocx-mirror/bazel-repo
+
+# CI consumes no build outputs, except the test reports (a cached target
+# otherwise leaves no test.xml on disk under minimal).
+build:ci --remote_download_minimal
+build:ci --remote_download_regex=.*/test\.(xml|log)$
+build:ci --jobs=auto
+
+# Personal overrides; must stay the last non-comment line.
+try-import %workspace%/.bazelrc.user

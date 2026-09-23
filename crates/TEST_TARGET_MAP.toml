@@ -1,0 +1,128 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# adr_bazel_crate_split.md § C4, C7; plan C-006, C-009. One `[[target]]` row
+# per Bazel `rust_test`, with the testcases `bazel test` last executed for it.
+#
+# `[[target]]` rows are generated — `task bazel:test:unit FLOOR_ARGS=--update`
+# rewrites them from the run's `test.log`s. **Counts rise only**: a falling
+# count is a deleted test or a `--skip` that widened past its name; lower it by
+# hand in the same commit and say why in its body.
+#
+#   suite    the `cargo nextest list` binary id the target mirrors
+#   cases    executed (passed + failed); excludes `--skip`ped ones
+#   skipped  how many the target's `args` filter out (libtest `filtered out`)
+#
+# `[[excluded]]` rows are hand-written: the cases a `rust_test` `--skip`s
+# (C4 — own process, cwd, `cargo metadata`, a cross-crate source walk). They
+# run under `task rust:test:bazel-excluded` (cargo nextest) instead, and
+# `task bazel:test:coverage` proves nextest's list == Bazel-executed + these.
+# **This list only shrinks.**
+
+
+[[target]]
+label = "//:log_targets"
+crate = "ocx_mirror"
+suite = "ocx_mirror::log_targets"
+cases = 3
+
+[[target]]
+label = "//:ocx_mirror_bin_test"
+crate = "ocx_mirror"
+suite = "ocx_mirror::bin/ocx-mirror"
+cases = 0
+
+[[target]]
+label = "//:ocx_mirror_test"
+crate = "ocx_mirror"
+suite = "ocx_mirror"
+cases = 385
+
+[[target]]
+label = "//:registry_spec_validation"
+crate = "ocx_mirror"
+suite = "ocx_mirror::registry_spec_validation"
+cases = 1
+
+[[target]]
+label = "//:source_scan"
+crate = "ocx_mirror"
+suite = "ocx_mirror::source_scan"
+cases = 1
+skipped = 2
+
+[[target]]
+label = "//:spec_validation"
+crate = "ocx_mirror"
+suite = "ocx_mirror::spec_validation"
+cases = 1
+
+[[target]]
+label = "//:workspace_structure"
+crate = "ocx_mirror"
+suite = "ocx_mirror::workspace_structure"
+cases = 11
+skipped = 1
+
+[[target]]
+label = "//crates/ocx_mirror_error:ocx_mirror_error_test"
+crate = "ocx_mirror_error"
+suite = "ocx_mirror_error"
+cases = 22
+
+[[target]]
+label = "//crates/ocx_mirror_http:ocx_mirror_http_test"
+crate = "ocx_mirror_http"
+suite = "ocx_mirror_http"
+cases = 22
+
+[[target]]
+label = "//crates/ocx_mirror_pipeline:ocx_mirror_pipeline_test"
+crate = "ocx_mirror_pipeline"
+suite = "ocx_mirror_pipeline"
+cases = 471
+skipped = 1
+
+[[target]]
+label = "//crates/ocx_mirror_report:ocx_mirror_report_test"
+crate = "ocx_mirror_report"
+suite = "ocx_mirror_report"
+cases = 58
+
+[[target]]
+label = "//crates/ocx_mirror_source:ocx_mirror_source_test"
+crate = "ocx_mirror_source"
+suite = "ocx_mirror_source"
+cases = 62
+
+[[target]]
+label = "//crates/ocx_mirror_spec:ocx_mirror_spec_test"
+crate = "ocx_mirror_spec"
+suite = "ocx_mirror_spec"
+cases = 533
+
+[[target]]
+label = "//crates/ocx_mirror_test_support:ocx_mirror_test_support_test"
+crate = "ocx_mirror_test_support"
+suite = "ocx_mirror_test_support"
+cases = 0
+
+[[excluded]]
+suite = "ocx_mirror_pipeline"
+name = "registry_sync::cache::tests::digest_file_and_locks_dir_stay_outside_output_for_every_output_shape"
+reason = "mutates the process-wide current directory (`set_current_dir` under the file's CWD_LOCK) \u2014 C4 names it: a cwd needs a process of its own"
+
+[[excluded]]
+suite = "ocx_mirror::source_scan"
+name = "every_production_client_is_built_through_the_factory"
+reason = "walks `src/` of the root package and every `crates/*/src` \u2014 declaring that as data would make the target an rdep of every crate (C4 cross-crate source walk)"
+
+[[excluded]]
+suite = "ocx_mirror::source_scan"
+name = "the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons"
+reason = "byte-compares against `external/ocx/crates/ocx_python/tests/`, a file of the ocx submodule no Bazel target of this graph exports"
+
+[[excluded]]
+suite = "ocx_mirror::workspace_structure"
+name = "real_workspace_has_no_violations"
+reason = "runs `cargo metadata` in the checkout (C4) \u2014 a cargo invocation, not a Bazel input"
