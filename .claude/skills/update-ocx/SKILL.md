@@ -100,8 +100,10 @@ Four checks, none of which `cargo check` catches.
    `external/ocx/rust-toolchain.toml`'s. (Targets legitimately differ: ocx
    cross-builds its Windows shim, the mirror does not.)
 2. **Copy-exactly dependency rows** — for every dep shared with ocx, the
-   version and feature list in the mirror's `Cargo.toml` must match ocx's
-   `[workspace.dependencies]` byte for byte:
+   version and feature list in the mirror's root `Cargo.toml` **and in
+   `crates/ocx_python/Cargo.toml`** (its own rows, not inherited from the
+   workspace until phase 2) must match ocx's `[workspace.dependencies]` byte
+   for byte:
    ```sh
    git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..$NEW -- Cargo.toml
    ```
@@ -158,9 +160,9 @@ candidates, each a real duplication class:
 
 | Upstream home | Mirror twin to check |
 |---------------|----------------------|
-| `ocx_config::env::keys::*` | `OCX_*` names as string literals — `src/pipeline/ocx_cli.rs` forwards a hand-maintained whitelist to every child `ocx` |
+| `ocx_config::env::keys::*` | `OCX_*` names as string literals — `ocx_mirror_pipeline::ocx_cli` forwards a hand-maintained whitelist to every child `ocx` |
 | `ocx_util::fs::persist_temp_file` | any `fs::write` / `File::create` onto a path a concurrent reader may open |
-| `ocx_index` retention / sweep | `src/pipeline/registry_sync/index_write.rs` dispatch-object and CAS retention |
+| `ocx_index` retention / sweep | `ocx_mirror_pipeline::registry_sync::index_write` dispatch-object and CAS retention |
 | `ocx_oci::auth` | anything reading or writing a docker `config.json` outside the crate |
 | `ocx_util::fs` locking | ad-hoc lock files |
 

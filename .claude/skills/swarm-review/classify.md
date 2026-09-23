@@ -53,9 +53,9 @@ changing the generated-workflow surface.
 | New top-level module under `src/` | → **max** (new subsystem surface) |
 | `src/command/pipeline/generate/templates/**` | → **max** if changed (generated workflow surface ships to every downstream mirror repo) |
 | `.github/workflows/**` changes | Adds `--breadth=full` minimum; security review required |
-| `src/pipeline/verify*`, checksum handling | Adds `--breadth=full`; `--codex` auto-on at high (integrity-sensitive) |
-| `src/pipeline/push*`, cascade tag logic | Adds `--breadth=adversarial` at high+ (cascade-order correctness) |
-| Webhook / notify paths (`src/discord.rs`, `src/command/pipeline/notify.rs`, `src/spec/notify_config.rs`) | Adds `--codex`; security review required (secret hygiene) |
+| `crates/ocx_mirror_pipeline/src/verify*`, checksum handling | Adds `--breadth=full`; `--codex` auto-on at high (integrity-sensitive) |
+| `crates/ocx_mirror_pipeline/src/push*`, cascade tag logic | Adds `--breadth=adversarial` at high+ (cascade-order correctness) |
+| Webhook / notify paths (`crates/ocx_mirror_report/src/discord.rs`, `src/command/package/pipeline/notify.rs`, `crates/ocx_mirror_spec/src/notify_config.rs`) | Adds `--codex`; security review required (secret hygiene) |
 | `Cargo.toml` dependency changes (incl. `[patch.crates-io]`, submodule pointer bumps) | Adds `--breadth=full` (supply-chain scrutiny) |
 | `deny.toml`, `.licenserc.toml` | Adds `--breadth=full` |
 | Public API breakage (removed `pub` items, plan.json / run-summary.json schema change) | → **max**, adds `--codex` |
@@ -97,7 +97,7 @@ multiple triggers may fire. Axis defs live in `overlays.md`.
 | Overlay | Triggered by |
 |---|---|
 | `--breadth=full` | tier=high (default); `.github/workflows/**`, `Cargo.toml`, or dependency paths touched at tier=low (escalation) |
-| `--breadth=adversarial` | tier=max (default); `src/pipeline/push*` / cascade logic touched at tier=high; `security` label; `--rca=on` together with ≥2 module areas |
+| `--breadth=adversarial` | tier=max (default); `crates/ocx_mirror_pipeline/src/push*` / cascade logic touched at tier=high; `security` label; `--rca=on` together with ≥2 module areas |
 | `--reviewer=haiku` | tier=low AND NO structural markers from "Structural marker signals" above present in diff |
 | `--reviewer=opus` | tier=max AND `--breadth=adversarial` |
 | `--doc-reviewer=haiku` | Diff touches ≤2 doc files (`docs/**/*.md` or `CHANGELOG.md`) AND does not touch `docs/getting-started.md` |
@@ -145,6 +145,6 @@ reviewing release-cut → let default baseline expand scope.
 4. `/swarm-review --base=v0.5.0` on branch 30 commits ahead
    → tier=**max** by metrics, meta-plan gate fires (max auto-fires
    gate).
-5. `/swarm-review` with 4 files changed across `src/spec/` and
-   `src/pipeline/` → metrics say `low` (size) but `high` (≥2
+5. `/swarm-review` with 4 files changed across `crates/ocx_mirror_spec/` and
+   `crates/ocx_mirror_pipeline/` → metrics say `low` (size) but `high` (≥2
    module areas); low-confidence → meta-plan gate fires.

@@ -22,7 +22,7 @@ Default `sonnet`. Orchestrator SHOULD pass `model: opus` for deep reasoning task
 
 ## Rules
 
-Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md) on `*.rs`, [quality-python.md](../rules/quality-python.md) on `*.py`, [subsystem-mirror.md](../rules/subsystem-mirror.md) on `src/**`. [quality-core.md](../rules/quality-core.md) always applies.
+Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md) on `*.rs`, [quality-python.md](../rules/quality-python.md) on `*.py`, [subsystem-mirror.md](../rules/subsystem-mirror.md) on `src/**`, `crates/**` and `tests/**`, [crate-placement.md](../rules/crate-placement.md) on `src/**`, `crates/**` and `Cargo.toml`. [quality-core.md](../rules/quality-core.md) always applies.
 
 ## Always Apply (block-tier compliance)
 
@@ -36,7 +36,7 @@ Fire at attention even when rules don't auto-load:
 
 ## Before Any Writes
 
-1. Grep existing helpers (`src/pipeline.rs`, `src/spec/`, `src/source/`) and check what ocx's `ocx_*` crates (path deps into `external/ocx`) already provide before new code. Extend existing utilities; no workarounds.
+1. Grep existing helpers (`crates/ocx_mirror_pipeline/`, `crates/ocx_mirror_spec/`, `crates/ocx_mirror_source/`) and check what ocx's `ocx_*` crates (path deps into `external/ocx`) already provide before new code. Extend existing utilities; no workarounds.
 2. Never edit files under `external/ocx` — vendored read-only submodule.
 
 ## Task Runner

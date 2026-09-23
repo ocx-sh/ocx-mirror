@@ -2596,8 +2596,78 @@ name = "ocx_mirror"
 version = "0.6.2"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
+ "clap",
+ "futures",
+ "log",
+ "ocx_config",
+ "ocx_console",
+ "ocx_exit",
+ "ocx_index",
+ "ocx_mirror_error",
+ "ocx_mirror_http",
+ "ocx_mirror_pipeline",
+ "ocx_mirror_report",
+ "ocx_mirror_source",
+ "ocx_mirror_spec",
+ "ocx_mirror_test_support",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_python",
+ "ocx_util",
+ "regex",
+ "rustls",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "ocx_mirror_error"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "ocx_config",
+ "ocx_exit",
+ "ocx_mirror_http",
+ "ocx_mirror_report",
+ "ocx_mirror_source",
+ "ocx_mirror_test_support",
+ "ocx_python",
+ "reqwest",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "ocx_mirror_http"
+version = "0.6.2"
+dependencies = [
+ "log",
+ "ocx_config",
+ "ocx_mirror_test_support",
+ "ocx_oci",
+ "ocx_util",
+ "reqwest",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "ocx_mirror_pipeline"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "bytes",
  "clap",
  "futures",
  "hex",
@@ -2605,21 +2675,22 @@ dependencies = [
  "hyper-util",
  "log",
  "md-5",
- "octocrab",
  "ocx_config",
  "ocx_console",
  "ocx_exit",
  "ocx_index",
+ "ocx_mirror_error",
+ "ocx_mirror_http",
+ "ocx_mirror_report",
+ "ocx_mirror_spec",
+ "ocx_mirror_test_support",
  "ocx_oci",
  "ocx_package",
  "ocx_python",
  "ocx_sign",
  "ocx_util",
- "quick-junit",
  "regex",
  "reqwest",
- "rustls",
- "schemars 1.2.1",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -2627,10 +2698,86 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
- "tower-service",
  "tracing",
- "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "ocx_mirror_report"
+version = "0.6.2"
+dependencies = [
+ "ocx_mirror_http",
+ "ocx_mirror_test_support",
+ "quick-junit",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "ocx_mirror_source"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "http",
+ "log",
+ "octocrab",
+ "ocx_mirror_http",
+ "ocx_mirror_test_support",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_python",
+ "regex",
+ "reqwest",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-service",
+ "url",
+]
+
+[[package]]
+name = "ocx_mirror_spec"
+version = "0.6.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "log",
+ "ocx_config",
+ "ocx_exit",
+ "ocx_index",
+ "ocx_mirror_error",
+ "ocx_mirror_http",
+ "ocx_mirror_source",
+ "ocx_mirror_test_support",
+ "ocx_oci",
+ "ocx_package",
+ "ocx_python",
+ "ocx_util",
+ "regex",
+ "reqwest",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "tempfile",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "ocx_mirror_test_support"
+version = "0.6.2"
+dependencies = [
+ "rustls",
+ "tokio",
 ]
 
 [[package]]

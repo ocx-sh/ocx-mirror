@@ -27,9 +27,9 @@ that what was written checks out against the stack that issued it.
 
 **Not covered here, deliberately.** ``S-062``'s "and no Rekor entry" half is
 pinned by the ``--no-rekor-upload`` argv unit test in
-``src/pipeline/ocx_cli/sign/tests.rs``, which is where it is falsifiable: the
-flag either is or is not in the child's argv, and reading a bundle back to
-find the absence of a ``tlogEntries`` array tests the bundle writer rather
+``crates/ocx_mirror_pipeline/src/ocx_cli/sign/tests.rs``, which is where it is
+falsifiable: the flag either is or is not in the child's argv, and reading a
+bundle back to find the absence of a ``tlogEntries`` array tests the bundle writer rather
 than this pipeline. ``S-052``'s plugin-dispatch shape lives in
 ``test_signing_dispatch.py``, which drives the real ``ocx mirror package
 pipeline push`` invocation: the scrub *can* reach these decisions — naming

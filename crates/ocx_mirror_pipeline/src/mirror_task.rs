@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 The OCX Authors
+
+use std::path::PathBuf;
+
+use ocx_oci::Platform;
+use url::Url;
+
+use ocx_mirror_spec::{AssetType, BinScanMode, MetadataConfig, Target, VerifyConfig};
+
+/// Variant context carried by a mirror task.
+#[derive(Debug, Clone)]
+pub struct VariantContext {
+    /// Variant name (e.g., "debug", "pgo.lto"). Stored for diagnostics and future annotation support.
+    #[allow(dead_code)]
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// A single unit of work: download + verify + package + push one platform of one version.
+/// Self-contained with all data needed for execution.
+#[derive(Debug, Clone)]
+pub struct MirrorTask {
+    #[allow(dead_code)] // Original version kept for Debug output
+    pub version: String,
+    pub normalized_version: String,
+    pub platform: Platform,
+    pub download_url: Url,
+    pub asset_name: String,
+    pub target: Target,
+    pub metadata_config: Option<MetadataConfig>,
+    /// Whether this task derives its `binaries` claim from the extracted
+    /// content tree. Unlike every other metadata input it cannot be resolved
+    /// before the download, so it is what forces the scan to sit between
+    /// extraction and bundling.
+    pub bin_scan: BinScanMode,
+    /// Whether this task checks its declared `os.features` against the libc its
+    /// packaged binaries link against. Like the scan it reads the extracted
+    /// tree, so it lives in the same window between extraction and compression.
+    pub libc_lint: bool,
+    pub verify_config: Option<VerifyConfig>,
+    /// Digest the download must match, when the source declared one.
+    pub asset_digest: Option<String>,
+    /// Whether a *missing* declared digest fails this asset
+    /// (`verify.<source>_digest: require`).
+    pub require_digest: bool,
+    pub cascade: bool,
+    pub spec_dir: PathBuf,
+    pub asset_type: AssetType,
+    /// Variant context for variant-aware cascade and aliasing.
+    pub variant: Option<VariantContext>,
+}

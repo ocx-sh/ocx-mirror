@@ -6,9 +6,7 @@ use super::support::*;
 
 // ── HTTP-interaction tests (local TCP server) ──────────────────────────
 
-fn ensure_crypto_provider() {
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-}
+use ocx_mirror_test_support::install_crypto_provider;
 
 /// Spawn a minimal HTTP server that accepts one request and responds with `status_code`.
 async fn one_shot_server(status_code: u16) -> String {
@@ -57,7 +55,7 @@ async fn sequence_status_server(statuses: Vec<u16>, served: std::sync::Arc<std::
 
 /// Drive `Notify::execute` against a stub TCP server bound to `OCX_MIRROR_DISCORD_HOOK`.
 async fn post_to_stub(summary: &RunSummary, status_code: u16) -> Result<(), MirrorError> {
-    ensure_crypto_provider();
+    install_crypto_provider();
     let server_url = one_shot_server(status_code).await;
     let _guard = WebhookEnvGuard::set(&server_url);
 
@@ -119,7 +117,7 @@ async fn notify_discord_403_returns_webhook_permission_denied() {
 // B1: pacing loop — 2-version green summary → 2 POSTs with INTER_MESSAGE_DELAY between them.
 #[tokio::test]
 async fn notify_execute_posts_once_per_version_with_pacing() {
-    ensure_crypto_provider();
+    install_crypto_provider();
     let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_url = sequence_status_server(vec![204, 204], served.clone()).await;
     let _guard = WebhookEnvGuard::set(&server_url);
@@ -172,7 +170,7 @@ async fn notify_execute_posts_once_per_version_with_pacing() {
 // B1: single-version run — no delay before the first (and only) message.
 #[tokio::test]
 async fn notify_execute_single_message_skips_pre_delay() {
-    ensure_crypto_provider();
+    install_crypto_provider();
     let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let server_url = sequence_status_server(vec![204], served.clone()).await;
     let _guard = WebhookEnvGuard::set(&server_url);

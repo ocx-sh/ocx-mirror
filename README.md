@@ -48,8 +48,10 @@ git add external/ocx Cargo.lock && git commit -m "chore(deps): bump external/ocx
 Checklist when bumping:
 
 - keep `rust-toolchain.toml` channel in sync with `external/ocx/rust-toolchain.toml`
-- keep the dependency feature lists in `Cargo.toml` in sync with ocx's
-  `[workspace.dependencies]`
+- keep the dependency feature lists in root `Cargo.toml`'s
+  `[workspace.dependencies]` **and** `crates/ocx_python/Cargo.toml`'s own
+  `[dependencies]` rows (it does not inherit the workspace table until phase 2)
+  in sync with ocx's `[workspace.dependencies]`
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
 

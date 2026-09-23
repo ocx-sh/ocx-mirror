@@ -1,0 +1,41 @@
+[package]
+name = "ocx_mirror_source"
+description = "Upstream version discovery for ocx-mirror: the GitHub Releases, url_index, pylock and PyPI Simple API adapters, the generator runner and the per-platform asset resolver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Derives `schemars::JsonSchema` on the url_index document types, for the
+# root's `ocx-mirror schema url-index` (the root's `jsonschema` forwards here).
+jsonschema = ["dep:schemars"]
+
+[dependencies]
+ocx_mirror_http.workspace = true
+ocx_oci.workspace = true
+ocx_package.workspace = true
+ocx_python.workspace = true
+anyhow.workspace = true
+http.workspace = true
+log.workspace = true
+octocrab.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-service.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ocx_mirror_test_support.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

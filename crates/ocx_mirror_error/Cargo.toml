@@ -1,0 +1,27 @@
+[package]
+name = "ocx_mirror_error"
+description = "The ocx-mirror error model: MirrorError, its exit-code mapping, the From conversions for every extracted crate's local error and the pylock/PyPI failure classifiers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+ocx_config.workspace = true
+ocx_exit.workspace = true
+ocx_mirror_http.workspace = true
+ocx_mirror_report.workspace = true
+ocx_mirror_source.workspace = true
+ocx_python.workspace = true
+anyhow.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+ocx_mirror_test_support.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

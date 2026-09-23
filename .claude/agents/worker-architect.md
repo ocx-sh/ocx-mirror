@@ -14,7 +14,7 @@ High-power design agent. Complex architecture decisions in the ocx-mirror projec
 Read `.claude/rules/subsystem-mirror.md` (module map, pipeline phases, spec format, error model) before design. Key patterns:
 - **Two-phase pipeline**: prepare (concurrent) then push (sequential by version, oldest first) — cascade tag order depends on it
 - **Spec-driven config**: `mirror.yml` → `MirrorSpec` with `extends:` inheritance; validation at parse time
-- **Error model**: `MirrorError` variants map to BSD-style exit codes (`src/error.rs::kind_exit_code`)
+- **Error model**: `MirrorError` variants map to BSD-style exit codes (`ocx_mirror_error::kind_exit_code`)
 - **Fail-safe target reads**: only authoritative not-found counts as absent — never re-flag published versions as new
 - **Generated workflow surface**: `pipeline generate ci` renders workflows shipped to every downstream mirror repo — template changes are high blast radius
 
@@ -23,11 +23,11 @@ Read `.claude/rules/subsystem-mirror.md` (module map, pipeline phases, spec form
 | Feature type | Location |
 |-------------|----------|
 | New CLI subcommand | `src/command/` |
-| New spec field | `src/spec/` |
-| New upstream source type | `src/source/` |
-| New pipeline stage | `src/pipeline/` |
-| New error variant + exit code | `src/error.rs` |
-| Workflow template change | `src/command/pipeline/generate/templates/` |
+| New spec field | `crates/ocx_mirror_spec/` |
+| New upstream source type | `crates/ocx_mirror_source/` |
+| New pipeline stage | `crates/ocx_mirror_pipeline/` |
+| New error variant + exit code | `crates/ocx_mirror_error/` |
+| Workflow template change | `src/command/package/pipeline/generate/templates/` |
 
 ## Capabilities
 - Analyze design trade-offs

@@ -27,7 +27,7 @@ Launch **in single message with multiple Agent tool calls** so run concurrently:
 - **1** `worker-reviewer` (focus: `spec-compliance`, phase:
   `post-implementation`) — review full Stub → Specify → Implement
   trajectory against design record, focus on **Implement**-phase
-  output. Anchors: `MirrorError` exit-code mapping (`src/error.rs`),
+  output. Anchors: `MirrorError` exit-code mapping (`crates/ocx_mirror_error/`),
   two-phase pipeline ordering (prepare concurrent / push sequential,
   oldest first), fail-safe target-registry reads, spec validation at
   parse time (no hardcoded webhook URLs).

@@ -19,9 +19,9 @@
 //! rejection — credentials, a wrong or absent `kind:`, userinfo in a source
 //! `index:` — fires *before* deserialization by construction, so it can never
 //! reach `validate()`, and the `panic!` below would fire on each one. Those
-//! live as unit tests in `src/spec/prescan/tests/`, which can additionally
-//! assert the exit code and the absence of the offending value — neither of
-//! which a fixture can express.
+//! live as unit tests in `crates/ocx_mirror_spec/src/prescan/tests/`, which
+//! can additionally assert the exit code and the absence of the offending
+//! value — neither of which a fixture can express.
 
 use std::path::{Path, PathBuf};
 
