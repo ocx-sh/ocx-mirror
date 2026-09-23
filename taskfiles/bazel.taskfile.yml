@@ -235,11 +235,31 @@ tasks:
       registry knobs (REGISTRY, MIRROR_REGISTRY, ZOT_REGISTRY, …) are read
       from this shell, exactly as `task test:parallel` reads them — and are
       not part of the cache key.
+
+      The per-case pytest JUnit (the runner's `--junit-xml=$XML_OUTPUT_FILE`)
+      is copied out of `bazel-testlogs` — a symlink into the output base — to
+      target/bazel/accept/junit.xml, where a CI upload reads a real path (ocx's
+      `test:accept` copies into the same target/bazel/accept/, one report per
+      module). Removed first, so a run that
+      never reached the test leaves no earlier run's report behind it; exit =
+      Bazel's.
     dir: '{{.ROOT_DIR}}'
     platforms: [linux]
+    vars:
+      JUNIT: '{{.ROOT_DIR}}/target/bazel/accept/junit.xml'
     cmds:
       - task: bootstrap
-      - '{{.BAZEL}} test --jobs={{.JOBS}} //test:acceptance {{.CLI_ARGS}}'
+      - cmd: |
+          rm -f '{{.JUNIT}}'
+          status=0
+          {{.BAZEL}} test --jobs={{.JOBS}} //test:acceptance {{.CLI_ARGS}} || status=$?
+          # 0 passed, 3 a test failed: both ran the suite and wrote its report.
+          # Any other code (build failure, interrupt) may leave a stale one.
+          if [ "$status" = 0 ] || [ "$status" = 3 ]; then
+            mkdir -p "$(dirname '{{.JUNIT}}')"
+            cp -L bazel-testlogs/test/acceptance/test.xml '{{.JUNIT}}' || echo 'bazel test:accept: no test.xml under bazel-testlogs/test/acceptance - nothing to publish' >&2
+          fi
+          exit "$status"
 
   test:unit:
     desc: Unit tests under Bazel (`//crates/... //:all`), floored per target and reported per case in target/bazel/junit.xml

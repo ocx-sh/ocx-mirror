@@ -35,21 +35,45 @@ jobs:
           args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   smoke:
+    # The one Linux job, cargo lint then every Bazel lane — ocx's
+    # verify-basic.yml `smoke` shape (fmt/clippy on cargo, then the Bazel
+    # gates and `bazel test`), plus the acceptance suite ocx runs in
+    # verify-deep.yml. One job, so the Bazel server, the output base and the
+    # credential are set up once, and the write lane is exactly one job.
     name: Smoke (Linux)
     runs-on: ubuntu-latest
     env:
       # Test telemetry (adr_bazel_crate_split.md § A-8): whether the credential
-      # exists, for the push step's `if:` — `secrets` is not a context `if:`
+      # exists, for the push steps' `if:` — `secrets` is not a context `if:`
       # can see. False on a fork PR, and the push skips rather than fails. The
-      # credential itself is that step's `env:` alone, never the whole job's.
+      # credential itself is those steps' `env:` alone, never the whole job's.
       OTEL_ON: ${{ secrets.OTEL_OTLP_AUTH != '' }}
+      # Without this the keyless tier looks for a *sibling* ../ocx checkout,
+      # which CI does not have, and all 14 signing acceptance tests skip — a
+      # green check that tested none of the feature. The submodule's copy is
+      # the same file, at the pin this branch builds against. Job-wide, not on
+      # the acceptance step: every `bazel:bootstrap` in this job writes
+      # test/acceptance.stamp off it (sha256 of the file and its sigstore/
+      # tree, never the path), and one value keeps that stamp from flapping
+      # between steps. `//test:acceptance` reads it through `env_inherit`.
+      # `pytest_sessionstart` brings the stack up by explicit service name, so
+      # ocx's own registries in that compose file are never started.
+      OCX_SIGSTORE_COMPOSE: ${{ github.workspace }}/external/ocx/test/docker-compose.yml
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           # Nested: external/ocx itself carries the fork submodules the
-          # [patch.crates-io] table points at.
+          # [patch.crates-io] table points at, and crate_universe splices them
+          # from there (`bazel:patch:check`).
           submodules: recursive
+      # --- cargo: only what ocx's smoke job also keeps on cargo -------------
+      # ocx verify-basic.yml:157-163 runs `rust:format:check` and
+      # `rust:clippy:check` on cargo beside its Bazel lane (no rules_rust
+      # clippy aspect, no Bazel rustfmt), and :521 keeps `schema:generate` on
+      # cargo — the jsonschema feature check below is that line's twin. The
+      # release build, nextest, and the ocx submodule build are gone: Bazel
+      # builds //:ocx-mirror and runs both test lanes below.
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
         with:
@@ -62,20 +86,19 @@ jobs:
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          # The submodule `ocx` build below has its own workspace + target dir.
-          workspaces: |
-            . -> target
-            external/ocx -> target
+          # clippy and the jsonschema check only; nothing builds external/ocx
+          # with cargo any more.
+          workspaces: . -> target
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Install nextest
-        uses: taiki-e/install-action@65851e10cd6c377f11a60e600abc07cb08643468 # v2.79.3
-        with:
-          tool: cargo-nextest
       - name: Verify fork patches bind
-        # Dropping the [patch.crates-io] table does NOT error — cargo would
-        # silently resolve the unpatched crates.io releases. Assert the fork
-        # path source is in the graph.
+        # Mirror-only, no ocx twin: the [patch.crates-io] re-declaration exists
+        # only here (patches do not travel with path deps), and the release
+        # binaries stay cargo-built (build-matrix.yml, as ocx's release.yml),
+        # so the cargo graph is still what ships. Dropping the table does NOT
+        # error — cargo would silently resolve the unpatched crates.io
+        # releases. A lockfile read, no compile; `bazel:patch:check` below is
+        # the same assertion on the Bazel graph.
         run: |
           for fork in oci-client:rust-oci-client sigstore:sigstore-rs; do
             cargo tree -i "${fork%%:*}" --locked | head -1 | grep -F "external/ocx/external/${fork#*:}" \
@@ -94,189 +117,83 @@ jobs:
         # so nothing else here compiles them — a broken derive stayed green
         # until someone ran `ocx-mirror schema` by hand.
         run: task rust:jsonschema:check
-      - name: Build
-        run: task rust:build
-      - name: Test
-        # nextest by name: `rust:test:unit` dispatches to Bazel on Linux, and
-        # CI's unit lane stays cargo (adr_bazel_crate_split.md § C8, C11).
-        run: task rust:test:nextest -- --profile ci
-      - name: Upload Binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocx-mirror-binary
-          path: target/release/ocx-mirror
-          compression-level: 0
-          retention-days: 1
-      - name: Build ocx (submodule pin)
-        # The acceptance job's checkout is `submodules: true`, not recursive,
-        # so it cannot build `ocx` itself (empty external/ocx/external/* =
-        # dangling [patch.crates-io]). This job can — its checkout is
-        # submodules:recursive — and the mount-
-        # dependent acceptance tests need an `ocx` at the exact submodule pin,
-        # not whatever release setup-ocx installs.
-        run: cargo build --release --bin ocx
-        working-directory: external/ocx
-      - name: Upload ocx Binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocx-submodule-binary
-          path: external/ocx/target/release/ocx
-          compression-level: 0
-          retention-days: 1
-      - name: Publish Unit Test Results
-        if: ${{ !cancelled() }}
-        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
-        with:
-          files: target/nextest/ci/junit.xml
-          check_name: "Unit Test Results"
-      - name: Push unit test timings
-        if: ${{ !cancelled() && env.OTEL_ON == 'true' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: ./.github/actions/test-telemetry
-        env:
-          # The composite action reads it from the environment.
-          OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
-        with:
-          junit: target/nextest/ci/junit.xml
-          suite: unit
-      - name: Check lint results
-        if: ${{ !cancelled() }}
-        run: |
-          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" ]]; then
-            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }})"
-            exit 1
-          fi
-
-  acceptance-tests:
-    name: Acceptance Tests
-    needs: smoke
-    runs-on: ubuntu-latest
-    env:
-      # Test telemetry, for `Push acceptance test timings` — see `smoke`.
-      OTEL_ON: ${{ secrets.OTEL_OTLP_AUTH != '' }}
-    services:
-      registry:
-        image: registry:2
-        ports:
-          - 5001:5000
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # The keyless-signing tier needs ocx's Sigstore compose file and the
-          # config, keys and trusted root beside it (external/ocx/test/) — all
-          # tracked in ocx itself, so one level is enough. Deliberately NOT
-          # `recursive`: ocx's own submodules are Rust fork patches this job
-          # never builds, and leaving them empty keeps the `real_ocx_binary`
-          # fixture's cargo-build fallback correctly unreachable (it is, in
-          # any case, short-circuited by OCX_TEST_BINARY below).
-          submodules: true
-      - name: Download Binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ocx-mirror-binary
-          path: test/bin
-      - name: Download ocx Binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: ocx-submodule-binary
-          path: test/bin
-      - name: Prepare Binary
-        run: chmod +x test/bin/ocx-mirror test/bin/ocx
+      # --- Bazel ---------------------------------------------------------------
       - name: Setup OCX
-        # Activates the project toolchain (task, uv, …) from ocx.lock. The
-        # `ocx` the acceptance tier drives is the submodule build under
-        # OCX_COMMAND below, not this one. Bump the version alongside
-        # external/ocx submodule bumps once the release exists. Must stay >=
-        # the ocx that wrote ocx.lock: setup-ocx runs `ocx pull` against it,
-        # and an older binary exits 78 on a newer lock_version.
+        # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command, and
+        # activates the project toolchain from ocx.lock. The `ocx` the
+        # acceptance suite drives is `@tools//:ocx`, the ocx.lock pin, not this
+        # one. Must stay >= the ocx that wrote ocx.lock: setup-ocx runs
+        # `ocx pull` against it, and an older binary exits 78 on a newer
+        # lock_version.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
           version: "0.6.2"
       - name: Install uv
+        # `telemetry:self-test` is `uv run --project test pytest`. The
+        # acceptance runner brings its own (`@tools//:uv`).
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Telemetry self-test
-        run: task telemetry:self-test
-      - name: Run Acceptance Tests
-        run: task test:parallel -- --junit-xml=results/junit.xml
-        env:
-          OCX_MIRROR_COMMAND: ${{ github.workspace }}/test/bin/ocx-mirror
-          # Submodule-pin ocx for the whole acceptance tier: the harness's
-          # own `ocx` calls and — via `OCX_BINARY_PIN`, which `MirrorRunner`
-          # derives from this — every `ocx` the mirror under test spawns.
-          # The setup-ocx `ocx` above activates the toolchain; it is a
-          # *release*, and the mirror's subprocess contract (cascade
-          # `--tags-file`, the positional announce package) moves with the
-          # submodule, ahead of the release that ships it.
-          OCX_COMMAND: ${{ github.workspace }}/test/bin/ocx
-          # The same binary for the mount-dependent tests (see the smoke
-          # job's "Build ocx" step); the `real_ocx_binary` fixture prefers it
-          # over a local cargo build, which cannot work in this checkout.
-          OCX_TEST_BINARY: ${{ github.workspace }}/test/bin/ocx
-          # Without this the keyless tier looks for a *sibling* ../ocx
-          # checkout, which CI does not have, and all 14 signing acceptance
-          # tests skip — a green check that tested none of the feature. The
-          # submodule's copy is the same file the sibling provides, at the
-          # pin this branch builds against. `pytest_sessionstart` brings the
-          # stack up by explicit service name, so ocx's own registries (5000,
-          # 5001, 5003, 5004) are never started and cannot contend with the
-          # `registry` service container on 5001.
-          OCX_SIGSTORE_COMPOSE: ${{ github.workspace }}/external/ocx/test/docker-compose.yml
-      - name: Publish Acceptance Test Results
-        if: ${{ !cancelled() }}
-        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
-        with:
-          files: test/results/junit.xml
-          check_name: "Acceptance Test Results"
-      - name: Push acceptance test timings
-        if: ${{ !cancelled() && env.OTEL_ON == 'true' }}
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: ./.github/actions/test-telemetry
-        env:
-          OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
-        with:
-          junit: test/results/junit.xml
-          suite: acceptance
-
-  bazel-graph:
-    # adr_bazel_crate_split.md § C8 "Light CI job": keeps the Bazel graph from
-    # rotting under either C11 verdict. Analysis only — no compile, no test;
-    # the unit and acceptance lanes above stay cargo.
-    name: Bazel graph (Linux)
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          # The [patch.crates-io] forks live in external/ocx's own submodules;
-          # crate_universe splices them from there (`bazel:patch:check`).
-          submodules: recursive
-      - name: Setup OCX
-        # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command.
-        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
-        with:
-          version: "0.6.2"
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Bazel repository cache
         # Analysis fetches every @crates source and the git_override clone;
         # the repository cache (and the repo contents cache under it) makes a
         # warm run local. Keyed on the two lockfiles that decide its contents.
+        # Not the disk cache: ocx measured it (measurement_bazel_r2.md § 5c) —
+        # 2 GiB and churning against the 10 GiB per-repo cap, and the remote
+        # cache is what persists build outputs across runs.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ocx-mirror/bazel-repo
           key: bazel-repo-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock', 'Cargo.lock') }}
           restore-keys: bazel-repo-${{ runner.os }}-
       - name: Gate script self-tests
-        # Python only; CI does not run `task verify`, so the five gate scripts'
-        # self-tests would otherwise run on developer machines alone.
+        # Python and bash only, no Bazel; includes the bazel-cache-rc action's
+        # selftest.sh.
         run: task scripts:self-test
+      - name: Telemetry self-test
+        run: task telemetry:self-test
+      # The shared cache's credential, ported from ocx verify-basic.yml `smoke`
+      # (its comment block carries the full reasoning; the points it rests on):
+      #
+      # * **One credential source per lane.** Bazel sends an `Authorization`
+      #   header per configured source, so the two bindings are one gate read
+      #   twice, one of them negated: the `main` push presents the write
+      #   credential alone (its user is in both realms), every other trigger
+      #   the read credential alone. `write_rc.py` refuses both at once.
+      # * **The truthy branch carries the secret in both.** GitHub's
+      #   `a && b || c` yields `c` whenever `b` is falsy, so a binding written
+      #   `<trusted> && '' || secrets.READ` would hand the read secret to the
+      #   `main` push.
+      # * A **fork** PR is given no secrets: both bindings are empty, the
+      #   action writes nothing, `{{.BAZEL}}` omits `--bazelrc`, and the lane
+      #   compiles over `--disk_cache` alone — silently, by design.
+      #
+      # **The write-lane expression, used verbatim for the credential here and
+      # the upload grant on both test steps:**
+      #
+      #   github.event_name == 'push' && github.ref == 'refs/heads/main'
+      #     && github.workflow == 'Verify'
+      #
+      # The first two terms are ocx's ADR ruling 5. The third is the mirror's:
+      # this file is also a `workflow_call` target (release.yml), and under
+      # `workflow_call` the whole `github` context is the CALLER's (ocx ruling
+      # 5a) — a caller triggered by a `main` push would satisfy the first two
+      # and write through this job. `github.workflow` is then the caller's
+      # name, never `Verify`. ocx needs no third term: its write lane lives in
+      # verify-basic.yml, which nothing calls.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && secrets.BAZEL_CACHE_READ_AUTH || '' }}
+          write-auth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
+      # Ahead of every Bazel command, because the C++ toolchain is
+      # autoconfigured on first use, once per output base: `rules_cc` probes
+      # `lld` then `gold` and bakes the winner in as `-fuse-ld=`. The runner
+      # image has gold and no unversioned `ld.lld`, so without this every link
+      # took gold (rustc warns it miscompiles). ocx installs it on every Bazel
+      # lane for the reason that matters here too: the lanes share one remote
+      # cache — ocx's and this repository's — and a linker difference is a
+      # different action key for every link.
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
       - name: Bazel static gates
         # No explicit bazel:bootstrap: every Bazel gate below runs it, and
         # `run: once` makes that one bootstrap per invocation.
@@ -295,3 +212,120 @@ jobs:
           OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_OTLP_AUTH != '' && 'https://otel.ocx.sh' || '' }}
           OTEL_EXPORTER_OTLP_HEADERS: Authorization=${{ secrets.OTEL_OTLP_AUTH }}
         run: task bazel:build:nobuild JOBS=auto
+      # Execution logs (goal decision D5): only the `main` push writes, so a
+      # branch run cannot show a cache hit — but two runs on one tree can show
+      # they asked for identical action keys. Each test step below writes
+      # `--execution_log_compact_file` here: under $RUNNER_TEMP, outside the
+      # `target/` Swatinem/rust-cache saves, 0700 like the BEP scratch. The log
+      # records spawns (argv, action env, digests), never Bazel's own flags, so
+      # no `--remote_header` value reaches it (checked on a local log against
+      # the host rc's header).
+      - name: Execution-log scratch
+        run: install -d -m 700 "$RUNNER_TEMP/bazel-execlog"
+      # `--config=ci` (.bazelrc): `--remote_download_minimal` plus the
+      # test.xml|test.log regex, so a fully cached second run downloads the
+      # reports and nothing else. ocx carries the block latent; this lane
+      # wires it. `bazel_test_floor.py` reads test.log off the BEP's file URIs,
+      # which the regex keeps local.
+      #
+      # **The upload grant**, the write-lane expression above: a command-line
+      # build option outranks the committed `--remote_upload_local_results=false`,
+      # and it rides `{{.CLI_ARGS}}`, which the task appends after the command
+      # word. Everywhere else it is the empty string, so the credential and the
+      # grant are absent together or present together.
+      - name: Unit tests (Bazel)
+        run: >-
+          task bazel:test:unit JOBS=auto --
+          --config=ci
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/unit.zst"
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}
+      # `target/bazel/junit.xml` — the per-case report `bazel:test:unit` writes
+      # off the same test.log files its floor reads. Bazel's own test.xml has
+      # one testcase per target. `!cancelled()`: a failing suite still writes
+      # it, and naming the red tests is what the check is for.
+      - name: Publish Unit Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: target/bazel/junit.xml
+          check_name: "Unit Test Results"
+      - name: Push unit test timings
+        if: ${{ !cancelled() && env.OTEL_ON == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        env:
+          # The composite action reads it from the environment.
+          OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+        with:
+          junit: target/bazel/junit.xml
+          suite: unit
+      # `//test:acceptance`: pytest against the Bazel-built ocx-mirror and the
+      # ocx.lock-pinned `@tools//:ocx`, results cached. The harness starts its
+      # own registries and the Sigstore stack through docker compose
+      # (`pytest_sessionstart`), so no `services:` container is needed. Same
+      # `--config=ci`, execution log and upload grant as the unit step.
+      - name: Acceptance tests (Bazel)
+        run: >-
+          task bazel:test:accept JOBS=auto --
+          --config=ci
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/accept.zst"
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}
+      # The per-case pytest JUnit the runner writes to $XML_OUTPUT_FILE, copied
+      # out of bazel-testlogs by the task (`--config=ci`'s regex keeps it on
+      # disk on a cache hit too).
+      - name: Publish Acceptance Test Results
+        if: ${{ !cancelled() }}
+        uses: EnricoMi/publish-unit-test-result-action@c950f6fb443cb5af20a377fd0dfaa78838901040 # v2.23.0
+        with:
+          files: target/bazel/accept/junit.xml
+          check_name: "Acceptance Test Results"
+      - name: Push acceptance test timings
+        if: ${{ !cancelled() && env.OTEL_ON == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        env:
+          OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+        with:
+          junit: target/bazel/accept/junit.xml
+          suite: acceptance
+      # >>> SLOT (WP-C): the mkdocs site build — `bazel build //docs:site`
+      # through its task, with the same `--config=ci`, an
+      # `--execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/site.zst"`
+      # and the same upload-grant expression as the two test steps. Goes here,
+      # after the test lanes and before the execution-log steps below. <<<
+      # One sorted `<label> <mnemonic> <digest>` line per spawn, per log: the
+      # diff of two runs' files is the action-key comparison. Evidence only —
+      # never the job's verdict.
+      - name: Execution-log action keys
+        if: always()
+        continue-on-error: true
+        run: |
+          for log in "$RUNNER_TEMP"/bazel-execlog/*.zst; do
+            [ -e "$log" ] || continue
+            python3 scripts/bazel_execlog_keys.py --log "$log" --out "${log%.zst}.keys.tsv"
+          done
+      - name: Upload execution logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bazel-execlog
+          path: ${{ runner.temp }}/bazel-execlog/
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Check lint results
+        if: ${{ !cancelled() }}
+        run: |
+          if [[ "${{ steps.fmt.outcome }}" == "failure" || "${{ steps.clippy.outcome }}" == "failure" ]]; then
+            echo "::error::Lint checks failed (fmt=${{ steps.fmt.outcome }}, clippy=${{ steps.clippy.outcome }})"
+            exit 1
+          fi
+      # A composite action has no `post:` hook, so the deletion is this file's
+      # obligation. `always()`: a cancelled or failed job is exactly the one
+      # that would otherwise leave the credential on the runner.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'

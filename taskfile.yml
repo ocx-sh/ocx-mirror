@@ -56,13 +56,14 @@ tasks:
       - cargo install --locked {{.CRATE | default .TOOL}}
 
   scripts:self-test:
-    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bep_to_otlp, and the bazel-cache-rc action's selftest.sh
+    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bazel_execlog_keys, bep_to_otlp, and the bazel-cache-rc action's selftest.sh
     dir: '{{.ROOT_DIR}}'
     cmds:
       - python3 scripts/bazel_test_floor.py --self-test
       - python3 scripts/bazel_build_drift.py --self-test
       - python3 scripts/bazel_cache_check.py --self-test
       - python3 scripts/bazel_scoped.py --self-test
+      - python3 scripts/bazel_execlog_keys.py --self-test
       - python3 scripts/bep_to_otlp.py --self-test
       # ocx's scripts.taskfile.yml wires it the same way: it lives under
       # `.github/actions/`, not `scripts/`, so a list of `scripts/*.py` alone

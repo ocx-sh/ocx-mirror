@@ -97,8 +97,9 @@ tasks:
     desc: Run unit tests — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
     summary: |
       adr_bazel_crate_split.md § C8: dispatch on OS only. Bazel is the Linux
-      loop; macOS and Windows (and CI's `Test` step, which calls
-      `rust:test:nextest` by name) stay on cargo nextest. `{{.CLI_ARGS}}` reaches
+      loop, and CI's unit lane (verify.yml `Unit tests (Bazel)` calls
+      `bazel:test:unit` by name); macOS and Windows stay on cargo nextest,
+      as in ocx. `{{.CLI_ARGS}}` reaches
       whichever arm runs — nextest flags off Linux, Bazel flags on it.
     # No `sources:` — Bazel's action cache decides what re-executes, and a
     # fingerprint over the Rust sources alone would serve a stale green after
@@ -114,14 +115,14 @@ tasks:
   test:nextest:
     desc: Unit tests under cargo nextest, then push the per-test JUnit to telemetry
     summary: |
-      `test:unit`'s body (the non-Linux and CI lane, adr_bazel_crate_split.md
+      `test:unit`'s body (the non-Linux lane, adr_bazel_crate_split.md
       § C8), plus plan D-B5: local unit telemetry comes from nextest only.
       `.config/nextest.toml` writes the default profile's JUnit; the push is a
       silent no-op unless this machine is configured for it. That report is
       deleted before the run, so a `-- --profile ci` run (which writes
       target/nextest/ci/) leaves nothing here and pushes nothing — never a
-      stale default-profile report. In CI the push is the `test-telemetry`
-      action's.
+      stale default-profile report. CI runs no nextest: its unit lane is
+      `bazel:test:unit`.
     deps:
       - install:nextest
     cmds:
@@ -129,8 +130,7 @@ tasks:
       # is workspace-excluded); without it only the root package's tests run.
       # `ocx_mirror/__testing`: the same feature set as `rust:build`, so this
       # release build reuses its artifacts instead of relinking
-      # target/release/ocx-mirror without the placeholders — CI uploads that
-      # file for the acceptance job after this step.
+      # target/release/ocx-mirror without the placeholders.
       - rm -f '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
       - cargo nextest run --workspace --release --locked --features ocx_mirror/__testing {{.CLI_ARGS}}
       - task: :telemetry:push
