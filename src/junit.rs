@@ -385,6 +385,35 @@ mod tests {
         }
     }
 
+    // ── E4 characterization: exact messages and exit codes ─────────────────
+    //
+    // Pinned byte for byte before the crate split moves this module.
+
+    #[test]
+    fn parse_str_malformed_xml_renders_the_parser_error() {
+        let error = parse_str(JUNIT_MALFORMED).expect_err("truncated XML is refused");
+        assert_eq!(
+            error.to_string(),
+            "JUNIT parse error: XML parse error: at testsuites/testsuite[0](\"bad\"): error parsing XML"
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::DataError);
+    }
+
+    #[tokio::test]
+    async fn parse_async_missing_file_names_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing.xml");
+        let error = parse_async(&path).await.expect_err("a missing file is refused");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "JUNIT parse error: failed to read {}: No such file or directory (os error 2)",
+                path.display()
+            )
+        );
+        assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::DataError);
+    }
+
     #[test]
     fn parse_bare_testsuite_root_accepted_or_wrapped() {
         // §3.7: Bare <testsuite> root without <testsuites> wrapper →

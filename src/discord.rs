@@ -324,6 +324,7 @@ pub mod colors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ocx_exit::ExitCode;
 
     // ── §3.9 S9: Discord payload type tests ────────────────────────────────
 
@@ -565,6 +566,11 @@ mod tests {
             matches!(result, Err(MirrorError::WebhookUnavailable(_))),
             "5xx must return WebhookUnavailable: {result:?}"
         );
+        assert_webhook_error(
+            result,
+            "webhook unavailable: HTTP 503: server error",
+            ExitCode::Unavailable,
+        );
     }
 
     #[tokio::test]
@@ -582,6 +588,11 @@ mod tests {
             matches!(result, Err(MirrorError::WebhookPermissionDenied(_))),
             "401 must return WebhookPermissionDenied: {result:?}"
         );
+        assert_webhook_error(
+            result,
+            "webhook permission denied: HTTP 401: check webhook secret rotation",
+            ExitCode::PermissionDenied,
+        );
     }
 
     #[tokio::test]
@@ -598,6 +609,94 @@ mod tests {
         assert!(
             matches!(result, Err(MirrorError::WebhookPermissionDenied(_))),
             "403 must return WebhookPermissionDenied: {result:?}"
+        );
+        assert_webhook_error(
+            result,
+            "webhook permission denied: HTTP 403: check webhook secret rotation",
+            ExitCode::PermissionDenied,
+        );
+    }
+
+    /// E4 characterization: the exact rendered bytes and exit code of a failed
+    /// `post`, pinned before the crate split moves this module.
+    fn assert_webhook_error(result: Result<(), MirrorError>, expected: &str, exit_code: ExitCode) {
+        let error = result.expect_err("the POST must fail");
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(error.kind_exit_code(), exit_code);
+    }
+
+    // `post`'s client-build failure arm is not pinned: `crate::http::builder`
+    // takes no input, and `build()` fails only when the TLS backend cannot
+    // initialise, which a test cannot provoke.
+
+    #[tokio::test]
+    async fn discord_post_unexpected_4xx_returns_webhook_unavailable() {
+        ensure_crypto_provider();
+        let url = one_shot_http_server(404).await;
+        let result = post(&url, &empty_payload()).await;
+        assert_webhook_error(
+            result,
+            "webhook unavailable: HTTP 404: unexpected client error",
+            ExitCode::Unavailable,
+        );
+    }
+
+    /// A refused connection is `WebhookUnavailable`, and the URL — whose path
+    /// is the webhook secret — never reaches the message.
+    #[tokio::test]
+    async fn discord_post_network_error_withholds_the_webhook_url() {
+        ensure_crypto_provider();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let address = listener.local_addr().expect("a bound address");
+        drop(listener); // reserved, unused: connection refused, not a timeout
+        let url = format!("http://{address}/api/webhooks/1234/s3cr3t-token");
+
+        let result = post(&url, &empty_payload()).await;
+        let rendered = result
+            .as_ref()
+            .map_err(ToString::to_string)
+            .expect_err("nothing listens");
+        assert!(
+            !rendered.contains("s3cr3t-token") && !rendered.contains(&address.to_string()),
+            "the webhook URL leaked into the message: {rendered}"
+        );
+        assert_webhook_error(
+            result,
+            "webhook unavailable: network error: error sending request",
+            ExitCode::Unavailable,
+        );
+    }
+
+    /// A server that accepts and never answers trips the 30 s request timeout.
+    /// Paused time makes the deadline elapse at once instead of in real time.
+    #[tokio::test(start_paused = true)]
+    async fn discord_post_timeout_returns_webhook_unavailable() {
+        use tokio::io::AsyncReadExt as _;
+        ensure_crypto_provider();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let address = listener.local_addr().expect("a bound address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("one connection");
+            let mut request = vec![0u8; 8192];
+            let _ = stream.read(&mut request).await;
+            // Hold the socket open, answering nothing, until the test ends.
+            std::future::pending::<()>().await;
+        });
+        let url = format!("http://{address}/api/webhooks/1234/s3cr3t-token");
+
+        let result = post(&url, &empty_payload()).await;
+        server.abort();
+        let rendered = result
+            .as_ref()
+            .map_err(ToString::to_string)
+            .expect_err("nothing answers");
+        assert!(!rendered.contains("s3cr3t-token"), "the webhook URL leaked: {rendered}");
+        assert_webhook_error(
+            result,
+            "webhook unavailable: request timed out: error sending request",
+            ExitCode::Unavailable,
         );
     }
 
@@ -714,6 +813,11 @@ mod tests {
             matches!(result, Err(MirrorError::WebhookUnavailable(_))),
             "4 consecutive 429s (3 retries exhausted) must return WebhookUnavailable: {result:?}"
         );
+        assert_webhook_error(
+            result,
+            "webhook unavailable: HTTP 429: rate limit exceeded after 3 retries",
+            ExitCode::Unavailable,
+        );
     }
 
     // C2: 429 with JSON body `{"retry_after": 0.05}` then 200 → Ok(()).
@@ -784,7 +888,7 @@ mod tests {
         ])
         .await;
         let result = post(&url, &empty_payload()).await;
-        match result {
+        match &result {
             Err(MirrorError::WebhookUnavailable(msg)) => {
                 assert!(
                     msg.contains("shared"),
@@ -793,6 +897,11 @@ mod tests {
             }
             other => panic!("expected WebhookUnavailable with 'shared' in message, got: {other:?}"),
         }
+        assert_webhook_error(
+            result,
+            "webhook unavailable: HTTP 429: rate limit exceeded after 3 retries (scope: shared)",
+            ExitCode::Unavailable,
+        );
     }
 
     // W2: 429 with `Retry-After: 0` header and no body → header honored, not the 1.0s default.

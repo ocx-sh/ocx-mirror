@@ -178,17 +178,36 @@ fn a_half_configured_identity_is_a_usage_error() {
     }
 
     let error = from_env("half.example").expect_err("a declared basic identity needs its token");
-    let rendered = error.to_string();
-    assert!(
-        rendered.contains("OCX_AUTH_half_example_TOKEN"),
-        "the error must name the variable to set, got: {rendered}"
-    );
 
     // SAFETY: same lock.
     unsafe {
         std::env::remove_var("OCX_AUTH_half_example_TYPE");
         std::env::remove_var("OCX_AUTH_half_example_USER");
     }
+
+    // Exact bytes: pinned before the crate split moves this module (E4).
+    assert_eq!(
+        error.to_string(),
+        "mirror spec usage error: OCX_AUTH_half_example_TYPE is 'basic' but OCX_AUTH_half_example_TOKEN is unset",
+        "the error must name the variable to set"
+    );
+    assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::UsageError);
+}
+
+/// A declared type that names no scheme fails the run with the variable and
+/// the accepted spellings, never as anonymous.
+#[test]
+fn an_unknown_declared_type_is_a_usage_error() {
+    let _guard = crate::test_support::ocx_env_lock();
+    let _restore = crate::test_support::EnvRestore::set(&[("OCX_AUTH_odd_example_TYPE", Some("Kerberos"))]);
+
+    let error = from_env("odd.example").expect_err("an unknown type is refused");
+
+    assert_eq!(
+        error.to_string(),
+        "mirror spec usage error: OCX_AUTH_odd_example_TYPE: invalid authentication type 'kerberos', valid types are: anonymous, basic, token, bearer"
+    );
+    assert_eq!(error.kind_exit_code(), ocx_exit::ExitCode::UsageError);
 }
 
 /// A URL with no authority (`data:`, `file:`) resolves to anonymous rather

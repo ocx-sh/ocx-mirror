@@ -205,6 +205,12 @@ version = "2.0.24"
         let err = load(dir.path(), "pylock.toml").await.unwrap_err();
         let mirror_err = classify_error("failed to load pylock source", err);
         assert!(matches!(mirror_err, MirrorError::PylockError(_)), "got: {mirror_err:?}");
+        // Exact bytes: pinned before the crate split moves this module (E4).
+        assert_eq!(
+            mirror_err.to_string(),
+            "pylock error: failed to load pylock source: failed to parse pylock.toml: package 'uwsgi' has no wheels (sdist-only)"
+        );
+        assert_eq!(mirror_err.kind_exit_code(), ocx_exit::ExitCode::DataError);
     }
 
     #[tokio::test]
@@ -214,6 +220,15 @@ version = "2.0.24"
         let err = load(dir.path(), "missing.toml").await.unwrap_err();
         let mirror_err = classify_error("failed to load pylock source", err);
         assert!(matches!(mirror_err, MirrorError::SourceError(_)), "got: {mirror_err:?}");
+        // Exact bytes: pinned before the crate split moves this module (E4).
+        assert_eq!(
+            mirror_err.to_string(),
+            format!(
+                "source error: failed to load pylock source: failed to read pylock file '{}': No such file or directory (os error 2)",
+                dir.path().join("missing.toml").display()
+            )
+        );
+        assert_eq!(mirror_err.kind_exit_code(), ocx_exit::ExitCode::Unavailable);
     }
 
     #[test]
