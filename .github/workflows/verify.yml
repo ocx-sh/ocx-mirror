@@ -47,11 +47,14 @@ jobs:
           args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
   smoke:
-    # The one Linux job, cargo lint then every Bazel lane — ocx's
-    # verify-basic.yml `smoke` shape (fmt/clippy on cargo, then the Bazel
-    # gates and `bazel test`), plus the acceptance suite ocx runs in
-    # verify-deep.yml. One job, so the Bazel server, the output base and the
-    # credential are set up once, and the write lane is exactly one job.
+    # The one Linux job, every lane through Bazel — ocx's verify-basic.yml
+    # `smoke` shape (the Bazel gates and `bazel test`), plus the acceptance
+    # suite ocx runs in verify-deep.yml. One job, so the Bazel server, the
+    # output base and the credential are set up once, and the write lane is
+    # exactly one job. No cargo step and no host Rust toolchain in use:
+    # ocx keeps fmt and clippy on cargo, but a cargo step re-compiles (or
+    # restores rust-cache) on every run, and this job's second run on one
+    # tree must execute nothing (adr_bazel_full_adoption.md § C1, C5).
     name: Smoke (Linux)
     runs-on: ubuntu-latest
     env:
@@ -68,57 +71,8 @@ jobs:
           # [patch.crates-io] table points at, and crate_universe splices them
           # from there (`bazel:patch:check`).
           submodules: recursive
-      # --- cargo: only what ocx's smoke job also keeps on cargo -------------
-      # ocx verify-basic.yml:157-163 runs `rust:format:check` and
-      # `rust:clippy:check` on cargo beside its Bazel lane (no rules_rust
-      # clippy aspect, no Bazel rustfmt), and :521 keeps `schema:generate` on
-      # cargo — the jsonschema feature check below is that line's twin. The
-      # release build, nextest, and the ocx submodule build are gone: Bazel
-      # builds //:ocx-mirror and runs both test lanes below.
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
-        with:
-          matcher: true
-          # Defer warning-denial to [lints.rust]. The action's default
-          # RUSTFLAGS=-D warnings is global and also denies the path-vendored
-          # forks (Cargo auto-caps registry/git deps, not path deps).
-          rustflags: ""
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          # clippy and the jsonschema check only; nothing builds external/ocx
-          # with cargo any more.
-          workspaces: . -> target
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Verify fork patches bind
-        # Mirror-only, no ocx twin: the [patch.crates-io] re-declaration exists
-        # only here (patches do not travel with path deps), and the release
-        # binaries stay cargo-built (build-matrix.yml, as ocx's release.yml),
-        # so the cargo graph is still what ships. Dropping the table does NOT
-        # error — cargo would silently resolve the unpatched crates.io
-        # releases. A lockfile read, no compile; `bazel:patch:check` below is
-        # the same assertion on the Bazel graph.
-        run: |
-          for fork in oci-client:rust-oci-client sigstore:sigstore-rs; do
-            cargo tree -i "${fork%%:*}" --locked | head -1 | grep -F "external/ocx/external/${fork#*:}" \
-              || { echo "::error::${fork%%:*} does not resolve to the vendored fork — [patch.crates-io] broken"; exit 1; }
-          done
-      - name: Check formatting
-        id: fmt
-        run: task rust:format:check
-        continue-on-error: true
-      - name: Clippy
-        id: clippy
-        run: task rust:clippy:check
-        continue-on-error: true
-      - name: Check jsonschema feature
-        # The `schema` command and every `schemars` derive are feature-gated,
-        # so nothing else here compiles them — a broken derive stayed green
-        # until someone ran `ocx-mirror schema` by hand.
-        run: task rust:jsonschema:check
-      # --- Bazel ---------------------------------------------------------------
       - name: Setup OCX
         # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command, and
         # activates the project toolchain from ocx.lock. The `ocx` the
@@ -198,6 +152,13 @@ jobs:
       - name: Bazel static gates
         # No explicit bazel:bootstrap: every Bazel gate below runs it, and
         # `run: once` makes that one bootstrap per invocation.
+        # `bazel:patch:check` asserts the [patch.crates-io] fork binding in
+        # both graphs — Cargo.bazel.lock.json, and Cargo.toml + Cargo.lock for
+        # the cargo-built release binaries (build-matrix.yml). It replaces a
+        # `cargo tree -i` step that was no lockfile read: through the runner's
+        # rustup it installed the rust-toolchain.toml channel (11 s) and
+        # downloaded every crate first (18 s). `bazel:build:drift` reads
+        # `cargo metadata` through the Bazel toolchain's cargo.
         run: task bazel:pin:check bazel:lint bazel:mod:check bazel:patch:check bazel:build:drift bazel:tag:guard JOBS=auto
       # Per-target analysis timings to otel.ocx.sh are pushed from inside this
       # step, by `telemetry:bazel` at the tail of `bazel:build:nobuild`. The
@@ -215,14 +176,46 @@ jobs:
         run: task bazel:build:nobuild JOBS=auto
       # Execution logs (goal decision D5): only the `main` push writes, so a
       # branch run cannot show a cache hit — but two runs on one tree can show
-      # they asked for identical action keys. Each test step below writes
-      # `--execution_log_compact_file` here: under $RUNNER_TEMP, outside the
-      # `target/` Swatinem/rust-cache saves, 0700 like the BEP scratch. The log
+      # they asked for identical action keys. Each lint, build and test step
+      # below writes `--execution_log_compact_file` here: under $RUNNER_TEMP,
+      # outside the workspace, 0700 like the BEP scratch. The log
       # records spawns (argv, action env, digests), never Bazel's own flags, so
       # no `--remote_header` value reaches it (checked on a local log against
       # the host rc's header).
       - name: Execution-log scratch
         run: install -d -m 700 "$RUNNER_TEMP/bazel-execlog"
+      # The lint lanes (.bazelrc `build:rustfmt` / `build:clippy`): cached
+      # Rustfmt and Clippy actions, keyed like any compile, so a second run on
+      # one tree executes none. Same `--config=ci`, execution log and upload
+      # grant as the test steps below (whose comment explains both).
+      # `continue-on-error` + `Check lint results` at the end: a lint finding
+      # still reds the job, after the tests have reported.
+      - name: Rustfmt (Bazel)
+        id: fmt
+        continue-on-error: true
+        run: >-
+          task bazel:lint:fmt JOBS=auto --
+          --config=ci
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/fmt.zst"
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}
+      - name: Clippy (Bazel)
+        id: clippy
+        continue-on-error: true
+        run: >-
+          task bazel:lint:clippy JOBS=auto --
+          --config=ci
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/clippy.zst"
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}
+      # The `schema` command and every `schemars` derive are feature-gated, so
+      # only `//:jsonschema` (the `jsonschema` variant graph) compiles them — a
+      # broken derive stayed green until someone ran `ocx-mirror schema` by
+      # hand. The unit step's `//:all` builds it too; here it fails on its own.
+      - name: jsonschema feature (Bazel)
+        run: >-
+          task bazel:build:jsonschema JOBS=auto --
+          --config=ci
+          --execution_log_compact_file="$RUNNER_TEMP/bazel-execlog/jsonschema.zst"
+          ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && '--remote_upload_local_results=true' || '' }}
       # `--config=ci` (.bazelrc): `--remote_download_minimal` plus the
       # test.xml|test.log regex, so a fully cached second run downloads the
       # reports and nothing else. ocx carries the block latent; this lane
