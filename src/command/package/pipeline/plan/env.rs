@@ -60,7 +60,7 @@ pub async fn build_pylock_plan_entries(
     // boundary.
     let lock = source::pylock::load(spec_dir, path)
         .await
-        .map_err(|e| source::pylock::classify_error("failed to load pylock source", e))?;
+        .map_err(|e| crate::error::pylock::classify_error("failed to load pylock source", e))?;
 
     build_env_plan_entries(spec, &lock, &app_version, all_tags, version_map, build_ts)
 }

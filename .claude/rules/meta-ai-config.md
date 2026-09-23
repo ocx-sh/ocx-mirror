@@ -58,8 +58,9 @@ is also not ported — the mirror has no doc-authoring swarm role.)
 
 1. **Naming** — "OCX/ocx mono-repo" → "ocx-mirror" where the text means *this* project
    (the OCX package format and the upstream repo keep their names).
-2. **Paths** — ocx's `crates/ocx_*` → `src/` (single crate, root manifest);
-   the vendored submodule is `external/ocx/crates/`.
+2. **Paths** — ocx's `crates/ocx_*` → the mirror's `src/` (root package) or its
+   `crates/ocx_mirror_*` workspace members, whichever owns the code per
+   `crates/crate_map.toml`; the vendored submodule is `external/ocx/crates/`.
 3. **Subsystem refs** — `arch-principles.md` / `subsystem-{cli,oci,…}.md` → `subsystem-mirror.md`.
 4. **Swarm handoffs** — keep `/swarm-plan → /swarm-execute → /swarm-review → /finalize`;
    drop refs to un-ported skills and to `worker-doc-writer` (not ported). Every referenced

@@ -18,11 +18,13 @@ Given feature area or topic. Focus exploration on relevant parts, but always bui
 ### 1. Module Map (always run first)
 
 Use Glob to find top-level modules:
-- `src/*.rs` — crate root modules (pipeline helpers, error model, filter, resolver, …)
-- `src/command/**/*.rs` — CLI subcommands (sync, check, validate, pipeline family)
-- `src/spec/**/*.rs` — `mirror.yml` config types
-- `src/source/**/*.rs` — upstream source clients (GitHub releases, URL index)
-- `src/pipeline/**/*.rs` — prepare/push pipeline stages
+- `src/*.rs`, `src/command/**/*.rs` — root package: CLI dispatch, façade
+- `crates/ocx_mirror_spec/**/*.rs` — `mirror.yml` config types
+- `crates/ocx_mirror_source/**/*.rs` — upstream source clients (GitHub releases, URL index)
+- `crates/ocx_mirror_pipeline/**/*.rs` — prepare/push pipeline stages
+- `crates/ocx_mirror_error/**/*.rs` — `MirrorError` variants and exit-code mappings
+- `crates/ocx_mirror_http/**/*.rs` — HTTP client factory, TLS roots, retry, credentials
+- `crates/ocx_mirror_report/**/*.rs` — JUnit, run-summary.json, Discord webhook
 
 Cross-check against the module map in `.claude/rules/subsystem-mirror.md`. Each relevant module: read root `.rs` file, note public types, key traits, re-exports.
 
@@ -37,16 +39,16 @@ Feature area being designed:
 ### 3. Design Pattern Detection
 
 Patterns new feature should follow:
-- **Two-phase pipeline**: prepare (concurrent) vs push (sequential) — trace `pipeline/orchestrator.rs`
-- **Spec-driven config**: `grep "Deserialize"` in `src/spec/` — how config fields validate
+- **Two-phase pipeline**: prepare (concurrent) vs push (sequential) — trace `ocx_mirror_pipeline::orchestrator`
+- **Spec-driven config**: `grep "Deserialize"` in `crates/ocx_mirror_spec/` — how config fields validate
 - **Trait dispatch**: `grep "dyn "` and `grep "impl.*for"` in area
-- **Error hierarchy**: trace `MirrorError` variants and exit-code mappings in `src/error.rs`
+- **Error hierarchy**: trace `MirrorError` variants and exit-code mappings in `crates/ocx_mirror_error/`
 
 ### 4. Reusable Code Discovery
 
 Before design new code, find what exist:
 - Public functions in related modules reusable
-- Shared pipeline helpers (`src/pipeline.rs`)
+- Shared pipeline helpers (`crates/ocx_mirror_pipeline/src/lib.rs`)
 - What ocx's `ocx_*` crates (path deps) already provide before writing OCI/packaging code
 - Test helpers in `test/src/` and `test/conftest.py`; renderer/spec fixtures in `tests/fixtures/`
 - Existing subcommand implementations similar to new feature

@@ -5,50 +5,28 @@ use ocx_exit::ExitCode;
 
 use super::super::*;
 use super::support::*;
+#[cfg(unix)]
+use ocx_mirror_test_support::{fake_ocx_flaky_push, push_attempts};
 use tempfile::tempdir;
 
 // ── Push retry (issue #50) ────────────────────────────────────────────
+//
+// The ladder's own behaviour (a transient failure retried, the ladder
+// stopping at the budget it is handed) is pinned fast in `ocx_mirror_pipeline`'s
+// `ocx_cli::push` tests, which drive `push_with_retry` directly where its
+// `cfg(test)` backoff scaling applies. What only this crate can pin is the
+// run end to end: `Push::execute` handing the spec's `concurrency.max_retries`
+// to that ladder, and the run result and `run-summary.json` rows a retried or
+// exhausted push leaves behind. `a_retried_push_lands_as_published` and
+// `max_retries_one_is_exactly_two_attempts` ride the real pipeline with
+// `mirror-push-retry-one.yml`; `max_retries_zero_is_a_single_attempt` pins the
+// floor through `invoke_push`. A hardcoded 0 passes the floor, a hardcoded
+// default 3 or an off-by-one fails the two-attempt test. A non-transient exit
+// is never retried either way.
 
-/// The single version `mirror-push-retry.yml` publishes in these tests.
+/// The single version `mirror-push-retry.yml` and `mirror-push-retry-one.yml`
+/// publish in these tests.
 const PUSH_RETRY_VERSION: &str = "3.7.0";
-
-/// A stand-in `ocx` whose push fails its first `failures` invocations with
-/// `exit_code` and succeeds afterwards. The attempt count lands in
-/// `{dir}/push-attempts` — same stateful-counter shape as
-/// [`fake_ocx_pipeline`]'s `tagstate/`, and the only way to tell one
-/// attempt from four.
-#[cfg(unix)]
-fn fake_ocx_flaky_push(dir: &Path, failures: u32, exit_code: u8) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let script = dir.join("fake-ocx");
-    std::fs::write(
-        &script,
-        format!(
-            r#"#!/bin/sh
-attempts=$(cat '{counter}' 2>/dev/null || echo 0)
-attempts=$((attempts + 1))
-echo "$attempts" > '{counter}'
-if [ "$attempts" -le {failures} ]; then
-  echo 'operation timed out' >&2
-  exit {exit_code}
-fi
-echo '{{"cascade_tags_written":["{PUSH_RETRY_VERSION}"],"status":"pushed"}}'
-"#,
-            counter = dir.join("push-attempts").display(),
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-    script
-}
-
-/// How many times [`fake_ocx_flaky_push`] was invoked.
-#[cfg(unix)]
-fn push_attempts(dir: &Path) -> u32 {
-    std::fs::read_to_string(dir.join("push-attempts"))
-        .map(|body| body.trim().parse().unwrap_or(0))
-        .unwrap_or(0)
-}
 
 /// Stage one green single-platform version for the retry fixture.
 #[cfg(unix)]
@@ -70,22 +48,117 @@ fn stage_push_retry_version(junit_dir: &Path, bundles_dir: &Path) {
 
 #[cfg(unix)]
 #[test]
-fn a_transient_push_failure_is_retried_and_the_tile_still_lands() {
-    // A registry 503 on the first attempt. The bundle is built, the tests
-    // are green, and the only thing between the run and a published image
-    // is one more request — reporting `push_error` here throws the whole
-    // leg away over a blip that costs a second to ride out.
+fn a_non_transient_push_failure_is_not_retried() {
+    // Guards the other side of the retry predicate rather than the bug:
+    // a rejected manifest (65) is deterministic, and re-sending it three
+    // more times only makes the run slower. Passes before the fix by
+    // construction — it exists to fail a retry-everything implementation.
     let _env_lock = job_url_env_lock();
     let dir = tempdir().unwrap();
     let junit_dir = tempdir().unwrap();
     let bundles_dir = tempdir().unwrap();
     let summary_path = dir.path().join("run-summary.json");
-    let script = fake_ocx_flaky_push(dir.path(), 1, ExitCode::TempFail as u8);
+    let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::DataError as u8, PUSH_RETRY_VERSION);
+
+    stage_push_retry_version(junit_dir.path(), bundles_dir.path());
+
+    let result = run_pipeline_with_fake_ocx(
+        "mirror-push-retry.yml",
+        &script,
+        junit_dir.path(),
+        bundles_dir.path(),
+        &summary_path,
+        None,
+    );
+    assert!(result.is_err(), "a rejected push must fail the run");
+    assert_eq!(push_attempts(dir.path()), 1, "a deterministic rejection is not retried");
+
+    let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
+    let version = &val["versions"][0];
+    assert_eq!(version["platforms_failed"][0]["reason"], "push_error", "got: {version}");
+}
+
+/// One `invoke_push` of a minimal spec granting `max_retries`, against a
+/// stand-in `ocx` whose push always fails transiently. Callers hold
+/// [`job_url_env_lock`] — this sets the process-global `OCX_BINARY_PIN`.
+#[cfg(unix)]
+fn invoke_push_always_transient(dir: &Path, max_retries: u32) -> Result<PushReport, String> {
+    let script = fake_ocx_flaky_push(dir, 99, ExitCode::TempFail as u8, PUSH_RETRY_VERSION);
+
+    let spec: MirrorSpec = serde_yaml_ng::from_str(&format!(
+        r#"
+name: minimal
+target:
+  registry: ocx.sh
+  repository: minimal
+source:
+  type: github_release
+  owner: test
+  repo: test
+assets:
+  linux/amd64:
+    - "test\\.tar\\.gz"
+concurrency:
+  max_retries: {max_retries}
+"#
+    ))
+    .unwrap();
+
+    // SAFETY: test-only process env, serialised by the caller's lock.
+    unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(invoke_push(
+        &spec,
+        "linux/amd64",
+        "ocx.sh/minimal:1.0.0",
+        &dir.join("bundle-1.0.0-linux_amd64.tar.xz"),
+        &std::collections::BTreeMap::new(),
+        false,
+        None,
+    ));
+    // SAFETY: cleanup so neighbouring tests don't inherit the pin.
+    unsafe { std::env::remove_var("OCX_BINARY_PIN") };
+    result
+}
+
+#[cfg(unix)]
+#[test]
+fn max_retries_zero_is_a_single_attempt() {
+    // The documented floor: `0` opts out of retrying entirely. Nothing else
+    // pins it — an off-by-one in the loop guard would quietly make it two,
+    // and the spec that asked for none would get one anyway.
+    let _env_lock = job_url_env_lock();
+    let dir = tempdir().unwrap();
+
+    let result = invoke_push_always_transient(dir.path(), 0);
+
+    assert!(result.is_err(), "the attempt failed and no retry was granted");
+    assert_eq!(push_attempts(dir.path()), 1, "`max_retries: 0` is one attempt, total");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_retried_push_lands_as_published() {
+    // A registry 503 on the first attempt. The bundle is built, the tests
+    // are green, and the only thing between the run and a published image
+    // is one more request — reporting `push_error` here throws the whole
+    // leg away over a blip that costs a second to ride out.
+    //
+    // Deliberate D-P6 cost: `push_retry_delay`'s `cfg(test)` scaling applies
+    // only inside `ocx_mirror_pipeline`'s own test build, so this sleeps one
+    // real first-rung backoff (1 s ±10%) — the price of seeing the retried
+    // push reach `run-summary.json` through the real pipeline.
+    let _env_lock = job_url_env_lock();
+    let dir = tempdir().unwrap();
+    let junit_dir = tempdir().unwrap();
+    let bundles_dir = tempdir().unwrap();
+    let summary_path = dir.path().join("run-summary.json");
+    let script = fake_ocx_flaky_push(dir.path(), 1, ExitCode::TempFail as u8, PUSH_RETRY_VERSION);
 
     stage_push_retry_version(junit_dir.path(), bundles_dir.path());
 
     run_pipeline_with_fake_ocx(
-        "mirror-push-retry.yml",
+        "mirror-push-retry-one.yml",
         &script,
         junit_dir.path(),
         bundles_dir.path(),
@@ -110,23 +183,28 @@ fn a_transient_push_failure_is_retried_and_the_tile_still_lands() {
 
 #[cfg(unix)]
 #[test]
-fn push_retries_stop_at_the_spec_max_retries() {
+fn max_retries_one_is_exactly_two_attempts() {
     // Two assertions in one number: the ladder is bounded (a registry that
     // is down stays down — the run must not sit there forever), and its
-    // length comes from the spec. The fixture sets `max_retries: 2`, a
-    // value no plausible hardcoding produces: the default 3 would spend
-    // four attempts, an off-by-one two.
+    // length comes from the spec. `1` is a value no plausible hardcoding
+    // produces — the default 3 would spend four attempts, an off-by-one one
+    // or three — and the floor test cannot see the wiring: with `0` a
+    // hardcoded 0 also passes.
+    //
+    // Deliberate D-P6 cost: one real first-rung backoff (1 s ±10%), as in
+    // `a_retried_push_lands_as_published`. One rung is the cheapest budget
+    // that still distinguishes a wired value from a hardcoded one.
     let _env_lock = job_url_env_lock();
     let dir = tempdir().unwrap();
     let junit_dir = tempdir().unwrap();
     let bundles_dir = tempdir().unwrap();
     let summary_path = dir.path().join("run-summary.json");
-    let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::TempFail as u8);
+    let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::TempFail as u8, PUSH_RETRY_VERSION);
 
     stage_push_retry_version(junit_dir.path(), bundles_dir.path());
 
     let result = run_pipeline_with_fake_ocx(
-        "mirror-push-retry.yml",
+        "mirror-push-retry-one.yml",
         &script,
         junit_dir.path(),
         bundles_dir.path(),
@@ -136,93 +214,13 @@ fn push_retries_stop_at_the_spec_max_retries() {
     assert!(result.is_err(), "an exhausted retry ladder must still fail the run");
     assert_eq!(
         push_attempts(dir.path()),
-        3,
-        "one attempt plus the two retries the spec grants",
+        2,
+        "one attempt plus the one retry the spec grants",
     );
 
     let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
     let version = &val["versions"][0];
     assert_eq!(version["platforms_failed"][0]["reason"], "push_error", "got: {version}");
-}
-
-#[cfg(unix)]
-#[test]
-fn a_non_transient_push_failure_is_not_retried() {
-    // Guards the other side of the retry predicate rather than the bug:
-    // a rejected manifest (65) is deterministic, and re-sending it three
-    // more times only makes the run slower. Passes before the fix by
-    // construction — it exists to fail a retry-everything implementation.
-    let _env_lock = job_url_env_lock();
-    let dir = tempdir().unwrap();
-    let junit_dir = tempdir().unwrap();
-    let bundles_dir = tempdir().unwrap();
-    let summary_path = dir.path().join("run-summary.json");
-    let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::DataError as u8);
-
-    stage_push_retry_version(junit_dir.path(), bundles_dir.path());
-
-    let result = run_pipeline_with_fake_ocx(
-        "mirror-push-retry.yml",
-        &script,
-        junit_dir.path(),
-        bundles_dir.path(),
-        &summary_path,
-        None,
-    );
-    assert!(result.is_err(), "a rejected push must fail the run");
-    assert_eq!(push_attempts(dir.path()), 1, "a deterministic rejection is not retried");
-
-    let val: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).unwrap()).unwrap();
-    let version = &val["versions"][0];
-    assert_eq!(version["platforms_failed"][0]["reason"], "push_error", "got: {version}");
-}
-
-#[cfg(unix)]
-#[test]
-fn max_retries_zero_is_a_single_attempt() {
-    // The documented floor: `0` opts out of retrying entirely. Nothing else
-    // pins it — an off-by-one in the loop guard would quietly make it two,
-    // and the spec that asked for none would get one anyway.
-    let _env_lock = job_url_env_lock();
-    let dir = tempdir().unwrap();
-    let script = fake_ocx_flaky_push(dir.path(), 99, ExitCode::TempFail as u8);
-
-    let spec: MirrorSpec = serde_yaml_ng::from_str(
-        r#"
-name: minimal
-target:
-  registry: ocx.sh
-  repository: minimal
-source:
-  type: github_release
-  owner: test
-  repo: test
-assets:
-  linux/amd64:
-    - "test\\.tar\\.gz"
-concurrency:
-  max_retries: 0
-"#,
-    )
-    .unwrap();
-
-    // SAFETY: test-only process env, serialised by the lock above.
-    unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(invoke_push(
-        &spec,
-        "linux/amd64",
-        "ocx.sh/minimal:1.0.0",
-        &dir.path().join("bundle-1.0.0-linux_amd64.tar.xz"),
-        &std::collections::BTreeMap::new(),
-        false,
-        None,
-    ));
-    // SAFETY: cleanup so neighbouring tests don't inherit the pin.
-    unsafe { std::env::remove_var("OCX_BINARY_PIN") };
-
-    assert!(result.is_err(), "the attempt failed and no retry was granted");
-    assert_eq!(push_attempts(dir.path()), 1, "`max_retries: 0` is one attempt, total");
 }
 
 #[cfg(unix)]

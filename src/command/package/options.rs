@@ -6,12 +6,7 @@ use std::path::PathBuf;
 use ocx_console::{Cell, DataInterface};
 
 use crate::pipeline::mirror_result::MirrorResult;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum OutputFormat {
-    Plain,
-    Json,
-}
+pub use crate::pipeline::options::OutputFormat;
 
 #[derive(Clone, clap::Args)]
 pub struct SyncOptions {

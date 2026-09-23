@@ -386,7 +386,7 @@ async fn crawl_source(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Result<V
             log::debug!("Reading pylock source for {}", spec.name);
             source::pylock::list_versions(spec_dir, path, spec.source.pylock_app_name(&spec.name))
                 .await
-                .map_err(|e| source::pylock::classify_error("failed to read pylock source", e))
+                .map_err(|e| crate::error::pylock::classify_error("failed to read pylock source", e))
         }
         spec::Source::Pypi { .. } => {
             let package_name = spec.source.pylock_app_name(&spec.name);
@@ -394,7 +394,7 @@ async fn crawl_source(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Result<V
             log::debug!("Querying {} simple index(es) for {}", indexes.len(), package_name);
             source::pypi::list_versions(package_name, &indexes)
                 .await
-                .map_err(|e| source::pypi::classify_error("failed to list PyPI releases", e))
+                .map_err(|e| crate::error::pypi::classify_error("failed to list PyPI releases", e))
         }
     }
 }

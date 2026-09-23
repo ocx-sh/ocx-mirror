@@ -125,7 +125,7 @@ Release listing was the one leg this did not cover until v0.7.0: `github_release
 
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
-`ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package description push`). The child binary is resolved in **two** rungs (`src/pipeline/ocx_cli.rs`, `resolve_ocx_binary`): `OCX_BINARY_PIN` if it is set and non-empty — `ocx` sets it itself when the mirror runs under `ocx exec` — otherwise `ocx` on `PATH`. There is deliberately no co-located lookup, so in a generated workflow, where the mirror is invoked directly rather than through `ocx exec`, the child `ocx` is whichever one the project toolchain put on `PATH`.
+`ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package description push`). The child binary is resolved in **two** rungs (`ocx_mirror_pipeline::ocx_cli`, `resolve_ocx_binary`): `OCX_BINARY_PIN` if it is set and non-empty — `ocx` sets it itself when the mirror runs under `ocx exec` — otherwise `ocx` on `PATH`. There is deliberately no co-located lookup, so in a generated workflow, where the mirror is invoked directly rather than through `ocx exec`, the child `ocx` is whichever one the project toolchain put on `PATH`.
 
 Whichever of those three wins must be **ocx 0.5.5 or newer**: an older binary rejects the metadata sidecar `pipeline prepare` writes and fails every push with exit 65. See [Push retry][spec-push-retry] for the full contract.
 

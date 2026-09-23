@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/**"
+  - "crates/**"
   - "tests/**"
   - "test/**"
   - ".claude/**"
@@ -10,7 +11,7 @@ paths:
 
 # Refactoring Workflow
 
-Path-scoped rule (auto-loads on source-work surfaces: `src/**`, `tests/**`, `test/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work classified as refactoring. Enforces Two Hats Rule: change structure, no behavior change.
+Path-scoped rule (auto-loads on source-work surfaces: `src/**`, `crates/**`, `tests/**`, `test/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work classified as refactoring. Enforces Two Hats Rule: change structure, no behavior change.
 
 ## Core Principle
 

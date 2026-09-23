@@ -19,11 +19,11 @@ Cross-reference every changed file against table. If source change match, verify
 |---|---|---|
 | `src/command/**` (new subcommand) | `docs/reference/cli.md` | New command section + summary |
 | `src/command/**` (new/changed flag or default) | `docs/reference/cli.md` | Flag table for that command |
-| `src/spec/**` (new/changed `mirror.yml` field) | `docs/reference/mirror-yml.md` | Field entry: name, type, default, constraints |
+| `crates/ocx_mirror_spec/**` (new/changed `mirror.yml` field) | `docs/reference/mirror-yml.md` | Field entry: name, type, default, constraints |
 | New `OCX_MIRROR_*` env var anywhere | `docs/reference/environment.md` | New env var section |
 | Changed env var behavior/default | `docs/reference/environment.md` | Env var description |
-| `src/error.rs` (new variant / exit code) | `docs/reference/cli.md` | Exit code documentation |
-| `src/command/pipeline/generate/templates/**` | `docs/reference/mirror-yml.md`, `docs/getting-started.md` | Generated workflow descriptions |
+| `crates/ocx_mirror_error/**` (new variant / exit code) | `docs/reference/cli.md` | Exit code documentation |
+| `src/command/package/pipeline/generate/templates/**` | `docs/reference/mirror-yml.md`, `docs/getting-started.md` | Generated workflow descriptions |
 | New user-facing feature | `docs/getting-started.md` | If it changes the core workflow |
 | Breaking change | `docs/changelog.md` | Breaking changes section |
 | JSON output format changes (`plan.json`, `run-summary.json`) | `docs/reference/cli.md` | Output format descriptions |
@@ -45,8 +45,8 @@ Cross-reference every changed file against table. If source change match, verify
 
 ### 3. Narrative Documentation Accuracy
 - [ ] Behavior claims verified against Rust source (grep, not memory)
-- [ ] Pipeline behavior matches `src/pipeline/` implementations
-- [ ] Exit codes match `src/error.rs::kind_exit_code`
+- [ ] Pipeline behavior matches `crates/ocx_mirror_pipeline/` implementations
+- [ ] Exit codes match `ocx_mirror_error::kind_exit_code`
 
 ### 4. Diátaxis Type Integrity
 - [ ] Reference pages = facts only (no tutorials, no narrative)

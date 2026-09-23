@@ -67,7 +67,7 @@ Rationale: Opus gap largest on multi-step agentic chains (adversarial breadth pr
 | `opus` | `worker-reviewer` with model=opus. Used at tier=max when `--breadth=adversarial` fires — CLI-UX, architecture-boundary, SOTA-gap perspectives benefit from deeper reasoning. |
 
 Per-tier defaults:
-- low → `haiku` (→ `sonnet` when structural markers from `swarm-review/classify.md` "Structural marker signals" fire: `src/pipeline/push*` / cascade, `src/pipeline/verify*` / checksum, webhook/notify paths, `Cargo.toml` dep changes, `deny.toml`, generated workflow templates, public API breakage)
+- low → `haiku` (→ `sonnet` when structural markers from `swarm-review/classify.md` "Structural marker signals" fire: `crates/ocx_mirror_pipeline/src/push*` / cascade, `crates/ocx_mirror_pipeline/src/verify*` / checksum, webhook/notify paths, `Cargo.toml` dep changes, `deny.toml`, generated workflow templates, public API breakage)
 - high → `sonnet`
 - max → `sonnet` (→ `opus` when `--breadth=adversarial`)
 

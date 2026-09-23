@@ -9,7 +9,7 @@
 | `--log-level <LEVEL>` | `trace`, `debug`, `info`, `warn`, `error` | Log verbosity (default: `info`) |
 | `--color <WHEN>` | `auto`, `always`, `never` | When to use ANSI colors in output (default: `auto`) |
 
-When `--log-level` is omitted, verbosity comes from the first of `OCX_LOG_CONSOLE`, `OCX_LOG`, `RUST_LOG` that is set, and from `info` when none is. Those accept full [`tracing` filter directives][tracing-filter], so `RUST_LOG=info,ocx_mirror=debug,reqwest=trace` narrows the noise to the legs you are debugging — which is what to reach for when a fetch fails and the error alone does not say why. Passing `--log-level` explicitly overrides all three.
+When `--log-level` is omitted, verbosity comes from the first of `OCX_LOG_CONSOLE`, `OCX_LOG`, `RUST_LOG` that is set, and from `info` when none is. Those accept full [`tracing` filter directives][tracing-filter], so `RUST_LOG=info,ocx_mirror=debug,reqwest=trace` narrows the noise to the legs you are debugging — which is what to reach for when a fetch fails and the error alone does not say why. Passing `--log-level` explicitly overrides all three. Log targets are per crate (`ocx_mirror_pipeline::…`, `ocx_mirror_spec::…`, and so on), and the `ocx_mirror` prefix used above matches all of them by string prefix; a module-scoped directive instead must name the owning crate, e.g. `ocx_mirror_pipeline::registry_sync=debug`, not `ocx_mirror::pipeline::registry_sync=debug`. Log lines do not print their target (the console formatter runs `with_target(false)`), so read module names from the source tree (`crates/<crate>/src/<module>`).
 
 [tracing-filter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 

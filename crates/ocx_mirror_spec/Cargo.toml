@@ -1,0 +1,46 @@
+[package]
+name = "ocx_mirror_spec"
+description = "The ocx-mirror spec model: mirror.yml, registry.yml and dist.yml parsing and validation, plus the grammars they check (version filter and normalizer, platform map, annotations, registry glob and destination templates, dist layout)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Derives `schemars::JsonSchema` on the spec types, for the root's
+# `ocx-mirror schema dist|plan` (the root's `jsonschema` forwards here); the
+# source crate's feature covers the url_index types the spec names.
+jsonschema = ["dep:schemars", "ocx_mirror_source/jsonschema"]
+
+[dependencies]
+ocx_config.workspace = true
+ocx_index.workspace = true
+ocx_mirror_error.workspace = true
+ocx_mirror_http.workspace = true
+ocx_mirror_source.workspace = true
+ocx_oci.workspace = true
+ocx_package.workspace = true
+ocx_python.workspace = true
+ocx_util.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+log.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ocx_exit.workspace = true
+ocx_mirror_test_support.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

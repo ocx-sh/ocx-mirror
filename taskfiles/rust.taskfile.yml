@@ -8,6 +8,7 @@ x-shared:
     - '{{.ROOT_DIR}}/tests/**/*'
     - '{{.ROOT_DIR}}/crates/**/*.rs'
     - '{{.ROOT_DIR}}/crates/**/Cargo.toml'
+    - '{{.ROOT_DIR}}/crates/crate_map.toml'
     - '{{.ROOT_DIR}}/Cargo.toml'
     - '{{.ROOT_DIR}}/Cargo.lock'
     - '{{.ROOT_DIR}}/rustfmt.toml'
@@ -23,7 +24,7 @@ tasks:
         2. cargo clippy
         3. hawkeye license headers
         4. cargo-deny license audit
-        5. cargo check --features jsonschema
+        5. cargo check --workspace --features jsonschema
         6. cargo build --release
         7. cargo nextest run
       Use during review-fix loops when only Rust code changed.
@@ -61,9 +62,10 @@ tasks:
       `jsonschema` feature, which no other task and no CI job builds — so a
       derive that stopped compiling stayed green until someone ran
       `ocx-mirror schema` by hand. `--all-targets` so the feature-gated tests
-      are type-checked too.
+      are type-checked too, and `--workspace` because those tests live in the
+      member crates that own the derives (ocx_mirror_spec's dist schema test).
     sources: *rust-sources
-    cmd: cargo check --locked --features jsonschema --all-targets
+    cmd: cargo check --workspace --locked --features jsonschema --all-targets
 
   build:
     desc: Build release binary
@@ -84,7 +86,7 @@ tasks:
     sources: *rust-sources
     deps:
       - install:nextest
-    # --workspace: the root package plus crates/ocx_python (external/ocx is
+    # --workspace: the root package plus every crates/* member (external/ocx is
     # workspace-excluded); without it only the root package's tests run.
     cmd: cargo nextest run --workspace --release --locked {{.CLI_ARGS}}
 

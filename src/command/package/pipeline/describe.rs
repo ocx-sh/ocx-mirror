@@ -90,7 +90,7 @@ async fn synthesize_env_catalog(
     let lock = match &spec.source {
         Source::Pylock { path, .. } => crate::source::pylock::load(spec_dir, path)
             .await
-            .map_err(|e| crate::source::pylock::classify_error("failed to load pylock for catalog autogen", e))?,
+            .map_err(|e| crate::error::pylock::classify_error("failed to load pylock for catalog autogen", e))?,
         Source::Pypi { .. } => match find_any_derived_pypi_lock(spec_dir).await {
             Some(lock) => lock,
             None => return Ok(None),
@@ -99,7 +99,7 @@ async fn synthesize_env_catalog(
     };
 
     let package = crate::source::pylock::find_app_package(&lock, app_name).map_err(|e| {
-        crate::source::pylock::classify_error("failed to resolve pylock app package for catalog autogen", e)
+        crate::error::pylock::classify_error("failed to resolve pylock app package for catalog autogen", e)
     })?;
 
     let Some(wheel) = pick_root_wheel(&package.wheels) else {

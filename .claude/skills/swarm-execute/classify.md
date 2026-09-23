@@ -77,7 +77,7 @@ multiple triggers may fire. Axis defs in `overlays.md`.
 | `--doc-reviewer=haiku` | Diff touches ≤2 doc files (`docs/**/*.md` or `CHANGELOG.md`) AND does not touch `docs/getting-started.md` |
 | `--loop-rounds=1` | tier=low; or plan tags the feature as Two-Way Door |
 | `--loop-rounds=3` | tier=high or tier=max (default) |
-| `--review=adversarial` | Security-sensitive paths (`src/pipeline/verify*`, checksum handling, webhook/notify code, archive extraction); plan labels `security`; diff touches `src/pipeline/push*` / cascade logic |
+| `--review=adversarial` | Security-sensitive paths (`crates/ocx_mirror_pipeline/src/verify*`, checksum handling, webhook/notify code, archive extraction); plan labels `security`; diff touches `crates/ocx_mirror_pipeline/src/push*` / cascade logic |
 | `--codex` | Plan header `Reversibility: One-Way Door` (Medium or High); breaking-change signals in plan or prompt; `Overlays: codex=on` |
 
 Defaults per tier (before overlays):

@@ -1,0 +1,38 @@
+# Which workspace member may depend on which — enforced by
+# `tests/workspace_structure.rs` (every rule there reads this file).
+#
+# Source: adr_bazel_crate_split.md § C1 ("Crate map (phase 1)"). Invariant:
+# every workspace member has exactly one row — a member without a row, or a
+# row without a member, fails the test.
+
+# member -> mirror workspace members it may depend on (normal and build edges;
+# dev edges may additionally reach [dev].allowed_everywhere).
+[allowed]
+ocx_mirror = ["ocx_mirror_error", "ocx_mirror_http", "ocx_mirror_pipeline", "ocx_mirror_report", "ocx_mirror_source", "ocx_mirror_spec", "ocx_python"]
+ocx_mirror_error = ["ocx_mirror_http", "ocx_mirror_report", "ocx_mirror_source", "ocx_python"]
+ocx_mirror_http = []
+ocx_mirror_pipeline = ["ocx_mirror_error", "ocx_mirror_http", "ocx_mirror_report", "ocx_mirror_source", "ocx_mirror_spec", "ocx_python"]
+ocx_mirror_report = ["ocx_mirror_http"]
+ocx_mirror_source = ["ocx_mirror_http", "ocx_python"]
+ocx_mirror_spec = ["ocx_mirror_error", "ocx_mirror_http", "ocx_mirror_source", "ocx_python"]
+ocx_mirror_test_support = []
+ocx_python = []
+
+# The ocx crates a satellite may name directly: ecosystem tier plus
+# `ocx_exit` (interface tier). Any other `ocx_*` dependency — `ocx_cli`, or an
+# internal-tier crate — fails the test. See CLAUDE.md "Dependency model".
+[ocx]
+allowed = [
+    "ocx_config",
+    "ocx_console",
+    "ocx_exit",
+    "ocx_index",
+    "ocx_oci",
+    "ocx_package",
+    "ocx_sign",
+    "ocx_util",
+]
+
+# Dev-only helper crates any member may take as a dev-dependency.
+[dev]
+allowed_everywhere = ["ocx_mirror_test_support"]

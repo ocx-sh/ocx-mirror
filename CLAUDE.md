@@ -28,9 +28,13 @@ document the four-line job, let them own the pipeline.
 
 | Path | Purpose |
 |------|---------|
-| `src/` | The crate (binary `ocx-mirror`), package manifest at repo root |
+| `src/` | The root crate (binary `ocx-mirror`): CLI dispatch (`command/`), `main.rs`, the `lib.rs` façade; package manifest at repo root |
+| `crates/ocx_mirror_*` | Cargo workspace members from the phase-1 crate split (`error`, `http`, `pipeline`, `report`, `source`, `spec`, `test_support`); each `Cargo.toml` inherits `[workspace.dependencies]` via `.workspace = true` |
+| `crates/crate_map.toml` | Authority for which crate may depend on which; enforced by `tests/workspace_structure.rs` |
 | `crates/ocx_python/` | Pure translation library: wheel → OCX packaging (PEP 751 lock parsing, wheel selection/repack, env composition) |
 | `external/ocx` | **git submodule** — vendored ocx; its `ocx_*` crates are path deps into it |
+| `tests/workspace_structure.rs` | Reads `cargo metadata`; fails naming the offender on any crate-map violation (upward edge, unlisted `ocx_*`, missing `[lints] workspace = true`, …) — the enforcement half of `crates/crate_map.toml` |
+| `tests/source_scan.rs` | Cross-crate source scans that need the whole tree at once: the extra-roots self-scan (walks `src/` and every `crates/*/src/`) and the cross-crate `include_str!` factory scan |
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
 | `test/` | pytest acceptance harness (Docker registry on :5001) |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
@@ -41,21 +45,25 @@ document the four-line job, let them own the pipeline.
 ## Dependency model (read before touching Cargo.toml)
 
 - Eight `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
-  Bumping ocx = bumping the submodule pointer (procedure in README.md); the row
-  list changes only when the code names a new crate.
+  They live in root `[workspace.dependencies]` once, and every member that
+  needs one takes it `.workspace = true` — except `crates/ocx_python`, which
+  keeps its own `ocx_oci`/`ocx_package` path rows (and its own copy-exactly
+  version rows) until phase 2 moves it onto the workspace table. Bumping ocx
+  = bumping the submodule pointer (procedure in README.md); the row list
+  changes only when the code names a new crate.
 - **Only ecosystem- or interface-tier crates may get a row.** ocx's `task
   satellite:verify` (a `verify-deep.yml` job) asserts this workspace resolves
   no internal-tier crate: internal code carries no stability at all, so a link
   is a break waiting for the next rename. `ocx_shell` and `ocx_announce` were
   dropped for this reason ([ocx-sh/ocx#497](https://github.com/ocx-sh/ocx/issues/497));
   what each was doing is now `--ci-annotations` on the push argv and
-  `src/spec/forge.rs` respectively.
+  `crates/ocx_mirror_spec/src/forge.rs` respectively.
 - **Never add a row for `ocx` itself** (`external/ocx/crates/ocx_cli`). It is an
   application, not a library with an interface, and linking it for two imports
   cost 160 packages — the whole Starlark host, an LSP/DAP/REPL stack and the gix
   family. The two things the mirror wanted from it are mirror-owned now:
   `src/tracing_init.rs` (a verbatim copy of ocx's, feature-tracked through the
-  `tracing-subscriber` row) and `error::tls_exit_code` (a copy of ocx's
+  `tracing-subscriber` row) and `ocx_mirror_error::tls_exit_code` (a copy of ocx's
   `impl ClassifyExitCode for TlsError`, guarded by an exhaustive match and the
   `tls_error_codes_match_ocx` unit test). Both are deleted upstream-side only by
   the `ocx_tracing` extraction named in `src/tracing_init.rs`.
@@ -77,7 +85,7 @@ document the four-line job, let them own the pipeline.
   mirror-owned. Keep them on one major: a split major linked two copies of the
   crate and made `ocx_oci`'s reqwest types unnameable here, which is how the
   mirror ended up with its own TLS-root handling and a corporate CA that no leg
-  trusted. `src/http.rs` now calls `ocx_util::tls::seed_embedded_roots`
+  trusted. `crates/ocx_mirror_http/src/lib.rs` now calls `ocx_util::tls::seed_embedded_roots`
   directly. **Since v0.6.1** ocx adds `system-proxy` (its SSRF guard consults
   reqwest's own proxy matcher), so the mirror carries it too — copy-exactly.
 - Clone/checkout always `--recurse-submodules`.
@@ -113,9 +121,12 @@ Work on branches, never `main`. **Never push** — human decides.
 Releases: `task release:prepare` → human reviews → commit + tag + push
 (see README.md).
 
-Rules in `.claude/rules/` auto-load by path (`quality-rust`, `quality-core`,
-`quality-python`, `subsystem-mirror`, `crate-placement`, `security-threat-model`,
-`workflow-*`, `meta-plan-status`, `meta-ai-config`). Design records live in
+Rules in `.claude/rules/` auto-load by path (`quality-core`, `quality-rust`,
+`quality-rust-errors`, `quality-rust-exit_codes`, `quality-python`,
+`python-packaging`, `subsystem-mirror`, `crate-placement`,
+`security-threat-model`, `workflow-*`, `meta-plan-status`, `meta-ai-config`,
+and the `rust-quality`, `rust-cargo`, `python-quality`, `docs-quality`,
+`bazel-quality` bundles). Design records live in
 `.claude/artifacts/` (ADRs and design specs moved from the ocx mono-repo).
 
 **Every security review reads

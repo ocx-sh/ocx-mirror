@@ -1,0 +1,50 @@
+[package]
+name = "ocx_mirror_pipeline"
+description = "The ocx-mirror pipeline legs: the package orchestrator (download, verify, bundle, the ocx push/sign/announce subprocesses), the Python env leg, registry and dist sync, and the registry-to-registry copy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+ocx_config.workspace = true
+ocx_console.workspace = true
+ocx_exit.workspace = true
+ocx_index.workspace = true
+ocx_mirror_error.workspace = true
+ocx_mirror_http.workspace = true
+ocx_mirror_report.workspace = true
+ocx_mirror_spec.workspace = true
+ocx_oci.workspace = true
+ocx_package.workspace = true
+ocx_python.workspace = true
+ocx_sign.workspace = true
+ocx_util.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+clap.workspace = true
+futures.workspace = true
+hex.workspace = true
+log.workspace = true
+md-5.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ocx_mirror_test_support.workspace = true
+http.workspace = true
+hyper-util.workspace = true
+serde_yaml_ng.workspace = true
+
+[lints]
+workspace = true

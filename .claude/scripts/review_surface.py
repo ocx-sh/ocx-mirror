@@ -69,14 +69,14 @@ ORDER = ["T0", "T1", "T2", "T3", "T4", "T5", "T6"]
 PROD = {"T0", "T1", "T2", "T3"}
 
 WIRE_FILES = re.compile(
-    r"src/spec/"  # mirror.yml contract (serde, deny_unknown_fields)
+    r"src/spec/|crates/ocx_mirror_spec/src/"  # mirror.yml contract (serde, deny_unknown_fields)
     r"|crates/ocx_python/src/lock\.rs"  # PEP 751 lock parsing
     r"|src/command/package/pipeline/generate/templates/"  # generated-workflow contract
     r"|src/junit\.rs"  # JUnit XML consumed by CI annotators
     r"|packaging/metadata\.json"
 )
 CLI_FILES = re.compile(r"src/command/|src/main\.rs")
-EXIT_FILES = re.compile(r"/error\.rs$")
+EXIT_FILES = re.compile(r"/error\.rs$|crates/ocx_mirror_error/src/")
 TESTY = re.compile(r"crates/[^/]+/tests/|^test/|^tests/|fixtures/")
 SCAFFOLD = re.compile(r"^\.claude/|^\.agents/|^taskfiles/|^\.github/|^external/")
 

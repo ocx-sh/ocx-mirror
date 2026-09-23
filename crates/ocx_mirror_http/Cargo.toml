@@ -1,0 +1,26 @@
+[package]
+name = "ocx_mirror_http"
+description = "The mirror's HTTP client factory (trust roots, connect bound), capped body reads, host-keyed credentials and retry jitter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+ocx_config.workspace = true
+ocx_oci.workspace = true
+ocx_util.workspace = true
+log.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+ocx_mirror_test_support.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

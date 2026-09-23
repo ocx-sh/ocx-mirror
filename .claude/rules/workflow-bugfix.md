@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/**"
+  - "crates/**"
   - "tests/**"
   - "test/**"
   - ".claude/**"
@@ -10,7 +11,7 @@ paths:
 
 # Bug Fix Workflow
 
-Path-scoped rule (auto-loads on source-work surfaces: `src/**`, `tests/**`, `test/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work classified as bug fix. Enforce root-cause discipline: understand bug before fix.
+Path-scoped rule (auto-loads on source-work surfaces: `src/**`, `crates/**`, `tests/**`, `test/**`, `.claude/**`, `Cargo.toml`, `Cargo.lock`). Referenced from [workflow-intent.md](./workflow-intent.md) when work classified as bug fix. Enforce root-cause discipline: understand bug before fix.
 
 ## Non-Negotiable Sequence
 

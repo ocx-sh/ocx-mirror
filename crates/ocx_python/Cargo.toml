@@ -36,8 +36,6 @@ uv-platform-tags = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e
 uv-pep508 = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
 uv-pep440 = { git = "https://github.com/astral-sh/uv", rev = "0adb444806e8bcea7e7a5e9ae90d1288778a0b54" }
 
-# Deny warnings for this package only — same rationale as the root manifest:
-# --cap-lints does not apply to path deps, so a blanket RUSTFLAGS=-D warnings
-# would promote the vendored forks' warnings to hard errors.
-[lints.rust]
-warnings = "deny"
+# Lint policy (warnings = "deny") is the workspace root's [workspace.lints].
+[lints]
+workspace = true

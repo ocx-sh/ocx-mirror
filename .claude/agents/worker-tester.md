@@ -38,7 +38,7 @@ Write tests to validate existing impl, improve coverage.
 
 ## Rules
 
-Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md) on `*.rs`, [quality-python.md](../rules/quality-python.md) on `*.py`, [subsystem-mirror.md](../rules/subsystem-mirror.md) on `src/**` and `tests/**`. [quality-core.md](../rules/quality-core.md) always applies.
+Path-scoped rules auto-load on edit: [quality-rust.md](../rules/quality-rust.md) on `*.rs`, [quality-python.md](../rules/quality-python.md) on `*.py`, [subsystem-mirror.md](../rules/subsystem-mirror.md) on `src/**`, `crates/**` and `tests/**`. [quality-core.md](../rules/quality-core.md) always applies.
 
 ## Always Apply (block-tier compliance)
 

@@ -10,9 +10,8 @@
 //!
 //! See `.claude/artifacts/adr_registry_mirror_sync.md`.
 
-// `pub(crate)`: `pipeline::registry_sync` takes `RegistrySyncOptions`, the same
-// upward edge `command::package::pipeline` already carries for
-// `pipeline::python_push`.
+// `RegistrySyncOptions` lives in `pipeline::options` (the pipeline takes the
+// whole flag set); this module re-exports it at its old path.
 pub(crate) mod options;
 mod sync;
 

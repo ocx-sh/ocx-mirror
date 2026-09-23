@@ -66,7 +66,7 @@ Action → expected outcome → error cases for each user-facing behavior.
 ## Error Taxonomy
 
 All documented failure modes with remediation guidance. New variants extend
-`MirrorError` with an exit-code mapping (`src/error.rs`).
+`MirrorError` with an exit-code mapping (`crates/ocx_mirror_error/`).
 
 | Failure Mode | Error Variant | Exit Code | Remediation |
 |--------------|---------------|-----------|-------------|

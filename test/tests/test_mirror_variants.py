@@ -1,8 +1,8 @@
 """Acceptance tests for variant-aware push and the default-variant alias pass.
 
-`push_and_cascade` (`src/pipeline/push.rs`) does two things no other push path
-does: it cascades a variant-prefixed version along its own track
-(`full-1.2.3` → `full-1.2` → `full` — the variant name IS the track's rolling
+`push_and_cascade` (`crates/ocx_mirror_pipeline/src/push.rs`) does two things
+no other push path does: it cascades a variant-prefixed version along its own
+track (`full-1.2.3` → `full-1.2` → `full` — the variant name IS the track's rolling
 `latest`), and, for the variant marked `default: true`, it pushes a SECOND
 cascade of unadorned tags (`1.2.3` → `1.2` → `1` → `latest`) pointing at the
 same manifest.

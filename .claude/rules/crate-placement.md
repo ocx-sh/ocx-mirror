@@ -9,30 +9,33 @@ paths:
 # Crate Placement
 
 Mirror-native. Where new code goes: mirror-owned vs. promoted to an ocx
-ecosystem crate, and which of the mirror's own crates it lands in once the
-phase 1 split (`adr_bazel_crate_split.md`) lands. Detail and rationale live in
-that ADR — this rule is the quick decision table, not a restatement of it.
+ecosystem crate, and which of the mirror's own crates it lands in — the
+phase 1 split (`adr_bazel_crate_split.md`) has landed. Detail and rationale
+live in that ADR — this rule is the quick decision table, not a restatement
+of it.
 
 ## Where new code goes
 
 | Code is… | Goes in |
 |---|---|
-| A spec grammar (`mirror.yml`/`registry.yml`/`dist.yml` types, validation, `extends:` merge) | mirror (`ocx_mirror_spec` once split; today `src/spec/`) |
-| Pipeline orchestration (prepare/push phases, `MirrorTask`, cascade, registry sync/copy) | mirror (`ocx_mirror_pipeline`; today `src/pipeline/`) |
-| CI-workflow rendering (`pipeline generate ci`, templates, drift guard) | mirror (`ocx_mirror` root; today `src/command/package/pipeline/generate/`) |
-| `MirrorError` and its exit-code mapping, or a `From<Local> for MirrorError` | mirror (`ocx_mirror_error`; today `src/error.rs`) |
-| The `ocx` subprocess boundary (binary resolution, argv assembly, `OCX_*` env forwarding) | mirror (`ocx_mirror_pipeline::ocx_cli`; today `src/pipeline/ocx_cli.rs`) |
+| A spec grammar (`mirror.yml`/`registry.yml`/`dist.yml` types, validation, `extends:` merge) | `ocx_mirror_spec` |
+| Pipeline orchestration (prepare/push phases, `MirrorTask`, cascade, registry sync/copy) | `ocx_mirror_pipeline` |
+| CI-workflow rendering (`pipeline generate ci`, templates, drift guard) | mirror root (`ocx_mirror`; `src/command/package/pipeline/generate/`) |
+| `MirrorError` and its exit-code mapping, or a `From<Local> for MirrorError` | `ocx_mirror_error` |
+| The `ocx` subprocess boundary (binary resolution, argv assembly, `OCX_*` env forwarding) | `ocx_mirror_pipeline::ocx_cli` |
 | Format/protocol logic (parsing, wire types) with a **named second caller that has a real call site** | promote to an ocx ecosystem crate — see Promotion below |
 | Generic logic with no dependency on `MirrorError` or a mirror spec type, not (yet) promoted | a generic `ocx_mirror_*` crate (`http`, `report`, `source`, `test_support`) |
 | Application glue (CLI dispatch, `main.rs`, the `lib.rs` façade re-exports) | mirror root package (`ocx_mirror`) |
 
-Today a spec grammar validates by calling into the pipeline module that owns
-it (`spec/registry.rs` → `registry_sync::destination`) — `destination`,
-`layout`, `index_host` and `glob` still live in `src/pipeline/`. From phase 1
-(`adr_bazel_crate_split.md` § C1) those grammars move *down* into
-`ocx_mirror_spec`, and `ocx_mirror_pipeline` depends on the spec crate to use
-them — never the reverse. No upward edges: a generic or lower-tier crate
-never depends on a crate above it in the map.
+A spec grammar validates by calling into the module that owns the grammar —
+`ocx_mirror_spec::registry` calls `ocx_mirror_spec::destination` and
+`ocx_mirror_spec::glob` directly, because `destination`, `layout`, `glob` and
+`catalog::index_host` moved *down* into `ocx_mirror_spec` per
+`adr_bazel_crate_split.md` § C1 (they used to live in the pipeline module,
+which would have made spec depend upward on pipeline). `ocx_mirror_pipeline`
+depends on the spec crate for the ones it still needs — never the reverse. No
+upward edges: a generic or lower-tier crate never depends on a crate above it
+in the map.
 
 ## ocx crate tiers
 
@@ -70,7 +73,7 @@ either compiles `ocx_store` without permission to name it directly.
 
 `ocx_cli::` must never appear as a path root in mirror code — write
 `crate::ocx_cli::`/`super::…` for the mirror's own subprocess-boundary
-module (`pipeline::ocx_cli`, unrelated to ocx's crate of the same name).
+module (`ocx_mirror_pipeline::ocx_cli`, unrelated to ocx's crate of the same name).
 ocx's satellite scan reads a bare `ocx_cli::` reference as the forbidden
 crate regardless of which `ocx_cli` it resolves to.
 
@@ -91,11 +94,10 @@ How to promote: the `/ocx-upstream-pr` skill authors the PR against
 `external/ocx`; landing and pointer adoption are owner/`/update-ocx` actions
 (`adr_bazel_crate_split.md` § C6).
 
-## The planned mirror crate layout
+## The mirror crate layout
 
-**Planned — phase 1 of `adr_bazel_crate_split.md`; authority
-`crates/crate_map.toml` once it exists.** Today everything below still lives
-under `src/`; this table is where it lands, not where it is.
+**Landed — phase 1 of `adr_bazel_crate_split.md`; authority
+`crates/crate_map.toml`.**
 
 | Crate | Kind | Roughly |
 |---|---|---|
@@ -123,7 +125,7 @@ and an `external/ocx` path crate from phase 2 on.
   (`http`, `auth`), `ocx_mirror_report` and, in `ocx_mirror_source`,
   `github_release::{client, api_client}` return local `thiserror` enums; no
   generic crate names `MirrorError` or a spec type. **E5** `anyhow` stays in
-  the `source/*` API; `thiserror` conversion is promotion debt. Conversion to
+  the `ocx_mirror_source` API; `thiserror` conversion is promotion debt. Conversion to
   `MirrorError` lives in `ocx_mirror_error` alone.
 - `pub(crate)` widens to `pub` only for items that actually cross a crate
   boundary. No cross-crate `pub use *`.
@@ -135,4 +137,4 @@ and an `external/ocx` path crate from phase 2 on.
   decision), § C9(a) (this rule's own design record).
 - `CLAUDE.md` § "Dependency model" — the authoritative eight-row list and why
   `ocx_cli` never gets a row.
-- `.claude/rules/subsystem-mirror.md` — today's (pre-split) module map.
+- `.claude/rules/subsystem-mirror.md` — the module map, keyed to the crate layout.

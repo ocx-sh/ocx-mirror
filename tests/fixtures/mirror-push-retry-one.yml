@@ -1,0 +1,38 @@
+# Mirror spec: single-platform fixture for the root's end-to-end push-retry tests.
+# Copy of mirror-push-retry.yml with `concurrency.max_retries: 1`: not the
+# default 3, and one rung is the cheapest budget whose two attempts no plausible
+# hardcoding produces (each rung is a real 1 s backoff outside
+# `ocx_mirror_pipeline`'s own test build).
+name: shfmt
+target:
+  registry: ocx.sh
+  repository: shfmt
+
+source:
+  type: github_release
+  owner: mvdan
+  repo: sh
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+assets:
+  linux/amd64:
+    - "shfmt_v.*_linux_amd64$"
+
+asset_type:
+  type: binary
+  name: shfmt
+
+skip_prereleases: true
+cascade: true
+build_timestamp: none
+
+concurrency:
+  max_retries: 1
+
+tests:
+  - name: version
+    command: shfmt --version
+
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
