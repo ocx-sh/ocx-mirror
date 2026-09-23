@@ -23,6 +23,7 @@ use ocx_index::Index;
 use ocx_index::RootTag;
 use ocx_oci::client::OciTransport;
 use ocx_oci::client::error::ClientError;
+use ocx_oci::client::{PUSH_CHUNK_SIZE, REGISTRY_CONNECT_TIMEOUT, REGISTRY_READ_TIMEOUT};
 use ocx_oci::native::oci_client::client::BlobMountResponse;
 use ocx_oci::native::oci_client::errors::{OciDistributionError, OciErrorCode};
 use ocx_oci::{Descriptor, Digest, Identifier, ImageIndexEntry, Manifest, Reference, native};
@@ -198,24 +199,11 @@ pub const DESCRIPTION_TAG: &str = "__ocx.desc";
 
 // ── Client construction (C-046) ─────────────────────────────────────────────
 //
-// The three constants below are copied from `ClientBuilder`'s own
-// `PUSH_CHUNK_SIZE`, `REGISTRY_READ_TIMEOUT` and `REGISTRY_CONNECT_TIMEOUT`
-// (`external/ocx/crates/ocx_oci/src/client/builder.rs`), which are their
-// source of truth — two of the three are `pub(crate)` there and so cannot be
-// imported. `ClientConfig::default()` sets none of the timeouts, so a
-// hand-built config inherits `None` for both: on a multi-hour transfer that
-// means one hung socket stalls the whole mirror forever.
-
-/// Body size of one chunked-push `PATCH`, held below GHCR's 4 MiB request cap.
-const PUSH_CHUNK_SIZE: usize = 3 * 1024 * 1024;
-
-/// Per-frame idle bound on a response body, and a hard deadline on everything
-/// before the first body frame.
-const REGISTRY_READ_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Bound on the connect phase, so a black-holing host cannot park a socket in
-/// `SYN_SENT` for minutes.
-const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+// `PUSH_CHUNK_SIZE`, `REGISTRY_READ_TIMEOUT` and `REGISTRY_CONNECT_TIMEOUT` are
+// `ClientBuilder`'s own values, imported so they cannot drift.
+// `ClientConfig::default()` sets none of the timeouts, so a hand-built config
+// inherits `None` for both: on a multi-hour transfer that means one hung socket
+// stalls the whole mirror forever.
 
 /// First retry delay after a rate limit; each further attempt doubles it.
 const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(1);
