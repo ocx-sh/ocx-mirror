@@ -216,7 +216,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 | 5 | 2026-09-23 | sub-orchestrator phase2-loop | opus | Loop 2 (`ocx_python` promotion, ocx PR, pointer, oracle, e2e tier 2) | done 8e62543 (+ ledger commit); ocx-sh/ocx#503 open, green |
 | 6 | 2026-09-23 | sub-orchestrator phase3-loop | opus | Loop 3 (Bazel Linux loop, JUnit, CI bar C11, OTEL telemetry + Grafana repo filter, final oracle) | done 4b1f40f (+ ledger commit); C11 NO-GO; telemetry live |
 | 7 | 2026-09-23 | sub-orchestrator refine-finalize | opus | R (≤3 turns /hex-review + /hex-execute on whole branch) + F (/hex-finalize, mirror PR, green pipeline, Verification items) | done — [#89](https://github.com/ocx-sh/ocx-mirror/pull/89) |
-| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | done 9d874c3; ADR A-11; cache proof 4/4 |
+| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | done 9d874c3 + f58c79b (CI fix: release nextest relinked the uploaded binary without `__testing`); ADR A-11; cache proof 4/4; `task verify` EXIT=0 at f58c79b; Verify [35890579251](https://github.com/ocx-sh/ocx-mirror/actions/runs/35890579251) green |
 
 ## Verification checklist (artifact § Verification + ADR § Phase plan and gates)
 
@@ -238,4 +238,4 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 
 ## Next action
 
-Owner review of [#89](https://github.com/ocx-sh/ocx-mirror/pull/89) (owner actions in the PR body and § Owner actions). Cleanup done by refine-finalize: oracle worktree, oracle registry container, its Bazel server, `.tmp/` (except `heartbeat.sh`).
+Owner review of [#89](https://github.com/ocx-sh/ocx-mirror/pull/89) (owner actions in the PR body and § Owner actions). version-cmd cleanup done: oracle worktree, registry container, Bazel server; the scratchpad probe copy is an owner action (sandbox refused `rm -rf`).
