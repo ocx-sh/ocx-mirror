@@ -56,3 +56,28 @@ ocx.project(
     ocx_toml = "//:ocx.toml",
 )
 use_repo(ocx, "tools")
+
+# The external/ocx submodule files tests read, as real inputs. The submodule is
+# no package of this repo (`//...` skips `external/`, and its BUILD files load
+# ocx's own graph), so each directory is a local repository with a BUILD file
+# of ours; `build_file` rather than `build_file_content`, because the rule
+# deletes the symlinked ocx BUILD.bazel before placing ours. The contents are
+# the pinned submodule tree — tracked, so every checkout of one superproject
+# commit keys identically, CI included (unlike a host path).
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+# The Sigstore stack //test:acceptance brings up and signs against: compose
+# file, sigstore/ (keys, service configs, token minter, trusted root), and
+# the golden cosign key pair test_signing.py reads.
+new_local_repository(
+    name = "ocx_test",
+    build_file = "//:BUILD.ocx_test.bazel",
+    path = "external/ocx/test",
+)
+
+# ocx_python's wheel fixture, which //:source_scan proves the root copy equals.
+new_local_repository(
+    name = "ocx_python_wheels",
+    build_file = "//:BUILD.ocx_python_wheels.bazel",
+    path = "external/ocx/crates/ocx_python/tests/fixtures/wheels",
+)
