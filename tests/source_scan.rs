@@ -264,9 +264,11 @@ fn every_production_client_is_built_through_the_factory() {
     // Floors, not `> 0`: the walk must not silently shrink as modules move
     // between crates. Both are the counts across `src/` and every
     // `crates/*/src/` after the report crate landed (crate split WP4,
-    // 2026-09-23): 130 files, 3 of them with an OCI factory. Raise them when
-    // files are added; never lower them to make a move pass.
-    const MIN_FILES: usize = 130;
+    // 2026-09-23): 130 files, 3 of them with an OCI factory. The one lowering
+    // since: `ocx_python`'s 9 source files left the mirror for
+    // `external/ocx` (phase 2), 133 read → 124. Raise them when files are
+    // added; never lower them to make a move between mirror crates pass.
+    const MIN_FILES: usize = 124;
     const MIN_FACTORY_FILES: usize = 3;
     assert!(
         state.files >= MIN_FILES,
@@ -310,9 +312,10 @@ fn the_mirror_rewrite_denylist_names_a_call_that_still_exists() {
     );
 }
 
-/// The root's `console_pkg` wheel is a copy of `ocx_python`'s, taken by the
-/// split so `ocx_mirror_pipeline`'s `python_prepare` tests need not reach into
-/// a sibling crate's `tests/` (adr_bazel_crate_split.md § C2). A copy drifts
+/// The root's `console_pkg` wheel is a copy of `ocx_python`'s, whose original
+/// now lives in ocx (`external/ocx/crates/ocx_python/tests/`); the copy keeps
+/// `ocx_mirror_pipeline`'s `python_prepare` tests and the acceptance suite off
+/// another crate's `tests/` (adr_bazel_crate_split.md § C2). A copy drifts
 /// silently: regenerating one wheel leaves the other tests pinning the old
 /// entry points.
 #[test]
@@ -320,10 +323,10 @@ fn the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let wheel = "fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl";
     let copy = std::fs::read(root.join("tests").join(wheel)).expect("the root wheel copy is readable");
-    let original =
-        std::fs::read(root.join("crates/ocx_python/tests").join(wheel)).expect("ocx_python's wheel is readable");
+    let original = std::fs::read(root.join("external/ocx/crates/ocx_python/tests").join(wheel))
+        .expect("ocx_python's wheel in external/ocx is readable");
     assert!(
         copy == original,
-        "tests/{wheel} differs from crates/ocx_python/tests/{wheel}; re-copy it"
+        "tests/{wheel} differs from external/ocx/crates/ocx_python/tests/{wheel}; re-copy it"
     );
 }

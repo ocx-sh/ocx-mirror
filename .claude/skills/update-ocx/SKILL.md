@@ -1,6 +1,6 @@
 ---
 name: update-ocx
-description: Bump the external/ocx submodule and adopt what changed upstream. Use when asked to update, bump, or advance ocx, to move the mirror onto a new ocx release or onto upstream main, or to review what an ocx bump brings. Covers the mechanical pointer move, the drift gates (toolchain, copy-exactly dependency rows, patch table), a semantic review of the eight linked crates, consolidation of mirror code onto newly shared ocx API, and the upstream-issue cross-check.
+description: Bump the external/ocx submodule and adopt what changed upstream. Use when asked to update, bump, or advance ocx, to move the mirror onto a new ocx release or onto upstream main, or to review what an ocx bump brings. Covers the mechanical pointer move, the drift gates (toolchain, copy-exactly dependency rows, patch table), a semantic review of the nine linked crates, consolidation of mirror code onto newly shared ocx API, and the upstream-issue cross-check.
 user-invocable: true
 disable-model-invocation: true
 ---
@@ -18,7 +18,7 @@ A bump moves one of them. Never assume it moved both.
 
 | Surface | Moves when | Governs |
 |---------|-----------|---------|
-| **Linked crates** — the eight `ocx_*` path deps | the `external/ocx` pointer moves | the mirror's own compiled behaviour |
+| **Linked crates** — the nine `ocx_*` path deps | the `external/ocx` pointer moves | the mirror's own compiled behaviour |
 | **Spawned CLI** — `ocx package push/announce/description` | the `ocx.sh/ocx/cli` pin in `ocx.lock` moves, and `OCX_CONTAINER_CLI_TAG` | what the child process does, and what generated CI bakes in |
 
 Upstream `feat(...)!:` commits are almost always surface 2. They change nothing
@@ -61,7 +61,7 @@ git -C "$(git rev-parse --show-toplevel)/external/ocx" diff --stat $OLD..$NEW | 
 Then narrow to what the mirror actually links — everything else is noise:
 
 ```sh
-for c in ocx_config ocx_console ocx_exit ocx_index ocx_oci ocx_package ocx_sign ocx_util; do
+for c in ocx_config ocx_console ocx_exit ocx_index ocx_oci ocx_package ocx_python ocx_sign ocx_util; do
   echo "=== $c ==="; git -C "$(git rev-parse --show-toplevel)/external/ocx" diff --stat $OLD..$NEW -- crates/$c | tail -20
 done
 ```
@@ -70,9 +70,9 @@ Public-API delta, both directions (the second command is the one that finds
 silent breakage — a `pub` demoted to `pub(crate)`):
 
 ```sh
-git -C "$(git rev-parse --show-toplevel)/external/ocx" diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,sign,util} \
+git -C "$(git rev-parse --show-toplevel)/external/ocx" diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,python,sign,util} \
   | grep -E '^\+\s*pub (fn|struct|enum|const|trait|type|mod)' | sort -u
-git -C "$(git rev-parse --show-toplevel)/external/ocx" diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,sign,util} \
+git -C "$(git rev-parse --show-toplevel)/external/ocx" diff -U0 $OLD..$NEW -- crates/ocx_{config,console,exit,index,oci,package,python,sign,util} \
   | grep -E '^-\s*pub ' | sort -u
 ```
 
@@ -100,10 +100,8 @@ Four checks, none of which `cargo check` catches.
    `external/ocx/rust-toolchain.toml`'s. (Targets legitimately differ: ocx
    cross-builds its Windows shim, the mirror does not.)
 2. **Copy-exactly dependency rows** — for every dep shared with ocx, the
-   version and feature list in the mirror's root `Cargo.toml` **and in
-   `crates/ocx_python/Cargo.toml`** (its own rows, not inherited from the
-   workspace until phase 2) must match ocx's `[workspace.dependencies]` byte
-   for byte:
+   version and feature list in the mirror's root `Cargo.toml` must match
+   ocx's `[workspace.dependencies]` byte for byte:
    ```sh
    git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..$NEW -- Cargo.toml
    ```
@@ -124,11 +122,12 @@ Four checks, none of which `cargo check` catches.
 
 ## Phase 4 — semantic review (delegate)
 
-Split the eight crates into two groups and give each an `opus` subagent
+Split the nine crates into two groups and give each an `opus` subagent
 (CLAUDE.md model routing — this is correctness- and security-adjacent):
 
-- **config + index** — env-key surface, config/project resolution, index
-  regeneration and object retention.
+- **config + index + python** — env-key surface, config/project resolution,
+  index regeneration and object retention, PEP 751 lock parsing, wheel
+  selection/repack, env composition (and the uv rev it pins).
 - **oci + util** — registry auth store, OCI client builder and transport, TLS
   roots, file locking, atomic writes.
 
@@ -136,7 +135,7 @@ Ask each for exactly four things, with `file:line` cites:
 
 1. **Breaking changes** against the mirror's real usage. Get that list first:
    ```sh
-   grep -rhoE 'ocx_(config|console|exit|index|oci|package|sign|util)::[A-Za-z_:]+' \
+   grep -rhoE 'ocx_(config|console|exit|index|oci|package|python|sign|util)::[A-Za-z_:]+' \
      src crates --include='*.rs' | sort | uniq -c | sort -rn
    ```
 2. **New reusable pub API** — and what mirror code it would replace.

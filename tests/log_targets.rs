@@ -42,9 +42,8 @@ fn recipe() -> String {
 /// target must be `'static`, so each crate needs its own `debug!` invocation.
 macro_rules! member_targets {
     ($($target:literal),* $(,)?) => {
-        /// Every mirror crate the recipe must reach — `crates/crate_map.toml`
-        /// `[allowed]` keys minus `ocx_python`, which is not a mirror crate
-        /// and is outside the `ocx_mirror` prefix by design.
+        /// Every mirror crate the recipe must reach — the
+        /// `crates/crate_map.toml` `[allowed]` keys.
         const MEMBER_TARGETS: &[&str] = &[$($target),*];
 
         fn emit_member_events() {
@@ -170,18 +169,14 @@ fn the_target_list_names_every_mirror_crate_in_the_crate_map() {
         .and_then(toml::Value::as_table)
         .expect("crate map has an [allowed] table");
 
-    let mut expected: Vec<&str> = allowed
-        .keys()
-        .map(String::as_str)
-        .filter(|name| *name != "ocx_python")
-        .collect();
+    let mut expected: Vec<&str> = allowed.keys().map(String::as_str).collect();
     expected.sort_unstable();
     let mut listed = MEMBER_TARGETS.to_vec();
     listed.sort_unstable();
 
     assert_eq!(
         listed, expected,
-        "MEMBER_TARGETS must list every crates/crate_map.toml [allowed] key except ocx_python — \
+        "MEMBER_TARGETS must list every crates/crate_map.toml [allowed] key — \
          a crate missing here is a crate the debug recipe is not proven to reach"
     );
 }

@@ -53,11 +53,11 @@ from pygments.lexers import get_lexer_for_filename
 from pygments.token import Comment, Keyword, Name, Number, String
 from pygments.util import ClassNotFound
 
-REPO_ANCHOR = "crates/ocx_python/src/compose.rs"
+REPO_ANCHOR = "crates/crate_map.toml"
 TEMPLATE = pathlib.Path(__file__).parent / "review_surface_page.html"
 
 TIERS = {
-    "T0": ("WIRE", "mirror.yml spec / lock parsing / generated workflows — breaks other programs"),
+    "T0": ("WIRE", "mirror.yml spec / generated workflows — breaks other programs"),
     "T1": ("CLI & EXIT", "what callers type, parse and branch on"),
     "T2": ("API", "new types and changed public signatures"),
     "T3": ("LOGIC", "no contract signal — read anyway"),
@@ -70,7 +70,6 @@ PROD = {"T0", "T1", "T2", "T3"}
 
 WIRE_FILES = re.compile(
     r"src/spec/|crates/ocx_mirror_spec/src/"  # mirror.yml contract (serde, deny_unknown_fields)
-    r"|crates/ocx_python/src/lock\.rs"  # PEP 751 lock parsing
     r"|src/command/package/pipeline/generate/templates/"  # generated-workflow contract
     r"|src/junit\.rs"  # JUnit XML consumed by CI annotators
     r"|packaging/metadata\.json"

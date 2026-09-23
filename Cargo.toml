@@ -34,7 +34,7 @@ publish = false
 # is still exactly one thing: bumping the external/ocx submodule pointer. What
 # changed upstream is the shape of the surface — the single `ocx_lib` crate was
 # dissolved into responsibility-derived crates, so the pointer bump now lands
-# across the eight rows below instead of one. Each row is a surface this
+# across the nine rows below instead of one. Each row is a surface this
 # binary names directly; a crate the code stops using is a row to delete, not a
 # convenience to keep.
 #
@@ -62,11 +62,11 @@ ocx_oci = { path = "external/ocx/crates/ocx_oci" }
 ocx_package = { path = "external/ocx/crates/ocx_package" }
 ocx_sign = { path = "external/ocx/crates/ocx_sign" }
 ocx_util = { path = "external/ocx/crates/ocx_util" }
-# ocx_python is an in-workspace path dep (crates/ocx_python) — the pylock
-# translation library the `source.type: pylock`/`pypi` adapters and the env
-# pipeline call into. It is a workspace member through the `crates/*` glob
-# above, and a dependency row here like any other.
-ocx_python = { path = "crates/ocx_python" }
+# The PEP 751 lock translation library the `source.type: pylock`/`pypi`
+# adapters and the env pipeline call into. Its git-pinned `uv-*` rows live in
+# ocx's `[workspace.dependencies]` and move with the pointer; the mirror names
+# the uv types through `ocx_python::` and never re-declares them.
+ocx_python = { path = "external/ocx/crates/ocx_python" }
 # The mirror's own workspace members (`crates/ocx_mirror_*`); which may depend
 # on which is `crates/crate_map.toml`.
 ocx_mirror_error = { path = "crates/ocx_mirror_error" }
@@ -170,8 +170,8 @@ hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system
 # `thiserror` matches ocx's pin; the local error enums of the extracted crates
 # use it (adr_bazel_crate_split.md § C3).
 thiserror = "2.0.18"
-# Dev-only: `tests/workspace_structure.rs` reads member manifests as TOML. Same
-# version `crates/ocx_python` pins (copied from ocx's [workspace.dependencies]).
+# Dev-only: `tests/workspace_structure.rs` reads member manifests as TOML.
+# Copied from ocx's [workspace.dependencies].
 toml = "1.1.2"
 
 # Deny warnings for workspace members only. Cargo applies --cap-lints to

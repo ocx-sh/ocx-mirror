@@ -49,9 +49,7 @@ Checklist when bumping:
 
 - keep `rust-toolchain.toml` channel in sync with `external/ocx/rust-toolchain.toml`
 - keep the dependency feature lists in root `Cargo.toml`'s
-  `[workspace.dependencies]` **and** `crates/ocx_python/Cargo.toml`'s own
-  `[dependencies]` rows (it does not inherit the workspace table until phase 2)
-  in sync with ocx's `[workspace.dependencies]`
+  `[workspace.dependencies]` in sync with ocx's `[workspace.dependencies]`
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
 
@@ -74,30 +72,11 @@ release it pins.
 
 ## Bumping the pinned uv crates
 
-`crates/ocx_python` parses `pylock.toml`, wheel filenames, and PEP 508/440
-markers via four crates from [astral-sh/uv](https://github.com/astral-sh/uv):
-`uv-distribution-filename`, `uv-platform-tags`, `uv-pep508`, `uv-pep440`.
-These are **not published to crates.io**, so they enter as git dependencies in
-`crates/ocx_python/Cargo.toml`'s `[dependencies]`, rev-pinned (same discipline
-as the ocx submodule — never a floating range).
-
-All four share **one** `rev`. To advance:
-
-```sh
-# Pick the new commit on astral-sh/uv, then update all four rev = "…" lines
-# in Cargo.toml together (they must stay identical).
-cargo update -p uv-pep508 -p uv-pep440 -p uv-platform-tags -p uv-distribution-filename
-task verify
-```
-
-Notes:
-
-- Bump all four to the same rev in the same commit — a split rev risks
-  incompatible internal types across the parser crates.
-- `version-ranges` (from `pubgrub`) is pulled in **transitively** by
-  `uv-pep508`; it is not declared here and needs no manual bump.
-- API breakage on a bump surfaces at `cargo check -p ocx_python` — the git pin
-  freezes the surface, so review the changelog before advancing.
+`ocx_python` parses `pylock.toml`, wheel filenames, and PEP 508/440 markers via
+four git-pinned crates from [astral-sh/uv](https://github.com/astral-sh/uv).
+Their rows live in ocx's `[workspace.dependencies]` (`external/ocx/Cargo.toml`),
+not here — the mirror reaches the uv types through `ocx_python::`. A uv bump is
+therefore an ocx PR (`/ocx-upstream-pr`) followed by a submodule pointer bump.
 
 ## Mirror development against unreleased ocx changes
 
