@@ -66,6 +66,13 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
   feature (fixed provenance in test builds) so the Bazel/acceptance cache stays stable; prove the
   cache (no-change rerun fully cached; docs-only commit keeps acceptance cached; src change reruns).
   Wire `GIT_SHA_SHORT` in `generate ci` to the build info (dead `option_env!` today).
+  → done (version-cmd, 9d874c3, ADR A-11). Choices taken (owner unavailable): Bazel runs no build
+  script and reads the `__testing` placeholders from `testing_provenance.env` as `rustc_env_files`
+  (one file shared with `build.rs`); `rust:build` + harness build pass `--features __testing` (ocx
+  AM-2); rev stamp = 8-char short SHA, `unknown` without `.git`; ocx's release provenance guard
+  (`release_provenance_check.py`) not ported — `__testing = []` is a leaf nothing enables and the
+  release build passes no feature. `generate ci --check` still compares the header, so binaries of one
+  version from different commits now drift-red each other (owner call, § Owner actions).
 
 - Owner requirement added 2026-09-23 (scope of Loop 3): ocx-mirror pushes CI/test telemetry to
   otel.ocx.sh exactly like ocx — port `../ocx/.github/actions/test-telemetry/action.yml`,
@@ -119,6 +126,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
   `jsonschema:check` now `--workspace`. `release.yml` reads the version via `cargo metadata` (workspace-inherited
   version). Cross-crate `#[cfg(test)]` shortcuts inventoried (plan D-P6): retry ladder tests moved into the
   pipeline crate; root keeps two ~1 s end-to-end retry tests.
+| version-cmd 2026-09-23 | **cargo** `cargo build --release --locked` of 9d874c3 (sha256 70882adf…, real provenance `commit: 9d874c3d (clean)`): 202 / 0 / 2 (27 s); **Bazel** `//:ocx-mirror` of 9d874c3 (sha256 d668f314…, `channel: test`): 202 / 0 / 2 (28 s); skip set = baseline | `task verify` EXIT=0 at 6dc6300 (`//test:acceptance` PASSED incl. `test_version.py`) | — (not due) | fresh worktree of v0.6.2 needed `submodule update --init external/ocx` (signing fixtures read `external/ocx/test/…`); baseline env (`REGISTRY=localhost:5021` on a fresh `ocx-mirror-oracle-registry`, :5001 = sibling `test` project; `TMPDIR=~/.cache/ocx-mirror-oracle-tmp`); script `.tmp/vc/oracle/run.sh`, logs/JUnit `.tmp/vc/oracle/`; worktree test/ clean after; worktree + container removed |
 
 ## Divergences from the artifact (with reasons)
 
@@ -146,6 +154,8 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
   A-9 (ffe3563, refined 4b1f40f: exec form is `ocx exec bazel` once `ocx.toml` has the row; bootstrap restores by generated
   header + repins a stale lock; acceptance runner uses the binary behind the `@tools` launcher; widened stamp; extra acceptance
   inputs; wiring incl. `scripts:self-test`, `run: once` bootstrap, OTEL scrubbed from Bazel client calls).
+- 2026-09-23 version-cmd — A-11 (root `build.rs` provenance + `__testing`; Bazel reads the placeholders as
+  `rustc_env_files`; drift admits that one script; cache proof). A-10 was already taken by refine-finalize.
 
 ## Deferred (GitHub issues)
 
@@ -172,6 +182,17 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 
 ## Owner actions (collected; surfaced at the end)
 
+- Decide whether `generate ci --check` should ignore the `(rev …)` header stamp. Today it compares it, so two
+  builds of one version from different commits (dev builds, a local build vs the release) red each other with 65;
+  the version already made the check binary-specific. Recommended: keep (the header states which binary rendered).
+- Decide whether to port ocx's release provenance guard (`release_provenance_check.py`, byte scan for the
+  `__testing` markers before publish). Not ported: the feature is a leaf and no release path enables it.
+- File upstream (outward, owner call): ocx's `crates/ocx_cli/build.rs` bakes `VERGEN_IDEMPOTENT_OUTPUT` as the
+  commit SHA on a checkout without `.git` — vergen reports it in `add_instructions`, not `build()`, so its
+  graceful-degrade arm is dead. Mirror fix: own `fail_on_error` emitter (ADR A-11 (5)).
+- Delete the 5 GB no-`.git` probe copy the sandbox refused to `rm -rf` (tmpfs, i.e. RAM):
+  `rm -rf /tmp/claude-1000/-home-mherwig-dev-ocx-mirror/a8883046-16f8-43db-b19c-2f8d98c34f96/scratchpad/{nogit,gen}`.
+
 - Port the Grafana `repo` variable into `herwig-systems/server-hetzner1` `monitoring/grafana/dashboards/{test-time,bazel-build}.json`
   (file-provisioned, `allowUiUpdates: true` — a future file `version` bump would drop the UI edit): export with
   `curl -s -u … https://<grafana>/api/dashboards/uid/ocx-test-time | jq .dashboard` (and `ocx-bazel-build`), commit, `task git:push`.
@@ -195,7 +216,7 @@ binary; plus current suite and `/e2e-test` tier 2. Runs after phases 1, 2 and at
 | 5 | 2026-09-23 | sub-orchestrator phase2-loop | opus | Loop 2 (`ocx_python` promotion, ocx PR, pointer, oracle, e2e tier 2) | done 8e62543 (+ ledger commit); ocx-sh/ocx#503 open, green |
 | 6 | 2026-09-23 | sub-orchestrator phase3-loop | opus | Loop 3 (Bazel Linux loop, JUnit, CI bar C11, OTEL telemetry + Grafana repo filter, final oracle) | done 4b1f40f (+ ledger commit); C11 NO-GO; telemetry live |
 | 7 | 2026-09-23 | sub-orchestrator refine-finalize | opus | R (≤3 turns /hex-review + /hex-execute on whole branch) + F (/hex-finalize, mirror PR, green pipeline, Verification items) | done — [#89](https://github.com/ocx-sh/ocx-mirror/pull/89) |
-| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | pending |
+| 8 | 2026-09-23 | sub-orchestrator version-cmd | opus | `version` command + `__testing` provenance + cache proof on #89 | done 9d874c3; ADR A-11; cache proof 4/4 |
 
 ## Verification checklist (artifact § Verification + ADR § Phase plan and gates)
 
