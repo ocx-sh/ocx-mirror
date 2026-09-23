@@ -61,12 +61,15 @@ A satellite (this mirror) may take a **direct** dependency on any
 ocx crate. It must not name an internal-tier crate or `ocx_cli` in its
 manifest or its source.
 
-**The nine allowed today:** `ocx_config`, `ocx_console`, `ocx_exit`,
+**The nine linked today:** `ocx_config`, `ocx_console`, `ocx_exit`,
 `ocx_index`, `ocx_oci`, `ocx_package`, `ocx_python`, `ocx_sign`, `ocx_util`.
 `ocx_python` joined in phase 2 of `adr_bazel_crate_split.md` (an
 owner-directed exception — see Promotion below). CLAUDE.md's "Dependency
 model" section is the authoritative row list; this rule states the boundary,
-not the count.
+not the count. Linking another ecosystem-tier crate (e.g. `ocx_trust`) means
+adding it to `crates/crate_map.toml`'s `[ocx].allowed` and a CLAUDE.md
+Dependency-model row in the same commit — `tests/workspace_structure.rs`
+enforces the list.
 
 Two sanctioned transitive paths exist and do not widen the rule: `ocx_index`
 and `ocx_package` both depend on `ocx_store` (internal tier), so linking
@@ -119,8 +122,8 @@ crate (ecosystem tier), linked like the other ocx rows.
 - **Naming:** every mirror-owned crate is `ocx_mirror_*`.
 - **No upward edges.** A generic crate never depends on a mirror crate. If a
   type a generic crate needs turns out to be mirror-shaped, move the type
-  *down* into the generic crate and re-export it at the old path — never add
-  the opposite edge.
+  *down* into the generic crate; re-export it at the old path only if the old
+  path was public (ADR A-6) — never add the opposite edge.
 - **Generic crates carry no `MirrorError` and no spec type** —
   `adr_bazel_crate_split.md` § C3, quoted exactly: **E1** `ocx_mirror_http`
   (`http`, `auth`), `ocx_mirror_report` and, in `ocx_mirror_source`,

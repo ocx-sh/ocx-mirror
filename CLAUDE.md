@@ -38,7 +38,7 @@ document the four-line job, let them own the pipeline.
 | `MODULE.bazel` (+ `.lock`), `.bazelrc`, `.bazelversion` | Bazel module (Linux dev loop only; release and non-Linux stay cargo). Third-party crates come from `Cargo.toml`/`Cargo.lock` via `crate.from_cargo`; the generated `Cargo.bazel.lock.json` is gitignored |
 | `BUILD.bazel`, `crates/*/BUILD.bazel`, `test/BUILD.bazel` | Hand-written Bazel packages (root lib/bin + tests, the seven crates, the acceptance suite as one `sh_test`); `bazel:build:drift` keeps their edges equal to Cargo's |
 | `crates/TEST_TARGET_MAP.toml` | Per-target Bazel test counts (rise only) + `[[excluded]]` cases Bazel skips and nextest runs |
-| `scripts/` | Gate tooling: `bazel_test_floor.py`, `bazel_build_drift.py`, `bazel_cache_check.py`, `bep_to_otlp.py` (each has `--self-test`; `task scripts:self-test` runs all four) |
+| `scripts/` | Gate tooling: `bazel_test_floor.py`, `bazel_build_drift.py`, `bazel_cache_check.py`, `bep_to_otlp.py`, `bazel_scoped.py` (each has `--self-test`; `task scripts:self-test` runs all five) |
 | `scripts/test_telemetry_names.py` | pytest (not `--self-test`) for the telemetry names + never-fail contract; `task telemetry:self-test` |
 | `test/bazel_accept.sh` | The `//test:acceptance` `sh_test` runner: points the harness at the Bazel-built `ocx-mirror` and the pinned `ocx`, then `pytest -n auto` |
 | `.github/actions/test-telemetry/` | Composite action pushing a JUnit report's timings to otel.ocx.sh from CI (the `push` task's CI half) |
@@ -191,9 +191,12 @@ Dev cycle: `/commit` (working phase, rolling Checkpoints) →
 model → [workflow-git.md](./.claude/rules/workflow-git.md).
 
 > The ported AI-config surface (skills, agents, most rules) is plain copies
-> from ocx; mirror-native files (`subsystem-mirror.md`, `meta-plan-status.md`,
-> `meta-ai-config.md`, `.claude/artifacts/`) are owned here.
+> from ocx; mirror-native files (`subsystem-mirror.md`, `crate-placement.md`,
+> `security-threat-model.md`, `meta-plan-status.md`, `meta-ai-config.md`,
+> `skills/{e2e-test,update-ocx,ocx-upstream-pr}/`, `hooks/`,
+> `.claude/artifacts/`) are owned here.
 > [meta-ai-config.md](./.claude/rules/meta-ai-config.md) governs the port /
 > re-sync protocol and the adaptation list — register any new port in this file
-> the same commit it lands. Grimoire-package distribution is a planned
-> follow-up; until then keep ported edits upstream-compatible.
+> the same commit it lands. Grimoire-package distribution of the ocx-ported
+> surface is a planned follow-up; the lore bundles in `grimoire.toml` are
+> already grimoire-managed.

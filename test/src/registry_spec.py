@@ -1,7 +1,7 @@
 """Builds `registry.yml` (`RegistrySpec`) documents for `registry sync` acceptance tests.
 
 Ground truth for field names: `RegistrySpec`/`RegistrySource` in
-`src/spec/registry.rs`. Written as JSON, not hand-rolled YAML text — YAML 1.2
+`crates/ocx_mirror_spec/src/registry.rs`. Written as JSON, not hand-rolled YAML text — YAML 1.2
 is a superset of JSON, `serde_yaml_ng` (the parser `load_registry_spec` uses)
 reads it unchanged, and `json.dumps` needs no new test dependency and cannot
 mis-escape a value the way a hand-rolled emitter could.

@@ -10,8 +10,9 @@ upstream [ocx](https://github.com/ocx-sh/ocx)** and kept upstream-compatible so 
 stay clean diffs. A small set of files are **mirror-native** and owned here. Load on any
 `.claude/**` edit.
 
-> No grimoire-package distribution yet (see CLAUDE.md). Ports are manual, diff-reviewed
-> copies. This rule is the sync protocol until that lands.
+> Grimoire-package distribution of the ocx-ported surface is a planned follow-up (see
+> CLAUDE.md); the lore bundles in `grimoire.toml` are already grimoire-managed. Ports are
+> manual, diff-reviewed copies. This rule is the sync protocol until that lands.
 
 ## Surface Inventory
 
@@ -71,6 +72,10 @@ is also not ported — the mirror has no doc-authoring swarm role.)
    `task claude:tests` / `test_ai_config.py`. Also strip a ported file's references to
    ocx's own hooks: `.claude/hooks/` exists here, but it is the mirror-native guard
    (`pre_tool_use_guard.py`), not a port of anything ocx ships.
+7. **Test-runner naming** — never name a specific underlying test runner (e.g. "cargo
+   nextest") in a ported file's prose; name only the `task <target>` the mirror runs.
+   Since `adr_bazel_crate_split.md` § C8, `task rust:test:unit` dispatches to Bazel on
+   Linux and nextest elsewhere — a hardcoded runner name goes stale on half the matrix.
 
 Anything beyond this list is divergence. If a change is genuinely mirror-specific, put it
 in a mirror-native file — never bolt it onto a port.

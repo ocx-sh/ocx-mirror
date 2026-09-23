@@ -37,7 +37,7 @@ Fire at attention even when rules don't auto-load:
 ## Before Any Writes
 
 1. Grep existing helpers (`crates/ocx_mirror_pipeline/`, `crates/ocx_mirror_spec/`, `crates/ocx_mirror_source/`) and check what ocx's `ocx_*` crates (path deps into `external/ocx`) already provide before new code. Extend existing utilities; no workarounds.
-2. Never edit files under `external/ocx` — vendored read-only submodule.
+2. Never edit files under `external/ocx` — vendored read-only submodule, except under `/ocx-upstream-pr` on a submodule feature branch.
 
 ## Task Runner
 
