@@ -50,8 +50,8 @@ changing the generated-workflow surface.
 
 | Marker | Tier impact |
 |---|---|
-| New top-level module under `src/` | → **max** (new subsystem surface) |
-| `src/command/pipeline/generate/templates/**` | → **max** if changed (generated workflow surface ships to every downstream mirror repo) |
+| New top-level module under `src/` or new crate under `crates/` | → **max** (new subsystem surface) |
+| `src/command/package/pipeline/generate/templates/**` | → **max** if changed (generated workflow surface ships to every downstream mirror repo) |
 | `.github/workflows/**` changes | Adds `--breadth=full` minimum; security review required |
 | `crates/ocx_mirror_pipeline/src/verify*`, checksum handling | Adds `--breadth=full`; `--codex` auto-on at high (integrity-sensitive) |
 | `crates/ocx_mirror_pipeline/src/push*`, cascade tag logic | Adds `--breadth=adversarial` at high+ (cascade-order correctness) |
@@ -140,7 +140,7 @@ reviewing release-cut → let default baseline expand scope.
    confident.
 3. `/swarm-review 143` where PR #143 has labels
    `breaking-change` + `enhancement`, touches
-   `src/command/pipeline/generate/templates/`
+   `src/command/package/pipeline/generate/templates/`
    → tier=**max**, `--breadth=adversarial`, `--codex=on`, confident.
 4. `/swarm-review --base=v0.5.0` on branch 30 commits ahead
    → tier=**max** by metrics, meta-plan gate fires (max auto-fires

@@ -69,7 +69,7 @@ ORDER = ["T0", "T1", "T2", "T3", "T4", "T5", "T6"]
 PROD = {"T0", "T1", "T2", "T3"}
 
 WIRE_FILES = re.compile(
-    r"src/spec/|crates/ocx_mirror_spec/src/"  # mirror.yml contract (serde, deny_unknown_fields)
+    r"crates/ocx_mirror_spec/src/"  # mirror.yml contract (serde, deny_unknown_fields)
     r"|src/command/package/pipeline/generate/templates/"  # generated-workflow contract
     r"|src/junit\.rs"  # JUnit XML consumed by CI annotators
     r"|packaging/metadata\.json"

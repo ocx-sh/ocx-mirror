@@ -33,10 +33,11 @@ publish = false
 # easy-to-maintain pattern ocx itself uses for its vendored forks. Bumping ocx
 # is still exactly one thing: bumping the external/ocx submodule pointer. What
 # changed upstream is the shape of the surface — the single `ocx_lib` crate was
-# dissolved into responsibility-derived crates, so the pointer bump now lands
-# across the nine rows below instead of one. Each row is a surface this
-# binary names directly; a crate the code stops using is a row to delete, not a
-# convenience to keep.
+# dissolved into eight responsibility-derived crates, so the pointer bump now
+# lands across those eight rows instead of one, plus a ninth row (`ocx_python`,
+# a phase-2 promotion — see its own comment below — not a piece of the
+# `ocx_lib` dissolution). Each row is a surface this binary names directly; a
+# crate the code stops using is a row to delete, not a convenience to keep.
 #
 # Every row is an **ecosystem**- or **interface**-tier crate in ocx's
 # stability table (`ocx`'s CLAUDE.md; `ocx_exit` is the interface one). An
@@ -236,7 +237,8 @@ workspace = true
 # docker_credential via [patch.crates-io] in the ocx workspace. Patch tables
 # only apply at the consuming workspace root — they do NOT travel with path or
 # git dependencies — so they are re-declared here, pointing into the nested
-# submodules of external/ocx. Requires `git submodule update --init --recursive`.
+# submodules of external/ocx. Requires
+# `git -C "$(git rev-parse --show-toplevel)/external/ocx" submodule update --init --recursive`.
 #
 # Invariant: the fork versions must keep satisfying ocx's requirements
 # (oci-client "0.17", docker_credential "1.3", sigstore "0.14"). A drift surfaces as a hard

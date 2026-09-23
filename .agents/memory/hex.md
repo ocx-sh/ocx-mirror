@@ -18,11 +18,11 @@ preferences, not copies. Team-shared — commit it.
   (users, comparable tools, research keywords).
 - Key rules: `.claude/rules/subsystem-mirror.md` (module map, pipeline
   phases, spec format, error model); `CLAUDE.md` › "Dependency model" —
-  `external/ocx` submodule is read-only, `[patch.crates-io]` table must
-  never be dropped.
+  `external/ocx` submodule is read-only (except under `/ocx-upstream-pr` on a
+  submodule feature branch), `[patch.crates-io]` table must never be dropped.
 - Worktrees: default `.agents/worktrees/` (gitignored).
 - Constitution: none.
-- Federation: `ocx` → `../ocx` (`https://github.com/ocx-sh/ocx.git`); verification documented in its `CLAUDE.md` › "Build & Development" — `task verify`. Satellite for plan `mirror-signing`; the vendored `external/ocx` submodule stays read-only and is consumed by pointer bump.
+- Federation: `ocx` → `../ocx` (`https://github.com/ocx-sh/ocx.git`); verification documented in its `CLAUDE.md` › "Build & Development" — `task verify`. Satellite for plan `mirror-signing`; the vendored `external/ocx` submodule stays read-only (except under `/ocx-upstream-pr` on a submodule feature branch) and is consumed by pointer bump.
 - Discussions: `.agents/discussions/<slug>.md` (hex-discuss artifacts; `State:` header is the hex-state signal).
 
 ## Preferences
@@ -54,7 +54,8 @@ research-axes:
 - Discussion hand-off 2026-09-22: `.agents/discussions/bazel-crate-split.md`
   → architect (`handed-off → architect`), consumed by an autonomous `/goal` (prompt in the
   artifact's `## Goal prompt`; run ledger `.agents/goal/bazel-crate-split.md`). Decisions: phases
-  AI config → crate split → promote `ocx_python` to ocx (submodule-authored PR, run squash-merges)
+  AI config → crate split → promote `ocx_python` to ocx (submodule-authored PR, run squash-merges
+  — superseded by ADR A-2/C6.3: landing is an owner action)
   → Bazel (local loop mandatory, CI swap only on a pre-declared measured bar); oracle = `test/` at
   `v0.6.2` unmodified via `OCX_MIRROR_COMMAND`. Research:
   `.claude/artifacts/research_bazel_crate_split_lessons.md`.

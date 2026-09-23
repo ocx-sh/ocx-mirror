@@ -14,7 +14,7 @@ commands with `ocx exec --`). Tasks run through [Task](https://taskfile.dev):
 |---|---|
 | `task` | Fast check: format, clippy, `cargo check` |
 | `task rust:verify` | Loop gate: format, clippy, unit tests |
-| `task verify` | Full gate: lint, licenses, release build, Bazel gates, unit, coverage and acceptance tests |
+| `task verify` | Full gate: lint, licenses, release build, unit and acceptance tests; on Linux also the Bazel static gates and the coverage gate |
 | `task test:parallel` | Acceptance suite under cargo (needs Docker for the local registry) |
 | `task docs:serve` | This site, locally |
 

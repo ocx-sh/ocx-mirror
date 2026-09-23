@@ -25,6 +25,7 @@ Use Glob to find top-level modules:
 - `crates/ocx_mirror_error/**/*.rs` — `MirrorError` variants and exit-code mappings
 - `crates/ocx_mirror_http/**/*.rs` — HTTP client factory, TLS roots, retry, credentials
 - `crates/ocx_mirror_report/**/*.rs` — JUnit, run-summary.json, Discord webhook
+- `crates/ocx_mirror_test_support/**/*.rs` — dev-only shared test env-lock helpers
 
 Cross-check against the module map in `.claude/rules/subsystem-mirror.md`. Each relevant module: read root `.rs` file, note public types, key traits, re-exports.
 
@@ -34,6 +35,7 @@ Feature area being designed:
 - Grep `use crate::` in module → find dependencies
 - Grep `use crate::{module}` across crate → find dependents
 - Note `ocx_*` usage (path deps into `external/ocx`) — what the vendored crates already provide
+- Grep `ocx_mirror_<crate>::` across `src/` and `crates/` for cross-crate dependents; allowed edges are `crates/crate_map.toml`
 - Map dependency graph for subsystem
 
 ### 3. Design Pattern Detection

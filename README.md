@@ -41,6 +41,7 @@ The `ocx_*` crates are not published — their version is whatever the submodule
 points at. To advance:
 
 ```sh
+OLD=$(git ls-tree HEAD external/ocx | awk '{print $3}')         # for the Bazel-pin diff below
 git -C "$(git rev-parse --show-toplevel)/external/ocx" fetch origin && git -C "$(git rev-parse --show-toplevel)/external/ocx" checkout origin/main
 git -C "$(git rev-parse --show-toplevel)/external/ocx" submodule update --init --recursive   # nested fork submodules
 cargo check                                               # refreshes Cargo.lock
@@ -57,6 +58,12 @@ Checklist when bumping:
   `[workspace.dependencies]` in sync with ocx's `[workspace.dependencies]`
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
+  (`task bazel:patch:check` asserts the same binding in `Cargo.bazel.lock.json`)
+- keep the Bazel pins copied from ocx in sync: `rules_rust`, `rules_shell`,
+  `buildifier_prebuilt` `bazel_dep` versions, the `rules_ocx` `git_override`
+  commit, and `.bazelversion` / `ocx.toml`'s bazel tag against
+  `external/ocx/MODULE.bazel` and `external/ocx/.bazelversion`
+  (`git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..HEAD -- MODULE.bazel .bazelversion ocx.toml`)
 
 When the bump raises the `ocx` floor (a new subcommand or flag the mirror
 spawns), the pinned `ocx` moves with it, in four places:
@@ -67,7 +74,7 @@ spawns), the pinned `ocx` moves with it, in four places:
   (the `setup-ocx` version every generated workflow bakes in), then regenerate
   the golden fixtures under `tests/golden/`
 - the `setup-ocx` `version:` steps in `.github/workflows/verify.yml`
-  (acceptance tests, Bazel graph)
+  (acceptance tests, Bazel graph) and `.github/workflows/oci-publish.yml`
 - the floor prose in `.claude/rules/subsystem-mirror.md` and
   `docs/reference/environment.md`
 
