@@ -12,6 +12,7 @@ use ocx_console::DataInterface;
 use ocx_console::progress::ProgressManager;
 
 use crate::error::MirrorError;
+use crate::pipeline::options::OutputFormat;
 
 #[derive(clap::Subcommand)]
 pub enum Command {
@@ -37,6 +38,34 @@ pub enum Command {
 }
 
 impl Command {
+    /// Folds the root `--format` / `--json` into the chosen command.
+    ///
+    /// The root group is the documented spelling (ocx's, from `ocx_console`);
+    /// the per-command `--format` flags predate it and keep working byte for
+    /// byte. Where both are given, JSON wins if either asks for it — a
+    /// defaulted per-command flag cannot tell `plain` typed from `plain`
+    /// assumed. An absent root flag changes nothing.
+    pub fn apply_format(&mut self, global: Option<ocx_console::FormatMode>) {
+        let Some(global) = global.map(|mode| match mode {
+            ocx_console::FormatMode::Json => OutputFormat::Json,
+            ocx_console::FormatMode::Plain => OutputFormat::Plain,
+        }) else {
+            return;
+        };
+        match self {
+            Self::Package(cmd) => cmd.apply_format(global),
+            Self::Registry(registry::RegistryCommand::Sync(cmd)) => {
+                cmd.options.format = with_global(cmd.options.format, global);
+            }
+            Self::Dist(dist::DistCommand::Sync(cmd)) => {
+                cmd.options.format = with_global(cmd.options.format, global);
+            }
+            #[cfg(feature = "jsonschema")]
+            Self::Schema(_) => {}
+            Self::Version(cmd) => cmd.format = Some(global),
+        }
+    }
+
     pub async fn execute(&self, printer: &DataInterface, progress: &ProgressManager) -> Result<(), MirrorError> {
         match self {
             Self::Package(cmd) => cmd.execute(printer, progress).await,
@@ -48,3 +77,16 @@ impl Command {
         }
     }
 }
+
+/// A defaulted per-command `--format` under a root `--format`: JSON if either
+/// asks for it.
+fn with_global(own: OutputFormat, global: OutputFormat) -> OutputFormat {
+    match global {
+        OutputFormat::Json => OutputFormat::Json,
+        OutputFormat::Plain => own,
+    }
+}
+
+#[cfg(test)]
+#[path = "command/tests.rs"]
+mod tests;

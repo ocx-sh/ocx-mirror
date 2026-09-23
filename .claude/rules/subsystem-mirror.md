@@ -19,8 +19,8 @@ Authority for which crate may depend on which is `crates/crate_map.toml` (enforc
 
 | Path | Purpose |
 |------|---------|
-| `command.rs` | Top-level `Command` dispatcher: `Package` / `Registry` / `Dist` (subcommand groups) + `Version` + `Schema` — `url-index` \| `dist` \| `plan`, behind the `jsonschema` feature; threads printer + progress |
-| `command/version.rs` | `version [--verbose] [--format]` — copy of ocx's `version` command and its `VersionData`/verbose rendering; plain prints the bare version token |
+| `command.rs` | Top-level `Command` dispatcher: `Package` / `Registry` / `Dist` (subcommand groups) + `Version` + `Schema` — `url-index` \| `dist` \| `plan`, behind the `jsonschema` feature; threads printer + progress. `apply_format` folds the root `--format`/`--json` (`ocx_console::Format`) into each command's own format — JSON if either asks for it |
+| `command/version.rs` | `version [--verbose]` (JSON via the root `--json`/`--format json`, `ocx_console::Format`, folded in by `Command::apply_format`) — copy of ocx's `version` command and its `VersionData`/verbose rendering; plain prints the bare version token |
 | `build_info.rs` | Compile-time provenance (`Provenance`, `version()`, `short_sha()`) — copy of ocx's `app::build_info`. Fed by the root `build.rs` (vergen-gix), so it must stay in the root package: `option_env!` sees only the owning package's `rustc-env`. Under `__testing` (and in every Bazel build, via `rustc_env_files`) the values are the fixed placeholders of `testing_provenance.env`. `short_sha()` is also `generate ci`'s `{OCX_MIRROR_REV}` |
 | `command/package/mod.rs` | `PackageCommand` dispatcher: routes sync/check/validate/pipeline |
 | `command/registry/mod.rs` | `RegistryCommand` dispatcher for `ocx-mirror registry <verb>` — currently just `Sync`; sibling to `command/package`, wired into the top-level `Command::Registry` arm |

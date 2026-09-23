@@ -10,7 +10,7 @@
 //! release channel. Every field is [`Option`] because a tarball checkout
 //! without `.git/` or a local `cargo build` outside CI cannot populate the
 //! missing piece, and an absent field must omit cleanly from
-//! `ocx-mirror version --format json`.
+//! `ocx-mirror --json version`.
 //!
 //! Every value here is `option_env!()` — resolved at compile time. None of
 //! these accessors read the runtime environment.

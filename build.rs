@@ -22,7 +22,7 @@
 //!
 //! All groups are best-effort: if the source env var is absent at build
 //! time, the corresponding compile-time `option_env!()` resolves to `None`
-//! and the binary omits the field from `ocx-mirror version --format json`.
+//! and the binary omits the field from `ocx-mirror --json version`.
 //!
 //! ## Test builds (`--features __testing`)
 //!

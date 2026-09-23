@@ -70,6 +70,30 @@ pub enum PipelineCommand {
 }
 
 impl PipelineCommand {
+    pub fn apply_format(&mut self, global: crate::pipeline::options::OutputFormat) {
+        use crate::pipeline::options::OutputFormat;
+        match self {
+            // `plan` has a default of its own (JSON under GitHub Actions), so
+            // an explicit root `--format plain` also switches that off.
+            Self::Plan(cmd) => {
+                cmd.format = match (cmd.format, global) {
+                    (Some(OutputFormat::Json), _) | (_, OutputFormat::Json) => Some(OutputFormat::Json),
+                    (_, OutputFormat::Plain) => Some(cmd.format.unwrap_or(OutputFormat::Plain)),
+                };
+            }
+            Self::Sign(cmd) => cmd.format = crate::command::with_global(cmd.format, global),
+            // `generate ci --format` is parsed but read by nothing.
+            Self::Generate(_)
+            | Self::Prepare(_)
+            | Self::Push(_)
+            | Self::Notify(_)
+            | Self::Describe(_)
+            | Self::Announce(_)
+            | Self::Patch(_)
+            | Self::Cascade(_) => {}
+        }
+    }
+
     pub async fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
         match self {
             Self::Generate(cmd) => match cmd {

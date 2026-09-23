@@ -8,6 +8,10 @@
 |------|--------|-------------|
 | `--log-level <LEVEL>` | `trace`, `debug`, `info`, `warn`, `error` | Log verbosity (default: `info`) |
 | `--color <WHEN>` | `auto`, `always`, `never` | When to use ANSI colors in output (default: `auto`) |
+| `--format <FORMAT>` | `plain`, `json` | Output format for stdout reports (default: `plain`); goes **before** the subcommand, as in `ocx` |
+| `--json` | — | Shorthand for `--format json`; combined with `--format`, the last one wins |
+
+`--format` / `--json` is the same option group `ocx` has (`ocx_console::Format`), so `ocx-mirror --json version` reads like `ocx --json version`. Several commands also take a `--format` of their own after the subcommand (`package sync`, `package check`, `package pipeline plan`, `package pipeline sign`, `registry sync`, `dist sync`); those keep working unchanged. When both are given, the output is JSON if either asks for it. `package pipeline plan`, which prints JSON under GitHub Actions by default, prints plain under an explicit root `--format plain`.
 
 When `--log-level` is omitted, verbosity comes from the first of `OCX_LOG_CONSOLE`, `OCX_LOG`, `RUST_LOG` that is set, and from `info` when none is. Those accept full [`tracing` filter directives][tracing-filter], so `RUST_LOG=info,ocx_mirror=debug,reqwest=trace` narrows the noise to the legs you are debugging — which is what to reach for when a fetch fails and the error alone does not say why. Passing `--log-level` explicitly overrides all three. Log targets are per crate (`ocx_mirror_pipeline::…`, `ocx_mirror_spec::…`, and so on), and the `ocx_mirror` prefix used above matches all of them by string prefix; a module-scoped directive instead must name the owning crate, e.g. `ocx_mirror_pipeline::registry_sync=debug`, not `ocx_mirror::pipeline::registry_sync=debug`. Log lines do not print their target (the console formatter runs `with_target(false)`), so read module names from the source tree (`crates/<crate>/src/<module>`).
 
@@ -67,16 +71,17 @@ ocx-mirror schema <TARGET>
 
 ## `version` {#version}
 
-Print the `ocx-mirror` version, and with `--verbose` or `--format json` the build provenance baked into the binary.
+Print the `ocx-mirror` version, and with `--verbose` or the root [`--json`](#global-flags) the build provenance baked into the binary.
 
 ```sh
-ocx-mirror version [--verbose] [--format <FMT>]
+ocx-mirror [--json | --format <FORMAT>] version [--verbose]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-v`, `--verbose` | off | Plain output only: add `host:`, `commit:`, `built:`/`target:`/`rustc:` and `ci:` rows for the provenance the build recorded |
-| `--format <FMT>` | `plain` | `plain` prints the bare version token (one line, for scripts); `json` prints the document below, identical with or without `--verbose` |
+
+Plain output is the bare version token (one line, for scripts). `ocx-mirror --json version` prints the document below, identical with or without `--verbose`. `version` has no `--format` of its own.
 
 ```json
 {
