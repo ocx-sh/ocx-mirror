@@ -37,6 +37,12 @@ jobs:
   smoke:
     name: Smoke (Linux)
     runs-on: ubuntu-latest
+    env:
+      # Test telemetry (adr_bazel_crate_split.md § A-8): whether the credential
+      # exists, for the push step's `if:` — `secrets` is not a context `if:`
+      # can see. False on a fork PR, and the push skips rather than fails. The
+      # credential itself is that step's `env:` alone, never the whole job's.
+      OTEL_ON: ${{ secrets.OTEL_OTLP_AUTH != '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -91,7 +97,9 @@ jobs:
       - name: Build
         run: task rust:build
       - name: Test
-        run: task rust:test:unit -- --profile ci
+        # nextest by name: `rust:test:unit` dispatches to Bazel on Linux, and
+        # CI's unit lane stays cargo (adr_bazel_crate_split.md § C8, C11).
+        run: task rust:test:nextest -- --profile ci
       - name: Upload Binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -121,6 +129,17 @@ jobs:
         with:
           files: target/nextest/ci/junit.xml
           check_name: "Unit Test Results"
+      - name: Push unit test timings
+        if: ${{ !cancelled() && env.OTEL_ON == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        env:
+          # The composite action reads it from the environment.
+          OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+        with:
+          junit: target/nextest/ci/junit.xml
+          suite: unit
       - name: Check lint results
         if: ${{ !cancelled() }}
         run: |
@@ -133,6 +152,9 @@ jobs:
     name: Acceptance Tests
     needs: smoke
     runs-on: ubuntu-latest
+    env:
+      # Test telemetry, for `Push acceptance test timings` — see `smoke`.
+      OTEL_ON: ${{ secrets.OTEL_OTLP_AUTH != '' }}
     services:
       registry:
         image: registry:2
@@ -176,6 +198,8 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Telemetry self-test
+        run: task telemetry:self-test
       - name: Run Acceptance Tests
         run: task test:parallel -- --junit-xml=results/junit.xml
         env:
@@ -207,3 +231,67 @@ jobs:
         with:
           files: test/results/junit.xml
           check_name: "Acceptance Test Results"
+      - name: Push acceptance test timings
+        if: ${{ !cancelled() && env.OTEL_ON == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: ./.github/actions/test-telemetry
+        env:
+          OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+        with:
+          junit: test/results/junit.xml
+          suite: acceptance
+
+  bazel-graph:
+    # adr_bazel_crate_split.md § C8 "Light CI job": keeps the Bazel graph from
+    # rotting under either C11 verdict. Analysis only — no compile, no test;
+    # the unit and acceptance lanes above stay cargo.
+    name: Bazel graph (Linux)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The [patch.crates-io] forks live in external/ocx's own submodules;
+          # crate_universe splices them from there (`bazel:patch:check`).
+          submodules: recursive
+      - name: Setup OCX
+        # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command.
+        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
+        with:
+          version: "0.6.2"
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Bazel repository cache
+        # Analysis fetches every @crates source and the git_override clone;
+        # the repository cache (and the repo contents cache under it) makes a
+        # warm run local. Keyed on the two lockfiles that decide its contents.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ocx-mirror/bazel-repo
+          key: bazel-repo-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock', 'Cargo.lock') }}
+          restore-keys: bazel-repo-${{ runner.os }}-
+      - name: Gate script self-tests
+        # Python only; CI does not run `task verify`, so the five gate scripts'
+        # self-tests would otherwise run on developer machines alone.
+        run: task scripts:self-test
+      - name: Bazel static gates
+        # No explicit bazel:bootstrap: every Bazel gate below runs it, and
+        # `run: once` makes that one bootstrap per invocation.
+        run: task bazel:pin:check bazel:lint bazel:mod:check bazel:patch:check bazel:build:drift JOBS=auto
+      # Per-target analysis timings to otel.ocx.sh are pushed from inside this
+      # step, by `telemetry:bazel` at the tail of `bazel:build:nobuild`. The
+      # BEP holds the whole client environment, so it lives in a 0700 mktemp
+      # outside the workspace, removed by a `defer:`; there is no file for a
+      # separate step to read. The endpoint is empty on a fork PR, which is the
+      # whole guard (`telemetry:bazel` exits 0 silently with no endpoint) — no
+      # `if:`, since this step is a gate. The credential is a step `env:`
+      # entry, never interpolated into `run:`, and the taskfile's `{{.BAZEL}}`
+      # drops it from the Bazel client environment (the BEP, repository rules).
+      - name: Bazel graph loads
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: ${{ secrets.OTEL_OTLP_AUTH != '' && 'https://otel.ocx.sh' || '' }}
+          OTEL_EXPORTER_OTLP_HEADERS: Authorization=${{ secrets.OTEL_OTLP_AUTH }}
+        run: task bazel:build:nobuild JOBS=auto
