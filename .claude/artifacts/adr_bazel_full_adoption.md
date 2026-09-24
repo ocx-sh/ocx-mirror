@@ -8,7 +8,7 @@
 **GitHub Issue:** N/A (goal run)
 **Related Design Spec:** N/A — ocx's `adr_bazel_build_adoption.md` is the design this copies
 **Stack Alignment:**
-- [x] Bazel 9.2.0 + rules_rust 0.74.0 as before; one new ruleset, rules_python 2.3.4 (docs site only — see C4)
+- [x] Bazel 9.2.0 + rules_rust 0.74.0 as before (patched for the Windows host — C5); rules_python 2.3.4 (docs site, release provenance — C4, C5); the release legs add `hermetic_cc_toolchain` 4.3.0 (musl) and `apple_support` 1.24.2 (darwin) — C5
 **Domain Tags:** ci | docs
 **Supersedes:** `adr_bazel_crate_split.md` § C11 (the CI lane-swap bar) and the NO-GO it produced in `measurement_bazel_ci_lane.md`
 **Superseded By:** N/A
@@ -116,6 +116,49 @@ arms of `task rust:lint` / `rust:verify` / `verify`. What moved:
   CI log shows it). `ocx package create` accepts both. build-matrix.yml smokes every artifact
   (`task release:smoke`); `build-check.yml` runs the matrix on pull requests with channel `check`.
 
+**C5 amended again — darwin and windows moved too; no release leg builds with cargo** (phases M and W,
+owner: everything under Bazel). Same task, same `//release:provenance`, one native runner per OS family:
+- **darwin:** `macos-latest` (arm64) builds both triples through `ocx exec bazel`; `apple_support` 1.24.2
+  registers the Apple clang toolchains (`//platforms` carries its `apple`/`device` constraints). The
+  task passes rustc's deployment targets as `--macos_minimum_os` (10.12 x86_64, 11.0 arm64 — unset, the
+  toolchain targets the runner's SDK) and `--features=-link_libc++` (the binary holds no C++; the
+  toolchain's `-lc++` added a load command cargo never had). x86_64 is smoked under Rosetta.
+- **windows:** `windows-latest` (x64) builds both triples with rules_cc's MSVC toolchains (`x64`,
+  `x64_arm64`) from the runner's Visual Studio — msvc ABI and dynamic CRT, as cargo-xwin built them. A
+  `rust.repository_set` adds rustc for aarch64 on the x64 exec; `smoke-windows-arm64` smokes the arm64
+  binary on `windows-11-arm`. Output root `C:/b` (MAX_PATH), `core.autocrlf false` (the templates ship
+  LF), `MSYS_NO_PATHCONV` (Git Bash rewrote `//platforms:…`). What the Windows host needed besides:
+  - `single_version_override` of rules_rust 0.74.0 with two patches under `release/`: crate_universe
+    for path dependencies on a Windows host (`/D:/…` package ids, `\` in a rendered Starlark string, a
+    bare `find` that is System32's find.exe), and one `-Ldependency` directory per Rustc action in the
+    process wrapper. rustc puts every search path on PATH before loading proc macros; ocx_config's 350
+    paths are 32488 characters, and past 32767 `LoadLibraryExW` fails with os error 8, reported as
+    E0463 ([rust-lang/rust#110889](https://github.com/rust-lang/rust/issues/110889),
+    [bazelbuild/rules_rust#3767](https://github.com/bazelbuild/rules_rust/issues/3767)). The wrapper's
+    BUILD selects a patched copy of `main.rs` on Windows only: any byte of `main.rs` re-keys every
+    Linux Rustc action (measured: 511 of 1080 test-lane keys moved).
+  - The Windows repin runs the patched cargo-bazel, built from source; its `CARGO_BAZEL_GENERATOR_*`
+    variables are set on that one command, or the build re-evaluates the crate extension, renders over
+    external/ocx and stamps the binary dirty.
+  - Crate annotations, per triple (`annotation_select`, so no host key moves): aws-lc-sys compiles with
+    Visual Studio's clang-cl on aarch64 (MSVC `cl` ignores `.S`, D9027); octocrab's build script gets
+    `CARGO_HOME` under `bazel-out` (its `cargo metadata` otherwise climbs to the execroot's
+    Cargo.toml).
+  - `BAZEL_WIN32_WINNT` emptied: rules_cc compiles C with `/D_WIN32_WINNT=0x0601`, and aws-lc took its
+    Windows 7 path — an extra `bcrypt.dll!BCryptGenRandom` import cargo's SDK default never had.
+- **Provenance action portable:** Python on rules_python's exec interpreter
+  (`release/provenance_env.py`) instead of `sed`; the Linux env file and binary are byte-identical.
+- **crate_universe:** both darwin and both windows triples in `supported_platform_triples`.
+- **Host keys unchanged:** execution-log keys of the test, clippy and rustfmt lanes before and after:
+  test 1079 of 1080 identical (the one: `bep_to_otlp_self_test`, whose declared input
+  `bazel.taskfile.yml` changed), clippy 1056 of 1056, rustfmt 31 of 31.
+- **Parity** with the cargo artifacts (build-check run 35942522657), in `.tmp/bazel-full/release-parity.md`:
+  darwin load commands byte-identical (8 images), same minos/SDK; windows DLL lists identical (18
+  x86_64, 17 aarch64); sizes within 1.4 %; `--json version` the same key set, equal where the value is
+  not per run; `ocx package create` accepts every artifact. Bazel runs: darwin
+  [35947180548](https://github.com/ocx-sh/ocx-mirror/actions/runs/35947180548), windows
+  [35980500812](https://github.com/ocx-sh/ocx-mirror/actions/runs/35980500812).
+
 ## Deviations from ocx
 
 | Mirror | ocx | Why |
@@ -130,22 +173,21 @@ arms of `task rust:lint` / `rust:verify` / `verify`. What moved:
 | fmt, clippy, jsonschema check as Bazel lanes (aspects, `*_jsonschema` variants) | cargo steps in `verify-basic.yml` ("Check formatting", "Clippy"), `schema:generate` on cargo | C1: a cargo step re-compiles every run (C5) |
 | Clippy/rustfmt scope = first-party targets | `cargo fmt --all` also checks the path dependencies; ocx's own crates are its members | the vendored ocx crates are ocx's to lint and format |
 | `cargo metadata` for the drift gate via the Bazel toolchain | ocx's `bazel_build_drift.py` calls the host cargo | no host Rust toolchain in the CI job |
+| Release builds (musl, darwin, windows) through `task bazel:build:release` | `release.yml` builds with cargo, no Bazel | owner: everything under Bazel (C5, amended twice) |
+| rules_rust 0.74.0 under `single_version_override` with two `release/` patches | rules_rust unpatched | Windows host: crate_universe path dependencies; the process wrapper's `-Ldependency` PATH overflow (upstream issues named in C5) |
+| `apple_support` 1.24.2 | no Apple toolchain module | the darwin legs' Apple clang toolchains |
+| Crate annotations for aws-lc-sys (aarch64 windows) and octocrab (windows) | none | clang-cl for aws-lc's assembly; `cargo metadata` in octocrab's build script |
 
-**The one explicit exception — release and cross-platform builds stay on cargo** (`build-matrix.yml`,
-`release.yml`), as ocx's (`release.yml` has no Bazel; its darwin/windows legs keep nextest, ADR § Stage 2
-ruling 1). They run on tags and manual dev deploys, never in `Verify`, so they do not touch the C1 bar.
-**Owner decision** whether to port them. Cost of porting: six targets (musl x86_64/aarch64, darwin
-x86_64/aarch64, windows-msvc x86_64/aarch64) need a hermetic C toolchain per target
-(`hermetic_cc_toolchain`/zig or `toolchains_llvm` + sysroots — one new ruleset), a macOS SDK story
-(macOS runners running Bazel, or an osxcross sysroot) and an MSVC/xwin SDK under Bazel (no maintained
-ruleset equivalent to `cargo xwin`); plus `build.rs`'s real provenance (git SHA, timestamps, CI run)
-as `--workspace_status_command` stamping on an uncacheable path — ocx's stamping ruling. Estimate:
-several days, with Windows the riskiest leg; none of it is ported in ocx to copy.
+**No release exception is left.** An earlier revision kept release and cross-platform builds on cargo
+(`build-matrix.yml`, `release.yml`) as ocx does. Phases L, M and W moved all six targets (C5 amendments):
+musl on Linux with zig, darwin on a macOS runner, windows-msvc on a Windows runner. What still runs
+cargo: the macOS/Windows arms of `task rust:lint` / `rust:verify` / `verify` (a developer on those hosts),
+and `release.yml`'s `cargo metadata` version read — a manifest read, no compile.
 
 ## Consequences
 
 - `verify.yml` runs no cargo and sets up no Rust toolchain; `Smoke (Linux)` replaces `acceptance-tests`
-  and `bazel-graph`. Only `build-matrix.yml` / `release.yml` build with cargo (C5).
+  and `bazel-graph`. No workflow compiles with cargo; every release binary is a Bazel build (C5).
 - A cache outage degrades to a cold build (timeout 30 s, 2 retries), never a red.
 - Residual acceptance under-declaration, stated plainly: running containers' state and mutable image tags
   (`registry:2`, tag-pinned images in ocx's compose file) are not in the key. Bounded by the host-wide flock
