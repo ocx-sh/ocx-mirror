@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-use ocx_oci::Identifier;
+use ocx_oci::PackageRef;
 use ocx_oci::ssrf::host_is_trusted;
 use serde::Deserialize;
 use url::{Host, Url};
@@ -195,7 +195,7 @@ impl RegistrySpec {
     /// lands under, so a prefix the OCI grammar would reject must fail here,
     /// at spec load, rather than half way through a multi-hour copy.
     fn validate_target(&self, errors: &mut Vec<String>) {
-        if let Err(error) = Identifier::validate_repository(&self.target.repository) {
+        if let Err(error) = PackageRef::validate_repository(&self.target.repository) {
             errors.push(format!(
                 "target.repository: '{}' is not a legal OCI repository path: {}",
                 self.target.repository, error.kind
@@ -211,7 +211,7 @@ impl RegistrySpec {
         // (`ghcr.io/ocx-contrib`) parses perfectly well — it just silently
         // moves that segment into the repository, which is why the parsed
         // registry has to be compared back against the configured one.
-        match Identifier::parse_with_default_registry(&self.target.reference(), &self.target.registry) {
+        match PackageRef::parse_with_default_registry(&self.target.reference(), &self.target.registry) {
             Ok(identifier) if identifier.registry() == self.target.registry => {}
             Ok(identifier) => errors.push(format!(
                 "target.registry: '{}' is not a bare registry host — '{}' parses with registry '{}'",
@@ -358,7 +358,7 @@ fn as_name_error(as_name: &str) -> Option<String> {
     if as_name.contains('/') {
         return Some("a path separator makes it more than one component".to_string());
     }
-    Identifier::validate_repository(as_name)
+    PackageRef::validate_repository(as_name)
         .err()
         .map(|error| error.kind.to_string())
 }

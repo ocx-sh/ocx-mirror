@@ -100,7 +100,7 @@ impl Sign {
             )));
         };
 
-        let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+        let identifier = ocx_oci::OciIdentifier::from_parts(&spec.target.repository, &spec.target.registry);
         let publisher = Publisher::new(crate::command::package::registry_client()?);
 
         // Fail-safe, exactly as discover is (issue #157): only an

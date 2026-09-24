@@ -26,7 +26,7 @@ use ocx_oci::client::error::ClientError;
 use ocx_oci::client::{PUSH_CHUNK_SIZE, REGISTRY_CONNECT_TIMEOUT, REGISTRY_READ_TIMEOUT};
 use ocx_oci::native::oci_client::client::BlobMountResponse;
 use ocx_oci::native::oci_client::errors::{OciDistributionError, OciErrorCode};
-use ocx_oci::{Descriptor, Digest, Identifier, ImageIndexEntry, Manifest, Reference, native};
+use ocx_oci::{Descriptor, Digest, ImageIndexEntry, Manifest, PackageRef, Reference, native};
 use tokio::sync::{Mutex, OnceCell, Semaphore};
 
 use ocx_mirror_error::MirrorError;
@@ -1174,8 +1174,8 @@ where
 ///
 /// `new_registry` adopts both halves verbatim — no parsing, so a repository
 /// this crate already validated is not re-decomposed here.
-fn source_identifier(reference: &Reference) -> Identifier {
-    Identifier::new_registry(reference.repository(), reference.registry())
+fn source_identifier(reference: &Reference) -> PackageRef {
+    PackageRef::new_registry(reference.repository(), reference.registry())
 }
 
 /// The same repository as `reference`, addressed by `digest`.

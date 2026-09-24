@@ -640,7 +640,7 @@ async fn an_unchanged_source_is_skipped_right_after_its_own_publish() {
 
     let local = store
         .read_root_uncatalogued(AS_NAME, PACKAGE, |root| {
-            parse_physical_repository(&root.repository).map(|_| ())
+            parse_repository_pointer(&root.repository).map(|_| ())
         })
         .await
         .expect("read the published root")

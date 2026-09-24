@@ -43,8 +43,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ocx_index::{
-    CatalogIndex, IndexFormatConfig, IndexRoot, RegenerateOutcome, SUPPORTED_FORMAT_VERSION, parse_physical_repository,
-    regenerate_catalog, serialize_config, serialize_root,
+    CatalogIndex, IndexFormatConfig, IndexRoot, RegenerateOutcome, SUPPORTED_FORMAT_VERSION, regenerate_catalog,
+    serialize_config, serialize_root,
 };
 use ocx_index::{CatalogTransaction, IndexStore, RootReadResult, SOURCE_LOCK_TIMEOUT};
 use ocx_oci::manifest::validate_image_index;
@@ -250,10 +250,10 @@ fn root_tags<'document>(
 /// Uses `CatalogTransaction::write_root` — **not** the bare
 /// `write_root_document`: it writes the bytes atomically *and* upserts the
 /// derived catalog entry under the one held lock. The `repository_check` hook
-/// is `parse_physical_repository`, the same one ocx's own published-root writer
-/// passes; a no-op `|_| Ok(())` hook is forbidden, because it discards the one
-/// cheap guarantee that a rewrite producing an unparseable pointer fails at the
-/// write rather than shipping.
+/// is [`super::parse_repository_pointer`], the same check ocx's own
+/// published-root writer runs; a no-op `|_| Ok(())` hook is forbidden, because
+/// it discards the one cheap guarantee that a rewrite producing an unparseable
+/// pointer fails at the write rather than shipping.
 ///
 /// **The transaction is per package, not per run** — upstream's own contract
 /// says all network work must happen before it is opened, and a per-package
@@ -266,7 +266,7 @@ fn root_tags<'document>(
 /// # Errors
 ///
 /// [`MirrorError::IndexWriteError`] (exit 74) for an I/O failure or a pointer
-/// that fails `parse_physical_repository`.
+/// that fails [`super::parse_repository_pointer`].
 pub async fn write_root(
     transaction: &mut CatalogTransaction<'_>,
     repository: &str,
@@ -274,7 +274,7 @@ pub async fn write_root(
 ) -> Result<(), MirrorError> {
     transaction
         .write_root(repository, rewritten, |root| {
-            parse_physical_repository(&root.repository).map(|_| ())
+            super::parse_repository_pointer(&root.repository).map(|_| ())
         })
         .await
         .map_err(|error| {

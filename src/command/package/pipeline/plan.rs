@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use futures::stream::{self, StreamExt, TryStreamExt};
 use ocx_console::DataInterface;
-use ocx_oci::{Algorithm, Architecture, Identifier, OperatingSystem, Platform};
+use ocx_oci::{Algorithm, Architecture, OciIdentifier, OperatingSystem, Platform};
 use ocx_package::metadata::Metadata;
 use ocx_package::publisher::Publisher;
 use ocx_package::version::Version;
@@ -296,7 +296,7 @@ async fn build_plan_report(
     // Build target identifier for registry queries.
     let client = crate::command::package::registry_client()?;
     let publisher = Publisher::new(client);
-    let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let identifier = OciIdentifier::from_parts(&spec.target.repository, &spec.target.registry);
 
     // Fetch existing tags from the target registry to build the platform map.
     // Fail-safe (issue #157): only an authoritative "repository not found"

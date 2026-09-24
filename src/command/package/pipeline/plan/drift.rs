@@ -26,7 +26,7 @@ use super::*;
 /// picked up on the following run, once it is fully published.
 pub async fn detect_metadata_drift(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     spec: &MirrorSpec,
     spec_dir: &Path,
     all_tags: &[String],
@@ -148,7 +148,7 @@ pub async fn detect_metadata_drift(
 /// unadopted one and deleting the claim.
 pub async fn image_drift(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     image: &PublishedImage,
     expected: &ExpectedMetadata,
     bin_scan: BinScanMode,

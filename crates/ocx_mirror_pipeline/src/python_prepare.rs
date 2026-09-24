@@ -349,10 +349,11 @@ async fn prepare_env_task(
     let composition = ocx_python::compose_env(&spec, &repacked)
         .map_err(|e| MirrorError::PylockError(format!("env composition failed: {e}")))?;
 
-    // The tag identifier — the registry host enters here (D: single seam).
-    let identifier = ocx_oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
-        .clone_with_tag(&task.normalized_version);
-    let info = composition.into_info(identifier);
+    // No tag identifier is minted here any more: `Info` carries no identifier
+    // (ocx#504's type split), and the push target — `target_ref` — is built
+    // independently at the push leg (`command::package::pipeline::push`) from
+    // `spec.target` and the version. Composing one here would be dead code.
+    let info = composition.into_info();
 
     // No libc lint on this leg — deliberately, not by omission. The archive
     // path runs `ocx_package::libc_lint::check_declared_libc` between

@@ -452,10 +452,10 @@ fn the_pointer_round_trips_through_the_parser_every_consumer_uses() {
             wire_pointer(&target, physical).unwrap_or_else(|error| panic!("`{registry}/{physical}`: {error}"));
         assert_eq!(pointer, format!("oci://{registry}/{physical}"));
 
-        let (host, path) = parse_physical_repository(&pointer)
+        let location = OciIdentifier::parse_repository_pointer(&pointer)
             .unwrap_or_else(|error| panic!("the pointer this function returned must re-parse: {error}"));
-        assert_eq!(host, *registry);
-        assert_eq!(path, *physical);
+        assert_eq!(location.registry(), *registry);
+        assert_eq!(location.repository(), *physical);
     }
 }
 

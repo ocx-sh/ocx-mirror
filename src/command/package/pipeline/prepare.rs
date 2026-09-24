@@ -272,7 +272,7 @@ async fn build_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
+    interpreter_candidates: &[(ocx_oci::PackageRef, ocx_oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
     let path = match &spec.source {
@@ -316,7 +316,7 @@ fn build_env_tasks_from_lock(
     version: &str,
     lock: &ocx_python::Pylock,
     app_version: &str,
-    interpreter_candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
+    interpreter_candidates: &[(ocx_oci::PackageRef, ocx_oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
 ) -> Result<Vec<WheelEnvTask>, MirrorError> {
     // `--version` names either the bare source version — the standalone path,
@@ -444,7 +444,7 @@ async fn build_pypi_env_tasks(
     spec: &MirrorSpec,
     spec_dir: &std::path::Path,
     version: &str,
-    interpreter_candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
+    interpreter_candidates: &[(ocx_oci::PackageRef, ocx_oci::Platform)],
     allowed_platforms: Option<&std::collections::HashSet<String>>,
     plan_path: Option<&std::path::Path>,
     work_dir: &std::path::Path,
@@ -598,8 +598,8 @@ async fn resolve_pypi_app_version(
 async fn fetch_interpreter_candidates(
     interpreter_package: &str,
     client: &ocx_oci::Client,
-) -> Result<Vec<(ocx_oci::Identifier, ocx_oci::Platform)>, MirrorError> {
-    let identifier = ocx_oci::Identifier::parse(interpreter_package).map_err(|e| {
+) -> Result<Vec<(ocx_oci::PackageRef, ocx_oci::Platform)>, MirrorError> {
+    let identifier = ocx_oci::PackageRef::parse(interpreter_package).map_err(|e| {
         MirrorError::PylockError(format!(
             "invalid interpreter package reference '{interpreter_package}': {e}"
         ))
@@ -631,7 +631,7 @@ async fn fetch_interpreter_candidates(
 /// leaf a leg depends on.
 fn select_interpreter_pin(
     interpreter_package: &str,
-    candidates: &[(ocx_oci::Identifier, ocx_oci::Platform)],
+    candidates: &[(ocx_oci::PackageRef, ocx_oci::Platform)],
     platform: &ocx_oci::Platform,
 ) -> Result<ocx_package::metadata::dependency::Dependency, MirrorError> {
     let winner = match ocx_oci::select_best(platform, candidates) {
@@ -652,7 +652,7 @@ fn select_interpreter_pin(
             )));
         }
     };
-    let pinned = ocx_oci::PinnedIdentifier::try_from(winner)
+    let pinned = ocx_oci::PinnedPackageRef::try_from(winner)
         .map_err(|e| MirrorError::TargetError(format!("interpreter identifier not pinnable: {e}")))?;
     Ok(ocx_package::metadata::dependency::Dependency {
         identifier: pinned,

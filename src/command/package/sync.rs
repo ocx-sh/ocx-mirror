@@ -49,7 +49,7 @@ impl Sync {
         // firewall-blocked origin — the anti-goal replace semantics prevent).
         let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
-        let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+        let identifier = ocx_oci::OciIdentifier::from_parts(&spec.target.repository, &spec.target.registry);
         log::debug!("[{}] Fetching existing tags from {}", spec.name, identifier);
         // Fail-safe (issue #157): only an authoritative "repository not found"
         // (first publish) yields an empty list; any other failure aborts so

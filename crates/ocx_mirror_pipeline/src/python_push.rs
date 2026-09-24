@@ -22,7 +22,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use ocx_oci::Identifier;
+use ocx_oci::OciIdentifier;
 use ocx_package::publisher::Publisher;
 
 use super::python_prepare::{EnvLayer, EnvManifest};
@@ -312,7 +312,7 @@ async fn wheel_tag_exists(
     wheel_repository: &str,
     wheel_sha256: &str,
 ) -> Result<bool, ocx_mirror_error::MirrorError> {
-    let identifier = Identifier::new_registry(wheel_repository, registry);
+    let identifier = OciIdentifier::from_parts(wheel_repository, registry);
     let tags = target_registry::list_target_tags(publisher, &identifier).await?;
     Ok(tags.iter().any(|tag| tag == wheel_sha256))
 }

@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use ocx_oci::client::error::ClientError;
-use ocx_oci::{Descriptor, Digest, Identifier, ImageManifest, PinnedIdentifier, Platform};
+use ocx_oci::{Descriptor, Digest, ImageManifest, OciIdentifier, PinnedOciIdentifier, Platform};
 use ocx_package::error::Error as PackageError;
 use ocx_package::metadata::Metadata;
 use ocx_package::publisher::Publisher;
@@ -40,7 +40,7 @@ pub(crate) fn extract_platforms(manifest: &ocx_oci::Manifest) -> Vec<Platform> {
 /// An authoritative "repository not found" (first publish of a new mirror)
 /// yields an empty list. Any other error aborts with
 /// [`MirrorError::TargetError`].
-pub async fn list_target_tags(publisher: &Publisher, identifier: &Identifier) -> Result<Vec<String>, MirrorError> {
+pub async fn list_target_tags(publisher: &Publisher, identifier: &OciIdentifier) -> Result<Vec<String>, MirrorError> {
     tags_from_result(publisher.list_tags(identifier.clone()).await, identifier)
 }
 
@@ -51,7 +51,7 @@ pub async fn list_target_tags(publisher: &Publisher, identifier: &Identifier) ->
 /// [`MirrorError::TargetError`].
 pub async fn fetch_published_platforms(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     tags: &[&str],
 ) -> Result<BTreeMap<Version, HashSet<Platform>>, MirrorError> {
     let mut platform_info: BTreeMap<Version, HashSet<Platform>> = BTreeMap::new();
@@ -103,7 +103,7 @@ pub struct PublishedImage {
 /// hop, aborts with [`MirrorError::TargetError`].
 pub async fn fetch_published_images(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     tags: &[&str],
 ) -> Result<Vec<PublishedImage>, MirrorError> {
     let mut images = Vec::new();
@@ -134,7 +134,7 @@ pub async fn fetch_published_images(
 /// republish every version of every mirror the moment the format moved.
 pub async fn fetch_published_metadata(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     image: &PublishedImage,
 ) -> Result<Metadata, MirrorError> {
     let config_digest = Digest::try_from(&image.config.digest).map_err(|error| {
@@ -153,8 +153,8 @@ pub async fn fetch_published_metadata(
 /// The tag is dropped first: an identifier carrying both would address the
 /// tag, and the digest-addressed fetch would silently read whatever the tag
 /// currently points at.
-fn pinned(identifier: &Identifier, digest: Digest) -> Result<PinnedIdentifier, MirrorError> {
-    PinnedIdentifier::try_from(identifier.without_tag().clone_with_digest(digest))
+fn pinned(identifier: &OciIdentifier, digest: Digest) -> Result<PinnedOciIdentifier, MirrorError> {
+    PinnedOciIdentifier::try_from(identifier.without_tag().clone_with_digest(digest))
         .map_err(|error| MirrorError::TargetError(format!("failed to pin {identifier}: {error}")))
 }
 
@@ -234,7 +234,7 @@ fn parse_metadata(
 /// Classifies a `list_tags` result — fail-safe (issue #157).
 fn tags_from_result(
     result: std::result::Result<Vec<String>, PackageError>,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
 ) -> Result<Vec<String>, MirrorError> {
     match result {
         Ok(tags) => Ok(tags),
@@ -287,7 +287,7 @@ fn merge_manifest_result(
 /// green run over content nothing signed.
 pub async fn fetch_signing_subjects(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     tags: &[&str],
 ) -> Result<Vec<crate::sign_backfill::PublishedTag>, MirrorError> {
     let mut published = Vec::new();
@@ -393,8 +393,8 @@ mod tests {
     // turned transient registry failures into "nothing published", re-flagging
     // published versions as New and re-pointing their tags on push.
 
-    fn identifier() -> Identifier {
-        Identifier::new_registry("mirror/cmake", "registry.test")
+    fn identifier() -> OciIdentifier {
+        OciIdentifier::from_parts("mirror/cmake", "registry.test")
     }
 
     fn transient_error() -> ClientError {
