@@ -1,0 +1,146 @@
+diff --git a/util/process_wrapper/ldeps.rs b/util/process_wrapper/ldeps.rs
+new file mode 100644
+index 0000000..602c9e4
+--- /dev/null
++++ b/util/process_wrapper/ldeps.rs
+@@ -0,0 +1,109 @@
++// Windows only (`#[cfg(windows)] mod ldeps;` in main.rs): one
++// `-Ldependency` directory per action instead of one per transitive crate.
++//
++// Before expanding macros, rustc on Windows prepends every search path to
++// `PATH` so proc-macro DLLs find their dependencies
++// (rust-lang/rust#110889). Past 32767 characters `LoadLibraryExW` fails
++// with os error 8, the proc macro does not load, and every crate whose
++// metadata names one reports E0463 "can't find crate"
++// (bazelbuild/rules_rust#3767). Hard-linking the crate files of all
++// dependency directories into one directory keeps `PATH` short. Every
++// line main.rs gains shares a line with existing code, so non-Windows
++// builds of this binary are byte-identical to upstream's.
++
++use std::collections::HashSet;
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++use crate::ProcessWrapperError;
++
++/// The consolidated directories; removed when dropped.
++pub(crate) struct LdepDirs(Vec<PathBuf>);
++
++impl Drop for LdepDirs {
++    fn drop(&mut self) {
++        for dir in &self.0 {
++            let _ = fs::remove_dir_all(dir);
++        }
++    }
++}
++
++/// The files rustc's crate locator reads from a dependency search path.
++const CRATE_EXTENSIONS: [&str; 3] = ["rlib", "rmeta", "dll"];
++
++/// Rewrites every `@param-file` among the child arguments in place.
++pub(crate) fn consolidate(child_arguments: &[String]) -> Result<LdepDirs, ProcessWrapperError> {
++    let mut dirs = Vec::new();
++    for arg in child_arguments {
++        if let Some(param_file) = arg.strip_prefix('@') {
++            if let Some(dir) = rewrite(param_file)? {
++                dirs.push(dir);
++            }
++        }
++    }
++    Ok(LdepDirs(dirs))
++}
++
++fn rewrite(param_file: &str) -> Result<Option<PathBuf>, ProcessWrapperError> {
++    let err = |what: &str, path: &Path, e: io::Error| {
++        ProcessWrapperError(format!("{what} {}: {e}", path.display()))
++    };
++    let content = fs::read_to_string(param_file)
++        .map_err(|e| err("unable to read", Path::new(param_file), e))?;
++    // One argument per line, as rustc reads it; every other line is kept
++    // byte for byte.
++    let mut search_dirs = Vec::new();
++    let mut kept = String::with_capacity(content.len());
++    let mut lines = content.split_inclusive('\n').peekable();
++    while let Some(line) = lines.next() {
++        let arg = line.trim_end_matches(['\r', '\n']);
++        if let Some(dir) = arg.strip_prefix("-Ldependency=") {
++            search_dirs.push(dir.to_owned());
++        } else if let Some(dir) = (arg == "-L")
++            .then(|| lines.peek().and_then(|next| next.strip_prefix("dependency=")))
++            .flatten()
++        {
++            search_dirs.push(dir.trim_end_matches(['\r', '\n']).to_owned());
++            lines.next();
++        } else {
++            kept.push_str(line);
++        }
++    }
++    if search_dirs.len() < 2 {
++        return Ok(None);
++    }
++    let unified = PathBuf::from(format!("{param_file}.ldeps"));
++    // A leftover from an interrupted run holds links to stale files.
++    let _ = fs::remove_dir_all(&unified);
++    fs::create_dir_all(&unified).map_err(|e| err("unable to create", &unified, e))?;
++    let mut seen = HashSet::new();
++    for dir in &search_dirs {
++        let dir = Path::new(dir);
++        for entry in fs::read_dir(dir).map_err(|e| err("unable to read", dir, e))? {
++            let path = entry.map_err(|e| err("unable to read", dir, e))?.path();
++            let is_crate = path
++                .extension()
++                .and_then(|ext| ext.to_str())
++                .is_some_and(|ext| CRATE_EXTENSIONS.contains(&ext));
++            let Some(name) = path.file_name().filter(|_| is_crate && path.is_file()) else {
++                continue;
++            };
++            // Crate file names carry a hash; the first directory wins,
++            // as rustc's own search order would.
++            if !seen.insert(name.to_ascii_lowercase()) {
++                continue;
++            }
++            let dest = unified.join(name);
++            if fs::hard_link(&path, &dest).is_err() {
++                fs::copy(&path, &dest).map_err(|e| err("unable to copy", &path, e))?;
++            }
++        }
++    }
++    if !kept.is_empty() && !kept.ends_with('\n') {
++        kept.push('\n');
++    }
++    kept.push_str(&format!("-Ldependency={}\n", unified.display()));
++    fs::write(param_file, kept).map_err(|e| err("unable to rewrite", Path::new(param_file), e))?;
++    Ok(Some(unified))
++}
+diff --git a/util/process_wrapper/main.rs b/util/process_wrapper/main.rs
+index 39a6d6d..6cdefb0 100644
+--- a/util/process_wrapper/main.rs
++++ b/util/process_wrapper/main.rs
+@@ -16,7 +16,7 @@ mod flags;
+ mod options;
+ mod output;
+ mod rustc;
+-mod util;
++mod util; #[cfg(windows)] mod ldeps;
+ 
+ use std::collections::HashMap;
+ use std::fmt;
+@@ -118,7 +118,7 @@ fn process_line(
+ }
+ 
+ fn main() -> Result<(), ProcessWrapperError> {
+-    let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
++    let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?; #[cfg(windows)] let ldep_dirs = ldeps::consolidate(&opts.child_arguments)?;
+ 
+     let mut command = Command::new(opts.executable);
+     command
+@@ -228,7 +228,7 @@ fn main() -> Result<(), ProcessWrapperError> {
+         }
+     }
+ 
+-    exit(code)
++    #[cfg(windows)] drop(ldep_dirs); exit(code)
+ }
+ 
+ #[cfg(test)]
