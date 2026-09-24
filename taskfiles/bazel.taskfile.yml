@@ -158,8 +158,9 @@ tasks:
             # the repin runs the patched one, built from source. Later
             # evaluations render from the lockfile, which parses no path.
             if [ '{{OS}}' = windows ]; then
-              {{.BAZEL}} build --jobs={{.JOBS}} @rules_rust//crate_universe:bin
-              gen='{{.ROOT_DIR | toSlash}}'/$({{.BAZEL}} cquery --output=files @rules_rust//crate_universe:bin)
+              # fastbuild: a tool that runs once per repin and never ships.
+              {{.BAZEL}} build --jobs={{.JOBS}} -c fastbuild @rules_rust//crate_universe:bin
+              gen='{{.ROOT_DIR | toSlash}}'/$({{.BAZEL}} cquery -c fastbuild --output=files @rules_rust//crate_universe:bin)
               export CARGO_BAZEL_GENERATOR_URL="file:///$gen"
               CARGO_BAZEL_GENERATOR_SHA256=$(sha256sum "$gen" | cut -d' ' -f1)
               export CARGO_BAZEL_GENERATOR_SHA256
