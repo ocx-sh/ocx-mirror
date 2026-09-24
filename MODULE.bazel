@@ -29,9 +29,10 @@ bazel_dep(name = "rules_rust", version = "0.74.0")
 # search path on PATH, and past 32767 characters no proc macro loads
 # (rust-lang/rust#110889; ocx_config's 350 paths are 32488 characters, run
 # 35964215210: `LoadLibraryExW failed ... (os error 8)`, reported as E0463).
-# The change is `#[cfg(windows)]` on lines main.rs already has, so the Linux
-# process wrapper compiles to the same bytes: its own Rustc action re-keys,
-# no action that runs it does.
+# The wrapper's BUILD selects a patched copy of main.rs (`main_windows.rs`)
+# on Windows only; every other host compiles the upstream sources in an
+# unchanged action. Not a `#[cfg(windows)]` edit of main.rs: any byte of
+# main.rs changes the Linux binary, and with it every Rustc key.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
