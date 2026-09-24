@@ -3,6 +3,12 @@ name: Docs
 # Build the mkdocs-material site and deploy to GitHub Pages via the
 # artifact-based deploy-pages flow (no gh-pages branch, OIDC, Pages
 # environment protection applies). Repo setting: Pages → Source = "GitHub Actions".
+#
+# The site is the Bazel target `//docs:site` (docs/BUILD.bazel): hermetic and
+# remote-cacheable: when `verify.yml`'s main-push run (started by the same
+# push) has uploaded it first, this build is a cache hit; otherwise it builds
+# the site itself, a few seconds, with the same bytes. This workflow only READS the shared cache — the one write
+# lane is verify.yml's.
 
 on:
   push:
@@ -12,6 +18,11 @@ on:
       - "mkdocs.yml"
       - "CHANGELOG.md"
       - ".github/workflows/docs.yml"
+      # The site is `//docs:site` (docs/BUILD.bazel): the pins that decide its
+      # interpreter and wheels, and the task that builds it.
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - "taskfiles/docs.taskfile.yml"
   workflow_dispatch:
 
 permissions:
@@ -30,10 +41,43 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+          # Naming mkdocs.yml/CHANGELOG.md loads the root package, which loads
+          # @crates; `bazel:bootstrap` splices it from the path deps in
+          # external/ocx and the [patch.crates-io] forks in its submodules.
+          submodules: recursive
+      - name: Setup OCX
+        # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command.
+        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
+        with:
+          version: "0.6.2"
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Bazel repository cache
+        # The interpreter, the locked wheels and the @crates sources; keyed on
+        # the lockfiles that decide them.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ocx-mirror/bazel-repo
+          key: bazel-repo-${{ runner.os }}-${{ hashFiles('MODULE.bazel.lock', 'Cargo.lock', 'docs/requirements.lock') }}
+          restore-keys: bazel-repo-${{ runner.os }}-
+      # Read-only on every trigger: this workflow never writes the cache, so
+      # it binds the read credential alone (a fork has no secrets, the action
+      # writes nothing, and the build reads anonymously).
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      # No lld step: the site graph compiles and links nothing (aquery over
+      # //docs:site holds no C++ or Rust action), so no linker reaches a key.
       - name: Build
-        run: uv run --with mkdocs-material mkdocs build --strict
+        run: task docs:build JOBS=auto -- --config=ci
+      # A composite action has no `post:` hook; `always()` so a failed or
+      # cancelled job leaves no credential on the runner.
+      - name: Remove the Bazel cache credential
+        if: always()
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          cleanup: 'true'
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4.0.0
         with:

@@ -59,6 +59,9 @@ jobs:
     with:
       version_semver: ${{ needs.compute-version.outputs.version_semver }}
       channel: dev
+    # Read-only: the Linux legs' Bazel build reads the shared cache.
+    secrets:
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
 
   publish:
     name: Publish to dev.ocx.sh
