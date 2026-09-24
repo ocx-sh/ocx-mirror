@@ -10,17 +10,22 @@
 
 version: '3'
 
+# `DOCS_`-prefixed: go-task (3.53) resolves a variable that two included
+# taskfiles both declare against the wrong file. Measured while these were
+# plain JOBS/BAZEL/CACHE_RC, the names taskfiles/bazel.taskfile.yml declares:
+# its `{{.BAZEL}}` rendered without its CACHE_RC, so every Bazel lane of CI
+# but `docs:build` met the shared cache as an anonymous `401 Unauthorized`.
 vars:
-  JOBS: '{{.JOBS | default "6"}}'
+  DOCS_JOBS: '{{.JOBS | default "6"}}'
   # Same client-env scrub as taskfiles/bazel.taskfile.yml's `{{.BAZEL}}`: the
   # telemetry credential must not reach the BEP or a repository rule.
-  BAZEL: env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT ocx exec bazel -- bazel
+  DOCS_BAZEL: env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT ocx exec bazel -- bazel
   # The shared cache's CI credential (`.github/actions/bazel-cache-rc`), as a
   # startup `--bazelrc`, or nothing. Derived from the file existing — a fork PR
   # and a developer shell have none, and `--bazelrc` naming a missing file is a
   # hard error (ocx taskfiles/bazel.taskfile.yml `CACHE_RC`, which also
   # records why this is `printf '%s'` and not `printf --`).
-  CACHE_RC:
+  DOCS_CACHE_RC:
     sh: test -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" && printf '%s' "--bazelrc=$RUNNER_TEMP/bazel-cache.rc" || true
 
 tasks:
@@ -29,7 +34,7 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - task: :bazel:bootstrap
-      - '{{.BAZEL}} run --jobs={{.JOBS}} //docs:mkdocs -- serve {{.CLI_ARGS}}'
+      - '{{.DOCS_BAZEL}} run --jobs={{.DOCS_JOBS}} //docs:mkdocs -- serve {{.CLI_ARGS}}'
 
   build:
     desc: Build the site with Bazel (//docs:site, mkdocs --strict) and unpack it into site/ — extra Bazel flags after --
@@ -42,7 +47,7 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - task: :bazel:bootstrap
-      - '{{.BAZEL}} {{.CACHE_RC}} build --jobs={{.JOBS}} {{.CLI_ARGS}} --remote_download_outputs=toplevel //docs:site'
+      - '{{.DOCS_BAZEL}} {{.DOCS_CACHE_RC}} build --jobs={{.DOCS_JOBS}} {{.CLI_ARGS}} --remote_download_outputs=toplevel //docs:site'
       - rm -rf site && mkdir site && tar -xf bazel-bin/docs/site.tar -C site
 
   lint:links:
