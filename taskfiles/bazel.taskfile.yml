@@ -128,7 +128,8 @@ tasks:
           for p in $(subs); do
             [ -e "$O/$p/.git" ] || continue
             ex=$(git -C "$O/$p" rev-parse --git-path info/exclude)
-            case "$ex" in /*) ;; *) ex="$O/$p/$ex" ;; esac
+            # Absolute as `/…`, or `D:/…` from a Windows git.
+            case "$ex" in /* | [A-Za-z]:*) ;; *) ex="$O/$p/$ex" ;; esac
             mkdir -p "$(dirname "$ex")"
             grep -qxF 'BUILD.bazel' "$ex" 2>/dev/null || echo 'BUILD.bazel' >> "$ex"
           done
@@ -194,7 +195,9 @@ tasks:
       carries rustc's own deployment target (10.12 on x86_64, 11.0 on
       arm64) as `--macos_minimum_os`: left unset, the Apple toolchain would
       compile and link for the runner's SDK version, a newer macOS floor
-      than the cargo build had.
+      than the cargo build had. And without its `link_libc++` feature: the
+      binary holds no C++, and the toolchain's `-lc++` added a libc++ load
+      command the cargo build never had (measured, run 35945119348).
 
       Never a cached lane: the provenance action is `no-remote-cache`, and no
       release caller passes the upload grant. The compiles it does not feed
@@ -211,9 +214,10 @@ tasks:
         --platforms=//platforms:{{.TARGET}}
         --experimental_platform_in_output_dir=yes
         --define=ocx_mirror_provenance=release
-        '--workspace_status_command={{.PYTHON}} release/workspace_status.py'
+        '--workspace_status_command=python3 release/workspace_status.py'
         {{if eq .TARGET "x86_64-apple-darwin"}}--macos_minimum_os=10.12{{end}}
         {{if eq .TARGET "aarch64-apple-darwin"}}--macos_minimum_os=11.0{{end}}
+        {{if contains "apple-darwin" .TARGET}}--features=-link_libc++{{end}}
       OUT: '{{.ROOT_DIR}}/target/bazel/release/ocx-mirror-{{.TARGET}}{{if contains "windows" .TARGET}}.exe{{end}}'
     cmds:
       - task: bootstrap

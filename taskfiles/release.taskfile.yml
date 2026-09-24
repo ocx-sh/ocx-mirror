@@ -123,7 +123,7 @@ tasks:
       plain=$("${run[@]}" version)
       json=$("${run[@]}" --json version)
       echo "$json"
-      {{.PYTHON}} - "$plain" "$json" '{{.TARGET}}' '{{.CHANNEL}}' '{{.VERSION}}' '{{.SHA}}' <<'EOF'
+      python3 - "$plain" "$json" '{{.TARGET}}' '{{.CHANNEL}}' '{{.VERSION}}' '{{.SHA}}' <<'EOF'
       import json, os, sys
       plain, raw, target, channel, version, sha = sys.argv[1:]
       data = json.loads(raw)
@@ -164,7 +164,7 @@ tasks:
             exit 1
           fi ;;
         *-windows-*)
-          {{.PYTHON}} - "$bin" <<'EOF'
+          python3 - "$bin" <<'EOF'
       import os, struct, sys
       data = open(sys.argv[1], "rb").read()
       pe = struct.unpack_from("<I", data, 0x3C)[0]

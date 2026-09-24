@@ -4,10 +4,6 @@ version: '3'
 
 vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
-  # The host interpreter for the release tasks that run on a Windows runner
-  # too (bazel:build:release's workspace status, release:smoke): its Python
-  # answers to `python` alone.
-  PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
 
 includes:
   rust: ./taskfiles/rust.taskfile.yml
