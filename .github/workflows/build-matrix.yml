@@ -233,12 +233,6 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: task bazel:build:release TARGET="$TARGET" JOBS=auto
-      - name: DEBUG tree state
-        if: always()
-        run: |
-          git status --porcelain --untracked-files=no
-          git submodule foreach --recursive 'git status --porcelain --untracked-files=no | head -20'
-          git diff --stat | tail -5
       - name: Smoke
         if: matrix.target == 'x86_64-pc-windows-msvc'
         env:
