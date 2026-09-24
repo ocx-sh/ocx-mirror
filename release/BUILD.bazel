@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+# The release build's provenance (`task bazel:build:release`): the real
+# values build.rs bakes under cargo, in place of `testing_provenance.env`.
+# Selected by a define rather than a platform, so every release leg — the
+# musl cross builds and the native darwin/windows hosts — takes one switch.
+
+load(":provenance.bzl", "release_provenance")
+
+# `--define=ocx_mirror_provenance=release`: //:ocx_mirror reads
+# `:provenance` instead of the placeholders. Without it the select resolves to
+# the same file as before, so no test or host build changes key.
+config_setting(
+    name = "stamped",
+    define_values = {"ocx_mirror_provenance": "release"},
+    visibility = ["//:__pkg__"],
+)
+
+# `manual`: it reads the workspace status, so a `bazel build //...` must not
+# pull it in; only the select above reaches it.
+release_provenance(
+    name = "provenance",
+    tags = ["manual"],
+    visibility = ["//:__pkg__"],
+)

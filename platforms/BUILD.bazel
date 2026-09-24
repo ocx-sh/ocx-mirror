@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+# Release target platforms, one per Rust triple build-matrix.yml ships and
+# named after it (`task bazel:build:release TARGET=<triple>`), so a triple is
+# the one name a workflow, an artifact and a `--platforms` flag share.
+#
+# `@zig_sdk//libc:musl` is what tells these apart from the host: rules_rust
+# maps a musl triple onto the gnu one's os/cpu constraints, so without it the
+# gnu rustc and the host C toolchain would match here (MODULE.bazel).
+#
+# The darwin and windows platforms are built on a host of their own OS
+# (build-matrix.yml): an arm64 macOS runner for both darwin triples, an x86_64
+# Windows runner for both windows ones. os/cpu alone picks rules_rust's
+# toolchain for the triple and the host's C toolchain for the target
+# (rules_cc's MSVC, `x64_arm64` for aarch64); the two apple_support
+# constraints are what its Apple clang toolchains require of a macOS target.
+
+platform(
+    name = "x86_64-unknown-linux-musl",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+        "@zig_sdk//libc:musl",
+    ],
+)
+
+platform(
+    name = "aarch64-unknown-linux-musl",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+        "@zig_sdk//libc:musl",
+    ],
+)
+
+platform(
+    name = "x86_64-apple-darwin",
+    constraint_values = [
+        "@apple_support//constraints:apple",
+        "@apple_support//constraints:device",
+        "@platforms//cpu:x86_64",
+        "@platforms//os:macos",
+    ],
+)
+
+platform(
+    name = "aarch64-apple-darwin",
+    constraint_values = [
+        "@apple_support//constraints:apple",
+        "@apple_support//constraints:device",
+        "@platforms//cpu:aarch64",
+        "@platforms//os:macos",
+    ],
+)
+
+platform(
+    name = "x86_64-pc-windows-msvc",
+    constraint_values = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:windows",
+    ],
+)
+
+platform(
+    name = "aarch64-pc-windows-msvc",
+    constraint_values = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:windows",
+    ],
+)
