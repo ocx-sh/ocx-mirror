@@ -169,6 +169,18 @@ crate.from_cargo(
 # the build script gets bazel-out, below the execroot root, as its
 # CARGO_HOME. Windows triples only: a select arm no Linux or darwin build
 # takes, so their build-script action keeps its key.
+# aws-lc's aarch64 Windows assembly is GNU-syntax `.S`, which MSVC's cl.exe
+# ignores (D9027, run 35956996476); aws-lc-sys requires clang-cl there, as
+# cargo-xwin used for every Windows C compile. rules_rust hands the build
+# script the MSVC toolchain's CC, so aws-lc-sys's own clang-cl discovery never
+# runs: the aarch64 Windows build passes the Visual Studio clang-cl as
+# `--define=OCX_MIRROR_CLANG_CL=<path>` (bazel:build:release finds it).
+crate.annotation_select(
+    build_script_env = {"CC": "$(OCX_MIRROR_CLANG_CL)"},
+    crate = "aws-lc-sys",
+    triples = ["aarch64-pc-windows-msvc"],
+)
+
 crate.annotation_select(
     # `$$`: the attribute is make-variable expanded; the runner substitutes
     # `${pwd}` with the execroot afterwards.

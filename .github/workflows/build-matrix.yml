@@ -239,7 +239,10 @@ jobs:
           mkdir -p dbg
           cp Cargo.bazel.lock.json dbg/ || true
           for d in /c/b/*/external/rules_rust++crate+crates__ocx_config-0.6.2 /c/b/*/external/rules_rust++crate+crates__aws-lc-sys-0.41.0; do ls -la "$d" > "dbg/$(basename "$d").ls" 2>&1; cp "$d/BUILD.bazel" "dbg/$(basename "$d").BUILD" || true; done
-          cp -r /c/b/*/execroot/_main/bazel-out/_tmp/actions dbg/actions || true
+          find /c/b/*/execroot/_main/bazel-out -name 'libocx_config-*.params' -exec cp {} dbg/ \; || true
+          find /c/b/*/execroot/_main/bazel-out -name 'libocx_util-*.params' -exec cp {} dbg/ \; || true
+          find /c/b/*/execroot/_main/bazel-out -path '*crates__ocx_util-0.6.2*' -name '*.rlib' > dbg/ocx_util_rlibs.txt || true
+          find /c/b/*/execroot/_main/bazel-out -path '*crates__ocx_config-0.6.2*' > dbg/ocx_config_out.txt || true
       - name: DEBUG upload
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

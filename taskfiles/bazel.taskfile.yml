@@ -222,6 +222,10 @@ tasks:
     platforms: [linux, darwin, windows]
     vars:
       TARGET: '{{.TARGET | default "x86_64-unknown-linux-musl"}}'
+      # Visual Studio's clang-cl, for aws-lc-sys on aarch64 Windows
+      # (MODULE.bazel), found by vswhere at its fixed install path.
+      CLANG_CL:
+        sh: '{{if eq .TARGET "aarch64-pc-windows-msvc"}}"C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -find VC/Tools/Llvm/x64/bin/clang-cl.exe{{end}}'
       FLAGS: >-
         --platforms=//platforms:{{.TARGET}}
         --experimental_platform_in_output_dir=yes
@@ -230,6 +234,7 @@ tasks:
         {{if eq .TARGET "x86_64-apple-darwin"}}--macos_minimum_os=10.12{{end}}
         {{if eq .TARGET "aarch64-apple-darwin"}}--macos_minimum_os=11.0{{end}}
         {{if contains "apple-darwin" .TARGET}}--features=-link_libc++{{end}}
+        {{if eq .TARGET "aarch64-pc-windows-msvc"}}'--define=OCX_MIRROR_CLANG_CL={{.CLANG_CL | toSlash}}'{{end}}
       OUT: '{{.ROOT_DIR}}/target/bazel/release/ocx-mirror-{{.TARGET}}{{if contains "windows" .TARGET}}.exe{{end}}'
     cmds:
       - task: bootstrap
