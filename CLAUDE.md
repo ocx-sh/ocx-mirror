@@ -35,15 +35,16 @@ document the four-line job, let them own the pipeline.
 | `tests/workspace_structure.rs` | Reads `cargo metadata`; fails naming the offender on any crate-map violation (upward edge, unlisted `ocx_*`, missing `[lints] workspace = true`, …) — the enforcement half of `crates/crate_map.toml` |
 | `tests/source_scan.rs` | Cross-crate source scans that need the whole tree at once: the extra-roots self-scan (walks `src/` and every `crates/*/src/`) and the cross-crate `include_str!` factory scan |
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
-| `MODULE.bazel` (+ `.lock`), `.bazelrc`, `.bazelversion` | Bazel module (Linux dev loop only; release and non-Linux stay cargo). Third-party crates come from `Cargo.toml`/`Cargo.lock` via `crate.from_cargo`; the generated `Cargo.bazel.lock.json` is gitignored |
+| `MODULE.bazel` (+ `.lock`), `.bazelrc`, `.bazelversion` | Bazel module (Linux dev loop, CI's `Smoke (Linux)` job, and every release binary — `task bazel:build:release TARGET=<triple>`: musl with zig via `hermetic_cc_toolchain` on Linux, darwin with `apple_support` on macOS, windows-msvc with the runner's MSVC on Windows, real provenance from `release/`, rules_rust patched for the Windows host (`release/*.patch`); only non-Linux dev loops stay cargo). Remote cache `bazel-cache.ocx.sh/v1`, shared with ocx; CI writes on the `main` push only. Third-party crates come from `Cargo.toml`/`Cargo.lock` via `crate.from_cargo`; the generated `Cargo.bazel.lock.json` is gitignored |
 | `BUILD.bazel`, `crates/*/BUILD.bazel`, `test/BUILD.bazel` | Hand-written Bazel packages (root lib/bin + tests, the seven crates, the acceptance suite as one `sh_test`); `bazel:build:drift` keeps their edges equal to Cargo's |
-| `crates/TEST_TARGET_MAP.toml` | Per-target Bazel test counts (rise only) + `[[excluded]]` cases Bazel skips and nextest runs |
-| `scripts/` | Gate tooling: `bazel_test_floor.py`, `bazel_build_drift.py`, `bazel_cache_check.py`, `bep_to_otlp.py`, `bazel_scoped.py` (each has `--self-test`; `task scripts:self-test` runs all five) |
+| `crates/TEST_TARGET_MAP.toml` | Per-target Bazel test counts (rise only); no `[[excluded]]` rows — every nextest case runs under Bazel (`bazel:test:coverage`) |
+| `scripts/` | Gate tooling: `bazel_test_floor.py`, `bazel_build_drift.py`, `bazel_cache_check.py`, `bep_to_otlp.py`, `bazel_scoped.py`, `bazel_execlog_keys.py`, `bazel_tag_guard.py` (each has `--self-test`; `scripts/BUILD.bazel` runs all seven, `.github/actions/bazel-cache-rc/selftest.sh` and the telemetry pytest as cached `py_test`s — `task bazel:test:scripts`, which `task scripts:self-test` calls on Linux; `scripts/requirements.lock` pins pytest/PyYAML) |
 | `scripts/test_telemetry_names.py` | pytest (not `--self-test`) for the telemetry names + never-fail contract; `task telemetry:self-test` |
 | `test/bazel_accept.sh` | The `//test:acceptance` `sh_test` runner: points the harness at the Bazel-built `ocx-mirror` and the pinned `ocx`, then `pytest -n auto` |
 | `.github/actions/test-telemetry/` | Composite action pushing a JUnit report's timings to otel.ocx.sh from CI (the `push` task's CI half) |
+| `.github/actions/bazel-cache-rc/` | Verbatim ocx port: writes the CI-only Bazel cache credential rc under `$RUNNER_TEMP` (read on every lane, write on the `main` push only); `selftest.sh` runs under `task scripts:self-test` |
 | `test/` | pytest acceptance harness (Docker registry on :5001) |
-| `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages |
+| `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages; built by Bazel as `//docs:site` (`docs/BUILD.bazel`, hermetic + remote-cacheable) from the hashed `docs/requirements.lock` |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
 | `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package description push` in `oci-publish.yml` (frontmatter = title/description/keywords) |
 | `src/command/package/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
@@ -76,9 +77,8 @@ document the four-line job, let them own the pipeline.
 - `[patch.crates-io]` re-declares ocx's fork patches pointing into the
   **nested** submodules (`external/ocx/external/...`). Patches do not travel
   with path deps; dropping the table silently resolves unpatched crates.io
-  releases. CI asserts the fork source via `cargo tree -i oci-client`;
-  `task bazel:patch:check` asserts the same fork binding under Bazel (in
-  `Cargo.bazel.lock.json`).
+  releases. `task bazel:patch:check` (CI) asserts the fork binding in both
+  graphs: Cargo.toml + Cargo.lock, and `Cargo.bazel.lock.json`.
 - Dependency feature lists for deps shared with ocx are copied
   exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
   bumps. `octocrab` is mirror-owned outright — no ocx equivalent exists to sync
@@ -105,15 +105,22 @@ document the four-line job, let them own the pipeline.
 Task runner [`task`](https://taskfile.dev). `task` (fast check),
 `task verify` (full gate), `task rust:verify` (Rust-only loop gate),
 `task test:parallel` (acceptance), `task docs:serve`. Toolchain via direnv +
-`ocx direnv export` (`ocx.toml`). Always `cargo fmt` before commit,
-`task verify` after implementation.
+`ocx direnv export` (`ocx.toml`). Always `cargo fmt` (`task
+rust:format:apply`) before commit, `task verify` after implementation.
+On Linux and in CI, fmt, clippy and the `jsonschema` feature check are Bazel
+lanes too — `bazel:lint:fmt`, `bazel:lint:clippy` (`.bazelrc` configs
+`rustfmt`/`clippy`, first-party targets only, warnings denied),
+`bazel:build:jsonschema` (the `*_jsonschema` variant rules); `task
+rust:lint` dispatches, cargo stays the macOS/Windows arm.
 
 Test builds carry the `__testing` feature (`task rust:build`, the harness
 build): `build.rs` then bakes the placeholders of `testing_provenance.env`
 instead of git/CI provenance, so the acceptance binary — and the Bazel cache
 keyed on it — is stable across commits. The Bazel graph runs no build script
-and reads the same file. Release builds (`build-matrix.yml`) never enable it;
-`ocx-mirror --json version` saying `"channel": "test"` is a test build.
+and reads the same file unless `--define=ocx_mirror_provenance=release`
+(`task bazel:build:release`, `build-matrix.yml`) swaps in the real
+provenance from `release/`; `ocx-mirror --json version` saying
+`"channel": "test"` is a test build.
 
 Single acceptance test:
 
@@ -122,11 +129,12 @@ cd test && uv run pytest tests/test_mirror.py::<name> -v
 ```
 
 **Bazel loop (Linux).** `task rust:test:unit` and `task rust:verify` run
-`bazel:test:unit` on Linux (nextest elsewhere; CI stays nextest). Bazel runs
+`bazel:test:unit` on Linux (nextest elsewhere; CI runs `bazel:test:unit` and `bazel:test:accept`, and no cargo at all). Bazel runs
 via `ocx exec bazel -- bazel`. `task bazel:bootstrap` first in a fresh
-worktree (generates `Cargo.bazel.lock.json`, restores `external/ocx`, writes
-`test/acceptance.stamp`); `bazel:test:unit`, `bazel:test:accept`
-(acceptance, cached — same env as `test:parallel`), `bazel:test:scoped`
+worktree (generates `Cargo.bazel.lock.json`, restores `external/ocx`);
+`bazel:test:unit`, `bazel:test:accept` (acceptance, remote-cacheable: the
+submodule's Sigstore stack as its own compose project, no knobs from the
+shell), `bazel:tag:guard`, `bazel:test:scoped`
 (rdeps of what changed vs `origin/main`), `bazel:cache:gc` (manual,
 `MAX_GB=30`). A manual repin needs
 `--repo_env=TMPDIR=/var/tmp/ocx-mirror-splice` on hosts with a

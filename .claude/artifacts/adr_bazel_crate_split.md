@@ -544,6 +544,8 @@ line becomes "ocx's hooks are not ported; `.claude/hooks/` is mirror-native" (ad
 
 ### C11 — CI lane-swap bar (verbatim; fixed by the commit that lands this ADR)
 
+> **Superseded 2026-09-23** by [`adr_bazel_full_adoption.md`](./adr_bazel_full_adoption.md) § C1 (remote cache; bar = a second run of one tree fully cached). Kept verbatim as the record of the NO-GO.
+
 > **Metric:** wall-clock (`startedAt`→`completedAt` from `gh run view --json jobs`) of the
 > `Smoke (Linux)` job; nextest lane = today's job; Bazel lane = the same job with Build +
 > Test replaced by `task bazel:test:unit` + `bazel build //:ocx-mirror` under
