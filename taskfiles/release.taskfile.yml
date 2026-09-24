@@ -204,12 +204,11 @@ tasks:
         aarch64-pc-windows-*) platform=windows/arm64 ;;
         *) echo "release:smoke: no OCI platform for {{.TARGET}}" >&2; exit 1 ;;
       esac
-      # Under target/, not mktemp's default: on Windows that is Git Bash's
-      # `/tmp`, a path the native `ocx` cannot resolve. A bare template in
-      # target/: task's built-in mktemp on Windows refuses one holding a
-      # path separator.
-      mkdir -p '{{.ROOT_DIR}}/target'
-      work='{{.ROOT_DIR}}/target/'$(cd '{{.ROOT_DIR}}/target' && mktemp -d release-smoke.XXXXXX)
+      # A fixed directory per target under target/, no mktemp: on Windows
+      # task's built-in mktemp resolves `/tmp`, a path no native program
+      # there can open, and refuses a template holding a separator.
+      work='{{.ROOT_DIR}}/target/release-smoke-{{.TARGET}}'
+      rm -rf "$work"
       trap 'rm -rf "$work"' EXIT
       ext=; case '{{.TARGET}}' in *windows*) ext=.exe ;; esac
       mkdir -p "$work/repackage/bin"
