@@ -1,0 +1,4 @@
+# The docs site toolchain — the one input `docs/requirements.lock` is compiled
+# from. Regenerate the lock with the command in its header (Renovate runs the
+# same command through its pip-compile manager).
+mkdocs-material
