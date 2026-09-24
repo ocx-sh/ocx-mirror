@@ -157,16 +157,20 @@ tasks:
             # dependency there (MODULE.bazel's single_version_override), so
             # the repin runs the patched one, built from source. Later
             # evaluations render from the lockfile, which parses no path.
+            # Set for the repin alone: the extension reads these variables,
+            # so a settle that saw them would re-evaluate in the caller's
+            # build, render over external/ocx after the restore below, and
+            # stamp the binary dirty (run 35971288623).
+            gen_env=
             if [ '{{OS}}' = windows ]; then
               # fastbuild: a tool that runs once per repin and never ships.
               {{.BAZEL}} build --jobs={{.JOBS}} -c fastbuild @rules_rust//crate_universe:bin
               gen='{{.ROOT_DIR | toSlash}}'/$({{.BAZEL}} cquery -c fastbuild --output=files @rules_rust//crate_universe:bin)
-              export CARGO_BAZEL_GENERATOR_URL="file:///$gen"
-              CARGO_BAZEL_GENERATOR_SHA256=$(sha256sum "$gen" | cut -d' ' -f1)
-              export CARGO_BAZEL_GENERATOR_SHA256
+              gen_env="CARGO_BAZEL_GENERATOR_URL=file:///$gen CARGO_BAZEL_GENERATOR_SHA256=$(sha256sum "$gen" | cut -d' ' -f1)"
             fi
             mkdir -p /var/tmp/ocx-mirror-splice
-            CARGO_BAZEL_REPIN=1 {{.BAZEL}} fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-mirror-splice
+            # shellcheck disable=SC2086 # gen_env is two words or none
+            env $gen_env CARGO_BAZEL_REPIN=1 {{.BAZEL}} fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-mirror-splice
             # Settle: the first evaluation without CARGO_BAZEL_REPIN renders
             # again (the env var is an extension input). Take it here, before
             # the restore, not in the caller's next build.
@@ -210,6 +214,11 @@ tasks:
       than the cargo build had. And without its `link_libc++` feature: the
       binary holds no C++, and the toolchain's `-lc++` added a libc++ load
       command the cargo build never had (measured, run 35945119348).
+      A windows build empties `BAZEL_WIN32_WINNT`: rules_cc's MSVC
+      toolchain otherwise compiles every C dependency with
+      `/D_WIN32_WINNT=0x0601`, and aws-lc takes its Windows 7 path
+      (`BCryptGenRandom`, an extra bcrypt.dll import the cargo build, on the
+      SDK's default, never had; run 35968338358).
 
       Never a cached lane: the provenance action is `no-remote-cache`, and no
       release caller passes the upload grant. The compiles it does not feed
@@ -235,6 +244,7 @@ tasks:
         {{if eq .TARGET "aarch64-apple-darwin"}}--macos_minimum_os=11.0{{end}}
         {{if contains "apple-darwin" .TARGET}}--features=-link_libc++{{end}}
         {{if eq .TARGET "aarch64-pc-windows-msvc"}}'--define=OCX_MIRROR_CLANG_CL={{.CLANG_CL | toSlash}}'{{end}}
+        {{if contains "windows" .TARGET}}--repo_env=BAZEL_WIN32_WINNT={{end}}
       OUT: '{{.ROOT_DIR}}/target/bazel/release/ocx-mirror-{{.TARGET}}{{if contains "windows" .TARGET}}.exe{{end}}'
     cmds:
       - task: bootstrap
