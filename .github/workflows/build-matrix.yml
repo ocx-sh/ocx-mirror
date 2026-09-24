@@ -9,23 +9,34 @@ on:
   workflow_call:
     inputs:
       version_semver:
-        description: SemVer build version (forwarded as `__OCX_BUILD_VERSION`
-          for a future build.rs; currently informational).
+        description: SemVer build version, baked in as `__OCX_BUILD_VERSION`
+          (what `ocx-mirror version` prints).
         required: true
         type: string
       channel:
-        description: Build channel (`dev` or `release`).
+        description: Build channel baked into the binary (`dev`, `release`, or
+          `check` for build-check.yml's never-published builds).
         required: true
         type: string
+    secrets:
+      BAZEL_CACHE_READ_AUTH:
+        description: The shared Bazel cache's read credential (the Linux legs).
+          Optional — without it they build cold.
+        required: false
 
 permissions:
   contents: read
 
 jobs:
   build-linux:
+    # Bazel (`task bazel:build:release`): //:ocx-mirror for the target's
+    # //platforms triple — rustc + zig's musl through hermetic_cc_toolchain,
+    # static, with build.rs's real provenance read by
+    # release/workspace_status.py from this job's environment (the two
+    # `__OCX_BUILD_*` below, CI, GITHUB_*). Both triples cross-compile on the
+    # x86_64 runner; the aarch64 smoke runs under qemu-aarch64.
     name: Build (${{ matrix.target }})
-    # ubuntu-22.04 — older glibc baseline, matches the ocx prod target set.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
       __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
@@ -41,11 +52,54 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
-      - name: Build
-        uses: ./.github/actions/build-rust
+      - name: Setup Task
+        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
+      - name: Setup OCX
+        # `ocx exec bazel` (ocx.toml's bazel row) runs Bazel; the smoke's
+        # `ocx package create` is this binary too. The same pin as verify.yml
+        # and oci-publish.yml.
+        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          target: ${{ matrix.target }}
-          use_zigbuild: true
+          version: "0.6.2"
+      # Read-only, on every caller: a build here never writes the shared
+      # cache (the upload grant is verify.yml's `main` push alone, C3), and
+      # the one action that reads the workspace status is `no-remote-cache`
+      # besides. The read credential only hits third-party and exec-tool
+      # compiles; a caller that maps no secret builds cold.
+      - name: Bazel cache credential
+        uses: ./.github/actions/bazel-cache-rc
+        with:
+          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      # verify.yml's reason: the host C toolchain (build scripts, proc
+      # macros) autoconfigures `-fuse-ld=` from what it finds, and the same
+      # linker keeps those exec compiles on verify.yml's cache keys.
+      - name: Install lld and qemu
+        run: sudo apt-get update && sudo apt-get install -y lld qemu-user
+      - name: Build
+        env:
+          TARGET: ${{ matrix.target }}
+        run: task bazel:build:release TARGET="$TARGET" JOBS=auto
+      - name: Smoke
+        # Provenance is the requested channel and version and this commit,
+        # clean; the run URL is this run's; the binary is static;
+        # `ocx package create` takes it as oci-publish.yml will. The caller's
+        # inputs arrive through `env`, never spliced into the script.
+        env:
+          TARGET: ${{ matrix.target }}
+        run: >-
+          task release:smoke
+          BIN="target/bazel/release/ocx-mirror-$TARGET"
+          TARGET="$TARGET"
+          CHANNEL="$__OCX_BUILD_CHANNEL"
+          VERSION="$__OCX_BUILD_VERSION"
+          SHA="$GITHUB_SHA"
+      - name: Upload Binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ocx-mirror-${{ matrix.target }}
+          path: target/bazel/release/ocx-mirror-${{ matrix.target }}
+          compression-level: 0
+          retention-days: 1
 
   build-darwin:
     name: Build (${{ matrix.target }})

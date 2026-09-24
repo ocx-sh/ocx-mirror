@@ -1,0 +1,57 @@
+name: Build Check
+
+# The release build matrix on a pull request, publishing nothing: every leg
+# release.yml and deploy-dev.yml run, with the `check` channel baked in so a
+# stray artifact can never pass for a dev or release binary. Artifacts expire
+# after a day (build-matrix.yml) and no publish job follows.
+#
+# Path-filtered to what decides a release binary: sources, manifests, the
+# Bazel graph and toolchains, the release tasks and this workflow family.
+# `workflow_dispatch` runs it on any branch by hand.
+
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "crates/**"
+      - "build.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "external/ocx"
+      - "MODULE.bazel"
+      - "MODULE.bazel.lock"
+      - ".bazelrc"
+      - ".bazelversion"
+      - "BUILD.bazel"
+      - "platforms/**"
+      - "release/**"
+      - "ocx.toml"
+      - "ocx.lock"
+      - "packaging/**"
+      - "taskfiles/bazel.taskfile.yml"
+      - "taskfiles/release.taskfile.yml"
+      - ".github/actions/bazel-cache-rc/**"
+      - ".github/actions/build-rust/**"
+      - ".github/workflows/build-check.yml"
+      - ".github/workflows/build-matrix.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      # A SemVer the smoke can assert on, visibly not a publishable version.
+      version_semver: 0.0.0-check+${{ github.run_id }}
+      channel: check
+    # Read-only. A fork PR is given no secrets: the Linux legs build cold.
+    secrets:
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
