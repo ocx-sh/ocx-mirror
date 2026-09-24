@@ -170,7 +170,9 @@ crate.from_cargo(
 # CARGO_HOME. Windows triples only: a select arm no Linux or darwin build
 # takes, so their build-script action keeps its key.
 crate.annotation_select(
-    build_script_env = {"CARGO_HOME": "${pwd}/bazel-out"},
+    # `$$`: the attribute is make-variable expanded; the runner substitutes
+    # `${pwd}` with the execroot afterwards.
+    build_script_env = {"CARGO_HOME": "$${pwd}/bazel-out"},
     crate = "octocrab",
     triples = [
         "aarch64-pc-windows-msvc",
