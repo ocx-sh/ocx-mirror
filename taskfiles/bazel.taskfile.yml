@@ -173,6 +173,43 @@ tasks:
       - task: bootstrap
       - '{{.BAZEL}} build --jobs={{.JOBS}} //...'
 
+  build:release:
+    desc: The release binary for TARGET (a //platforms triple, default x86_64-unknown-linux-musl), real provenance, at target/bazel/release/ocx-mirror-<TARGET>
+    summary: |
+      `//:ocx-mirror` for `--platforms=//platforms:<TARGET>` with the
+      provenance build.rs bakes under cargo (release/BUILD.bazel): git from
+      this checkout, `__OCX_BUILD_VERSION`, `__OCX_BUILD_CHANNEL`, `CI` and
+      `GITHUB_*` from this environment, read by release/workspace_status.py.
+      The flags live here, not in .bazelrc: `bazel:tag:guard` keeps
+      `--workspace_status_command` out of the checked-in rc.
+
+      Never a cached lane: the provenance action is `no-remote-cache`, and no
+      release caller passes the upload grant. The compiles it does not feed
+      read the shared cache like any other build. Its own output directory
+      (`--experimental_platform_in_output_dir`), so a release build does not
+      overwrite the host outputs the test lanes read.
+
+      The copy is decided on the file cquery names, never on bazel-bin.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      TARGET: '{{.TARGET | default "x86_64-unknown-linux-musl"}}'
+      FLAGS: >-
+        --platforms=//platforms:{{.TARGET}}
+        --experimental_platform_in_output_dir=yes
+        --define=ocx_mirror_provenance=release
+        --workspace_status_command={{.ROOT_DIR}}/release/workspace_status.py
+      OUT: '{{.ROOT_DIR}}/target/bazel/release/ocx-mirror-{{.TARGET}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} {{.FLAGS}} //:ocx-mirror {{.CLI_ARGS}}'
+      - cmd: |
+          set -euo pipefail
+          bin=$({{.BAZEL}} cquery {{.FLAGS}} --output=files //:ocx-mirror {{.CLI_ARGS}})
+          mkdir -p "$(dirname '{{.OUT}}')"
+          cp -f "$bin" '{{.OUT}}'
+          echo '{{.OUT}}'
+
   build:nobuild:
     desc: Load and analyse every target without building; push the analysis BEP to telemetry
     summary: |
@@ -413,7 +450,7 @@ tasks:
       fi
 
   pin:check:
-    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, MODULE.bazel rust version vs rust-toolchain.toml, MODULE.bazel version vs the workspace version, MODULE.bazel's schemars spoke vs Cargo.lock
+    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, every MODULE.bazel rust `versions` (host and musl toolchains) vs rust-toolchain.toml, MODULE.bazel version vs the workspace version, MODULE.bazel's schemars spoke vs Cargo.lock
     silent: true
     dir: '{{.ROOT_DIR}}'
     cmd: |
@@ -425,7 +462,10 @@ tasks:
       ocx_tag = tomllib.loads(Path("ocx.toml").read_text())["tools"]["bazel"].rsplit(":", 1)[1]
       channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
       workspace = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
-      rust = re.search(r'rust\.toolchain\([^)]*versions\s*=\s*\["([^"]+)"\]', module, re.S)
+      # Every `versions = [...]`: rust.toolchain and the musl repository_set
+      # both download a rustc, and a second one on another version would
+      # compile the release binaries with a toolchain no test lane runs.
+      rust = sorted(set(re.findall(r'versions\s*=\s*\["([^"]+)"\]', module)))
       mod = re.search(r'module\([^)]*version\s*=\s*"([^"]+)"', module, re.S)
       # The jsonschema variants' spoke import: a stale one fails every Bazel
       # command with an extension exception, so name the fix before that.
@@ -436,7 +476,7 @@ tasks:
                 if p["name"] == "schemars" and p["version"].split(".")[0] == major]
       pairs = [
           (".bazelversion", bazelversion, "ocx.toml bazel tag", ocx_tag),
-          ("MODULE.bazel rust.toolchain versions", rust and rust.group(1), "rust-toolchain.toml channel", channel),
+          ("MODULE.bazel rust versions", ", ".join(rust), "rust-toolchain.toml channel", channel),
           ("MODULE.bazel module version", mod and mod.group(1), "Cargo.toml [workspace.package] version", workspace),
           ("MODULE.bazel use_repo crates__schemars-<v>", spoke and spoke.group(1), f"Cargo.lock schemars {major}.x", ", ".join(locked)),
       ]

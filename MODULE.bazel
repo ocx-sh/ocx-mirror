@@ -1,4 +1,4 @@
-"""ocx-mirror — the Bazel module (Linux test loop; release and non-Linux stay cargo).
+"""ocx-mirror — the Bazel module (Linux test loop and the musl release builds; darwin/windows stay cargo).
 
 Pins copy ocx's MODULE.bazel (external/ocx). `compatibility_level` is absent on
 purpose: it is non-functional from Bazel 9.1.0 on.
@@ -24,7 +24,66 @@ rust.toolchain(
 )
 use_repo(rust, "rust_toolchains")
 
-register_toolchains("@rust_toolchains//:all")
+# ---------------------------------------------------------------------------
+# Release cross-compilation — static musl binaries (`task bazel:build:release`)
+# ---------------------------------------------------------------------------
+
+# The C toolchain rustc links through, and aws-lc-sys/ring compile their C
+# with: zig's clang and bundled musl, the linker cargo-zigbuild used for these
+# artifacts before. Only the two `libc_aware` musl toolchains are registered:
+# they require `@zig_sdk//libc:musl`, which only //platforms:*-linux-musl carries,
+# so the host build keeps the auto-detected host cc toolchain and its keys.
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
+
+# Named by //platforms and the constraints below; already in the graph at this
+# version (rules_rust's), so declaring it moves nothing.
+bazel_dep(name = "platforms", version = "1.1.0")
+
+zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(zig, "zig_sdk")
+
+register_toolchains(
+    "@zig_sdk//libc_aware/toolchain:linux_amd64_musl",
+    "@zig_sdk//libc_aware/toolchain:linux_arm64_musl",
+)
+
+# rustc and std for the musl triples. rules_rust gives a musl triple the same
+# os/cpu constraints as the gnu one, so the gnu toolchain would match a musl
+# platform too. The `libc:musl` constraint keeps these two off every other
+# platform, and registering them ahead of `@rust_toolchains//:all` puts them
+# first for the musl ones. Same version as the host toolchain (`task
+# bazel:pin:check` reads every `versions`).
+rust.repository_set(
+    name = "rust_linux_x86_64_musl",
+    edition = "2024",
+    exec_triple = "x86_64-unknown-linux-gnu",
+    # zig links its own musl crt and libc; rustc's self-contained copies on
+    # top are a duplicate `_start` (measured). cargo-zigbuild drops the same
+    # objects from the link line.
+    extra_rustc_flags = ["-Clink-self-contained=no"],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+        "@zig_sdk//libc:musl",
+    ],
+    target_triple = "x86_64-unknown-linux-musl",
+    versions = ["1.95.0"],
+)
+rust.repository_set(
+    name = "rust_linux_x86_64_musl",
+    target_compatible_with = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+        "@zig_sdk//libc:musl",
+    ],
+    target_triple = "aarch64-unknown-linux-musl",
+)
+
+register_toolchains(
+    "@rust_toolchains//:rust_linux_x86_64_musl__x86_64-unknown-linux-musl__stable",
+    "@rust_toolchains//:rust_linux_x86_64_musl__aarch64-unknown-linux-musl__stable",
+    "@rust_toolchains//:all",
+)
 
 # Root manifest only: the splice discovers `members = ["crates/*"]`, and the
 # ocx crates (path deps into external/ocx) render as `@crates//:ocx_*`. The

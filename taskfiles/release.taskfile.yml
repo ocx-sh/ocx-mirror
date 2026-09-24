@@ -92,6 +92,85 @@ tasks:
       - task: :bazel:bootstrap
       - env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT ocx exec bazel -- bazel mod deps --lockfile_mode=update
 
+  # The one check a release artifact gets before upload (build-matrix.yml runs
+  # it per target; it is also the cargo-vs-Bazel parity probe). Red unless:
+  # `version` prints the `--json version` version; the provenance is a real
+  # build's — never the `test` placeholders — carrying the target triple it
+  # was built for and, for each expectation passed in, exactly that value
+  # (CHANNEL, VERSION, SHA; SHA also demands a clean tree, and a GITHUB_RUN_ID
+  # in this environment demands its run URL); a musl binary has no program
+  # interpreter and no NEEDED entry; and `ocx package create` accepts it as
+  # oci-publish.yml repackages it, into a scratch directory — nothing pushed.
+  # An aarch64 binary on an x86_64 host runs under qemu-aarch64.
+  smoke:
+    desc: 'Smoke a release binary: BIN=<path> TARGET=<triple> [CHANNEL= VERSION= SHA=] — provenance, static linkage, `ocx package create`'
+    dir: '{{.ROOT_DIR}}'
+    silent: true
+    requires:
+      vars: [BIN, TARGET]
+    cmd: |
+      set -euo pipefail
+      bin='{{.BIN}}'
+      run=("$bin")
+      case '{{.TARGET}}' in
+        aarch64-*) [ "$(uname -m)" = aarch64 ] || run=(qemu-aarch64 "$bin") ;;
+      esac
+      plain=$("${run[@]}" version)
+      json=$("${run[@]}" --json version)
+      python3 - "$plain" "$json" '{{.TARGET}}' '{{.CHANNEL}}' '{{.VERSION}}' '{{.SHA}}' <<'EOF'
+      import json, os, sys
+      plain, raw, target, channel, version, sha = sys.argv[1:]
+      data = json.loads(raw)
+      bad = []
+      def want(what, got, expected):
+          if got != expected:
+              bad.append(f"{what} = {got!r}, expected {expected!r}")
+      want("`version` (plain)", plain, data.get("version"))
+      if data.get("channel") in (None, "test"):
+          bad.append(f"channel = {data.get('channel')!r} - a test build or no channel at all, not a release build")
+      want("build.target", (data.get("build") or {}).get("target"), target)
+      if channel:
+          want("channel", data.get("channel"), channel)
+      if version:
+          want("version", data.get("version"), version)
+      if sha:
+          want("commit.sha", (data.get("commit") or {}).get("sha"), sha)
+          want("commit.dirty", (data.get("commit") or {}).get("dirty"), False)
+      if os.environ.get("GITHUB_RUN_ID"):
+          url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}".format(**os.environ)
+          want("ci.run_url", (data.get("ci") or {}).get("run_url"), url)
+      for line in bad:
+          print(f"release:smoke: {line}", file=sys.stderr)
+      if bad:
+          sys.exit(1)
+      print(f"release:smoke: {target} {data['version']} channel={data['channel']} commit={(data.get('commit') or {}).get('short')}")
+      EOF
+      case '{{.TARGET}}' in
+        *-linux-musl)
+          if readelf -lW "$bin" | grep -q INTERP || readelf -dW "$bin" | grep -q NEEDED; then
+            echo "release:smoke: $bin is not static - it names a program interpreter or a NEEDED library" >&2
+            exit 1
+          fi ;;
+      esac
+      # oci-publish.yml's PLATFORM_MAP. A `case`, not `declare -A`: go-task's
+      # shell (mvdan/sh) panics on an associative-array key holding `-`.
+      case '{{.TARGET}}' in
+        x86_64-*-linux-*) platform=linux/amd64 ;;
+        aarch64-*-linux-*) platform=linux/arm64 ;;
+        x86_64-apple-darwin) platform=darwin/amd64 ;;
+        aarch64-apple-darwin) platform=darwin/arm64 ;;
+        x86_64-pc-windows-*) platform=windows/amd64 ;;
+        aarch64-pc-windows-*) platform=windows/arm64 ;;
+        *) echo "release:smoke: no OCI platform for {{.TARGET}}" >&2; exit 1 ;;
+      esac
+      work=$(mktemp -d)
+      trap 'rm -rf "$work"' EXIT
+      ext=; case '{{.TARGET}}' in *windows*) ext=.exe ;; esac
+      mkdir -p "$work/repackage/bin"
+      install -m 0755 "$bin" "$work/repackage/bin/ocx-mirror$ext"
+      ocx package create "$work/repackage" -m packaging/metadata.json -o "$work/ocx-mirror.tar.xz" -p "$platform"
+      echo "release:smoke: ocx package create accepted it ($(du -h "$work/ocx-mirror.tar.xz" | cut -f1) archive)"
+
   # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
   # After this task succeeds, the human reviews and commits.
   #
