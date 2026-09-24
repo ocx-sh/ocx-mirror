@@ -243,6 +243,11 @@ jobs:
           find /c/b/*/execroot/_main/bazel-out -name 'libocx_util-*.params' -exec cp {} dbg/ \; || true
           find /c/b/*/execroot/_main/bazel-out -path '*crates__ocx_util-0.6.2*' -name '*.rlib' > dbg/ocx_util_rlibs.txt || true
           find /c/b/*/execroot/_main/bazel-out -path '*crates__ocx_config-0.6.2*' > dbg/ocx_config_out.txt || true
+          ( cd /c/b/*/execroot/_main && ls -la bazel-out/x64_windows-opt-exec/bin/external/rules_rust++crate+crates__thiserror-impl-2.0.18/ > "$GITHUB_WORKSPACE/dbg/thiserror_impl.ls" 2>&1
+            P=$(find bazel-out -name 'libocx_config-*.params' | head -1)
+            R=$(ls bazel-out/*-pc-windows-msvc-opt/bin/external/rules_rust++rust+*_tools/rust_toolchain/bin/rustc.exe | head -1)
+            echo "rustc=$R params=$P" > "$GITHUB_WORKSPACE/dbg/rerun.txt"
+            RUSTC_LOG=rustc_metadata=debug RUST_BACKTRACE=1 "$R" "@$P" >> "$GITHUB_WORKSPACE/dbg/rerun.txt" 2>&1 || true ) || true
       - name: DEBUG upload
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
