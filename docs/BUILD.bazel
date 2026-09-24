@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+#
+# The mkdocs-material site as one coarse target — ocx's `//website:site` shape
+# (external/ocx/website/site.bzl: one genrule, one `.tar`, coarse input-hash
+# skip), with one intended divergence.
+#
+# ocx tags its site `no-remote-cache` + `requires-network`: `bun install`
+# fetches the package closure inside the action, and that rule's hermeticity is
+# "not yet proven". This one fetches nothing at action time. The interpreter
+# and every wheel come from MODULE.bazel's rules_python block — a hashed lock
+# (`requirements.lock`) resolved by repository rules into the repository
+# cache — so the action runs sandboxed and offline over declared inputs only,
+# and its output is byte-identical across cold builds. That meets the owner's
+# fully-cached bar, and it is the position ocx's own ADR originally gave the
+# site (adr_bazel_build_adoption.md § Stage 3: the shared-cache-eligible target
+# once its hermeticity checks pass). So: no tags, remote-cacheable. The checks,
+# measured on 9.2.0 (declared-input invalidation, offline sandbox, two cold
+# builds with equal sha256), are in the commit that added this file.
+#
+# No `site.bzl`: ocx's macro exists for its runner-script materialisation; the
+# runner here is a checked-in Python file (`mkdocs_bazel.py`), so the genrule
+# has one caller and needs no macro.
+
+load("@rules_python//python:py_binary.bzl", "py_binary")
+
+# mkdocs, from the locked closure, behind `mkdocs_bazel.py` (the CLI plus the
+# `--tar` mode `:site` uses). `mkdocs-material` is a direct dep because mkdocs
+# finds the theme through its entry point, which needs the dist-info in
+# runfiles. `script` bootstrap: the default `system_python` stub is started by
+# the HOST `python3` on PATH before it hands over to the hermetic interpreter
+# (BZL-PY-14) — an ambient input this action must not have.
+py_binary(
+    name = "mkdocs",
+    srcs = ["mkdocs_bazel.py"],
+    config_settings = {
+        "@rules_python//python/config_settings:bootstrap_impl": "script",
+    },
+    # rules_python's implicit `__init__.py` creation is deprecated; nothing
+    # here imports this package as a module.
+    legacy_create_init = 0,
+    main = "mkdocs_bazel.py",
+    deps = [
+        "@docs_pip//mkdocs",
+        "@docs_pip//mkdocs_material",
+    ],
+)
+
+genrule(
+    name = "site",
+    # Everything mkdocs reads: the config, the pages and assets, and the one
+    # `pymdownx.snippets` target (`docs/changelog.md` includes CHANGELOG.md;
+    # `check_paths: true` fails the build on a snippet not staged here).
+    # `allow_empty = False`: a glob that matched nothing would build a site
+    # from the config alone and still report success.
+    srcs = glob(
+        ["**/*.md"] + ["assets/**"],
+        allow_empty = False,
+    ) + [
+        "//:CHANGELOG.md",
+        "//:mkdocs.yml",
+    ],
+    outs = ["site.tar"],
+    # PYTHONHASHSEED must be fixed before the interpreter starts; everything
+    # else the build pins (SOURCE_DATE_EPOCH) is set by mkdocs_bazel.py.
+    cmd = "PYTHONHASHSEED=0 $(execpath :mkdocs) --tar $@ build --strict --config-file $(execpath //:mkdocs.yml)",
+    tools = [":mkdocs"],
+)
+
+# `tests/log_targets.rs` (root `:log_targets`) reads this page's documented
+# `RUST_LOG` recipe; declaring this package took the path out of `//:`'s reach.
+exports_files(
+    ["reference/cli.md"],
+    visibility = ["//:__pkg__"],
+)
