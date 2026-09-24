@@ -59,11 +59,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ocx_index::{CatalogDocument, IndexFormatConfig, IndexRoot, SUPPORTED_FORMAT_VERSION, parse_physical_repository};
-use ocx_oci::Digest;
+use ocx_index::{CatalogDocument, IndexFormatConfig, IndexRoot, SUPPORTED_FORMAT_VERSION};
 use ocx_oci::ssrf::{
     DialRoute, DialScheme, GuardedResolver, ProxyRules, guard_destination, proxy_rules, split_host_port,
 };
+use ocx_oci::{Digest, OciIdentifier};
 use serde::Deserialize;
 use url::{Host, Url};
 
@@ -216,11 +216,11 @@ fn index_client(
 /// pointer, a forbidden host, or a host that does not resolve. The
 /// [`SsrfError`](ocx_oci::ssrf::SsrfError) supplies the message text.
 pub async fn validate_root_host(root: &IndexRoot, trusted: &[String], rules: &ProxyRules) -> Result<(), MirrorError> {
-    let (registry, _repository) = parse_physical_repository(&root.repository).map_err(|error| {
+    let location = OciIdentifier::parse_repository_pointer(&root.repository).map_err(|error| {
         MirrorError::SourceError(format!("source root has an unusable repository pointer: {error}"))
     })?;
 
-    let (host, port) = split_host_port(&registry);
+    let (host, port) = split_host_port(location.registry());
     // `split_host_port` does not strip brackets, and its own doc says any
     // future stripping must land there so both of *its* call sites get it
     // together — but that file is a read-only submodule here. Without this,
@@ -236,7 +236,7 @@ pub async fn validate_root_host(root: &IndexRoot, trusted: &[String], rules: &Pr
     // The verdict only: the registry client's own `GuardedResolver` re-judges
     // and pins at dial time (C-046), so nothing here is discarded.
     guard_destination(
-        DialScheme::for_registry(&ocx_config::env::insecure_registries(), &registry),
+        DialScheme::for_registry(&ocx_config::env::insecure_registries(), location.registry()),
         host,
         port,
         trusted,

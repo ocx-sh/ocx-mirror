@@ -748,11 +748,11 @@ fn the_source_client_is_seeded_for_the_host_the_pointer_names() {
         body.contains("registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await;"),
         "the physical host's credential is seeded"
     );
-    // The host seeded must be the one `parse_physical_repository` read off the
-    // root, not the source's logical `registry:` — rebinding it to the latter
-    // is exactly the bug this fixed, and it would leave the needle above
-    // matching, so pin the provenance too.
-    assert_ordered(&body, "parse_physical_repository", "ensure_source_auth");
+    // The host seeded must be the one `OciIdentifier::parse_repository_pointer`
+    // read off the root, not the source's logical `registry:` — rebinding it
+    // to the latter is exactly the bug this fixed, and it would leave the
+    // needle above matching, so pin the provenance too.
+    assert_ordered(&body, "OciIdentifier::parse_repository_pointer", "ensure_source_auth");
     // The credential is resolved only for a host the operator named — the
     // source's `registry:` plus its `trusted_hosts` — so a lookalike physical
     // host from a hostile root cannot slug-collide onto a real credential.

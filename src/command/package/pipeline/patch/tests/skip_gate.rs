@@ -89,7 +89,7 @@ async fn matching_metadata_skips_without_a_registry_call() {
 
     let drift = image_drift(
         &offline_publisher(),
-        &Identifier::new_registry("mirror/cmake", "registry.test"),
+        &OciIdentifier::from_parts("mirror/cmake", "registry.test"),
         &image,
         &expected,
         BinScanMode::Off,
@@ -109,7 +109,7 @@ async fn a_differing_config_digest_never_settles_as_a_skip() {
 
     let result = image_drift(
         &offline_publisher(),
-        &Identifier::new_registry("mirror/cmake", "registry.invalid"),
+        &OciIdentifier::from_parts("mirror/cmake", "registry.invalid"),
         &image,
         &expected_metadata(),
         BinScanMode::Off,

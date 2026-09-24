@@ -957,17 +957,17 @@ async fn push_task(
     annotations: &std::collections::BTreeMap<String, String>,
     sign: Option<&ResolvedSign>,
 ) -> Result<MirrorResult> {
-    let identifier = ocx_oci::Identifier::new_registry(&task.target.repository, &task.target.registry)
+    let target = ocx_oci::OciIdentifier::from_parts(&task.target.repository, &task.target.registry)
         .clone_with_tag(&task.normalized_version);
 
     let info = ocx_package::info::Info {
-        identifier,
         metadata: metadata.clone(),
         platform: task.platform.clone(),
     };
 
     push::push_and_cascade(
         publisher,
+        &target,
         info,
         bundle_path,
         task.cascade,

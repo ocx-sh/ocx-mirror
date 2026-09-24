@@ -15,8 +15,7 @@
 //! ANSI escape reaches their terminal. `char::escape_debug` escapes both
 //! classes and supplies the quoting these messages already implied.
 
-use ocx_index::parse_physical_repository;
-use ocx_oci::Identifier;
+use ocx_oci::{OciIdentifier, PackageRef};
 
 use crate::Target;
 use ocx_mirror_error::MirrorError;
@@ -55,7 +54,7 @@ enum TemplateSegment {
 }
 
 /// The upstream reference a package's root points at, as
-/// `parse_physical_repository` split it.
+/// `OciIdentifier::parse_repository_pointer` split it.
 ///
 /// The two halves `{upstream_host}` and `{upstream_repository}` substitute —
 /// and the pair every `[mirrors]` rewrite is expressed over, which is why they
@@ -264,7 +263,7 @@ fn split_catalog_key(key: &str) -> Result<(&str, &str), TemplateError> {
 ///
 /// `format!("{}/{}", target.repository, expanded)`, then:
 ///
-/// 1. `Identifier::validate_repository` — **refuse, never normalise**.
+/// 1. `PackageRef::validate_repository` — **refuse, never normalise**.
 ///    Uppercase is refused rather than lowercased, because `str::to_lowercase`
 ///    folds U+212A KELVIN SIGN onto `k` and would manufacture collisions.
 ///    `.` and `..` segments are refused as directory traversal.
@@ -278,12 +277,12 @@ fn split_catalog_key(key: &str) -> Result<(&str, &str), TemplateError> {
 pub fn physical_repository(target: &Target, expanded: &str) -> Result<String, MirrorError> {
     let composed = format!("{}/{}", target.repository, expanded);
 
-    // The whole string is validated, not a decomposition of it: `Identifier::parse`
+    // The whole string is validated, not a decomposition of it: `PackageRef::parse`
     // splits a tag and digest off *before* its repository guards run, so a
     // key of `ns/pkg:latest` would parse as the repository `ns/pkg` while the
     // mirror went on to use the whole thing. `validate_repository` is the
     // entry point that applies every guard to the string as given.
-    Identifier::validate_repository(&composed).map_err(|error| {
+    PackageRef::validate_repository(&composed).map_err(|error| {
         MirrorError::SpecInvalid(vec![format!(
             "destination repository {composed:?} is not a legal OCI repository path: {}",
             error.kind
@@ -309,18 +308,19 @@ pub fn physical_repository(target: &Target, expanded: &str) -> Result<String, Mi
 /// (C-014).
 ///
 /// Returns `format!("oci://{}/{}", target.registry, physical)` and validates it
-/// by calling `parse_physical_repository` on the composed string **before
-/// returning** — so the mirror reaches the same verdict every consumer will,
-/// rather than shipping a pointer that only fails at resolve time.
+/// by calling `OciIdentifier::parse_repository_pointer` on the composed string
+/// **before returning** — so the mirror reaches the same verdict every
+/// consumer will, rather than shipping a pointer that only fails at resolve
+/// time.
 ///
 /// # Errors
 ///
 /// [`MirrorError::SpecInvalid`] (exit 65) when the composed pointer does not
-/// round-trip through `parse_physical_repository`.
+/// round-trip through `OciIdentifier::parse_repository_pointer`.
 pub fn wire_pointer(target: &Target, physical: &str) -> Result<String, MirrorError> {
     let pointer = format!("oci://{}/{}", target.registry, physical);
 
-    parse_physical_repository(&pointer).map_err(|error| {
+    OciIdentifier::parse_repository_pointer(&pointer).map_err(|error| {
         MirrorError::SpecInvalid(vec![format!(
             "destination pointer is not a legal index repository value: {error}"
         )])

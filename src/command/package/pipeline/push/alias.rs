@@ -96,7 +96,7 @@ pub async fn alias_newest_as_latest(
 /// corrects it. Nothing here may fail the push job — the packages are already
 /// published either way.
 pub async fn run_newest_is_registry_newest(publisher: &Publisher, spec: &MirrorSpec, version: &str) -> bool {
-    let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let identifier = ocx_oci::OciIdentifier::from_parts(&spec.target.repository, &spec.target.registry);
     let tags = match fetch_published_tags(publisher, &identifier).await {
         Ok(tags) => tags,
         Err(error) => {
@@ -130,7 +130,7 @@ pub async fn run_newest_is_registry_newest(publisher: &Publisher, spec: &MirrorS
 /// other process-global test knob.
 pub async fn fetch_published_tags(
     publisher: &Publisher,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
 ) -> Result<Vec<String>, MirrorError> {
     #[cfg(test)]
     if let Some(tags) = LATEST_TAGS_OVERRIDE
@@ -229,7 +229,7 @@ pub async fn cascade_backfilled_entries(
     platforms_pushed: &[String],
     annotations: &BTreeMap<String, String>,
 ) -> Vec<String> {
-    let identifier = ocx_oci::Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+    let identifier = ocx_oci::OciIdentifier::from_parts(&spec.target.repository, &spec.target.registry);
     let published = match published_images_for(publisher, &identifier, version).await {
         Ok(images) => images,
         Err(error) => {
@@ -306,7 +306,7 @@ pub async fn cascade_backfilled_entries(
 #[cfg(not(test))]
 pub async fn published_images_for(
     publisher: &Publisher,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     version: &str,
 ) -> Result<Vec<target_registry::PublishedImage>, MirrorError> {
     target_registry::fetch_published_images(publisher, identifier, &[version]).await
@@ -316,7 +316,7 @@ pub async fn published_images_for(
 #[cfg(test)]
 pub async fn published_images_for(
     _publisher: &Publisher,
-    _identifier: &ocx_oci::Identifier,
+    _identifier: &ocx_oci::OciIdentifier,
     _version: &str,
 ) -> Result<Vec<target_registry::PublishedImage>, MirrorError> {
     Ok(Vec::new())
@@ -328,7 +328,7 @@ pub async fn published_images_for(
 /// published state.
 pub async fn re_cascade_entry(
     publisher: &Publisher,
-    identifier: &ocx_oci::Identifier,
+    identifier: &ocx_oci::OciIdentifier,
     spec: &MirrorSpec,
     image: &target_registry::PublishedImage,
     annotations: &BTreeMap<String, String>,

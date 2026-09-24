@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 
 use ocx_console::DataInterface;
 use ocx_oci::ArchiveMediaType;
-use ocx_oci::{Descriptor, Identifier};
+use ocx_oci::{Descriptor, OciIdentifier};
 use ocx_package::publisher::Publisher;
 use ocx_package::version::Version;
 
@@ -109,7 +109,7 @@ impl Patch {
 
         let client = crate::command::package::registry_client()?;
         let publisher = Publisher::new(client);
-        let identifier = Identifier::new_registry(&spec.target.repository, &spec.target.registry);
+        let identifier = OciIdentifier::from_parts(&spec.target.repository, &spec.target.registry);
 
         // Fail-safe (issue #157): a failed tag list must not read as "nothing
         // published", which here would silently patch nothing at all.
@@ -333,7 +333,7 @@ fn closing_verdict(sweep: Result<(), MirrorError>, failures: Vec<String>) -> (Ve
 /// avoid. Upgrade to a blob listing if a mirror ever hits that shape.
 async fn layout_unchanged(
     publisher: &Publisher,
-    identifier: &Identifier,
+    identifier: &OciIdentifier,
     image: &PublishedImage,
     expected: &ocx_package::metadata::Metadata,
 ) -> Result<Result<(), String>, MirrorError> {

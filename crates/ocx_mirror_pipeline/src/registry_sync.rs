@@ -61,8 +61,8 @@ use std::sync::Arc;
 use futures::{StreamExt as _, TryStreamExt as _};
 use ocx_index::Index;
 use ocx_index::IndexStore;
-use ocx_index::{CatalogIndex, OciIndex, OciIndexConfig, parse_physical_repository, serialize_root};
-use ocx_oci::{Algorithm, ClientBuilder, Digest, Reference};
+use ocx_index::{CatalogIndex, OciIndex, OciIndexConfig, serialize_root};
+use ocx_oci::{Algorithm, ClientBuilder, Digest, OciIdentifier, Reference};
 use tokio::sync::Semaphore;
 
 use self::plan::{PackageWork, PlannedDestination, SourcePlan};
@@ -569,6 +569,17 @@ enum PackageStep {
     Failed(String),
 }
 
+/// Parses an index root's `repository` pointer (`oci://host/path`), mapping
+/// the refusal into `ocx_index`'s own [`ocx_index::error::Error::MalformedPhysicalRef`]
+/// so it composes with [`ocx_index::IndexStore::read_root_uncatalogued`]'s
+/// `repository_check` closure contract — the same mapping `ocx_index` applies
+/// to its own root reads, reproduced here because that helper is crate-private.
+fn parse_repository_pointer(value: &str) -> ocx_index::error::Result<OciIdentifier> {
+    OciIdentifier::parse_repository_pointer(value).map_err(|_| ocx_index::error::Error::MalformedPhysicalRef {
+        value: value.to_string(),
+    })
+}
+
 /// Mirror one package (C-044's phase 2 body).
 ///
 /// The write order is C-030's visibility guarantee and is not negotiable:
@@ -610,7 +621,7 @@ async fn sync_package(
     // run's confirmed set and delete every tag a previous run mirrored.
     let local_root = match store
         .read_root_uncatalogued(as_name, &package.name, |root| {
-            parse_physical_repository(&root.repository).map(|_| ())
+            parse_repository_pointer(&root.repository).map(|_| ())
         })
         .await
     {
@@ -637,12 +648,14 @@ async fn sync_package(
     // Re-parsed rather than threaded out of `validate_root_host`, so that
     // function stays the single SSRF guard on this path instead of doubling as
     // an accessor.
-    let (source_registry, source_repository) = parse_physical_repository(&source_root.repository).map_err(|error| {
+    let source_location = OciIdentifier::parse_repository_pointer(&source_root.repository).map_err(|error| {
         MirrorError::SourceError(format!(
             "source root for '{}' has an unusable repository pointer: {error}",
             package.name
         ))
     })?;
+    let source_registry = source_location.registry().to_string();
+    let source_repository = source_location.repository().to_string();
 
     // A `{upstream_host}`/`{upstream_repository}` template expands here and
     // nowhere else — the plan phase holds the catalog key alone, and this is

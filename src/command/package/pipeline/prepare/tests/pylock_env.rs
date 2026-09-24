@@ -15,10 +15,10 @@ fn interpreter_pin_selects_the_matching_libc_leaf_per_leg() {
     // D5 leaf pinning must discriminate by the wheels key's `+libc.*`
     // feature: the `Any`-candidate fake used elsewhere would keep every
     // other test green even if the libc threading broke — this one reds.
-    fn candidate(digest_byte: char, platform: &str) -> (ocx_oci::Identifier, ocx_oci::Platform) {
+    fn candidate(digest_byte: char, platform: &str) -> (ocx_oci::PackageRef, ocx_oci::Platform) {
         let reference = format!("ocx.sh/cpython:3.13@sha256:{}", digest_byte.to_string().repeat(64));
         (
-            ocx_oci::Identifier::parse(&reference).expect("candidate reference parses"),
+            ocx_oci::PackageRef::parse(&reference).expect("candidate reference parses"),
             platform.parse().expect("candidate platform parses"),
         )
     }

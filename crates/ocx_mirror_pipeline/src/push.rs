@@ -7,6 +7,7 @@ use std::path::Path;
 use anyhow::Result;
 use ocx_oci::LayerLayoutSpec;
 use ocx_oci::LayerRef;
+use ocx_oci::OciIdentifier;
 use ocx_package::info::Info;
 use ocx_package::publisher::Publisher;
 use ocx_package::version::Version;
@@ -42,6 +43,7 @@ use super::ocx_cli::sign::{ResolvedSign, invoke_sign_reference};
 )]
 pub async fn push_and_cascade(
     publisher: &Publisher,
+    target: &OciIdentifier,
     info: Info,
     bundle_path: &Path,
     cascade: bool,
@@ -50,12 +52,11 @@ pub async fn push_and_cascade(
     annotations: &BTreeMap<String, String>,
     sign: Option<&ResolvedSign>,
 ) -> Result<MirrorResult> {
-    let version_str = info.identifier.tag_or_latest().to_string();
+    let version_str = target.tag_or_latest().to_string();
     let platform = info.platform.clone();
-    // `Display` on an `Identifier` is `registry/repository:tag` — the exact
-    // reference `ocx package sign` takes. Captured before `info` is moved into
-    // the push.
-    let signed_ref = info.identifier.to_string();
+    // `Display` on an `OciIdentifier` is `registry/repository:tag` — the exact
+    // reference `ocx package sign` takes.
+    let signed_ref = target.to_string();
     // ponytail: default layout (no strip/prefix) preserves pre-bump behavior
     // exactly. Archive/binary pushes never cross-repository mount — only the
     // pylock env-push path's wheel layers carry `mount_from`.
@@ -90,6 +91,7 @@ pub async fn push_and_cascade(
         let default = variant.is_some_and(|ctx| ctx.is_default);
         publisher
             .push_cascade(
+                target,
                 vec![info],
                 &layers,
                 cascade_versions.clone(),
@@ -109,7 +111,7 @@ pub async fn push_and_cascade(
     }
 
     publisher
-        .push(vec![info], &layers, None, canonical_tag, false, annotations)
+        .push(target, vec![info], &layers, None, canonical_tag, false, annotations)
         .await?;
 
     sign_platform(sign, &signed_ref, &platform.to_string()).await?;
