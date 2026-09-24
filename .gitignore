@@ -57,4 +57,3 @@ venv/
 /Cargo.bazel.lock.json
 /bazel-*
 /.bazelrc.user
-/test/acceptance.stamp

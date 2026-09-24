@@ -1,16 +1,21 @@
 # yaml-language-server: $schema=https://taskfile.dev/schema.json
 #
-# The Bazel Linux loop (adr_bazel_crate_split.md § C7, C8, A-4, A-8). Ported
-# from ocx's taskfiles/bazel.taskfile.yml; ocx-only material (remote cache,
-# tag guard, doctor) is not carried.
+# The Bazel lane — the Linux dev loop and CI's `Smoke (Linux)` job
+# (adr_bazel_crate_split.md § C7, C8, A-4, A-8). Ported from ocx's
+# taskfiles/bazel.taskfile.yml, remote-cache credential wiring included; ocx's
+# `doctor` (a 1.7k-line host probe of ocx's own paths) is not carried.
 #
 # Every Bazel call goes through `ocx exec bazel -- bazel …` (the `bazel` row in
 # ocx.toml) and passes `--jobs={{.JOBS}}` where the command takes it: the host
-# ~/.bazelrc outranks the workspace rc. CI and the C11 lane pass JOBS=auto.
+# ~/.bazelrc outranks the workspace rc. CI passes JOBS=auto.
 #
 # `{{.BAZEL}}` drops the telemetry credential from the client environment:
 # Bazel writes that environment into every BEP and hands it to repository
 # rules. `telemetry:bazel` still reads both from the task env.
+#
+# Tasks CI calls append `{{.CLI_ARGS}}` after the command word, so verify.yml
+# can hand a *build* option through — `--config=ci`, the execution log, and on
+# the `main` push alone `--remote_upload_local_results=true`.
 #
 # Gates are `cmds:`, never `preconditions:` or `status:` — `task --force`
 # skips those, and a cached green cannot be told from a gate that never ran.
@@ -21,7 +26,37 @@ vars:
   JOBS: '{{.JOBS | default "6"}}'
   OCX_DIR: '{{.ROOT_DIR}}/external/ocx'
   NO_OTEL: env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT
-  BAZEL: '{{.NO_OTEL}} ocx exec bazel -- bazel'
+  # `--bazelrc=$RUNNER_TEMP/bazel-cache.rc`, or the empty string — ocx's
+  # `CACHE_RC`, verbatim in its derivation. That file is the cache credential
+  # `.github/actions/bazel-cache-rc` writes; without it a CI request to the
+  # shared cache is an anonymous 401 and the lane compiles cold.
+  #
+  # **Derived from the file existing, never from a lane naming it.** `--bazelrc`
+  # on a missing path is a HARD error (ocx measured on 9.2.0: exit 2, `Unable
+  # to read .bazelrc file`), a fork PR is given no secrets so the action writes
+  # nothing, and a developer shell has no $RUNNER_TEMP (its read credential is
+  # a `--remote_header` in ~/.bazelrc). It is a *startup* option, so it sits
+  # before the command word; it adds to the workspace rc, it does not replace
+  # it, so `--remote_upload_local_results=false` still holds on every lane.
+  #
+  # `printf '%s'`, never `printf -- '%s'`: go-task's `sh:` shell (mvdan/sh)
+  # takes `--` as the format string and emits two dashes, silently dropping the
+  # credential (ocx measured it through `task --dry`).
+  #
+  # Divergence from ocx: ocx computes it in `test:unit` and `test:accept` alone;
+  # here it is part of `{{.BAZEL}}`, so every Bazel command of the CI job runs
+  # with one startup-option set (one server, and `bazel:lint`'s buildifier
+  # build reads the cache too).
+  #
+  # ponytail: unquoted at the expansion — `$RUNNER_TEMP` is
+  # `/home/runner/work/_temp` on every GitHub runner. A path with a space would
+  # need the flag built inside each `cmd:` body.
+  #
+  # A Windows runner's $RUNNER_TEMP is `D:\a\_temp`: the unquoted expansion
+  # would eat its backslashes, so they become slashes (a no-op elsewhere).
+  CACHE_RC:
+    sh: rc="${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc"; test -f "$rc" && printf '%s' "--bazelrc=${rc//\\//}" || true
+  BAZEL: '{{.NO_OTEL}} ocx exec bazel -- bazel {{.CACHE_RC}}'
 
 tasks:
   bep:mode:
@@ -36,7 +71,7 @@ tasks:
       chmod 700 '{{.DIR}}' && python3 -c "import os,sys; m = os.stat(sys.argv[1]).st_mode & 0o777; sys.exit(0 if m == 0o700 else f'bazel: the BEP scratch directory {sys.argv[1]} is mode {m:04o}, not 0700 - the BEP carries the client environment. Point TMPDIR at a filesystem that honours modes.')" '{{.DIR}}'
 
   bootstrap:
-    desc: Make this checkout buildable — repin @crates when Cargo.bazel.lock.json is absent or stale, undo crate_universe's writes into external/ocx, write test/acceptance.stamp
+    desc: Make this checkout buildable — repin @crates when Cargo.bazel.lock.json is absent or stale, undo crate_universe's writes into external/ocx
     summary: |
       C8 + A-4. `Cargo.bazel.lock.json` is gitignored (crate_universe records
       this checkout's absolute paths), so a fresh clone has none. Bootstrap
@@ -60,15 +95,11 @@ tasks:
       cached): the lockfile is non-empty, and external/ocx plus each nested
       fork has an empty `git status --porcelain --untracked-files=all`.
 
-      The stamp keys `//test:acceptance` on host inputs Bazel cannot see:
-      sha256 of the resolved Sigstore compose file (OCX_SIGSTORE_COMPOSE, else
-      the harness's default `<main checkout>/../ocx/test/docker-compose.yml` —
-      the main checkout, not this worktree, exactly as test/src/helpers.py
-      resolves it — else `absent`), one digest over every file (relative path
-      + content) under the `sigstore/` directory beside it (the token minter,
-      trusted root, keys and service configs the harness and stack read; else
-      `absent`), and the external/ocx HEAD. A dirty submodule needs no key:
-      bootstrap exits 1 on one below.
+      The external/ocx files the tests read (the Sigstore stack, the golden
+      cosign keys, ocx_python's wheel) are Bazel inputs of their own, through
+      the @ocx_test / @ocx_python_wheels local repositories (MODULE.bazel), so
+      a dirty submodule would re-key them rather than hide — bootstrap still
+      exits 1 on one below.
     silent: true
     # `task verify` reaches it from seven gates; it takes no per-caller vars.
     run: once
@@ -97,7 +128,8 @@ tasks:
           for p in $(subs); do
             [ -e "$O/$p/.git" ] || continue
             ex=$(git -C "$O/$p" rev-parse --git-path info/exclude)
-            case "$ex" in /*) ;; *) ex="$O/$p/$ex" ;; esac
+            # Absolute as `/…`, or `D:/…` from a Windows git.
+            case "$ex" in /* | [A-Za-z]:*) ;; *) ex="$O/$p/$ex" ;; esac
             mkdir -p "$(dirname "$ex")"
             grep -qxF 'BUILD.bazel' "$ex" 2>/dev/null || echo 'BUILD.bazel' >> "$ex"
           done
@@ -121,8 +153,24 @@ tasks:
               exit 1
             fi
             echo "bazel: $why - repinning." >&2
+            # Windows: rules_rust's prebuilt cargo-bazel cannot repin a path
+            # dependency there (MODULE.bazel's single_version_override), so
+            # the repin runs the patched one, built from source. Later
+            # evaluations render from the lockfile, which parses no path.
+            # Set for the repin alone: the extension reads these variables,
+            # so a settle that saw them would re-evaluate in the caller's
+            # build, render over external/ocx after the restore below, and
+            # stamp the binary dirty (run 35971288623).
+            gen_env=
+            if [ '{{OS}}' = windows ]; then
+              # fastbuild: a tool that runs once per repin and never ships.
+              {{.BAZEL}} build --jobs={{.JOBS}} -c fastbuild @rules_rust//crate_universe:bin
+              gen='{{.ROOT_DIR | toSlash}}'/$({{.BAZEL}} cquery -c fastbuild --output=files @rules_rust//crate_universe:bin)
+              gen_env="CARGO_BAZEL_GENERATOR_URL=file:///$gen CARGO_BAZEL_GENERATOR_SHA256=$(sha256sum "$gen" | cut -d' ' -f1)"
+            fi
             mkdir -p /var/tmp/ocx-mirror-splice
-            CARGO_BAZEL_REPIN=1 {{.BAZEL}} fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-mirror-splice
+            # shellcheck disable=SC2086 # gen_env is two words or none
+            env $gen_env CARGO_BAZEL_REPIN=1 {{.BAZEL}} fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-mirror-splice
             # Settle: the first evaluation without CARGO_BAZEL_REPIN renders
             # again (the env var is an extension input). Take it here, before
             # the restore, not in the caller's next build.
@@ -132,18 +180,6 @@ tasks:
           test -s Cargo.bazel.lock.json || {
             echo 'bazel: Cargo.bazel.lock.json is still absent after the repin - its cause is printed above (bazel fetch exits 0 as a no-op once @crates is cached; a cargo config above the splice temp makes cargo-bazel refuse).' >&2
             exit 1; }
-          main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
-          compose="${OCX_SIGSTORE_COMPOSE:-$main/../ocx/test/docker-compose.yml}"
-          if [ -f "$compose" ]; then sum=$(sha256sum < "$compose" | cut -d' ' -f1); else sum=absent; fi
-          # The harness also reads beside the compose file (sigstore/get-token.py,
-          # sigstore/trusted_root.json) and the stack mounts sigstore/keys and the
-          # dex/fulcio configs: one digest over every file's relative path + content.
-          sdir="$(dirname "$compose")/sigstore"
-          if [ -d "$sdir" ]; then
-            tree=$(cd "$sdir" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0r sha256sum | sha256sum | cut -d' ' -f1)
-          else tree=absent; fi
-          stamp=$(printf 'sigstore-compose %s\nsigstore-dir %s\nexternal/ocx %s\n' "$sum" "$tree" "$(git -C "$O" rev-parse HEAD)")
-          [ "$(cat test/acceptance.stamp 2>/dev/null)" = "$stamp" ] || printf '%s\n' "$stamp" > test/acceptance.stamp
           d=$(dirty)
           if [ -n "$d" ]; then
             printf 'bazel: the external/ocx submodule tree is not clean - bootstrap only undoes crate_universe output; commit, stash or revert these:\n%s\n' "$d" >&2
@@ -156,6 +192,69 @@ tasks:
     cmds:
       - task: bootstrap
       - '{{.BAZEL}} build --jobs={{.JOBS}} //...'
+
+  build:release:
+    desc: The release binary for TARGET (a //platforms triple, default x86_64-unknown-linux-musl), real provenance, at target/bazel/release/ocx-mirror-<TARGET>[.exe]
+    summary: |
+      `//:ocx-mirror` for `--platforms=//platforms:<TARGET>` with the
+      provenance build.rs bakes under cargo (release/BUILD.bazel): git from
+      this checkout, `__OCX_BUILD_VERSION`, `__OCX_BUILD_CHANNEL`, `CI` and
+      `GITHUB_*` from this environment, read by release/workspace_status.py.
+      The flags live here, not in .bazelrc: `bazel:tag:guard` keeps
+      `--workspace_status_command` out of the checked-in rc.
+
+      Hosts: Linux cross-builds the musl triples, an arm64 macOS host both
+      darwin triples, an x86_64 Windows host both windows triples
+      (//platforms says why). The status command is `<python> <script>`,
+      one string: Bazel runs it through `/bin/sh -c` on Unix and `cmd.exe /c`
+      on Windows, where a bare `.py` path is no command. A darwin build
+      carries rustc's own deployment target (10.12 on x86_64, 11.0 on
+      arm64) as `--macos_minimum_os`: left unset, the Apple toolchain would
+      compile and link for the runner's SDK version, a newer macOS floor
+      than the cargo build had. And without its `link_libc++` feature: the
+      binary holds no C++, and the toolchain's `-lc++` added a libc++ load
+      command the cargo build never had (measured, run 35945119348).
+      A windows build empties `BAZEL_WIN32_WINNT`: rules_cc's MSVC
+      toolchain otherwise compiles every C dependency with
+      `/D_WIN32_WINNT=0x0601`, and aws-lc takes its Windows 7 path
+      (`BCryptGenRandom`, an extra bcrypt.dll import the cargo build, on the
+      SDK's default, never had; run 35968338358).
+
+      Never a cached lane: the provenance action is `no-remote-cache`, and no
+      release caller passes the upload grant. The compiles it does not feed
+      read the shared cache like any other build. Its own output directory
+      (`--experimental_platform_in_output_dir`), so a release build does not
+      overwrite the host outputs the test lanes read.
+
+      The copy is decided on the file cquery names, never on bazel-bin.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux, darwin, windows]
+    vars:
+      TARGET: '{{.TARGET | default "x86_64-unknown-linux-musl"}}'
+      # Visual Studio's clang-cl, for aws-lc-sys on aarch64 Windows
+      # (MODULE.bazel), found by vswhere at its fixed install path.
+      CLANG_CL:
+        sh: '{{if eq .TARGET "aarch64-pc-windows-msvc"}}"C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" -latest -find VC/Tools/Llvm/x64/bin/clang-cl.exe{{end}}'
+      FLAGS: >-
+        --platforms=//platforms:{{.TARGET}}
+        --experimental_platform_in_output_dir=yes
+        --define=ocx_mirror_provenance=release
+        '--workspace_status_command=python3 release/workspace_status.py'
+        {{if eq .TARGET "x86_64-apple-darwin"}}--macos_minimum_os=10.12{{end}}
+        {{if eq .TARGET "aarch64-apple-darwin"}}--macos_minimum_os=11.0{{end}}
+        {{if contains "apple-darwin" .TARGET}}--features=-link_libc++{{end}}
+        {{if eq .TARGET "aarch64-pc-windows-msvc"}}'--define=OCX_MIRROR_CLANG_CL={{.CLANG_CL | toSlash}}'{{end}}
+        {{if contains "windows" .TARGET}}--repo_env=BAZEL_WIN32_WINNT={{end}}
+      OUT: '{{.ROOT_DIR}}/target/bazel/release/ocx-mirror-{{.TARGET}}{{if contains "windows" .TARGET}}.exe{{end}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} {{.FLAGS}} //:ocx-mirror {{.CLI_ARGS}}'
+      - cmd: |
+          set -euo pipefail
+          bin=$({{.BAZEL}} cquery {{.FLAGS}} --output=files //:ocx-mirror {{.CLI_ARGS}})
+          mkdir -p "$(dirname '{{.OUT}}')"
+          cp -f "$bin" '{{.OUT}}'
+          echo '{{.OUT}}'
 
   build:nobuild:
     desc: Load and analyse every target without building; push the analysis BEP to telemetry
@@ -185,8 +284,9 @@ tasks:
           BEP: '{{.BEP}}'
 
   test:
-    desc: The whole Bazel test lane — unit, the C4 coverage gate, then acceptance
+    desc: The whole Bazel test lane — gate-script proofs, unit, the C4 coverage gate, then acceptance
     cmds:
+      - task: test:scripts
       - task: test:unit
       - task: test:coverage
       - task: test:accept
@@ -195,19 +295,56 @@ tasks:
     desc: The acceptance suite as one cached Bazel test — `bazel test //test:acceptance`
     summary: |
       C-008. One `sh_test` running `pytest -n auto` against the Bazel-built
-      ocx-mirror and the ocx.lock-pinned ocx (test/BUILD.bazel carries the
-      tags, inputs and inherited environment). Bootstrap first: it writes
-      test/acceptance.stamp, the input that re-keys the result when the
-      Sigstore compose file, its sigstore/ tree, or the external/ocx HEAD
-      moves. The suite's
-      registry knobs (REGISTRY, MIRROR_REGISTRY, ZOT_REGISTRY, …) are read
-      from this shell, exactly as `task test:parallel` reads them — and are
-      not part of the cache key.
+      ocx-mirror, the ocx.lock-pinned ocx and the external/ocx Sigstore stack
+      (test/BUILD.bazel carries the tags, inputs and inherited environment).
+      The result is remote-cacheable, so the suite takes none of its knobs
+      from this shell: registries at their defaults, the Sigstore stack as
+      its own compose project on fixed ports (test/bazel_accept.sh). For
+      other registries or the sibling ../ocx stack, run `task test:parallel`.
+
+      The per-case pytest JUnit (the runner's `--junit-xml=$XML_OUTPUT_FILE`)
+      is copied out of `bazel-testlogs` — a symlink into the output base — to
+      target/bazel/accept/junit.xml, where a CI upload reads a real path (ocx's
+      `test:accept` copies into the same target/bazel/accept/, one report per
+      module). Removed first, so a run that
+      never reached the test leaves no earlier run's report behind it; exit =
+      Bazel's.
     dir: '{{.ROOT_DIR}}'
     platforms: [linux]
+    vars:
+      JUNIT: '{{.ROOT_DIR}}/target/bazel/accept/junit.xml'
     cmds:
       - task: bootstrap
-      - '{{.BAZEL}} test --jobs={{.JOBS}} //test:acceptance {{.CLI_ARGS}}'
+      - cmd: |
+          rm -f '{{.JUNIT}}'
+          status=0
+          {{.BAZEL}} test --jobs={{.JOBS}} //test:acceptance {{.CLI_ARGS}} || status=$?
+          # 0 passed, 3 a test failed: both ran the suite and wrote its report.
+          # Any other code (build failure, interrupt) may leave a stale one.
+          if [ "$status" = 0 ] || [ "$status" = 3 ]; then
+            mkdir -p "$(dirname '{{.JUNIT}}')"
+            cp -L bazel-testlogs/test/acceptance/test.xml '{{.JUNIT}}' || echo 'bazel test:accept: no test.xml under bazel-testlogs/test/acceptance - nothing to publish' >&2
+          fi
+          exit "$status"
+
+  test:scripts:
+    desc: The gate-script proofs as cached Bazel tests — `bazel test //scripts/...` (TARGETS= narrows)
+    summary: |
+      scripts/BUILD.bazel: each gate script's `--self-test`, the
+      bazel-cache-rc action's selftest.sh, and the telemetry names/never-fail
+      pytest, over the hermetic interpreter and the hashed
+      scripts/requirements.lock. `task scripts:self-test` and
+      `task telemetry:self-test` are this on Linux. A target of its own, not
+      part of `test:unit`: `bazel_test_floor.py` floors libtest case counts,
+      and these are no libtest targets.
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    vars:
+      TARGETS: '{{.TARGETS | default "//scripts/..."}}'
+    cmds:
+      # The root package these targets read exports from loads @crates.
+      - task: bootstrap
+      - '{{.BAZEL}} test --jobs={{.JOBS}} {{.TARGETS}} {{.CLI_ARGS}}'
 
   test:unit:
     desc: Unit tests under Bazel (`//crates/... //:all`), floored per target and reported per case in target/bazel/junit.xml
@@ -250,14 +387,14 @@ tasks:
           exit "$status"
 
   test:coverage:
-    desc: C4 coverage gate — Bazel-executed cases ⊇ `cargo nextest list` minus the [[excluded]] rows
+    desc: C4 coverage gate — Bazel-executed cases ⊇ `cargo nextest list`
     summary: |
       C-009. Runs `bazel test //crates/... //:all` with a BEP (a cache replay
       on an unchanged tree), then `cargo nextest list --workspace --release
       --locked` — sequentially: cargo and Bazel never build at once. Red on
-      any case nextest names that no Bazel target executed and no
-      `[[excluded]]` row covers (the names are printed), on a row matching no
-      case, and on a row Bazel executes (the list only shrinks).
+      any case nextest names that no Bazel target executed (the names are
+      printed): nothing else runs a case a target skips, so there is no
+      exclusion list, and crates/TEST_TARGET_MAP.toml carrying one reds too.
     dir: '{{.ROOT_DIR}}'
     platforms: [linux]
     vars:
@@ -337,12 +474,29 @@ tasks:
       - task: bootstrap
       - cmd: |
           set -e
-          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all //test:acceptance --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
+          {{.BAZEL}} test --jobs={{.JOBS}} //crates/... //:all //scripts/... //test:acceptance --build_event_json_file='{{.BEP}}' {{.CLI_ARGS}}
           chmod 600 '{{.BEP}}'
       - python3 scripts/bazel_cache_check.py --bep '{{.BEP}}'
 
+  cache:rc:check:
+    desc: The CI cache credential reaches Bazel — `{{.BAZEL}}` carries `--bazelrc` whenever $RUNNER_TEMP/bazel-cache.rc exists
+    summary: |
+      Bazel treats a refused cache as a WARNING (`Remote Cache: 401
+      Unauthorized`) and builds on, so a credential that never reaches the
+      command line is a silent cold build — and, on the `main` push, a write
+      lane that uploads nothing. That happened: a variable name docs.taskfile.yml
+      also declared made go-task 3.53 render this file's `{{.BAZEL}}` without
+      its `CACHE_RC`. verify.yml runs this right after writing the credential.
+    cmd: |
+      if [ -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" ]; then
+        case '{{.BAZEL}}' in
+          *--bazelrc=*) echo 'bazel cache:rc:check: the credential rc reaches {{"{{"}}.BAZEL{{"}}"}}' ;;
+          *) echo "bazel cache:rc:check: \$RUNNER_TEMP/bazel-cache.rc exists but the Bazel command line lacks --bazelrc: '{{.BAZEL}}'" >&2; exit 1 ;;
+        esac
+      fi
+
   pin:check:
-    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, MODULE.bazel rust version vs rust-toolchain.toml, MODULE.bazel version vs the workspace version
+    desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, every MODULE.bazel rust `versions` (host and musl toolchains) vs rust-toolchain.toml, MODULE.bazel version vs the workspace version, MODULE.bazel's schemars spoke vs Cargo.lock
     silent: true
     dir: '{{.ROOT_DIR}}'
     cmd: |
@@ -354,37 +508,70 @@ tasks:
       ocx_tag = tomllib.loads(Path("ocx.toml").read_text())["tools"]["bazel"].rsplit(":", 1)[1]
       channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
       workspace = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["package"]["version"]
-      rust = re.search(r'rust\.toolchain\([^)]*versions\s*=\s*\["([^"]+)"\]', module, re.S)
+      # Every `versions = [...]`: rust.toolchain and the musl repository_set
+      # both download a rustc, and a second one on another version would
+      # compile the release binaries with a toolchain no test lane runs.
+      rust = sorted(set(re.findall(r'versions\s*=\s*\["([^"]+)"\]', module)))
       mod = re.search(r'module\([^)]*version\s*=\s*"([^"]+)"', module, re.S)
+      # The jsonschema variants' spoke import: a stale one fails every Bazel
+      # command with an extension exception, so name the fix before that.
+      spoke = re.search(r'"crates__schemars-([^"]+)"', module)
+      row = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["dependencies"]["schemars"]
+      major = (row if isinstance(row, str) else row["version"]).lstrip("=^~").split(".")[0]
+      locked = [p["version"] for p in tomllib.loads(Path("Cargo.lock").read_text())["package"]
+                if p["name"] == "schemars" and p["version"].split(".")[0] == major]
       pairs = [
           (".bazelversion", bazelversion, "ocx.toml bazel tag", ocx_tag),
-          ("MODULE.bazel rust.toolchain versions", rust and rust.group(1), "rust-toolchain.toml channel", channel),
+          ("MODULE.bazel rust versions", ", ".join(rust), "rust-toolchain.toml channel", channel),
           ("MODULE.bazel module version", mod and mod.group(1), "Cargo.toml [workspace.package] version", workspace),
+          ("MODULE.bazel use_repo crates__schemars-<v>", spoke and spoke.group(1), f"Cargo.lock schemars {major}.x", ", ".join(locked)),
       ]
       bad = [f"bazel:pin:check: {a} = {x!r} but {b} = {y!r}" for a, x, b, y in pairs if x != y]
-      print("\n".join(bad) or "bazel:pin:check: 3 pin pairs agree", file=sys.stderr if bad else sys.stdout)
+      print("\n".join(bad) or "bazel:pin:check: 4 pin pairs agree", file=sys.stderr if bad else sys.stdout)
       sys.exit(1 if bad else 0)
       EOF
 
   patch:check:
-    desc: The [patch.crates-io] forks bind under Bazel — exactly one Cargo.bazel.lock.json entry each for oci-client, docker_credential, sigstore, each a Path into external/ocx/external/<fork>
+    desc: The [patch.crates-io] forks bind, in both graphs — Bazel's Cargo.bazel.lock.json and cargo's Cargo.toml + Cargo.lock — for oci-client, docker_credential, sigstore
     summary: |
       ADR Q2. Nothing in MODULE.bazel names the forks; the splice reads the
       Cargo patch table. Dropping that table does not error — the splice
       resolves the crates.io releases — so this asserts the binding in the
-      generated lockfile. `LOCK=<file>` checks another file (red proofs).
+      generated lockfile: exactly one entry per fork, a Path into
+      external/ocx/external/<fork>.
+
+      The cargo half guards the darwin and windows release binaries, which
+      build-matrix.yml still builds with cargo: Cargo.toml's `[patch.crates-io]` row points
+      at the same directory, and Cargo.lock holds exactly one entry of each
+      fork, with no `source` — cargo records none for a path package, and a
+      registry resolve would record `registry+…`. It replaced a `cargo tree
+      -i` CI step, which is no lockfile read: it installed the pinned
+      toolchain through rustup and downloaded every crate first.
+
+      `LOCK=`, `CARGO_TOML=`, `CARGO_LOCK=` check other files (red proofs).
     silent: true
     dir: '{{.ROOT_DIR}}'
     vars:
       LOCK: '{{.LOCK | default "Cargo.bazel.lock.json"}}'
+      CARGO_TOML: '{{.CARGO_TOML | default "Cargo.toml"}}'
+      CARGO_LOCK: '{{.CARGO_LOCK | default "Cargo.lock"}}'
     cmds:
       - task: bootstrap
       - cmd: |
-          python3 - '{{.LOCK}}' <<'EOF'
-          import json, sys
+          python3 - '{{.LOCK}}' '{{.CARGO_TOML}}' '{{.CARGO_LOCK}}' <<'EOF'
+          import json, sys, tomllib
           forks = {"oci-client": "rust-oci-client", "docker_credential": "docker_credential", "sigstore": "sigstore-rs"}
           crates = json.load(open(sys.argv[1]))["crates"]
+          patch = tomllib.load(open(sys.argv[2], "rb")).get("patch", {}).get("crates-io", {})
+          locked = tomllib.load(open(sys.argv[3], "rb")).get("package", [])
           bad = []
+          for name, fork in forks.items():
+              row = patch.get(name, {}).get("path")
+              if row != "external/ocx/external/" + fork:
+                  bad.append(f"{sys.argv[2]} [patch.crates-io] {name} = {row!r}, expected path external/ocx/external/{fork}")
+              entries = [e for e in locked if e.get("name") == name]
+              if len(entries) != 1 or "source" in entries[0]:
+                  bad.append(f"{sys.argv[3]} {name}: {[e.get('source', 'path') for e in entries]}, expected exactly one path entry (no `source`) - cargo does not resolve the fork")
           for name, fork in forks.items():
               hits = [(k, v) for k, v in crates.items() if k.startswith(name + " ")]
               if len(hits) != 1:
@@ -397,7 +584,7 @@ tasks:
           for line in bad:
               print(f"bazel:patch:check: {line}", file=sys.stderr)
           if not bad:
-              print(f"bazel:patch:check: {', '.join(forks)} bind to external/ocx/external/*")
+              print(f"bazel:patch:check: {', '.join(forks)} bind to external/ocx/external/* in Cargo.bazel.lock.json, Cargo.toml and Cargo.lock")
           sys.exit(1 if bad else 0)
           EOF
 
@@ -406,7 +593,24 @@ tasks:
     dir: '{{.ROOT_DIR}}'
     cmds:
       - task: bootstrap
-      - '{{.NO_OTEL}} ocx exec bazel -- python3 scripts/bazel_build_drift.py'
+      # `cargo metadata` runs through the Bazel toolchain's cargo (the script's
+      # `bazel run @rules_rust//tools/upstream_wrapper:cargo`): no host Rust.
+      # RUN_FLAGS: build options for that `bazel run` — verify.yml's main-push
+      # lane passes its upload grant, or the wrapper compile never reaches the
+      # shared cache and every later run rebuilds it.
+      - python3 scripts/bazel_build_drift.py --bazel '{{.BAZEL}}' --run-flags='{{.RUN_FLAGS}}'
+
+  tag:guard:
+    desc: Every test stays remotely cacheable and honestly keyed — no cache-suppressing tag, acceptance's inputs declared, no stray env_inherit, no volatile .bazelrc flag
+    summary: |
+      `scripts/bazel_tag_guard.py` (adapted from ocx's) over two queries:
+      `tests(//...)` for tags and `env_inherit`, `deps(//test:acceptance)` for
+      its input closure; plus the checked-in .bazelrc. Its `--self-test` is
+      `task scripts:self-test`'s.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - python3 scripts/bazel_tag_guard.py --bazel '{{.BAZEL}}'
 
   lint:
     desc: Buildifier over every BUILD.bazel and .bzl — format diff plus lint findings, decided on the exit code
@@ -415,6 +619,38 @@ tasks:
       # The root package loads @crates, which a fresh worktree has no lockfile for.
       - task: bootstrap
       - '{{.BAZEL}} run --jobs={{.JOBS}} //:buildifier.check'
+
+  lint:clippy:
+    desc: Clippy over every first-party Rust target, warnings denied — `cargo clippy --all-targets -- -D warnings` under Bazel
+    summary: |
+      `--config=clippy` (.bazelrc says what it carries and why it is a named
+      config). The aspect runs on every rust target `//...` expands to — each
+      library, binary and rust_test, the jsonschema variants included — and on
+      no external one. Linux and CI; `rust:clippy:check` stays cargo elsewhere.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} --config=clippy //... {{.CLI_ARGS}}'
+
+  lint:fmt:
+    desc: rustfmt --check over every tracked first-party `.rs`, against rustfmt.toml — `cargo fmt --check` under Bazel
+    summary: |
+      `--config=rustfmt`: one cached Rustfmt action per target, compiling
+      nothing. `//:build_script_fmt` is named because `manual` keeps it out of
+      `//...` — it is build.rs, the one tracked `.rs` no target compiles.
+      Unlike `cargo fmt --all`, it never reaches the path dependencies under
+      external/ocx. The fixer stays `task rust:format:apply`.
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} --config=rustfmt //... //:build_script_fmt {{.CLI_ARGS}}'
+
+  build:jsonschema:
+    desc: Compile the `jsonschema` feature graph (`//:jsonschema`) — `cargo check --features jsonschema --all-targets` under Bazel
+    dir: '{{.ROOT_DIR}}'
+    cmds:
+      - task: bootstrap
+      - '{{.BAZEL}} build --jobs={{.JOBS}} //:jsonschema {{.CLI_ARGS}}'
 
   mod:check:
     desc: MODULE.bazel.lock is fresh — `bazel mod deps --lockfile_mode=error`

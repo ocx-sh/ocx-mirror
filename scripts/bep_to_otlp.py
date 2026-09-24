@@ -65,7 +65,10 @@ from typing import Any
 
 from _gate import Finding, codes, expect, report
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# `absolute()`, never `resolve()`: under `bazel test` (scripts/BUILD.bazel) this
+# file is a runfiles symlink into the source tree, and resolving it would let
+# the self-test read the checkout instead of its declared inputs.
+REPO_ROOT = Path(__file__).absolute().parent.parent
 
 # ponytail: the reader floor, mirror-local. 7 `crates/*` libraries + the root
 # library; see the module docstring for why it is this low.
@@ -1624,7 +1627,8 @@ def prove_bep_not_persisted() -> int:
 
 def self_test() -> int:
     """Every pair, on fixtures this repository owns."""
-    scratch = REPO_ROOT / ".tmp"
+    # Bazel's per-test scratch when it runs this; the checkout is read-only there.
+    scratch = Path(os.environ.get("TEST_TMPDIR") or REPO_ROOT / ".tmp")
     scratch.mkdir(mode=0o700, exist_ok=True)
     checks = 0
     import tempfile

@@ -8,6 +8,9 @@
   "git-submodules": {
     "enabled": true
   },
+  "pip-compile": {
+    "managerFilePatterns": ["/^docs/requirements\\.lock$/", "/^scripts/requirements\\.lock$/"]
+  },
   "packageRules": [
     {
       "description": "GitHub Actions — group, SHA-pin, ci(deps) prefix",
@@ -21,6 +24,21 @@
       "description": "Cargo crates — group, chore(deps) prefix",
       "matchManagers": ["cargo"],
       "groupName": "rust-deps",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Docs site toolchain (docs/requirements.lock, uv pip compile) — group, chore(deps) prefix",
+      "matchManagers": ["pip-compile"],
+      "groupName": "docs-deps",
+      "semanticCommitType": "chore",
+      "semanticCommitScope": "deps"
+    },
+    {
+      "description": "Gate-script test toolchain (scripts/requirements.lock, uv pip compile) — its own group, chore(deps) prefix",
+      "matchManagers": ["pip-compile"],
+      "matchFileNames": ["scripts/requirements.lock"],
+      "groupName": "scripts-deps",
       "semanticCommitType": "chore",
       "semanticCommitScope": "deps"
     },

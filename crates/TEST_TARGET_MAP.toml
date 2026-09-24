@@ -13,11 +13,9 @@
 #   cases    executed (passed + failed); excludes `--skip`ped ones
 #   skipped  how many the target's `args` filter out (libtest `filtered out`)
 #
-# `[[excluded]]` rows are hand-written: the cases a `rust_test` `--skip`s
-# (C4 — own process, cwd, `cargo metadata`, a cross-crate source walk). They
-# run under `task rust:test:bazel-excluded` (cargo nextest) instead, and
-# `task bazel:test:coverage` proves nextest's list == Bazel-executed + these.
-# **This list only shrinks.**
+# There are no `[[excluded]]` rows: every case `cargo nextest list` names runs
+# under Bazel, and `task bazel:test:coverage` proves it (nothing else would run
+# a case a target `--skip`s). The last four moved in the full Bazel adoption.
 
 
 [[target]]
@@ -48,8 +46,7 @@ cases = 1
 label = "//:source_scan"
 crate = "ocx_mirror"
 suite = "ocx_mirror::source_scan"
-cases = 1
-skipped = 2
+cases = 3
 
 [[target]]
 label = "//:spec_validation"
@@ -61,8 +58,7 @@ cases = 1
 label = "//:workspace_structure"
 crate = "ocx_mirror"
 suite = "ocx_mirror::workspace_structure"
-cases = 11
-skipped = 1
+cases = 12
 
 [[target]]
 label = "//crates/ocx_mirror_error:ocx_mirror_error_test"
@@ -80,8 +76,7 @@ cases = 22
 label = "//crates/ocx_mirror_pipeline:ocx_mirror_pipeline_test"
 crate = "ocx_mirror_pipeline"
 suite = "ocx_mirror_pipeline"
-cases = 471
-skipped = 1
+cases = 472
 
 [[target]]
 label = "//crates/ocx_mirror_report:ocx_mirror_report_test"
@@ -106,23 +101,3 @@ label = "//crates/ocx_mirror_test_support:ocx_mirror_test_support_test"
 crate = "ocx_mirror_test_support"
 suite = "ocx_mirror_test_support"
 cases = 0
-
-[[excluded]]
-suite = "ocx_mirror_pipeline"
-name = "registry_sync::cache::tests::digest_file_and_locks_dir_stay_outside_output_for_every_output_shape"
-reason = "mutates the process-wide current directory (`set_current_dir` under the file's CWD_LOCK) \u2014 C4 names it: a cwd needs a process of its own"
-
-[[excluded]]
-suite = "ocx_mirror::source_scan"
-name = "every_production_client_is_built_through_the_factory"
-reason = "walks `src/` of the root package and every `crates/*/src` \u2014 declaring that as data would make the target an rdep of every crate (C4 cross-crate source walk)"
-
-[[excluded]]
-suite = "ocx_mirror::source_scan"
-name = "the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons"
-reason = "byte-compares against `external/ocx/crates/ocx_python/tests/`, a file of the ocx submodule no Bazel target of this graph exports"
-
-[[excluded]]
-suite = "ocx_mirror::workspace_structure"
-name = "real_workspace_has_no_violations"
-reason = "runs `cargo metadata` in the checkout (C4) \u2014 a cargo invocation, not a Bazel input"

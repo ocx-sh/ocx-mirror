@@ -1,6 +1,8 @@
 """Telemetry names and the never-fail contract (ADR adr_bazel_crate_split.md A-8, C-013).
 
-Run by `task telemetry:self-test` as `uv run --project test pytest scripts -q`.
+Run by `task telemetry:self-test`: on Linux as the Bazel test
+`//scripts:telemetry_names` (scripts/BUILD.bazel), elsewhere as
+`uv run --project test pytest scripts -q`.
 
 * The two JUnit producers — the CI composite action and `telemetry:push` —
   must push under the mirror's own service name, trace-name prefix and repo
@@ -9,21 +11,27 @@ Run by `task telemetry:self-test` as `uv run --project test pytest scripts -q`.
   failing `junit2otlp` exit 0 with one `telemetry` warning line; no endpoint
   exits 0 in silence.
 
-Scratch lives under `~/.cache/ocx-mirror-pytest-tmp`, outside any git
-checkout, and every subprocess gets a throwaway `HOME` so the operator's real
-`~/.config/ocx-telemetry/env` is never sourced.
+Scratch lives under Bazel's `TEST_TMPDIR`, else `~/.cache/ocx-mirror-pytest-tmp`
+— outside any git checkout either way — and every subprocess gets a throwaway
+`HOME` so the operator's real `~/.config/ocx-telemetry/env` is never sourced.
+The `python3` the tasks spawn is this interpreter, and under Bazel `task` is
+the declared `@tools//:task` (`TELEMETRY_TASK`), never a host binary.
 """
 
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# `absolute()`, never `resolve()`: under `bazel test` this file is a runfiles
+# symlink into the source tree, and resolving it would read the checkout
+# instead of the declared inputs.
+REPO_ROOT = Path(__file__).absolute().parent.parent
 ACTION = REPO_ROOT / ".github" / "actions" / "test-telemetry" / "action.yml"
 TASKFILE = REPO_ROOT / "taskfiles" / "telemetry.taskfile.yml"
 UNREACHABLE = "https://127.0.0.1:9"
@@ -69,12 +77,18 @@ def test_junit_producer_carries_mirror_names(path: Path, trace_name: str, attrib
 
 @pytest.fixture
 def scratch():
-    root = Path.home() / ".cache" / "ocx-mirror-pytest-tmp"
+    root = Path(os.environ.get("TEST_TMPDIR") or Path.home() / ".cache" / "ocx-mirror-pytest-tmp")
     root.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(dir=root))
     (directory / "home").mkdir()
     (directory / "bin").mkdir()
     (directory / "tmp").mkdir()
+    # First on every subprocess PATH (`_env`): the tasks' `python3` is the
+    # interpreter running this test, not whichever one the host has.
+    (directory / "bin" / "python3").symlink_to(sys.executable)
+    if task := os.environ.get("TELEMETRY_TASK"):
+        # An rlocationpath, resolved as test/bazel_accept.sh resolves its own.
+        (directory / "bin" / "task").symlink_to(Path(os.environ["TEST_SRCDIR"], task))
     (directory / "junit.xml").write_text(JUNIT, encoding="utf-8")
     yield directory
     shutil.rmtree(directory, ignore_errors=True)
@@ -224,3 +238,9 @@ def test_action_without_secret_is_a_named_no_op(scratch: Path) -> None:
     result = _action(scratch)
     assert result.returncode == 0, result
     assert result.stdout == "test telemetry: OTEL_OTLP_AUTH is empty, nothing pushed\n", result
+
+
+if __name__ == "__main__":
+    # The `py_test` entry point (scripts/BUILD.bazel); `pytest scripts` never
+    # takes this branch.
+    raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))

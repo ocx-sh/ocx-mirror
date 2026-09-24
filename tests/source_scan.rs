@@ -323,8 +323,14 @@ fn the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let wheel = "fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl";
     let copy = std::fs::read(root.join("tests").join(wheel)).expect("the root wheel copy is readable");
-    let original = std::fs::read(root.join("external/ocx/crates/ocx_python/tests").join(wheel))
-        .expect("ocx_python's wheel in external/ocx is readable");
+    // Bazel hands the original over as a runfiles path (`OCX_PYTHON_WHEEL`,
+    // an `@ocx_python_wheels` input): the submodule is not under its root.
+    let original_path = std::env::var_os("OCX_PYTHON_WHEEL").map_or_else(
+        || root.join("external/ocx/crates/ocx_python/tests").join(wheel),
+        std::path::PathBuf::from,
+    );
+    let original = std::fs::read(&original_path)
+        .unwrap_or_else(|error| panic!("ocx_python's wheel at {} is readable: {error}", original_path.display()));
     assert!(
         copy == original,
         "tests/{wheel} differs from external/ocx/crates/ocx_python/tests/{wheel}; re-copy it"
