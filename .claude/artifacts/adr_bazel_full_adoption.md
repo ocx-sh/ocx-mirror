@@ -146,6 +146,12 @@ Key files, attempt 2 vs attempt 3 (same tree): unit 1125/1125, acceptance 1/1 an
 all byte-identical. Run 1 vs run 2 (commits differing only outside these targets' inputs): also
 byte-identical. Every action a second run would look up has the key the first run would have written.
 
+After the lint lanes moved in (C5): runs [35934619032](https://github.com/ocx-sh/ocx-mirror/actions/runs/35934619032)
+(d4f3085) and [35936219566](https://github.com/ocx-sh/ocx-mirror/actions/runs/35936219566) (2554774). Their key files are
+identical for clippy (1126 lines), fmt (29), jsonschema (2), unit (29), acceptance (1) and site (2). Scripts differ in
+exactly 2 of 18 lines: `bazel_build_drift_self_test` and `bep_to_otlp_self_test`, whose declared inputs
+(`bazel_build_drift.py`, `verify.yml`, `bazel.taskfile.yml`) that commit edited.
+
 **Local (done-bar 4).** After `bazel clean`, `bazel test //test:acceptance //docs:site` reported
 `1523 processes: 1099 disk cache hit, 424 internal` and `Executed 0 out of 1 test`.
 
