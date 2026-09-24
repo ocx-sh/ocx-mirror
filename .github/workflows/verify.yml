@@ -129,6 +129,10 @@ jobs:
         with:
           read-auth: ${{ !(github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && secrets.BAZEL_CACHE_READ_AUTH || '' }}
           write-auth: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.workflow == 'Verify') && secrets.BAZEL_CACHE_WRITE_AUTH || '' }}
+      # Bazel only WARNS on a refused cache and builds on cold, so prove the
+      # credential reaches the Bazel command line before anything relies on it.
+      - name: Bazel cache credential reaches Bazel
+        run: task bazel:cache:rc:check
       # Ahead of every Bazel command, because the C++ toolchain is
       # autoconfigured on first use, once per output base: `rules_cc` probes
       # `lld` then `gold` and bakes the winner in as `-fuse-ld=`. The runner

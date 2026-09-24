@@ -395,6 +395,23 @@ tasks:
           chmod 600 '{{.BEP}}'
       - python3 scripts/bazel_cache_check.py --bep '{{.BEP}}'
 
+  cache:rc:check:
+    desc: The CI cache credential reaches Bazel — `{{.BAZEL}}` carries `--bazelrc` whenever $RUNNER_TEMP/bazel-cache.rc exists
+    summary: |
+      Bazel treats a refused cache as a WARNING (`Remote Cache: 401
+      Unauthorized`) and builds on, so a credential that never reaches the
+      command line is a silent cold build — and, on the `main` push, a write
+      lane that uploads nothing. That happened: a variable name docs.taskfile.yml
+      also declared made go-task 3.53 render this file's `{{.BAZEL}}` without
+      its `CACHE_RC`. verify.yml runs this right after writing the credential.
+    cmd: |
+      if [ -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" ]; then
+        case '{{.BAZEL}}' in
+          *--bazelrc=*) echo 'bazel cache:rc:check: the credential rc reaches {{"{{"}}.BAZEL{{"}}"}}' ;;
+          *) echo "bazel cache:rc:check: \$RUNNER_TEMP/bazel-cache.rc exists but the Bazel command line lacks --bazelrc: '{{.BAZEL}}'" >&2; exit 1 ;;
+        esac
+      fi
+
   pin:check:
     desc: Pin twins agree — .bazelversion vs ocx.toml's bazel tag, MODULE.bazel rust version vs rust-toolchain.toml, MODULE.bazel version vs the workspace version, MODULE.bazel's schemars spoke vs Cargo.lock
     silent: true
