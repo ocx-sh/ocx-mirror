@@ -494,8 +494,8 @@ tasks:
       generated lockfile: exactly one entry per fork, a Path into
       external/ocx/external/<fork>.
 
-      The cargo half guards the release binaries, which build-matrix.yml
-      still builds with cargo: Cargo.toml's `[patch.crates-io]` row points
+      The cargo half guards the darwin and windows release binaries, which
+      build-matrix.yml still builds with cargo: Cargo.toml's `[patch.crates-io]` row points
       at the same directory, and Cargo.lock holds exactly one entry of each
       fork, with no `source` — cargo records none for a path package, and a
       registry resolve would record `registry+…`. It replaced a `cargo tree

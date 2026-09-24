@@ -91,6 +91,31 @@ arms of `task rust:lint` / `rust:verify` / `verify`. What moved:
   runner's rustup it installed the toolchain and downloaded every crate. `bazel:build:drift` reads
   `cargo metadata` through the Bazel toolchain's cargo (`@rules_rust//tools/upstream_wrapper:cargo`).
 
+**C5 amended — the Linux musl release legs moved to Bazel** (phase L; darwin and windows still cargo).
+`task bazel:build:release TARGET=<triple>` builds `//:ocx-mirror` for `//platforms:<triple>`:
+- **Toolchain:** `hermetic_cc_toolchain` 4.3.0 (zig 0.15.2 — the linker family cargo-zigbuild used; no
+  `rules_cc` bump, where `toolchains_musl` 0.1.27.bcr.1 needs 0.2.18) registers only its two
+  `libc_aware` musl C toolchains, and a `rust.repository_set` adds rustc 1.95.0 for both musl triples
+  with `-Clink-self-contained=no` (zig's crt and rustc's are otherwise a duplicate `_start`). Both are
+  selected by `@zig_sdk//libc:musl`, which only `//platforms` carries: rules_rust gives a musl triple
+  the gnu constraint set, so without it the gnu toolchains match a musl platform. crate_universe needs
+  no musl triple (none exists in rules_rust 0.74.0's platform list): `cargo tree -e normal,build` is
+  byte-identical for gnu and musl on both arches, so its gnu arms are exact.
+- **Provenance:** `--define=ocx_mirror_provenance=release` selects `//release:provenance` over
+  `testing_provenance.env` in `//:ocx_mirror`'s `rustc_env_files`. That rule reads the stable workspace
+  status (`release/workspace_status.py`: build.rs's git fields, `VERGEN_BUILD_TIMESTAMP` under `CI`,
+  `__OCX_BUILD_*`, `GITHUB_*`) and the target toolchain's triple and rustc, in one `no-remote-cache`
+  action. Not rules_rust's `stamp` + `{KEY}` substitution: an absent key stays in the value verbatim,
+  where build.rs omits the field. No `--stamp` (it would stamp every `rust_binary`).
+- **Host keys unchanged:** execution-log keys of every host lane, before and after, 1143 of 1144
+  identical; the one difference is a script test whose declared input `bazel.taskfile.yml` changed.
+- **Parity** with the cargo-zigbuild artifact, both triples: static (no interpreter, no dynamic
+  section), stripped, sizes within 0.02 %, `--json version` identical except the wall-clock build
+  timestamp and the `commit` block, which only Bazel carried: the local cargo build's vergen-gix
+  dropped it (`Could not determine status for submodule at 'external/ocx'` in a linked worktree; no
+  CI log shows it). `ocx package create` accepts both. build-matrix.yml smokes every artifact
+  (`task release:smoke`); `build-check.yml` runs the matrix on pull requests with channel `check`.
+
 ## Deviations from ocx
 
 | Mirror | ocx | Why |
