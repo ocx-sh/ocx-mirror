@@ -153,6 +153,17 @@ tasks:
               exit 1
             fi
             echo "bazel: $why - repinning." >&2
+            # Windows: rules_rust's prebuilt cargo-bazel cannot repin a path
+            # dependency there (MODULE.bazel's single_version_override), so
+            # the repin runs the patched one, built from source. Later
+            # evaluations render from the lockfile, which parses no path.
+            if [ '{{OS}}' = windows ]; then
+              {{.BAZEL}} build --jobs={{.JOBS}} @rules_rust//crate_universe:bin
+              gen='{{.ROOT_DIR | toSlash}}'/$({{.BAZEL}} cquery --output=files @rules_rust//crate_universe:bin)
+              export CARGO_BAZEL_GENERATOR_URL="file:///$gen"
+              CARGO_BAZEL_GENERATOR_SHA256=$(sha256sum "$gen" | cut -d' ' -f1)
+              export CARGO_BAZEL_GENERATOR_SHA256
+            fi
             mkdir -p /var/tmp/ocx-mirror-splice
             CARGO_BAZEL_REPIN=1 {{.BAZEL}} fetch --repo=@crates --repo_env=TMPDIR=/var/tmp/ocx-mirror-splice
             # Settle: the first evaluation without CARGO_BAZEL_REPIN renders
