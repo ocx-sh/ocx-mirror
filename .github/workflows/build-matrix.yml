@@ -70,6 +70,9 @@ jobs:
         uses: ./.github/actions/bazel-cache-rc
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      - name: Bazel cache credential reaches Bazel
+        shell: bash
+        run: task bazel:cache:rc:check
       # verify.yml's reason: the host C toolchain (build scripts, proc
       # macros) autoconfigures `-fuse-ld=` from what it finds, and the same
       # linker keeps those exec compiles on verify.yml's cache keys.
@@ -145,6 +148,9 @@ jobs:
         uses: ./.github/actions/bazel-cache-rc
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      - name: Bazel cache credential reaches Bazel
+        shell: bash
+        run: task bazel:cache:rc:check
       - name: Install Rosetta
         # The x86_64 smoke runs the binary; an arm64 runner image may ship
         # without the translator. Idempotent when it is there.
@@ -229,6 +235,9 @@ jobs:
         uses: ./.github/actions/bazel-cache-rc
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      - name: Bazel cache credential reaches Bazel
+        shell: bash
+        run: task bazel:cache:rc:check
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
