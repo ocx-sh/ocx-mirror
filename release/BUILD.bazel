@@ -3,8 +3,8 @@
 
 # The release build's provenance (`task bazel:build:release`): the real
 # values build.rs bakes under cargo, in place of `testing_provenance.env`.
-# Selected by a define rather than a platform, so a native host release build
-# (the darwin/windows legs, later) takes the same switch.
+# Selected by a define rather than a platform, so every release leg — the
+# musl cross builds and the native darwin/windows hosts — takes one switch.
 
 load(":provenance.bzl", "release_provenance")
 

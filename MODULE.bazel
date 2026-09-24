@@ -1,4 +1,4 @@
-"""ocx-mirror — the Bazel module (Linux test loop and the musl release builds; darwin/windows stay cargo).
+"""ocx-mirror — the Bazel module (Linux test loop and every release build: musl, darwin, windows).
 
 Pins copy ocx's MODULE.bazel (external/ocx). `compatibility_level` is absent on
 purpose: it is non-functional from Bazel 9.1.0 on.
@@ -79,11 +79,37 @@ rust.repository_set(
     target_triple = "aarch64-unknown-linux-musl",
 )
 
+# rustc on the x86_64 Windows host, std for aarch64-pc-windows-msvc — the one
+# release triple rust.toolchain's default targets lack. Both darwin triples
+# are among them already: the arm64 macOS host's default toolchain targets
+# x86_64-apple-darwin too, so nothing is declared for darwin here. MSVC is
+# the target ABI cargo-xwin built before (the same CRT for every consumer);
+# the link goes through rules_cc's `x64_arm64` MSVC toolchain on the runner.
+# Registered through `:all` alone: rules_rust names a Windows-exec toolchain
+# by a hash (`rw-<n>`), and no other toolchain targets this triple.
+rust.repository_set(
+    name = "rust_windows_x86_64_cross",
+    edition = "2024",
+    exec_triple = "x86_64-pc-windows-msvc",
+    target_compatible_with = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:windows",
+    ],
+    target_triple = "aarch64-pc-windows-msvc",
+    versions = ["1.95.0"],
+)
+
 register_toolchains(
     "@rust_toolchains//:rust_linux_x86_64_musl__x86_64-unknown-linux-musl__stable",
     "@rust_toolchains//:rust_linux_x86_64_musl__aarch64-unknown-linux-musl__stable",
     "@rust_toolchains//:all",
 )
+
+# The Apple clang toolchains //platforms:*-apple-darwin select, and the two
+# constraints those platforms carry to reach them. Already in the graph at
+# this version (rules_rust's), so declaring it moves nothing; it registers its
+# toolchains itself, and none of them matches a Linux or Windows target.
+bazel_dep(name = "apple_support", version = "1.24.2")
 
 # Root manifest only: the splice discovers `members = ["crates/*"]`, and the
 # ocx crates (path deps into external/ocx) render as `@crates//:ocx_*`. The
@@ -97,6 +123,22 @@ crate.from_cargo(
     cargo_lockfile = "//:Cargo.lock",
     lockfile = "//:Cargo.bazel.lock.json",
     manifests = ["//:Cargo.toml"],
+    # crate_universe's default seven, plus the two release triples it lacks
+    # (x86_64-apple-darwin, aarch64-pc-windows-msvc): a triple outside the
+    # list gets no `cfg(...)`-gated dependency at all — windows-sys, the
+    # Apple framework crates. The musl triples need no row: rules_rust maps
+    # them onto the gnu ones (adr_bazel_full_adoption.md C5, the `cargo tree` proof).
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "wasm32-unknown-unknown",
+        "wasm32-wasip1",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-nixos-gnu",
+    ],
 )
 
 # `crates__schemars-<v>`: the `jsonschema` feature variants' optional
