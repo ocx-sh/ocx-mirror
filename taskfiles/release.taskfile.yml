@@ -204,7 +204,10 @@ tasks:
         aarch64-pc-windows-*) platform=windows/arm64 ;;
         *) echo "release:smoke: no OCI platform for {{.TARGET}}" >&2; exit 1 ;;
       esac
-      work=$(mktemp -d)
+      # Under target/, not mktemp's default: on Windows that is Git Bash's
+      # `/tmp`, a path the native `ocx` cannot resolve.
+      mkdir -p '{{.ROOT_DIR}}/target'
+      work=$(mktemp -d '{{.ROOT_DIR}}/target/release-smoke.XXXXXX')
       trap 'rm -rf "$work"' EXIT
       ext=; case '{{.TARGET}}' in *windows*) ext=.exe ;; esac
       mkdir -p "$work/repackage/bin"

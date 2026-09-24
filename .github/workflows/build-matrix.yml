@@ -188,6 +188,11 @@ jobs:
     env:
       __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
       __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
+      # Git Bash's `env` (the tasks' `{{.BAZEL}}` prefix) rewrites arguments
+      # that look like POSIX paths for the native program it starts:
+      # `--platforms=//platforms:…` reached Bazel as `/platforms:…` (run
+      # 35947180548). Every path the tasks hand over is native already.
+      MSYS_NO_PATHCONV: "1"
     defaults:
       run:
         shell: bash
@@ -262,6 +267,7 @@ jobs:
     env:
       __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
       __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
+      MSYS_NO_PATHCONV: "1"
       TARGET: aarch64-pc-windows-msvc
     defaults:
       run:
