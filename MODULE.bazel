@@ -11,16 +11,18 @@ module(
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
 
-# Two fixes to cargo-bazel, crate_universe's generator, both for path
-# dependencies on a Windows host — every ocx crate is one. It took the
-# package id `path+file:///D:/…` for the path `/D:/…` (a repin died with os
-# error 123, build-check run 35946412471), and it renders the path it
-# resolves, `D:/a\external\…`, unescaped into a Starlark string (`\e`: the
-# load failed, run 35948464027); the patch drops the slash and writes `/`.
-# The patched source is built only by the Windows bootstrap
-# (`@rules_rust//crate_universe:bin`, handed to the repin as
-# CARGO_BAZEL_GENERATOR_URL); every other host keeps the prebuilt generator,
-# and no action reads the patched file, so no key moves.
+# Three fixes to crate_universe for path dependencies on a Windows host —
+# every ocx crate is one. cargo-bazel took the package id `path+file:///D:/…`
+# for the path `/D:/…` (a repin died with os error 123, build-check run
+# 35946412471) and rendered the path it resolves, `D:/a\external\…`,
+# unescaped into a Starlark string (`\e`: the load failed, run 35948464027);
+# local_crate_mirror ran a bare `find`, which is System32's find.exe there
+# (run 35950931584). The patch drops the slash, writes `/`, and watches the
+# tree with `repository_ctx.watch_tree` on Windows. The patched cargo-bazel
+# is built only by the Windows bootstrap (`@rules_rust//crate_universe:bin`,
+# handed to the repin as CARGO_BAZEL_GENERATOR_URL); every other host keeps
+# the prebuilt generator and the `find` branch, and no action reads a
+# patched file, so no key moves.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,

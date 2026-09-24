@@ -229,12 +229,6 @@ jobs:
         uses: ./.github/actions/bazel-cache-rc
         with:
           read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-      # rules_rust's local_crate_mirror (every path dependency: the ocx
-      # crates, the forks) runs `find` and `cp` by name, and System32's
-      # find.exe came first ("FIND: Parameter format not correct", run
-      # 35949680898). Git's GNU tools go ahead of it for the later steps.
-      - name: GNU tools ahead of System32
-        run: cygpath -w /usr/bin >> "$GITHUB_PATH"
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
