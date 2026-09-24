@@ -232,48 +232,13 @@ jobs:
       - name: Build
         env:
           TARGET: ${{ matrix.target }}
-        run: task bazel:build:release TARGET="$TARGET" JOBS=auto -- --keep_going --verbose_failures
-      - name: DEBUG collect
-        if: failure()
+        run: task bazel:build:release TARGET="$TARGET" JOBS=auto
+      - name: DEBUG tree state
+        if: always()
         run: |
-          mkdir -p dbg
-          cp Cargo.bazel.lock.json dbg/ || true
-          for d in /c/b/*/external/rules_rust++crate+crates__ocx_config-0.6.2 /c/b/*/external/rules_rust++crate+crates__aws-lc-sys-0.41.0; do ls -la "$d" > "dbg/$(basename "$d").ls" 2>&1; cp "$d/BUILD.bazel" "dbg/$(basename "$d").BUILD" || true; done
-          find /c/b/*/execroot/_main/bazel-out -name 'libocx_config-*.params' -exec cp {} dbg/ \; || true
-          find /c/b/*/execroot/_main/bazel-out -name 'libocx_util-*.params' -exec cp {} dbg/ \; || true
-          find /c/b/*/execroot/_main/bazel-out -path '*crates__ocx_util-0.6.2*' -name '*.rlib' > dbg/ocx_util_rlibs.txt || true
-          find /c/b/*/execroot/_main/bazel-out -path '*crates__ocx_config-0.6.2*' > dbg/ocx_config_out.txt || true
-          ( cd /c/b/*/execroot/_main
-            P=$(find bazel-out -name 'libocx_config-*.params' | head -1)
-            U=$(find bazel-out -name 'libocx_util-*.params' | head -1)
-            R=$(ls bazel-out/x86_64-pc-windows-msvc-opt/bin/external/rules_rust++rust+*_tools/rust_toolchain/bin/rustc.exe | head -1)
-            D=$(ls bazel-out/x64_windows-opt-exec/bin/external/rules_rust++crate+crates__tokio-macros-2.7.0/*.dll | head -1)
-            O="$GITHUB_WORKSPACE/dbg"
-            echo "rustc=$R params=$P util=$U dll=$D" > "$O/probe.txt"
-            ls -la bazel-out/x64_windows-opt-exec/bin/external/rules_rust++crate+crates__tokio-macros-2.7.0/ >> "$O/probe.txt" 2>&1
-            python3 -c "import ctypes,sys; ctypes.WinDLL(sys.argv[1]); print('ctypes load ok')" "$(cygpath -w "$D")" >> "$O/probe.txt" 2>&1
-            mkdir -p dbgout
-            printf 'extern crate ocx_util;\nextern crate tokio;\n' > dbg_t.rs
-            tr -d '\r' < "$P" | sed -e '1s|.*|dbg_t.rs|' -e 's|^--crate-name=.*|--crate-name=dbg_t|' -e 's|^--out-dir=.*|--out-dir=dbgout|' -e 's|^--color=.*|--color=never|' > dbg_t.params
-            echo "== extern crate probe" >> "$O/probe.txt"
-            "$R" @dbg_t.params >> "$O/probe.txt" 2>&1; echo "exit=$?" >> "$O/probe.txt"
-            printf 'extern crate tokio_macros;\n' > dbg_m.rs
-            echo "== direct proc-macro extern" >> "$O/probe.txt"
-            "$R" --crate-type=lib --crate-name=dbg_m --edition=2021 --out-dir=dbgout --color=never "--sysroot=$(dirname "$(dirname "$R")")" --extern "tokio_macros=$D" dbg_m.rs >> "$O/probe.txt" 2>&1; echo "exit=$?" >> "$O/probe.txt"
-            echo "== ocx_util rerun" >> "$O/probe.txt"
-            tr -d '\r' < "$U" | sed -e 's|^--out-dir=.*|--out-dir=dbgout|' -e 's|^--color=.*|--color=never|' > dbg_u.params
-            "$R" @dbg_u.params >> "$O/probe.txt" 2>&1; echo "exit=$?" >> "$O/probe.txt"
-            echo "== ocx_config rerun" >> "$O/probe.txt"
-            tr -d '\r' < "$P" | sed -e 's|^--out-dir=.*|--out-dir=dbgout|' -e 's|^--color=.*|--color=never|' > dbg_c.params
-            "$R" @dbg_c.params 2>&1 | head -30 >> "$O/probe.txt"; echo "exit=${PIPESTATUS[0]}" >> "$O/probe.txt"
-          ) || true
-      - name: DEBUG upload
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: dbg-${{ matrix.target }}
-          path: dbg
-          retention-days: 1
+          git status --porcelain --untracked-files=no
+          git submodule foreach --recursive 'git status --porcelain --untracked-files=no | head -20'
+          git diff --stat | tail -5
       - name: Smoke
         if: matrix.target == 'x86_64-pc-windows-msvc'
         env:
