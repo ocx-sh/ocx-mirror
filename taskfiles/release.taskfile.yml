@@ -92,6 +92,130 @@ tasks:
       - task: :bazel:bootstrap
       - env -u OTEL_EXPORTER_OTLP_HEADERS -u OTEL_EXPORTER_OTLP_ENDPOINT ocx exec bazel -- bazel mod deps --lockfile_mode=update
 
+  # The one check a release artifact gets before upload (build-matrix.yml runs
+  # it per target; it is also the cargo-vs-Bazel parity probe). Red unless:
+  # `version` prints the `--json version` version; the provenance is a real
+  # build's — never the `test` placeholders — carrying the target triple it
+  # was built for and, for each expectation passed in, exactly that value
+  # (CHANNEL, VERSION, SHA; SHA also demands a clean tree, and a GITHUB_RUN_ID
+  # in this environment demands its run URL); it links nothing but the OS — a
+  # musl binary has no program interpreter and no NEEDED entry, a darwin one
+  # loads only /usr/lib and /System/Library images (`otool -L`), a windows one
+  # imports only API sets and DLLs the host's System32 holds (read from the PE
+  # import tables, printed either way); and `ocx package create` accepts it as
+  # oci-publish.yml repackages it, into a scratch directory — nothing pushed.
+  # An aarch64 Linux binary on an x86_64 host runs under qemu-aarch64, an
+  # x86_64 darwin one on an arm64 Mac under Rosetta; an aarch64 windows binary
+  # needs an arm64 Windows host (build-matrix.yml's smoke-windows-arm64).
+  smoke:
+    desc: 'Smoke a release binary: BIN=<path> TARGET=<triple> [CHANNEL= VERSION= SHA=] — provenance, static linkage, `ocx package create`'
+    dir: '{{.ROOT_DIR}}'
+    silent: true
+    requires:
+      vars: [BIN, TARGET]
+    cmd: |
+      set -euo pipefail
+      bin='{{.BIN}}'
+      run=("$bin")
+      case '{{.TARGET}}' in
+        aarch64-*-linux-*) [ "$(uname -m)" = aarch64 ] || run=(qemu-aarch64 "$bin") ;;
+      esac
+      plain=$("${run[@]}" version)
+      json=$("${run[@]}" --json version)
+      echo "$json"
+      python3 - "$plain" "$json" '{{.TARGET}}' '{{.CHANNEL}}' '{{.VERSION}}' '{{.SHA}}' <<'EOF'
+      import json, os, sys
+      plain, raw, target, channel, version, sha = sys.argv[1:]
+      data = json.loads(raw)
+      bad = []
+      def want(what, got, expected):
+          if got != expected:
+              bad.append(f"{what} = {got!r}, expected {expected!r}")
+      want("`version` (plain)", plain, data.get("version"))
+      if data.get("channel") in (None, "test"):
+          bad.append(f"channel = {data.get('channel')!r} - a test build or no channel at all, not a release build")
+      want("build.target", (data.get("build") or {}).get("target"), target)
+      if channel:
+          want("channel", data.get("channel"), channel)
+      if version:
+          want("version", data.get("version"), version)
+      if sha:
+          want("commit.sha", (data.get("commit") or {}).get("sha"), sha)
+          want("commit.dirty", (data.get("commit") or {}).get("dirty"), False)
+      if os.environ.get("GITHUB_RUN_ID"):
+          url = "{GITHUB_SERVER_URL}/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN_ID}".format(**os.environ)
+          want("ci.run_url", (data.get("ci") or {}).get("run_url"), url)
+      for line in bad:
+          print(f"release:smoke: {line}", file=sys.stderr)
+      if bad:
+          sys.exit(1)
+      print(f"release:smoke: {target} {data['version']} channel={data['channel']} commit={(data.get('commit') or {}).get('short')}")
+      EOF
+      case '{{.TARGET}}' in
+        *-linux-musl)
+          if readelf -lW "$bin" | grep -q INTERP || readelf -dW "$bin" | grep -q NEEDED; then
+            echo "release:smoke: $bin is not static - it names a program interpreter or a NEEDED library" >&2
+            exit 1
+          fi ;;
+        *-apple-darwin)
+          otool -L "$bin"
+          if otool -L "$bin" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/'; then
+            echo "release:smoke: $bin loads the images above from outside /usr/lib and /System/Library" >&2
+            exit 1
+          fi ;;
+        *-windows-*)
+          python3 - "$bin" <<'EOF'
+      import os, struct, sys
+      data = open(sys.argv[1], "rb").read()
+      pe = struct.unpack_from("<I", data, 0x3C)[0]
+      count, optional = struct.unpack_from("<H12xH", data, pe + 6)
+      pe32plus = struct.unpack_from("<H", data, pe + 24)[0] == 0x20B
+      dirs = pe + 24 + (112 if pe32plus else 96)
+      # (VirtualSize, VirtualAddress, SizeOfRawData, PointerToRawData) per section.
+      sections = [struct.unpack_from("<8xIIII", data, pe + 24 + optional + 40 * i) for i in range(count)]
+      def offset(rva):
+          return next(raw + rva - va for size, va, rawsize, raw in sections if va <= rva < va + max(size, rawsize))
+      dlls = []
+      # The import table (directory 1, 20-byte descriptors, name at +12) and
+      # the delay-load one (directory 13, 32-byte descriptors, name at +4).
+      for index, width, name_at in ((1, 20, 12), (13, 32, 4)):
+          rva = struct.unpack_from("<I", data, dirs + 8 * index)[0]
+          at = offset(rva) if rva else None
+          while at is not None and any(data[at:at + width]):
+              name = offset(struct.unpack_from("<I", data, at + name_at)[0])
+              dlls.append(data[name:data.index(b"\0", name)].decode())
+              at += width
+      system32 = {entry.lower() for entry in os.listdir(os.path.join(os.environ["SYSTEMROOT"], "System32"))}
+      foreign = [d for d in dlls if not d.lower().startswith(("api-ms-win-", "ext-ms-")) and d.lower() not in system32]
+      print("release:smoke: imports " + " ".join(sorted(dlls, key=str.lower)))
+      if foreign:
+          sys.exit(f"release:smoke: {sys.argv[1]} imports DLLs no System32 holds: {' '.join(foreign)}")
+      EOF
+          ;;
+      esac
+      # oci-publish.yml's PLATFORM_MAP. A `case`, not `declare -A`: go-task's
+      # shell (mvdan/sh) panics on an associative-array key holding `-`.
+      case '{{.TARGET}}' in
+        x86_64-*-linux-*) platform=linux/amd64 ;;
+        aarch64-*-linux-*) platform=linux/arm64 ;;
+        x86_64-apple-darwin) platform=darwin/amd64 ;;
+        aarch64-apple-darwin) platform=darwin/arm64 ;;
+        x86_64-pc-windows-*) platform=windows/amd64 ;;
+        aarch64-pc-windows-*) platform=windows/arm64 ;;
+        *) echo "release:smoke: no OCI platform for {{.TARGET}}" >&2; exit 1 ;;
+      esac
+      # A fixed directory per target under target/, no mktemp: on Windows
+      # task's built-in mktemp resolves `/tmp`, a path no native program
+      # there can open, and refuses a template holding a separator.
+      work='{{.ROOT_DIR}}/target/release-smoke-{{.TARGET}}'
+      rm -rf "$work"
+      trap 'rm -rf "$work"' EXIT
+      ext=; case '{{.TARGET}}' in *windows*) ext=.exe ;; esac
+      mkdir -p "$work/repackage/bin"
+      install -m 0755 "$bin" "$work/repackage/bin/ocx-mirror$ext"
+      ocx package create "$work/repackage" -m packaging/metadata.json -o "$work/ocx-mirror.tar.xz" -p "$platform"
+      echo "release:smoke: ocx package create accepted it ($(du -h "$work/ocx-mirror.tar.xz" | cut -f1) archive)"
+
   # Full release preparation: compute next version, update Cargo.toml + CHANGELOG, run verify.
   # After this task succeeds, the human reviews and commits.
   #

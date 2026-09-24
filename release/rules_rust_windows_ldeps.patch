@@ -1,0 +1,533 @@
+diff --git a/util/process_wrapper/BUILD.bazel b/util/process_wrapper/BUILD.bazel
+index d8ea9e0..51119b4 100644
+--- a/util/process_wrapper/BUILD.bazel
++++ b/util/process_wrapper/BUILD.bazel
+@@ -4,7 +4,25 @@ load("//util/process_wrapper/private:bootstrap_process_wrapper.bzl", "bootstrap_
+ 
+ rust_binary_without_process_wrapper(
+     name = "process_wrapper",
+-    srcs = glob(["*.rs"]),
++    # ocx-mirror patch: Windows compiles main_windows.rs (ldeps.rs); every
++    # other host the upstream sources alone, so its action is unchanged.
++    srcs = glob(
++        ["*.rs"],
++        exclude = [
++            "ldeps.rs",
++            "main_windows.rs",
++        ],
++    ) + select({
++        "@platforms//os:windows": [
++            "ldeps.rs",
++            "main_windows.rs",
++        ],
++        "//conditions:default": [],
++    }),
++    crate_root = select({
++        "@platforms//os:windows": "main_windows.rs",
++        "//conditions:default": "main.rs",
++    }),
+     allocator_libraries = select({
+         "@rules_rust//rust/settings:experimental_use_allocator_libraries_with_mangled_symbols_on": "@rules_rust//ffi/rs:allocator_libraries_with_mangling_support_without_process_wrapper",
+         "//conditions:default": "@rules_rust//ffi/rs:empty_allocator_libraries",
+diff --git a/util/process_wrapper/ldeps.rs b/util/process_wrapper/ldeps.rs
+new file mode 100644
+index 0000000..6fef4e8
+--- /dev/null
++++ b/util/process_wrapper/ldeps.rs
+@@ -0,0 +1,107 @@
++// Windows only (main_windows.rs): one `-Ldependency` directory per action
++// instead of one per transitive crate.
++//
++// Before expanding macros, rustc on Windows prepends every search path to
++// `PATH` so proc-macro DLLs find their dependencies
++// (rust-lang/rust#110889). Past 32767 characters `LoadLibraryExW` fails
++// with os error 8, the proc macro does not load, and every crate whose
++// metadata names one reports E0463 "can't find crate"
++// (bazelbuild/rules_rust#3767). Hard-linking the crate files of all
++// dependency directories into one directory keeps `PATH` short.
++
++use std::collections::HashSet;
++use std::fs;
++use std::io;
++use std::path::{Path, PathBuf};
++
++use crate::ProcessWrapperError;
++
++/// The consolidated directories; removed when dropped.
++pub(crate) struct LdepDirs(Vec<PathBuf>);
++
++impl Drop for LdepDirs {
++    fn drop(&mut self) {
++        for dir in &self.0 {
++            let _ = fs::remove_dir_all(dir);
++        }
++    }
++}
++
++/// The files rustc's crate locator reads from a dependency search path.
++const CRATE_EXTENSIONS: [&str; 3] = ["rlib", "rmeta", "dll"];
++
++/// Rewrites every `@param-file` among the child arguments in place.
++pub(crate) fn consolidate(child_arguments: &[String]) -> Result<LdepDirs, ProcessWrapperError> {
++    let mut dirs = Vec::new();
++    for arg in child_arguments {
++        if let Some(param_file) = arg.strip_prefix('@') {
++            if let Some(dir) = rewrite(param_file)? {
++                dirs.push(dir);
++            }
++        }
++    }
++    Ok(LdepDirs(dirs))
++}
++
++fn rewrite(param_file: &str) -> Result<Option<PathBuf>, ProcessWrapperError> {
++    let err = |what: &str, path: &Path, e: io::Error| {
++        ProcessWrapperError(format!("{what} {}: {e}", path.display()))
++    };
++    let content = fs::read_to_string(param_file)
++        .map_err(|e| err("unable to read", Path::new(param_file), e))?;
++    // One argument per line, as rustc reads it; every other line is kept
++    // byte for byte.
++    let mut search_dirs = Vec::new();
++    let mut kept = String::with_capacity(content.len());
++    let mut lines = content.split_inclusive('\n').peekable();
++    while let Some(line) = lines.next() {
++        let arg = line.trim_end_matches(['\r', '\n']);
++        if let Some(dir) = arg.strip_prefix("-Ldependency=") {
++            search_dirs.push(dir.to_owned());
++        } else if let Some(dir) = (arg == "-L")
++            .then(|| lines.peek().and_then(|next| next.strip_prefix("dependency=")))
++            .flatten()
++        {
++            search_dirs.push(dir.trim_end_matches(['\r', '\n']).to_owned());
++            lines.next();
++        } else {
++            kept.push_str(line);
++        }
++    }
++    if search_dirs.len() < 2 {
++        return Ok(None);
++    }
++    let unified = PathBuf::from(format!("{param_file}.ldeps"));
++    // A leftover from an interrupted run holds links to stale files.
++    let _ = fs::remove_dir_all(&unified);
++    fs::create_dir_all(&unified).map_err(|e| err("unable to create", &unified, e))?;
++    let mut seen = HashSet::new();
++    for dir in &search_dirs {
++        let dir = Path::new(dir);
++        for entry in fs::read_dir(dir).map_err(|e| err("unable to read", dir, e))? {
++            let path = entry.map_err(|e| err("unable to read", dir, e))?.path();
++            let is_crate = path
++                .extension()
++                .and_then(|ext| ext.to_str())
++                .is_some_and(|ext| CRATE_EXTENSIONS.contains(&ext));
++            let Some(name) = path.file_name().filter(|_| is_crate && path.is_file()) else {
++                continue;
++            };
++            // Crate file names carry a hash; the first directory wins,
++            // as rustc's own search order would.
++            if !seen.insert(name.to_ascii_lowercase()) {
++                continue;
++            }
++            let dest = unified.join(name);
++            if fs::hard_link(&path, &dest).is_err() {
++                fs::copy(&path, &dest).map_err(|e| err("unable to copy", &path, e))?;
++            }
++        }
++    }
++    if !kept.is_empty() && !kept.ends_with('\n') {
++        kept.push('\n');
++    }
++    kept.push_str(&format!("-Ldependency={}\n", unified.display()));
++    fs::write(param_file, kept).map_err(|e| err("unable to rewrite", Path::new(param_file), e))?;
++    Ok(Some(unified))
++}
+diff --git a/util/process_wrapper/main_windows.rs b/util/process_wrapper/main_windows.rs
+new file mode 100644
+index 0000000..67c8ec2
+--- /dev/null
++++ b/util/process_wrapper/main_windows.rs
+@@ -0,0 +1,383 @@
++// Copyright 2020 The Bazel Authors. All rights reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++// Windows crate root of the process wrapper (ocx-mirror patch, see
++// ldeps.rs): upstream's main.rs plus `ldeps::consolidate` before the child
++// runs. BUILD.bazel selects it on Windows only, so every other host
++// compiles upstream's main.rs unchanged.
++
++mod flags;
++mod options;
++mod output;
++mod rustc;
++mod util;
++mod ldeps;
++
++use std::collections::HashMap;
++use std::fmt;
++use std::fs::{copy, OpenOptions};
++use std::io;
++use std::process::{exit, Command, ExitStatus, Stdio};
++
++use tinyjson::JsonValue;
++
++use crate::options::options;
++use crate::output::{process_output, LineOutput};
++use crate::rustc::ErrorFormat;
++
++#[cfg(windows)]
++fn status_code(status: ExitStatus, was_killed: bool) -> i32 {
++    // On windows, there's no good way to know if the process was killed by a signal.
++    // If we killed the process, we override the code to signal success.
++    if was_killed {
++        0
++    } else {
++        status.code().unwrap_or(1)
++    }
++}
++
++#[cfg(not(windows))]
++fn status_code(status: ExitStatus, was_killed: bool) -> i32 {
++    // On unix, if code is None it means that the process was killed by a signal.
++    // https://doc.rust-lang.org/std/process/struct.ExitStatus.html#method.success
++    match status.code() {
++        Some(code) => code,
++        // If we killed the process, we expect None here
++        None if was_killed => 0,
++        // Otherwise it's some unexpected signal
++        None => 1,
++    }
++}
++
++#[derive(Debug)]
++struct ProcessWrapperError(String);
++
++impl fmt::Display for ProcessWrapperError {
++    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
++        write!(f, "process wrapper error: {}", self.0)
++    }
++}
++
++impl std::error::Error for ProcessWrapperError {}
++
++macro_rules! debug_log {
++    ($($arg:tt)*) => {
++        if std::env::var_os("RULES_RUST_PROCESS_WRAPPER_DEBUG").is_some() {
++            eprintln!($($arg)*);
++        }
++    };
++}
++
++fn json_warning(line: &str) -> JsonValue {
++    JsonValue::Object(HashMap::from([
++        (
++            "$message_type".to_string(),
++            JsonValue::String("diagnostic".to_string()),
++        ),
++        ("message".to_string(), JsonValue::String(line.to_string())),
++        ("code".to_string(), JsonValue::Null),
++        (
++            "level".to_string(),
++            JsonValue::String("warning".to_string()),
++        ),
++        ("spans".to_string(), JsonValue::Array(Vec::new())),
++        ("children".to_string(), JsonValue::Array(Vec::new())),
++        ("rendered".to_string(), JsonValue::String(line.to_string())),
++    ]))
++}
++
++fn process_line(
++    mut line: String,
++    quit_on_rmeta: bool,
++    format: ErrorFormat,
++    metadata_emitted: &mut bool,
++) -> Result<LineOutput, String> {
++    // LLVM can emit lines that look like the following, and these will be interspersed
++    // with the regular JSON output. Arguably, rustc should be fixed not to emit lines
++    // like these (or to convert them to JSON), but for now we convert them to JSON
++    // ourselves.
++    if line.contains("is not a recognized feature for this target (ignoring feature)")
++        || line.starts_with(" WARN ")
++    {
++        if let Ok(json_str) = json_warning(&line).stringify() {
++            line = json_str;
++        } else {
++            return Ok(LineOutput::Skip);
++        }
++    }
++    if quit_on_rmeta {
++        rustc::stop_on_rmeta_completion(line, format, metadata_emitted)
++    } else {
++        rustc::process_json(line, format)
++    }
++}
++
++fn main() -> Result<(), ProcessWrapperError> {
++    let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
++    let ldep_dirs = ldeps::consolidate(&opts.child_arguments)?;
++
++    let mut command = Command::new(opts.executable);
++    command
++        .args(opts.child_arguments)
++        .env_clear()
++        .envs(opts.child_environment)
++        .stdout(if let Some(stdout_file) = opts.stdout_file {
++            OpenOptions::new()
++                .create(true)
++                .truncate(true)
++                .write(true)
++                .open(stdout_file)
++                .map_err(|e| ProcessWrapperError(format!("unable to open stdout file: {}", e)))?
++                .into()
++        } else {
++            Stdio::inherit()
++        })
++        .stderr(Stdio::piped());
++    debug_log!("{:#?}", command);
++    let mut child = command
++        .spawn()
++        .map_err(|e| ProcessWrapperError(format!("failed to spawn child process: {}", e)))?;
++
++    let mut stderr: Box<dyn io::Write> = if let Some(stderr_file) = opts.stderr_file {
++        Box::new(
++            OpenOptions::new()
++                .create(true)
++                .truncate(true)
++                .write(true)
++                .open(stderr_file)
++                .map_err(|e| ProcessWrapperError(format!("unable to open stderr file: {}", e)))?,
++        )
++    } else {
++        Box::new(io::stderr())
++    };
++
++    let mut child_stderr = child.stderr.take().ok_or(ProcessWrapperError(
++        "unable to get child stderr".to_string(),
++    ))?;
++
++    let mut output_file: Option<std::fs::File> = if let Some(output_file_name) = opts.output_file {
++        Some(
++            OpenOptions::new()
++                .create(true)
++                .truncate(true)
++                .write(true)
++                .open(output_file_name)
++                .map_err(|e| ProcessWrapperError(format!("Unable to open output_file: {}", e)))?,
++        )
++    } else {
++        None
++    };
++
++    let mut was_killed = false;
++    let result = if let Some(format) = opts.rustc_output_format {
++        let quit_on_rmeta = opts.rustc_quit_on_rmeta;
++        // Process json rustc output and kill the subprocess when we get a signal
++        // that we emitted a metadata file.
++        let mut me = false;
++        let metadata_emitted = &mut me;
++        let result = process_output(
++            &mut child_stderr,
++            stderr.as_mut(),
++            output_file.as_mut(),
++            move |line| process_line(line, quit_on_rmeta, format, metadata_emitted),
++        );
++        if me {
++            // If recv returns Ok(), a signal was sent in this channel so we should terminate the child process.
++            // We can safely ignore the Result from kill() as we don't care if the process already terminated.
++            let _ = child.kill();
++            was_killed = true;
++        }
++        result
++    } else {
++        // Process output normally by forwarding stderr
++        process_output(
++            &mut child_stderr,
++            stderr.as_mut(),
++            output_file.as_mut(),
++            move |line| Ok(LineOutput::Message(line)),
++        )
++    };
++    result.map_err(|e| ProcessWrapperError(format!("failed to process stderr: {}", e)))?;
++
++    let status = child
++        .wait()
++        .map_err(|e| ProcessWrapperError(format!("failed to wait for child process: {}", e)))?;
++    // If the child process is rustc and is killed after metadata generation, that's also a success.
++    let code = status_code(status, was_killed);
++    let success = code == 0;
++    if success {
++        if let Some(tf) = opts.touch_file {
++            OpenOptions::new()
++                .create(true)
++                .truncate(true)
++                .write(true)
++                .open(tf)
++                .map_err(|e| ProcessWrapperError(format!("failed to create touch file: {}", e)))?;
++        }
++        if let Some((copy_source, copy_dest)) = opts.copy_output {
++            copy(&copy_source, &copy_dest).map_err(|e| {
++                ProcessWrapperError(format!(
++                    "failed to copy {} into {}: {}",
++                    copy_source, copy_dest, e
++                ))
++            })?;
++        }
++    }
++
++    // `exit` runs no destructor.
++    drop(ldep_dirs);
++    exit(code)
++}
++
++#[cfg(test)]
++mod test {
++    use super::*;
++
++    fn parse_json(json_str: &str) -> Result<JsonValue, String> {
++        json_str.parse::<JsonValue>().map_err(|e| e.to_string())
++    }
++
++    #[test]
++    fn test_process_line_diagnostic_json() -> Result<(), String> {
++        let mut metadata_emitted = false;
++        let LineOutput::Message(msg) = process_line(
++            r#"
++                {
++                    "$message_type": "diagnostic",
++                    "rendered": "Diagnostic message"
++                }
++            "#
++            .to_string(),
++            false,
++            ErrorFormat::Json,
++            &mut metadata_emitted,
++        )?
++        else {
++            return Err("Expected a LineOutput::Message".to_string());
++        };
++        assert_eq!(
++            parse_json(&msg)?,
++            parse_json(
++                r#"
++                {
++                    "$message_type": "diagnostic",
++                    "rendered": "Diagnostic message"
++                }
++            "#
++            )?
++        );
++        Ok(())
++    }
++
++    #[test]
++    fn test_process_line_diagnostic_rendered() -> Result<(), String> {
++        let mut metadata_emitted = false;
++        let LineOutput::Message(msg) = process_line(
++            r#"
++                {
++                    "$message_type": "diagnostic",
++                    "rendered": "Diagnostic message"
++                }
++            "#
++            .to_string(),
++            /*quit_on_rmeta=*/ false,
++            ErrorFormat::Rendered,
++            &mut metadata_emitted,
++        )?
++        else {
++            return Err("Expected a LineOutput::Message".to_string());
++        };
++        assert_eq!(msg, "Diagnostic message");
++        Ok(())
++    }
++
++    #[test]
++    fn test_process_line_noise() -> Result<(), String> {
++        let mut metadata_emitted = false;
++        for text in [
++            "'+zaamo' is not a recognized feature for this target (ignoring feature)",
++            " WARN rustc_errors::emitter Invalid span...",
++        ] {
++            let LineOutput::Message(msg) = process_line(
++                text.to_string(),
++                /*quit_on_rmeta=*/ false,
++                ErrorFormat::Json,
++                &mut metadata_emitted,
++            )?
++            else {
++                return Err("Expected a LineOutput::Message".to_string());
++            };
++            assert_eq!(
++                parse_json(&msg)?,
++                parse_json(&format!(
++                    r#"{{
++                        "$message_type": "diagnostic",
++                        "message": "{0}",
++                        "code": null,
++                        "level": "warning",
++                        "spans": [],
++                        "children": [],
++                        "rendered": "{0}"
++                    }}"#,
++                    text
++                ))?
++            );
++        }
++        Ok(())
++    }
++
++    #[test]
++    fn test_process_line_emit_link() -> Result<(), String> {
++        let mut metadata_emitted = false;
++        assert!(matches!(
++            process_line(
++                r#"
++                {
++                    "$message_type": "artifact",
++                    "emit": "link"
++                }
++            "#
++                .to_string(),
++                /*quit_on_rmeta=*/ true,
++                ErrorFormat::Rendered,
++                &mut metadata_emitted,
++            )?,
++            LineOutput::Skip
++        ));
++        assert!(!metadata_emitted);
++        Ok(())
++    }
++
++    #[test]
++    fn test_process_line_emit_metadata() -> Result<(), String> {
++        let mut metadata_emitted = false;
++        assert!(matches!(
++            process_line(
++                r#"
++                {
++                    "$message_type": "artifact",
++                    "emit": "metadata"
++                }
++            "#
++                .to_string(),
++                /*quit_on_rmeta=*/ true,
++                ErrorFormat::Rendered,
++                &mut metadata_emitted,
++            )?,
++            LineOutput::Terminate
++        ));
++        assert!(metadata_emitted);
++        Ok(())
++    }
++}
