@@ -11,19 +11,23 @@ module(
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
 
-# One fix to cargo-bazel, crate_universe's generator: on a Windows host it
-# takes a path dependency's `path+file:///D:/…` package id for the path
-# `/D:/…`, and a repin fails with os error 123 (build-check run 35946412471).
-# Every ocx crate is such a dependency. The patched source is built only by
-# the Windows bootstrap (`@rules_rust//crate_universe:bin`, handed to the
-# repin as CARGO_BAZEL_GENERATOR_URL); every other host keeps the prebuilt
-# generator, and no action reads the patched file, so no key moves.
+# Two fixes to cargo-bazel, crate_universe's generator, both for path
+# dependencies on a Windows host — every ocx crate is one. It took the
+# package id `path+file:///D:/…` for the path `/D:/…` (a repin died with os
+# error 123, build-check run 35946412471), and it renders the path it
+# resolves, `D:/a\external\…`, unescaped into a Starlark string (`\e`: the
+# load failed, run 35948464027); the patch drops the slash and writes `/`.
+# The patched source is built only by the Windows bootstrap
+# (`@rules_rust//crate_universe:bin`, handed to the repin as
+# CARGO_BAZEL_GENERATOR_URL); every other host keeps the prebuilt generator,
+# and no action reads the patched file, so no key moves.
 single_version_override(
     module_name = "rules_rust",
     patch_strip = 1,
     patches = ["//release:rules_rust_windows_path_deps.patch"],
     version = "0.74.0",
 )
+
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
 

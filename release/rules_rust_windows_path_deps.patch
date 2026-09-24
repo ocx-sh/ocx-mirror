@@ -17,3 +17,14 @@
                              let path = match Utf8Path::new(path_in_lockfile)
                                  .strip_prefix(&metadata.workspace_root)
                              {
+@@ -320,6 +330,10 @@
+                                 }
+                                 Err(_) => Utf8PathBuf::from(path_in_lockfile),
+                             };
++                            // The path lands unescaped in a Starlark string
++                            // (`local_crate_mirror(path = "…")`): a Windows `\e` in
++                            // `D:/a\external\…` fails the load. `/` separates there too.
++                            let path = Utf8PathBuf::from(path.as_str().replace('\\', "/"));
+                             return Ok(SourceAnnotation::Path { path });
+                         }
+                     }
