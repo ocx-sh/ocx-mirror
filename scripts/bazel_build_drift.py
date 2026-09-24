@@ -3,7 +3,7 @@
 # Copyright 2026 The OCX Authors
 """`task bazel:build:drift` — every Cargo dep edge has a BUILD twin and back.
 
-    scripts/bazel_build_drift.py              # gate the live tree
+    scripts/bazel_build_drift.py --bazel '<bazel argv>'  # gate the live tree
     scripts/bazel_build_drift.py --self-test  # red/green proofs, no subprocess
 
 Port of ocx's `scripts/bazel_build_drift.py` (adr_bazel_crate_split.md § C7).
@@ -14,6 +14,8 @@ Two readings, compared per workspace package:
   third-party list at all, so a text parse would agree with itself forever.
 * Cargo: `cargo metadata --locked` resolve graph — feature- and
   rename-resolved, the same lock crate_universe renders `@crates//` from.
+  Run with the Bazel toolchain's cargo (rules_rust's upstream wrapper), so
+  the gate needs no host Rust install and reads what Bazel builds with.
 
 Differences from ocx, both deliberate:
 
@@ -51,6 +53,15 @@ Two things the edge comparison cannot see, each its own finding:
   moves (the floor reads only targets that exist), so a new `tests/foo.rs`
   would run under nextest and nowhere under Bazel.
 
+Feature variants (`<crate>_jsonschema`, `<crate>_jsonschema_test`) are
+Bazel's twin of a non-default Cargo feature (VARIANT_FEATURES): the same
+sources with `crate_features`, against the featured member crates. Their
+edges stay out of the comparison above — an optional dependency (`schemars`)
+is no edge of the default resolve — and one finding guards them instead:
+every member whose Cargo `[features]` declares one needs its
+`<crate>_<feature>` rule naming it in `crate_features`, or the gated code
+would compile nowhere under Bazel.
+
 Also: every `rust_library`/`rust_binary` carries `version` == the workspace
 version, and a reader floor — every Cargo member must own >= 1 rust rule, at
 least MIN_MEMBERS members must exist, and at least one member must have a
@@ -63,6 +74,7 @@ import argparse
 import dataclasses
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -89,8 +101,22 @@ STRING_LITERAL = re.compile(r'"([^"]*)"')
 DEP_LABEL_PREFIX = ("@crates//", "//")
 VERSIONED_KINDS = ("rust_library", "rust_binary", "rust_proc_macro")
 ENV_FILES_ATTR = re.compile(r"^  rustc_env_files = (?P<value>.*)$")
+CRATE_FEATURES_ATTR = re.compile(r"^  crate_features = (?P<value>.*)$")
+#: Non-default Cargo features Bazel builds as `<crate>_<feature>` variant rules.
+VARIANT_FEATURES = ("jsonschema",)
+
+
+def variant_feature(name: str | None) -> str | None:
+    """`ocx_mirror_spec_jsonschema(_test)` -> `jsonschema`; a non-variant -> None."""
+    for feature in VARIANT_FEATURES:
+        if name and (name.endswith(f"_{feature}") or name.endswith(f"_{feature}_test")):
+            return feature
+    return None
 #: (package, script, env file): the one build script Bazel stands in for.
 ADMITTED_BUILD_SCRIPT = ("", "build.rs", "testing_provenance.env")
+#: Root BUILD.bazel's hand-kept `source_scan`/`workspace_structure` data list.
+MEMBER_SOURCES_ATTR = re.compile(r"_MEMBER_SOURCES = \[(?P<body>.*?)\]", re.DOTALL)
+RUST_SOURCES_NAME = re.compile(r'name\s*=\s*"rust_sources"')
 
 
 @dataclasses.dataclass
@@ -104,6 +130,8 @@ class BuildRead:
     test_srcs: dict[str, set[str]] = dataclasses.field(default_factory=dict)
     #: Per package: files the rules name as `rustc_env_files`.
     env_files: dict[str, set[str]] = dataclasses.field(default_factory=dict)
+    #: Per package: `{variant rule name: its crate_features}`.
+    variants: dict[str, dict[str, set[str]]] = dataclasses.field(default_factory=dict)
     targets: int = 0
     orphan_rules: int = 0
 
@@ -120,6 +148,8 @@ class CargoRead:
     tested: dict[str, list[tuple[frozenset[str], str, str]]] = dataclasses.field(default_factory=dict)
     default_features: dict[str, list[str]] = dataclasses.field(default_factory=dict)
     build_scripts: dict[str, list[str]] = dataclasses.field(default_factory=dict)
+    #: Per package: every feature its `[features]` table declares.
+    features: dict[str, set[str]] = dataclasses.field(default_factory=dict)
 
 
 def pkg_label(package: str) -> str:
@@ -172,8 +202,14 @@ def read_build_output(text: str, root: str) -> BuildRead:
             continue
         if match := NAME_ATTR.match(line):
             name = match.group("value")
+            if variant_feature(name):
+                read.variants.setdefault(package, {})[name] = set()
         elif match := VERSION_ATTR.match(line):
             version = match.group("value")
+        elif variant_feature(name):
+            # Name precedes every other attribute in `--output=build`.
+            if match := CRATE_FEATURES_ATTR.match(line):
+                read.variants[package][name].update(STRING_LITERAL.findall(match.group("value")))
         elif kind == "rust_test" and (match := CRATE_ATTR.match(line)):
             read.test_crates.setdefault(package, set()).add(label_target(match.group("value")))
         elif kind == "rust_test" and (match := SRCS_ATTR.match(line)):
@@ -201,6 +237,7 @@ def read_cargo_metadata(document: dict) -> CargoRead:
     tested: dict[str, list[tuple[frozenset[str], str, str]]] = {}
     default_features: dict[str, list[str]] = {}
     build_scripts: dict[str, list[str]] = {}
+    features: dict[str, set[str]] = {}
     version = ""
     for member in document["workspace_members"]:
         package = by_id[member]
@@ -209,6 +246,7 @@ def read_cargo_metadata(document: dict) -> CargoRead:
         own_name[key] = package["name"]
         if default := package.get("features", {}).get("default"):
             default_features[key] = default
+        features[key] = set(package.get("features", {}))
         for target in package.get("targets", []):
             kinds = frozenset(target["kind"])
             source = Path(target["src_path"]).relative_to(directory, walk_up=True).as_posix()
@@ -228,7 +266,7 @@ def read_cargo_metadata(document: dict) -> CargoRead:
                 dev[key].add(dep_name)
     stems = {f"{p['name']}-{p['version']}": p["name"] for p in document["packages"]}
     return CargoRead(normal=normal, dev=dev, own_name=own_name, stems=stems, version=version,
-                     tested=tested, default_features=default_features, build_scripts=build_scripts)
+                     tested=tested, default_features=default_features, build_scripts=build_scripts, features=features)
 
 
 def resolve(label: str, cargo: CargoRead) -> str | None:
@@ -237,6 +275,44 @@ def resolve(label: str, cargo: CargoRead) -> str | None:
         return cargo.stems.get(label[len("@crates//") :].split(":", 1)[0])
     target = label_target(label)
     return target if target in cargo.own_name.values() else None
+
+
+def check_member_sources(*, root_build_text: str, crate_names: list[str], crate_build_texts: dict[str, str | None]) -> list[Finding]:
+    """Root `_MEMBER_SOURCES` == one `//crates/<d>:rust_sources` per `crates/<d>/Cargo.toml`.
+
+    A crate absent from the list is silently skipped by `//:source_scan` and
+    `//:workspace_structure` (`source_scan.rs`, `workspace_structure.rs`) —
+    their data comes from this list, not a glob.
+    """
+    findings: list[Finding] = []
+    match = MEMBER_SOURCES_ATTR.search(root_build_text)
+    listed = set(STRING_LITERAL.findall(match.group("body"))) if match else set()
+    wanted = {f"//crates/{name}:rust_sources" for name in crate_names}
+    missing, extra = sorted(wanted - listed), sorted(listed - wanted)
+    if missing or extra:
+        findings.append(
+            Finding(
+                "drift-member-sources",
+                f"BUILD drift: root BUILD.bazel _MEMBER_SOURCES — crates/*/Cargo.toml with no listed label: {missing}; listed labels with no matching crate: {extra}",
+            )
+        )
+    for name in sorted(crate_names):
+        text = crate_build_texts.get(name)
+        if text is None:
+            findings.append(Finding("drift-member-sources", f"BUILD drift: crates/{name} has no BUILD.bazel"))
+        elif not RUST_SOURCES_NAME.search(text):
+            findings.append(Finding("drift-member-sources", f"BUILD drift: crates/{name}/BUILD.bazel defines no rust_sources target"))
+    return findings
+
+
+def read_member_sources_inputs(root: Path) -> tuple[str, list[str], dict[str, str | None]]:
+    root_build_text = (root / "BUILD.bazel").read_text(encoding="utf-8")
+    crate_names = sorted(p.parent.name for p in (root / "crates").glob("*/Cargo.toml"))
+    crate_build_texts: dict[str, str | None] = {}
+    for name in crate_names:
+        build_path = root / "crates" / name / "BUILD.bazel"
+        crate_build_texts[name] = build_path.read_text(encoding="utf-8") if build_path.exists() else None
+    return root_build_text, crate_names, crate_build_texts
 
 
 def check_drift(*, build_text: str, metadata: dict, root: str) -> list[Finding]:
@@ -295,6 +371,13 @@ def check_drift(*, build_text: str, metadata: dict, root: str) -> list[Finding]:
         findings.append(
             Finding("drift-default-features", f"BUILD drift: {pkg_label(package)} Cargo `default` feature enables {default} — Bazel builds none of it; mirror it into the BUILD rules' `crate_features` first")
         )
+    for package, declared_features in sorted(cargo.features.items()):
+        for feature in sorted(declared_features & set(VARIANT_FEATURES)):
+            rule = f"{cargo.own_name[package]}_{feature}"
+            if feature not in read.variants.get(package, {}).get(rule, set()):
+                findings.append(
+                    Finding("drift-feature-variant", f"BUILD drift: {pkg_label(package)} Cargo feature `{feature}` has no `{rule}` rule with `crate_features = [\"{feature}\"]` — its gated code compiles nowhere under Bazel")
+                )
     admitted_package, admitted_script, stand_in = ADMITTED_BUILD_SCRIPT
     for package, scripts in sorted(cargo.build_scripts.items()):
         if (package, scripts) == (admitted_package, [admitted_script]):
@@ -356,6 +439,7 @@ SERDE = "@crates//serde-1.0.228:serde-1.0.228"
 TOML = "@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0"
 OCX_OCI = "@crates//ocx_oci-0.6.2:ocx_oci-0.6.2"
 TEMPFILE = "@crates//tempfile-3.27.0:tempfile-3.27.0"
+SCHEMARS = "@crates__schemars-1.2.1//:schemars"
 BUILD_SCRIPT_ONLY = ("cc", "1.2.0")
 MEMBERS = [
     ("", "ocx_mirror"),
@@ -391,6 +475,14 @@ def sample_tree() -> tuple[str, dict]:
             normal.append(OCX_OCI)
         labels = normal + [f"//crates/{fp}:{fp}" for fp in first_party]
         records.append(_rule(package, "rust_library", name, labels))
+        if index % 2 == 0:
+            # The members declaring `jsonschema` below carry its variant pair;
+            # the optional schemars edge and the variant-to-variant edge must
+            # stay out of the edge comparison.
+            featured = (f'  crate_features = ["jsonschema"],',)
+            records.append(_rule(package, "rust_library", f"{name}_jsonschema", labels + [SCHEMARS, f"//{package}:{name}_jsonschema"], extra=featured))
+            records.append(_rule(package, "rust_test", f"{name}_jsonschema_test", [TEMPFILE], version=None,
+                                 extra=(f'  crate = "//{package}:{name}_jsonschema",', *featured)))
         dev = []
         if index != 7:
             dev = [TEMPFILE, "//crates/ocx_mirror_test_support:ocx_mirror_test_support"]
@@ -498,7 +590,7 @@ def self_test() -> int:
     run_case("rust_test edge in neither normal nor dev", _in_package(text, "crates/ocx_mirror_error", f'"{TEMPFILE}", ', f'"{TEMPFILE}", "{OCX_OCI}", '),
              metadata, ["drift-dev-set"], "in BUILD not in Cargo: ['ocx_oci']")
 
-    run_case("empty query output", "", metadata, ["drift-reader-floor", "drift-set", "drift-test-target"], "members with no rust rule")
+    run_case("empty query output", "", metadata, ["drift-feature-variant", "drift-reader-floor", "drift-set", "drift-test-target"], "members with no rust rule")
     blocks = text.split("\n# " + ROOT)
     dropped = "\n# ".join([blocks[0]] + [ROOT + b for b in blocks[1:] if not b.startswith("/crates/ocx_mirror_source/")])
     expect(dropped.count("BUILD.bazel:9:13\n") < text.count("BUILD.bazel:9:13\n"), "package removal did not land")
@@ -531,6 +623,12 @@ def self_test() -> int:
     built = json.loads(json.dumps(metadata))
     member(built, "ocx_mirror_http")["targets"].append({"kind": ["custom-build"], "name": "build-script-build", "src_path": f"{ROOT}/crates/ocx_mirror_http/build.rs", "test": False})
     run_case("first-party build.rs", text, built, ["drift-build-script"], "cargo_build_script")
+    unfeatured = _in_package(text, "crates/ocx_mirror_report", '  crate_features = ["jsonschema"],\n  deps', "  deps")
+    expect(unfeatured != text, "variant crate_features drop did not land")
+    run_case("feature variant rule without its crate_features", unfeatured, metadata, ["drift-feature-variant"], "ocx_mirror_report_jsonschema")
+    unvaried = _in_package(text, "crates/ocx_mirror_error", 'name = "ocx_mirror_error_jsonschema"', 'name = "ocx_mirror_errors_jsonschema"')
+    expect(unvaried != text, "variant rename did not land")
+    run_case("Cargo feature whose variant rule is misnamed", unvaried, metadata, ["drift-feature-variant"], "//crates/ocx_mirror_error Cargo feature `jsonschema`")
     rooted = json.loads(json.dumps(metadata))
     member(rooted, "ocx_mirror")["targets"].append({"kind": ["custom-build"], "name": "build-script-build", "src_path": f"{ROOT}/build.rs", "test": False})
     # The root library is the first record, ahead of any split point `_in_package` uses.
@@ -551,6 +649,36 @@ def self_test() -> int:
 
     run_case("rule with no header", 'rust_library(\n  name = "x",\n  deps = [],\n)\n' + text, metadata, ["drift-orphan-rule"])
 
+    def run_member_case(label: str, root_text: str, names: list[str], build_texts: dict[str, str | None], want: list[str], needle: str = "") -> None:
+        nonlocal checks
+        got = check_member_sources(root_build_text=root_text, crate_names=names, crate_build_texts=build_texts)
+        codes = sorted({f.code for f in got})
+        expect(codes == want, f"{label}: expected {want}, got {codes}: {[f.message for f in got]}")
+        if needle:
+            expect(any(needle in f.message for f in got), f"{label}: no finding names {needle!r}: {[f.message for f in got]}")
+        print(f"{'GREEN' if not want else 'RED  '}: {label}" + (f" — {got[0].message}" if got else ""))
+        checks += 1
+
+    member_names = sorted(name for _, name in MEMBERS if name != "ocx_mirror")
+    member_root = "_MEMBER_SOURCES = [\n" + "".join(f'    "//crates/{n}:rust_sources",\n' for n in member_names) + "]\n"
+    member_builds = {n: f'filegroup(\n    name = "rust_sources",\n    srcs = glob(["**/*.rs"]) + ["Cargo.toml"],\n)\n' for n in member_names}
+    run_member_case("agreeing member-sources tree (every crate listed, every BUILD defines rust_sources)", member_root, member_names, member_builds, [])
+
+    missing_root = member_root.replace(f'    "//crates/{member_names[0]}:rust_sources",\n', "")
+    expect(missing_root != member_root, "member drop did not land")
+    run_member_case("a new crates/<d>/Cargo.toml absent from _MEMBER_SOURCES", missing_root, member_names, member_builds, ["drift-member-sources"], f"//crates/{member_names[0]}:rust_sources")
+
+    stale_names = member_names[1:]
+    run_member_case("a stale label in _MEMBER_SOURCES for a crate that no longer exists", member_root, stale_names, {n: v for n, v in member_builds.items() if n != member_names[0]}, ["drift-member-sources"], f"//crates/{member_names[0]}:rust_sources")
+
+    unbuilt = dict(member_builds)
+    unbuilt[member_names[0]] = None
+    run_member_case("a listed crate with no BUILD.bazel at all", member_root, member_names, unbuilt, ["drift-member-sources"], f"crates/{member_names[0]} has no BUILD.bazel")
+
+    untargeted = dict(member_builds)
+    untargeted[member_names[0]] = 'rust_library(\n    name = "%s",\n)\n' % member_names[0]
+    run_member_case("a listed crate whose BUILD.bazel defines no rust_sources target", member_root, member_names, untargeted, ["drift-member-sources"], f"crates/{member_names[0]}/BUILD.bazel defines no rust_sources")
+
     print(f"bazel build drift self-test: {checks} checks passed")
     return 0
 
@@ -558,16 +686,27 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--self-test", action="store_true", help="prove the gate red and green on synthetic readings")
+    parser.add_argument("--bazel", default="bazel", help="the Bazel command, shell-quoted (the task passes its `{{.BAZEL}}`)")
+    parser.add_argument(
+        "--run-flags",
+        default="",
+        help="build options for the cargo wrapper's `bazel run`, shell-quoted — CI's main-push lane passes its upload grant, so the wrapper it compiles reaches the shared cache",
+    )
     args = parser.parse_args()
     if args.self_test:
         return self_test()
-    # `bazel` from PATH, as `ocx exec bazel --` leaves it.
-    build_text, build_red = run(["bazel", "query", QUERY, "--output=build"])
-    metadata_text, metadata_red = run(["cargo", "metadata", "--locked", "--format-version", "1"])
-    findings = [finding for finding in (build_red, metadata_red) if finding]
-    if findings:
+    root_build_text, crate_names, crate_build_texts = read_member_sources_inputs(REPO_ROOT)
+    findings = check_member_sources(root_build_text=root_build_text, crate_names=crate_names, crate_build_texts=crate_build_texts)
+    bazel = shlex.split(args.bazel)
+    build_text, build_red = run([*bazel, "query", QUERY, "--output=build"])
+    # The wrapper runs cargo in the client's working directory (REPO_ROOT)
+    # with the toolchain's rustc first on PATH; Bazel's own output is stderr.
+    metadata_text, metadata_red = run([*bazel, "run", *shlex.split(args.run_flags), "@rules_rust//tools/upstream_wrapper:cargo", "--",
+                                       "metadata", "--locked", "--format-version", "1"])
+    findings += [finding for finding in (build_red, metadata_red) if finding]
+    if build_red or metadata_red:
         return report(findings)
-    return report(check_drift(build_text=build_text, metadata=json.loads(metadata_text), root=str(REPO_ROOT)))
+    return report(findings + check_drift(build_text=build_text, metadata=json.loads(metadata_text), root=str(REPO_ROOT)))
 
 
 if __name__ == "__main__":

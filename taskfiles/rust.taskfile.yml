@@ -16,41 +16,62 @@ x-shared:
     - '{{.ROOT_DIR}}/rustfmt.toml'
     - exclude: '{{.ROOT_DIR}}/target/**'
     - exclude: '{{.ROOT_DIR}}/external/**'
+  # The files rustfmt sees: tracked plus untracked-not-ignored `.rs`, which
+  # never includes external/ocx (a gitlink). Not `cargo fmt --all`: that also
+  # formats every local path dependency — measured, 39 files under
+  # external/ocx/crates — and the vendored submodule is never reformatted
+  # here. rustfmt finds rustfmt.toml from each file's directory.
+  rust-files: &rust-files
+    RUST_FILES:
+      sh: git -C '{{.ROOT_DIR}}' ls-files --cached --others --exclude-standard -- '*.rs' ':!:external/**' | sed "s|^|{{.ROOT_DIR}}/|" | tr '\n' ' '
 
 tasks:
   verify:
-    desc: Rust loop gate (format, clippy, BUILD drift on Linux, unit tests — Bazel on Linux, nextest elsewhere); skips the [[excluded]] rows
+    desc: Rust loop gate (format, clippy, BUILD drift on Linux, unit tests — Bazel on Linux, cargo elsewhere)
     summary: |
-      adr_bazel_crate_split.md § C8 — sequential, fail-fast:
-        1. cargo fmt --all --check
-        2. cargo clippy (stays cargo; finishes before Bazel starts, so the
-           two never build at once)
-        3. Linux: `bazel:build:drift` — a query, no build. Reds on a Cargo
-           test target (a new `tests/foo.rs`, a crate's first `tests/`) with
-           no `rust_test`, which the Bazel run below would never notice.
-        4. test:unit — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
-      NOT run: `rust:test:bazel-excluded`, the crates/TEST_TARGET_MAP.toml
-      `[[excluded]]` rows Bazel `--skip`s — a release-profile nextest build of
-      every test binary, too heavy for the loop. On Linux those cases run only
-      under `task verify`; run that task by hand after touching them.
+      adr_bazel_crate_split.md § C8, adr_bazel_full_adoption.md § C5 —
+      sequential, fail-fast:
+        1. lint — rustfmt and clippy: the Bazel lanes on Linux, cargo elsewhere
+        2. Linux: `bazel:build:drift` — no build. Reds on a Cargo test target
+           (a new `tests/foo.rs`, a crate's first `tests/`) with no
+           `rust_test`, which the Bazel run below would never notice.
+        3. test:unit — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
       Use during review-fix loops when only Rust code changed; license,
       jsonschema, the release build and acceptance are `task verify`'s.
     cmds:
-      - task: format:check
-      - task: clippy:check
+      - task: lint
       # `if:`, not `platforms:` — see test:unit.
       - task: :bazel:build:drift
         if: '[ "{{OS}}" = linux ]'
       - task: test:unit
 
+  lint:
+    desc: rustfmt + clippy checks — `bazel:lint:fmt` and `bazel:lint:clippy` on Linux, cargo elsewhere
+    summary: |
+      adr_bazel_full_adoption.md § C5: Bazel owns the Linux lanes, CI's
+      included; macOS and Windows keep `format:check` and `clippy:check`,
+      as they keep nextest. Sequential either way — one Bazel server, and
+      cargo never builds beside it.
+    cmds:
+      - task: :bazel:lint:fmt
+        if: '[ "{{OS}}" = linux ]'
+      - task: :bazel:lint:clippy
+        if: '[ "{{OS}}" = linux ]'
+      - task: format:check
+        if: '[ "{{OS}}" != linux ]'
+      - task: clippy:check
+        if: '[ "{{OS}}" != linux ]'
+
   format:check:
-    desc: Check Rust formatting
+    desc: Check Rust formatting (the macOS/Windows arm; `bazel:lint:fmt` on Linux)
     sources: *rust-sources
-    cmd: cargo fmt --all --check
+    vars: *rust-files
+    cmd: rustfmt --edition 2024 --check {{.RUST_FILES}}
 
   format:apply:
-    desc: Apply Rust formatting
-    cmd: cargo fmt --all
+    desc: Apply Rust formatting to every tracked or new first-party `.rs`
+    vars: *rust-files
+    cmd: rustfmt --edition 2024 {{.RUST_FILES}}
 
   clippy:check:
     desc: Run clippy linter
@@ -62,7 +83,7 @@ tasks:
     cmd: cargo clippy --workspace --locked --all-targets --fix --allow-dirty
 
   jsonschema:check:
-    desc: Type-check the optional `jsonschema` feature
+    desc: Type-check the optional `jsonschema` feature with cargo (`bazel:build:jsonschema` is the Linux lane)
     summary: |
       The `schema` command and every `schemars` derive live behind the
       `jsonschema` feature, which no other task and no CI job builds — so a
@@ -97,8 +118,9 @@ tasks:
     desc: Run unit tests — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
     summary: |
       adr_bazel_crate_split.md § C8: dispatch on OS only. Bazel is the Linux
-      loop; macOS and Windows (and CI's `Test` step, which calls
-      `rust:test:nextest` by name) stay on cargo nextest. `{{.CLI_ARGS}}` reaches
+      loop, and CI's unit lane (verify.yml `Unit tests (Bazel)` calls
+      `bazel:test:unit` by name); macOS and Windows stay on cargo nextest,
+      as in ocx. `{{.CLI_ARGS}}` reaches
       whichever arm runs — nextest flags off Linux, Bazel flags on it.
     # No `sources:` — Bazel's action cache decides what re-executes, and a
     # fingerprint over the Rust sources alone would serve a stale green after
@@ -114,14 +136,14 @@ tasks:
   test:nextest:
     desc: Unit tests under cargo nextest, then push the per-test JUnit to telemetry
     summary: |
-      `test:unit`'s body (the non-Linux and CI lane, adr_bazel_crate_split.md
+      `test:unit`'s body (the non-Linux lane, adr_bazel_crate_split.md
       § C8), plus plan D-B5: local unit telemetry comes from nextest only.
       `.config/nextest.toml` writes the default profile's JUnit; the push is a
       silent no-op unless this machine is configured for it. That report is
       deleted before the run, so a `-- --profile ci` run (which writes
       target/nextest/ci/) leaves nothing here and pushes nothing — never a
-      stale default-profile report. In CI the push is the `test-telemetry`
-      action's.
+      stale default-profile report. CI runs no nextest: its unit lane is
+      `bazel:test:unit`.
     deps:
       - install:nextest
     cmds:
@@ -129,38 +151,13 @@ tasks:
       # is workspace-excluded); without it only the root package's tests run.
       # `ocx_mirror/__testing`: the same feature set as `rust:build`, so this
       # release build reuses its artifacts instead of relinking
-      # target/release/ocx-mirror without the placeholders — CI uploads that
-      # file for the acceptance job after this step.
+      # target/release/ocx-mirror without the placeholders.
       - rm -f '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
       - cargo nextest run --workspace --release --locked --features ocx_mirror/__testing {{.CLI_ARGS}}
       - task: :telemetry:push
         vars:
           JUNIT: '{{.ROOT_DIR}}/target/nextest/default/junit.xml'
           SUITE: unit
-
-  test:bazel-excluded:
-    desc: Run exactly the crates/TEST_TARGET_MAP.toml [[excluded]] rows under cargo nextest (C4)
-    summary: |
-      The cases Bazel `--skip`s run here instead. The nextest filterset is
-      generated from the rows by `scripts/bazel_test_floor.py`; a row that
-      matches no test is red before anything runs (a stale row would
-      otherwise shrink the run silently). `MAP=<file>` judges another map
-      (red proofs).
-    dir: '{{.ROOT_DIR}}'
-    deps:
-      - install:nextest
-    vars:
-      MAP: '{{.MAP | default "crates/TEST_TARGET_MAP.toml"}}'
-      LISTING:
-        sh: mktemp -t ocx-mirror-excluded.XXXXXXXX
-    cmds:
-      - defer: rm -f '{{.LISTING}}'
-      - cmd: |
-          set -eu
-          filter=$(python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-filter)
-          cargo nextest list --workspace --release --locked --features ocx_mirror/__testing --message-format json -E "$filter" > '{{.LISTING}}'
-          python3 scripts/bazel_test_floor.py --map '{{.MAP}}' --excluded-check '{{.LISTING}}'
-          cargo nextest run --workspace --release --locked --features ocx_mirror/__testing -E "$filter" {{.CLI_ARGS}}
 
   install:hawkeye:
     internal: true

@@ -38,7 +38,10 @@ from pathlib import Path
 
 from _gate import expect
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# `absolute()`, never `resolve()`: under `bazel test` (scripts/BUILD.bazel) this
+# file is a runfiles symlink into the source tree, and resolving it would let
+# the self-test read the checkout instead of its declared inputs.
+REPO_ROOT = Path(__file__).absolute().parent.parent
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "bep" / "cache_states.json"
 
 

@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 The OCX Authors
+
+# BUILD file of @ocx_python_wheels (MODULE.bazel):
+# external/ocx/crates/ocx_python/tests/fixtures/wheels, read by //:source_scan.
+
+exports_files(
+    ["console_pkg-1.0.0-py3-none-any.whl"],
+    visibility = ["//visibility:public"],
+)

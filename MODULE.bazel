@@ -1,4 +1,4 @@
-"""ocx-mirror — the Bazel module (Linux test loop; release and non-Linux stay cargo).
+"""ocx-mirror — the Bazel module (Linux test loop and every release build: musl, darwin, windows).
 
 Pins copy ocx's MODULE.bazel (external/ocx). `compatibility_level` is absent on
 purpose: it is non-functional from Bazel 9.1.0 on.
@@ -10,6 +10,39 @@ module(
 )
 
 bazel_dep(name = "rules_rust", version = "0.74.0")
+
+# Three fixes to crate_universe for path dependencies on a Windows host —
+# every ocx crate is one. cargo-bazel took the package id `path+file:///D:/…`
+# for the path `/D:/…` (a repin died with os error 123, build-check run
+# 35946412471) and rendered the path it resolves, `D:/a\external\…`,
+# unescaped into a Starlark string (`\e`: the load failed, run 35948464027);
+# local_crate_mirror ran a bare `find`, which is System32's find.exe there
+# (run 35950931584). The patch drops the slash, writes `/`, and watches the
+# tree with `repository_ctx.watch_tree` on Windows. The patched cargo-bazel
+# is built only by the Windows bootstrap (`@rules_rust//crate_universe:bin`,
+# handed to the repin as CARGO_BAZEL_GENERATOR_URL); every other host keeps
+# the prebuilt generator and the `find` branch, and no action reads a
+# patched file, so no key moves.
+#
+# The second patch gives the process wrapper one `-Ldependency` directory per
+# Rustc action on Windows (bazelbuild/rules_rust#3767): rustc puts every
+# search path on PATH, and past 32767 characters no proc macro loads
+# (rust-lang/rust#110889; ocx_config's 350 paths are 32488 characters, run
+# 35964215210: `LoadLibraryExW failed ... (os error 8)`, reported as E0463).
+# The wrapper's BUILD selects a patched copy of main.rs (`main_windows.rs`)
+# on Windows only; every other host compiles the upstream sources in an
+# unchanged action. Not a `#[cfg(windows)]` edit of main.rs: any byte of
+# main.rs changes the Linux binary, and with it every Rustc key.
+single_version_override(
+    module_name = "rules_rust",
+    patch_strip = 1,
+    patches = [
+        "//release:rules_rust_windows_path_deps.patch",
+        "//release:rules_rust_windows_ldeps.patch",
+    ],
+    version = "0.74.0",
+)
+
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
 
@@ -24,7 +57,92 @@ rust.toolchain(
 )
 use_repo(rust, "rust_toolchains")
 
-register_toolchains("@rust_toolchains//:all")
+# ---------------------------------------------------------------------------
+# Release cross-compilation — static musl binaries (`task bazel:build:release`)
+# ---------------------------------------------------------------------------
+
+# The C toolchain rustc links through, and aws-lc-sys/ring compile their C
+# with: zig's clang and bundled musl, the linker cargo-zigbuild used for these
+# artifacts before. Only the two `libc_aware` musl toolchains are registered:
+# they require `@zig_sdk//libc:musl`, which only //platforms:*-linux-musl carries,
+# so the host build keeps the auto-detected host cc toolchain and its keys.
+bazel_dep(name = "hermetic_cc_toolchain", version = "4.3.0")
+
+# Named by //platforms and the constraints below; already in the graph at this
+# version (rules_rust's), so declaring it moves nothing.
+bazel_dep(name = "platforms", version = "1.1.0")
+
+zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
+use_repo(zig, "zig_sdk")
+
+register_toolchains(
+    "@zig_sdk//libc_aware/toolchain:linux_amd64_musl",
+    "@zig_sdk//libc_aware/toolchain:linux_arm64_musl",
+)
+
+# rustc and std for the musl triples. rules_rust gives a musl triple the same
+# os/cpu constraints as the gnu one, so the gnu toolchain would match a musl
+# platform too. The `libc:musl` constraint keeps these two off every other
+# platform, and registering them ahead of `@rust_toolchains//:all` puts them
+# first for the musl ones. Same version as the host toolchain (`task
+# bazel:pin:check` reads every `versions`).
+rust.repository_set(
+    name = "rust_linux_x86_64_musl",
+    edition = "2024",
+    exec_triple = "x86_64-unknown-linux-gnu",
+    # zig links its own musl crt and libc; rustc's self-contained copies on
+    # top are a duplicate `_start` (measured). cargo-zigbuild drops the same
+    # objects from the link line.
+    extra_rustc_flags = ["-Clink-self-contained=no"],
+    target_compatible_with = [
+        "@platforms//cpu:x86_64",
+        "@platforms//os:linux",
+        "@zig_sdk//libc:musl",
+    ],
+    target_triple = "x86_64-unknown-linux-musl",
+    versions = ["1.95.0"],
+)
+rust.repository_set(
+    name = "rust_linux_x86_64_musl",
+    target_compatible_with = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:linux",
+        "@zig_sdk//libc:musl",
+    ],
+    target_triple = "aarch64-unknown-linux-musl",
+)
+
+# rustc on the x86_64 Windows host, std for aarch64-pc-windows-msvc — the one
+# release triple rust.toolchain's default targets lack. Both darwin triples
+# are among them already: the arm64 macOS host's default toolchain targets
+# x86_64-apple-darwin too, so nothing is declared for darwin here. MSVC is
+# the target ABI cargo-xwin built before (the same CRT for every consumer);
+# the link goes through rules_cc's `x64_arm64` MSVC toolchain on the runner.
+# Registered through `:all` alone: rules_rust names a Windows-exec toolchain
+# by a hash (`rw-<n>`), and no other toolchain targets this triple.
+rust.repository_set(
+    name = "rust_windows_x86_64_cross",
+    edition = "2024",
+    exec_triple = "x86_64-pc-windows-msvc",
+    target_compatible_with = [
+        "@platforms//cpu:aarch64",
+        "@platforms//os:windows",
+    ],
+    target_triple = "aarch64-pc-windows-msvc",
+    versions = ["1.95.0"],
+)
+
+register_toolchains(
+    "@rust_toolchains//:rust_linux_x86_64_musl__x86_64-unknown-linux-musl__stable",
+    "@rust_toolchains//:rust_linux_x86_64_musl__aarch64-unknown-linux-musl__stable",
+    "@rust_toolchains//:all",
+)
+
+# The Apple clang toolchains //platforms:*-apple-darwin select, and the two
+# constraints those platforms carry to reach them. Already in the graph at
+# this version (rules_rust's), so declaring it moves nothing; it registers its
+# toolchains itself, and none of them matches a Linux or Windows target.
+bazel_dep(name = "apple_support", version = "1.24.2")
 
 # Root manifest only: the splice discovers `members = ["crates/*"]`, and the
 # ocx crates (path deps into external/ocx) render as `@crates//:ocx_*`. The
@@ -38,8 +156,64 @@ crate.from_cargo(
     cargo_lockfile = "//:Cargo.lock",
     lockfile = "//:Cargo.bazel.lock.json",
     manifests = ["//:Cargo.toml"],
+    # crate_universe's default seven, plus the two release triples it lacks
+    # (x86_64-apple-darwin, aarch64-pc-windows-msvc): a triple outside the
+    # list gets no `cfg(...)`-gated dependency at all — windows-sys, the
+    # Apple framework crates. The musl triples need no row: rules_rust maps
+    # them onto the gnu ones (adr_bazel_full_adoption.md C5, the `cargo tree` proof).
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "aarch64-pc-windows-msvc",
+        "aarch64-unknown-linux-gnu",
+        "wasm32-unknown-unknown",
+        "wasm32-wasip1",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-nixos-gnu",
+    ],
 )
-use_repo(crate, "crates")
+
+# octocrab's build script runs `cargo metadata` on its own manifest. On
+# Windows no sandbox hides the execroot's copy of this repository's
+# Cargo.toml, and cargo, walking up from the build-script runfiles, took it
+# for the package's workspace ("current package believes it's in a workspace
+# when it's not", run 35951907110). Cargo stops that walk at CARGO_HOME, so
+# the build script gets bazel-out, below the execroot root, as its
+# CARGO_HOME. Windows triples only: a select arm no Linux or darwin build
+# takes, so their build-script action keeps its key.
+crate.annotation_select(
+    # `$$`: the attribute is make-variable expanded; the runner substitutes
+    # `${pwd}` with the execroot afterwards.
+    build_script_env = {"CARGO_HOME": "$${pwd}/bazel-out"},
+    crate = "octocrab",
+    triples = [
+        "aarch64-pc-windows-msvc",
+        "x86_64-pc-windows-msvc",
+    ],
+)
+
+# aws-lc's aarch64 Windows assembly is GNU-syntax `.S`, which MSVC's cl.exe
+# ignores (D9027, run 35956996476); aws-lc-sys requires clang-cl there, as
+# cargo-xwin used for every Windows C compile. rules_rust hands the build
+# script the MSVC toolchain's CC, so aws-lc-sys's own clang-cl discovery never
+# runs: the aarch64 Windows build passes the Visual Studio clang-cl as
+# `--define=OCX_MIRROR_CLANG_CL=<path>` (bazel:build:release finds it).
+crate.annotation_select(
+    build_script_env = {"CC": "$(OCX_MIRROR_CLANG_CL)"},
+    crate = "aws-lc-sys",
+    triples = ["aarch64-pc-windows-msvc"],
+)
+
+# `crates__schemars-<v>`: the `jsonschema` feature variants' optional
+# dependency (`crates/ocx_mirror_source/BUILD.bazel`). crate_universe aliases
+# only the dependencies the default features enable, so the spoke the ocx
+# crates already link is imported by its versioned name — the same schemars
+# crate, never a second copy. A schemars bump in Cargo.lock renames the spoke
+# and fails every Bazel command (measured: an extension exception on a plain
+# query) until this line and the BUILD labels follow; `bazel:pin:check`, which
+# runs no Bazel, names the mismatch first.
+use_repo(crate, "crates", "crates__schemars-1.2.1")
 
 # rules_ocx has no BCR release with Bazel 9 support yet; same commit as ocx.
 git_override(
@@ -56,3 +230,70 @@ ocx.project(
     ocx_toml = "//:ocx.toml",
 )
 use_repo(ocx, "tools")
+
+# The external/ocx submodule files tests read, as real inputs. The submodule is
+# no package of this repo (`//...` skips `external/`, and its BUILD files load
+# ocx's own graph), so each directory is a local repository with a BUILD file
+# of ours; `build_file` rather than `build_file_content`, because the rule
+# deletes the symlinked ocx BUILD.bazel before placing ours. The contents are
+# the pinned submodule tree — tracked, so every checkout of one superproject
+# commit keys identically, CI included (unlike a host path).
+new_local_repository = use_repo_rule("@bazel_tools//tools/build_defs/repo:local.bzl", "new_local_repository")
+
+# The Sigstore stack //test:acceptance brings up and signs against: compose
+# file, sigstore/ (keys, service configs, token minter, trusted root), and
+# the golden cosign key pair test_signing.py reads.
+new_local_repository(
+    name = "ocx_test",
+    build_file = "//:BUILD.ocx_test.bazel",
+    path = "external/ocx/test",
+)
+
+# ocx_python's wheel fixture, which //:source_scan proves the root copy equals.
+new_local_repository(
+    name = "ocx_python_wheels",
+    build_file = "//:BUILD.ocx_python_wheels.bazel",
+    path = "external/ocx/crates/ocx_python/tests/fixtures/wheels",
+)
+
+# ---------------------------------------------------------------------------
+# The docs site toolchain (`//docs:site`) — one contiguous block, WP-C.
+# ---------------------------------------------------------------------------
+
+# rules_python is the one Bazel-side route to a hermetic interpreter plus a
+# hashed PyPI closure; `@tools//` exposes executables only (a uv launcher), so
+# it cannot feed a sandboxed action a pinned site-packages. 2.3.4 is the BCR
+# head and presubmits against Bazel 9.x.
+bazel_dep(name = "rules_python", version = "2.3.4")
+
+# BZL-PY-01: both calls carry the literal version, or the interpreter rides
+# rules_python's rolling default and moves on any bump. 3.14 = the version the
+# acceptance venv (`test/`) resolves to, and the `--python-version` the lock
+# was compiled for.
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.defaults(python_version = "3.14")
+python.toolchain(python_version = "3.14")
+
+# BZL-PY-03: bound to that interpreter. The wheels come from the lock's own
+# sha256 pins through the repository cache — nothing is fetched inside the
+# build action, which is what lets `//docs:site` run offline and sandboxed and
+# live on the remote cache (docs/BUILD.bazel says why that differs from ocx).
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "docs_pip",
+    python_version = "3.14",
+    requirements_lock = "//docs:requirements.lock",
+)
+use_repo(pip, "docs_pip")
+
+# The gate-script tests' toolchain (`//scripts:*`): pytest for the telemetry
+# pytest, PyYAML for the bazel-cache-rc selftest. A hub of its own, not
+# docs_pip: one lock per consumer, so a test-tool bump never re-keys
+# //docs:site and a docs bump never re-runs the gate proofs. Same hashed-lock
+# route and interpreter as the docs block (BZL-PY-03).
+pip.parse(
+    hub_name = "scripts_pip",
+    python_version = "3.14",
+    requirements_lock = "//scripts:requirements.lock",
+)
+use_repo(pip, "scripts_pip")

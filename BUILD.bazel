@@ -54,10 +54,15 @@ rust_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     # Stand-in for the package's `build.rs`, which Bazel never runs (as in
     # ocx): the fixed provenance a cargo `__testing` build bakes, read from
-    # the same file. Every Bazel build is a test build, so no commit, dirty
-    # flag or CI variable reaches the binary and nothing re-keys per commit.
-    # `rust_test(crate = ":ocx_mirror")` inherits it.
-    rustc_env_files = ["testing_provenance.env"],
+    # the same file, so no commit, dirty flag or CI variable reaches a test
+    # or the acceptance binary and nothing re-keys per commit.
+    # `rust_test(crate = ":ocx_mirror")` inherits it. The one exception is
+    # the release build (`task bazel:build:release`), which swaps in the real
+    # provenance (release/BUILD.bazel) — never on a test or cached lane.
+    rustc_env_files = select({
+        "//release:stamped": ["//release:provenance"],
+        "//conditions:default": ["testing_provenance.env"],
+    }),
     version = "0.6.2",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_mirror_error",
@@ -67,6 +72,69 @@ rust_library(
         "//crates/ocx_mirror_source",
         "//crates/ocx_mirror_spec",
     ],
+)
+
+# The Cargo `jsonschema` feature: the `schema` command and the plan derives.
+# Built against the featured member crates, as Cargo unifies them
+# (//crates/ocx_mirror_error:ocx_mirror_error_jsonschema says why).
+rust_library(
+    name = "ocx_mirror_jsonschema",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = [
+            "src/main.rs",
+            "src/tracing_init.rs",
+        ],
+    ),
+    aliases = aliases(),
+    compile_data = glob(
+        ["src/**"],
+        exclude = ["src/**/*.rs"],
+    ),
+    crate_features = ["jsonschema"],
+    crate_name = "ocx_mirror",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env_files = ["testing_provenance.env"],
+    version = "0.6.2",
+    deps = all_crate_deps(normal = True) + [
+        "//crates/ocx_mirror_error:ocx_mirror_error_jsonschema",
+        "//crates/ocx_mirror_http",
+        "//crates/ocx_mirror_pipeline:ocx_mirror_pipeline_jsonschema",
+        "//crates/ocx_mirror_report",
+        "//crates/ocx_mirror_source:ocx_mirror_source_jsonschema",
+        "//crates/ocx_mirror_spec:ocx_mirror_spec_jsonschema",
+        "@crates__schemars-1.2.1//:schemars",
+    ],
+)
+
+# `cargo check --workspace --features jsonschema --all-targets`, as a build:
+# every target whose code the feature changes — the root library and the spec
+# unit tests (both featured source crates are in the root's graph). The binary
+# and the other test targets hold no feature-gated code. Not a test (testonly
+# only because it names one): `bazel build //...` and the unit lane's `bazel
+# test //:all` build it, so its compiles are cached like any other.
+filegroup(
+    name = "jsonschema",
+    testonly = True,
+    srcs = [
+        ":ocx_mirror_jsonschema",
+        "//crates/ocx_mirror_spec:ocx_mirror_spec_jsonschema_test",
+    ],
+)
+
+# The one tracked `.rs` no target compiles: the provenance `build.rs`, which
+# Bazel stands in for with `rustc_env_files`. The rustfmt aspect reads a
+# target's sources and edition at analysis, so this rule is never compiled —
+# `manual` keeps it out of `//...`; `task bazel:lint:fmt` names it.
+rust_library(
+    name = "build_script_fmt",
+    srcs = ["build.rs"],
+    crate_root = "build.rs",
+    edition = "2024",
+    tags = ["manual"],
+    version = "0.6.2",
 )
 
 rust_binary(
@@ -133,7 +201,21 @@ rust_test(
     ],
 )
 
-# One rust_test per `tests/*.rs`, with the data each one reads.
+# Every workspace member's Rust sources and manifest, for the two scans that
+# see the whole workspace. Both targets link every first-party crate anyway,
+# so declaring the sources adds no rdep edge they did not already have.
+_MEMBER_SOURCES = [
+    "//crates/ocx_mirror_error:rust_sources",
+    "//crates/ocx_mirror_http:rust_sources",
+    "//crates/ocx_mirror_pipeline:rust_sources",
+    "//crates/ocx_mirror_report:rust_sources",
+    "//crates/ocx_mirror_source:rust_sources",
+    "//crates/ocx_mirror_spec:rust_sources",
+    "//crates/ocx_mirror_test_support:rust_sources",
+]
+
+# One rust_test per `tests/*.rs`, with the data and environment each one reads.
+# Every case runs here: crates/TEST_TARGET_MAP.toml has no `[[excluded]]` row.
 [
     rust_test(
         name = name,
@@ -146,15 +228,15 @@ rust_test(
         ),
         # No `--test-threads=1`: no case in tests/*.rs mutates the process
         # environment; the first one that does needs it (see :ocx_mirror_test).
-        args = args,
         data = data,
         edition = "2024",
+        env = env,
         proc_macro_deps = all_crate_deps(
             proc_macro = True,
             proc_macro_dev = True,
         ),
-        # `CARGO`: `workspace_structure` names `env!("CARGO")` at compile time;
-        # the one case reading it is skipped below, so any value compiles.
+        # `CARGO`: `workspace_structure` falls back to `env!("CARGO")` when the
+        # runtime `CARGO` is unset; under Bazel `env` below always sets it.
         rustc_env = {
             "CARGO": "cargo",
             "CARGO_MANIFEST_DIR": ".",
@@ -167,47 +249,52 @@ rust_test(
             "//crates/ocx_mirror_test_support",
         ],
     )
-    for name, args, data in [
+    for name, data, env in [
         (
             "log_targets",
-            [],
             [
                 "crates/crate_map.toml",
-                "docs/reference/cli.md",
+                "//docs:reference/cli.md",
             ],
+            {},
         ),
         (
             "registry_spec_validation",
-            [],
             [":test_fixtures"],
+            {},
         ),
-        # C4 exclusions (`[[excluded]]` rows in crates/TEST_TARGET_MAP.toml,
-        # run by `task rust:test:bazel-excluded`): a walk of every crate's
-        # `src/` (this target would otherwise be an rdep of every crate), and
-        # a byte comparison against the external/ocx submodule tree.
+        # The factory walk reads `src/` and every `crates/*/src`; the wheel
+        # comparison reads ocx_python's original through @ocx_python_wheels,
+        # handed over by runfiles path (the submodule is no `_main` path).
         (
             "source_scan",
-            [
-                "--exact",
-                "--skip=every_production_client_is_built_through_the_factory",
-                "--skip=the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons",
+            glob(["src/**"]) + _MEMBER_SOURCES + [
+                "tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
+                "@ocx_python_wheels//:console_pkg-1.0.0-py3-none-any.whl",
             ],
-            glob(["src/**"]),
+            {"OCX_PYTHON_WHEEL": "$(rootpath @ocx_python_wheels//:console_pkg-1.0.0-py3-none-any.whl)"},
         ),
         (
             "spec_validation",
-            [],
             [":test_fixtures"],
+            {},
         ),
-        # C4 exclusion: `real_workspace_has_no_violations` runs `cargo
-        # metadata` from the checkout; the synthetic red proofs run here.
+        # `real_workspace_has_no_violations` runs `cargo metadata --no-deps
+        # --offline` over the declared manifests with the toolchain's own
+        # cargo (never a host one), then scans every `.rs` under src/, crates/
+        # and tests/. `--no-deps` needs no registry and no external/ocx
+        # manifest; the member view it returns equals the resolved one.
         (
             "workspace_structure",
-            [
-                "--exact",
-                "--skip=real_workspace_has_no_violations",
+            glob([
+                "src/**/*.rs",
+                "tests/**/*.rs",
+            ]) + _MEMBER_SOURCES + [
+                "Cargo.toml",
+                "crates/crate_map.toml",
+                "@rules_rust//rust/toolchain:current_cargo_files",
             ],
-            [],
+            {"CARGO": "$(rootpath @rules_rust//rust/toolchain:current_cargo_files)"},
         ),
     ]
 ]
@@ -224,8 +311,7 @@ filegroup(
 
 # Bazel 9 exports no source file implicitly; the acceptance target reads these.
 # renovate.json and matrix.rs: test_renovate_managers.py greps them (the
-# templates it also greps are `include_str!`-embedded, so the binary carries
-# them); the wheel: test_mirror_{pypi,mount,libc}.py push it. Undeclared, an
+# templates it greps too are `:pipeline_templates` below); the wheel: test_mirror_{pypi,mount,libc}.py push it. Undeclared, an
 # edit to any of them would be served a cached acceptance green.
 exports_files([
     "ocx.lock",
@@ -234,3 +320,50 @@ exports_files([
     "src/command/package/pipeline/generate/ci/matrix.rs",
     "tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
 ])
+
+# The workflow templates test_renovate_managers.py matches by PATH. The binary
+# embeds their content (`include_str!`) but not their names, so a rename that
+# stops Renovate's managerFilePatterns matching would leave //:ocx-mirror —
+# and a cached acceptance verdict — unchanged. Declared by name here.
+filegroup(
+    name = "pipeline_templates",
+    srcs = glob(["src/command/package/pipeline/generate/templates/*"]),
+    visibility = ["//test:__pkg__"],
+)
+
+# `--config=rustfmt` (.bazelrc) points rules_rust's `rustfmt.toml` label flag
+# here; the flag lives in @rules_rust, so the file is public.
+exports_files(
+    ["rustfmt.toml"],
+    visibility = ["//visibility:public"],
+)
+
+# The docs site's two root-level inputs (docs/BUILD.bazel `//docs:site`):
+# mkdocs.yml, and CHANGELOG.md, which docs/changelog.md snippet-includes.
+exports_files(
+    [
+        "CHANGELOG.md",
+        "mkdocs.yml",
+    ],
+    visibility = ["//docs:__pkg__"],
+)
+
+# The root-package files the gate-script tests read (scripts/BUILD.bazel):
+# BEP fixtures, the live test map, the telemetry and cache-credential actions,
+# and the taskfile + workflow the BEP persistence scan reads.
+exports_files(
+    [
+        ".github/actions/bazel-cache-rc/action.yml",
+        ".github/actions/bazel-cache-rc/selftest.sh",
+        ".github/actions/bazel-cache-rc/write_rc.py",
+        ".github/actions/test-telemetry/action.yml",
+        ".github/workflows/verify.yml",
+        "crates/TEST_TARGET_MAP.toml",
+        "taskfiles/bazel.taskfile.yml",
+        "taskfiles/telemetry.taskfile.yml",
+        "tests/fixtures/bep/cache_states.json",
+        "tests/fixtures/bep/crates_build.json",
+        "tests/fixtures/bep/failed_build.json",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)

@@ -56,30 +56,49 @@ tasks:
       - cargo install --locked {{.CRATE | default .TOOL}}
 
   scripts:self-test:
-    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bep_to_otlp
+    desc: Prove every gate script red and green — the `--self-test` of bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bazel_execlog_keys, bazel_tag_guard, bep_to_otlp, and the bazel-cache-rc action's selftest.sh
+    cmds:
+      # Linux: as cached Bazel tests (scripts/BUILD.bazel, with the telemetry
+      # pytest); elsewhere the plain python list below. Each is a no-op off
+      # its own platforms.
+      - task: bazel:test:scripts
+      - task: .scripts:self-test:python
+
+  .scripts:self-test:python:
+    internal: true
+    platforms: [darwin, windows]
     dir: '{{.ROOT_DIR}}'
     cmds:
       - python3 scripts/bazel_test_floor.py --self-test
       - python3 scripts/bazel_build_drift.py --self-test
       - python3 scripts/bazel_cache_check.py --self-test
       - python3 scripts/bazel_scoped.py --self-test
+      - python3 scripts/bazel_execlog_keys.py --self-test
+      - python3 scripts/bazel_tag_guard.py --self-test
       - python3 scripts/bep_to_otlp.py --self-test
+      # ocx's scripts.taskfile.yml wires it the same way: it lives under
+      # `.github/actions/`, not `scripts/`, so a list of `scripts/*.py` alone
+      # would never run it. Bare `bash`, no network, no real credential, ~1 s.
+      - bash .github/actions/bazel-cache-rc/selftest.sh
 
   # Two-phase verify: parallel lint, then sequential build+test
   verify:
     desc: Full quality gate
     summary: |
-      Phase 1 (parallel): format, clippy, gate-script self-tests, telemetry self-test
+      Phase 1 (parallel): rustfmt + clippy (`rust:lint` — the Bazel lanes on
+        Linux, cargo elsewhere); off Linux also the gate-script and telemetry
+        self-tests
       Phase 2 (sequential; adr_bazel_crate_split.md § C8):
-        Linux — license headers, dependency licenses, jsonschema feature,
-          cargo release build (`__testing` provenance), claude hooks test, the
-          Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift),
-          Bazel unit tests, the Bazel coverage gate, the Bazel-excluded rows
-          under nextest, Bazel acceptance.
+        Linux — license headers, dependency licenses, claude hooks test,
+          the Bazel static gates
+          (pin, lint, lockfile, fork patches, BUILD drift, tag guard), the
+          Bazel jsonschema feature build, the gate-script + telemetry
+          self-tests (Bazel), Bazel unit tests, the Bazel coverage gate,
+          Bazel acceptance.
         elsewhere — license headers, dependency licenses, jsonschema feature,
           cargo release build (`__testing`), claude hooks test, nextest unit tests,
           acceptance tests.
-      Clippy (phase 1) finishes before any Bazel command (phase 2) starts.
+      Phase 1's lint finishes before phase 2's cargo build starts.
       Use `task --force verify` to bypass caching.
       Use `task --status verify` to check freshness without running.
     cmds:
@@ -89,18 +108,24 @@ tasks:
   .verify:lint:
     internal: true
     deps:
-      - task: rust:format:check
-      - task: rust:clippy:check
-      - task: scripts:self-test
-      - task: telemetry:self-test
+      - task: rust:lint
+      # Off Linux only: on Linux both are `bazel:test:scripts`, in phase 2,
+      # so no Bazel command starts while clippy builds.
+      - task: .scripts:self-test:python
+      - task: telemetry:self-test:python
 
   .verify:build-test:
     internal: true
     cmds:
       - task: rust:license:check
       - task: rust:license:deps
+      # Linux: `bazel:build:jsonschema` in .verify:test:linux.
       - task: rust:jsonschema:check
+        if: '[ "{{OS}}" != linux ]'
+      # Linux tests the Bazel-built //:ocx-mirror; the cargo release build
+      # feeds only the non-Linux `test:parallel`.
       - task: rust:build
+        if: '[ "{{OS}}" != linux ]'
       - task: claude:hooks:test
       # `if:`, not `platforms:` — go-task 3.53 ignores `platforms:` on a
       # `task:` call (measured), and would run both arms.
@@ -119,7 +144,9 @@ tasks:
       - task: bazel:mod:check
       - task: bazel:patch:check
       - task: bazel:build:drift
+      - task: bazel:tag:guard
+      - task: bazel:build:jsonschema
+      - task: bazel:test:scripts
       - task: bazel:test:unit
       - task: bazel:test:coverage
-      - task: rust:test:bazel-excluded
       - task: bazel:test:accept

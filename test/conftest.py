@@ -22,6 +22,7 @@ from src.helpers import (
     mint_identity_token,
     render_signing_fixture,
     sigstore_base_urls,
+    sigstore_compose_argv,
     sigstore_compose_path,
     sigstore_skip_reason,
     sigstore_trusted_root,
@@ -82,7 +83,7 @@ def _start_sigstore_stack() -> None:
         return
     compose_file = sigstore_compose_path()
     brought_up = subprocess.run(
-        ["docker", "compose", "-f", str(compose_file), "up", "-d", *SIGSTORE_SERVICES],
+        [*sigstore_compose_argv(compose_file), "up", "-d", *SIGSTORE_SERVICES],
         capture_output=True,
         text=True,
     )

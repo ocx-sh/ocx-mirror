@@ -263,8 +263,12 @@ fn crate_map(text: &str) -> CrateMap {
 #[test]
 fn real_workspace_has_no_violations() {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| env!("CARGO").into());
+    // `--no-deps`: the checker reads members, their manifests and their
+    // declared dependency edges — all of it present without resolution, so no
+    // registry, no lockfile and no external/ocx manifest is consulted, which
+    // is what lets Bazel run this over declared inputs alone.
     let output = Command::new(cargo)
-        .args(["metadata", "--format-version", "1", "--locked"])
+        .args(["metadata", "--format-version", "1", "--no-deps", "--offline"])
         .current_dir(root())
         .output()
         .expect("cargo metadata runs");
