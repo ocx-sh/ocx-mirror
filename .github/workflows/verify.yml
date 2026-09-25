@@ -84,7 +84,7 @@ jobs:
         with:
           version: "0.6.2"
       - name: Bazel repository cache
-        # Analysis fetches every @crates source and the git_override clone;
+        # Analysis fetches every @crates source and the Bazel modules;
         # the repository cache (and the repo contents cache under it) makes a
         # warm run local. Keyed on the two lockfiles that decide its contents.
         # Not the disk cache: ocx measured it (measurement_bazel_r2.md § 5c) —
