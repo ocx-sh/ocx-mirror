@@ -534,6 +534,19 @@ asset_type:
   name: shfmt        # `.exe` is appended on Windows when the asset carries it
 ```
 
+A bare single-file `.gz`/`.xz`/`.zst`/`.bz2` asset (one compressed executable, no tar layer) is also `binary`: it is decompressed before it is placed, detected by its leading bytes rather than its extension. `archive` would fail on it — there is no tar inside. Such a Windows asset carries no `.exe` in its name, so name the file explicitly:
+
+```yaml
+asset_type:
+  default:
+    type: binary
+    name: taplo      # assets: taplo-<os>-<arch>.gz on every platform
+  platforms:
+    windows/amd64:
+      type: binary
+      name: taplo.exe
+```
+
 **Per-platform** — a `default:` plus a `platforms:` map, for upstreams that ship an archive on one OS and a bare executable on another:
 
 ```yaml
