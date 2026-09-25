@@ -49,7 +49,7 @@ jobs:
         # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.2"
+          version: "0.6.3"
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Bazel repository cache

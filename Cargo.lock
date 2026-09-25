@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_config"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "chrono",
  "dirs",
@@ -3437,7 +3437,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_console"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "chrono",
  "clap",
@@ -3456,14 +3456,14 @@ dependencies = [
 
 [[package]]
 name = "ocx_exit"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ocx_index"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_oci"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-compression",
  "async-trait",
@@ -3717,7 +3717,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_package"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3745,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_python"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "ocx_oci",
  "ocx_package",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_sign"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_store"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "dunce",
  "hex",
@@ -3817,7 +3817,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_trust"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "log",
  "ocx_util",
@@ -3832,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_util"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
  "async-trait",
  "bzip2",

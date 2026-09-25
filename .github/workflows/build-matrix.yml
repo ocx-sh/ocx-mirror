@@ -60,7 +60,7 @@ jobs:
         # and oci-publish.yml.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.2"
+          version: "0.6.3"
       # Read-only, on every caller: a build here never writes the shared
       # cache (the upload grant is verify.yml's `main` push alone, C3), and
       # the one action that reads the workspace status is `no-remote-cache`
@@ -141,7 +141,7 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.2"
+          version: "0.6.3"
       # Read-only, as on the Linux legs. No other lane writes darwin keys, so
       # it reads nothing today; it keeps the three legs one shape.
       - name: Bazel cache credential
@@ -230,7 +230,7 @@ jobs:
       - name: Setup OCX
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.2"
+          version: "0.6.3"
       - name: Bazel cache credential
         uses: ./.github/actions/bazel-cache-rc
         with:
@@ -296,7 +296,7 @@ jobs:
         # runs no project tool.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.2"
+          version: "0.6.3"
           project: ""
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
