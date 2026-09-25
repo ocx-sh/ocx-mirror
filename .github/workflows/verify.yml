@@ -82,7 +82,7 @@ jobs:
         # lock_version.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
-          version: "0.6.2"
+          version: "0.6.3"
       - name: Bazel repository cache
         # Analysis fetches every @crates source and the Bazel modules;
         # the repository cache (and the repo contents cache under it) makes a
