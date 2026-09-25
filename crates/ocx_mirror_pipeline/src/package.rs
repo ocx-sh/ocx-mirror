@@ -3,12 +3,13 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ocx_oci::Platform;
 use ocx_package::bundle::BundleBuilder;
 use ocx_package::metadata::authoring::AuthoringMetadata;
 use ocx_package::metadata::binary::Binaries;
 use ocx_util::archive::{Archive, ExtractOptions};
+use ocx_util::compression::CompressionAlgorithm;
 
 use ocx_mirror_spec::{AssetType, MetadataConfig};
 
@@ -17,7 +18,8 @@ use ocx_mirror_spec::{AssetType, MetadataConfig};
 ///
 /// The [`AssetType`] determines how the asset is handled:
 /// - `Archive`: extracted as a tar/zip, with optional `strip_components`.
-/// - `Binary`: placed directly into the content directory under the configured name.
+/// - `Binary`: placed directly into the content directory under the configured name,
+///   decompressed first when the asset is a bare `.gz`/`.xz`/`.zst`/`.bz2` file.
 ///
 /// Separate from [`bundle`] because the published metadata is finalised
 /// between the two: `bin_scan` derives the `binaries` claim from this tree, and
@@ -56,15 +58,45 @@ pub async fn bundle(content_dir: &Path, bundle_path: &Path, compression_threads:
 ///
 /// The filename is the configured `name` from the spec. If the downloaded asset
 /// has a `.exe` extension, it is preserved on the output filename.
+///
+/// A bare single-file compressed asset (`taplo-linux-x86_64.gz`, no tar layer)
+/// is decompressed first — detected by magic, not extension, since no real
+/// executable starts with a compressor header. Copying it verbatim published a
+/// gzip stream as the executable, which `execve` refuses (ocx-sh/ocx#284).
+///
+/// ponytail: no output size cap, parity with the archive path's extraction.
+/// Add one to both if a decompression bomb from upstream ever matters.
 async fn place_binary(asset_path: &Path, content_dir: &Path, name: &str, asset_name: &str) -> Result<()> {
-    let filename = if asset_name.ends_with(".exe") && !name.ends_with(".exe") {
+    let compression = CompressionAlgorithm::from_file_magic(asset_path).await?;
+    // `tool.exe.gz` keeps its `.exe`: test the name the asset has once decoded.
+    let decoded_name = match compression {
+        Some(_) => Path::new(asset_name)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(asset_name),
+        None => asset_name,
+    };
+    let filename = if decoded_name.ends_with(".exe") && !name.ends_with(".exe") {
         format!("{name}.exe")
     } else {
         name.to_string()
     };
 
     let dest = content_dir.join(&filename);
-    tokio::fs::copy(asset_path, &dest).await?;
+    match compression {
+        Some(algorithm) => {
+            let mut reader = ocx_util::compression::read_file(asset_path, Some(algorithm)).await?;
+            let decode_dest = dest.clone();
+            tokio::task::spawn_blocking(move || -> std::io::Result<u64> {
+                std::io::copy(&mut reader, &mut std::fs::File::create(&decode_dest)?)
+            })
+            .await?
+            .with_context(|| format!("failed to decompress {algorithm} asset {asset_name}"))?;
+        }
+        None => {
+            tokio::fs::copy(asset_path, &dest).await?;
+        }
+    }
 
     #[cfg(unix)]
     {
@@ -104,7 +136,6 @@ pub async fn ensure_declared_binaries_executable(content_dir: &Path, binaries: &
         use std::collections::BTreeSet;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-        use anyhow::Context;
         use ocx_package::bin_scan;
         use ocx_util::fs::{DirWalker, WalkDecision};
 
@@ -270,6 +301,88 @@ mod tests {
             .unwrap();
 
         assert!(content_dir.join("shfmt.exe").exists());
+    }
+
+    /// Writes `payload` compressed with `algorithm` to `path`, the shape of a
+    /// bare single-file upstream asset (`taplo-linux-x86_64.gz`).
+    async fn write_compressed(path: &Path, algorithm: ocx_util::compression::CompressionAlgorithm, payload: &[u8]) {
+        use std::io::Write;
+        let options = ocx_util::compression::CompressionOptions::new(algorithm);
+        let mut writer = ocx_util::compression::write_file(path, &options).await.unwrap();
+        writer.write_all(payload).unwrap();
+        // Dropping the writer finishes the stream's epilogue.
+    }
+
+    /// ocx-sh/ocx#284: a gzip'd raw ELF used to be copied verbatim — an
+    /// "executable" that `execve` refuses with `Exec format error`.
+    #[tokio::test]
+    async fn place_binary_decompresses_a_bare_compressed_asset() {
+        use ocx_util::compression::CompressionAlgorithm;
+
+        let payload = b"\x7fELF fake binary payload";
+        for (algorithm, extension) in [
+            (CompressionAlgorithm::Gzip, "gz"),
+            (CompressionAlgorithm::Lzma, "xz"),
+            (CompressionAlgorithm::Zstd, "zst"),
+        ] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let asset_name = format!("taplo-linux-x86_64.{extension}");
+            let asset = dir.path().join(&asset_name);
+            write_compressed(&asset, algorithm, payload).await;
+
+            let content_dir = dir.path().join("content");
+            std::fs::create_dir(&content_dir).unwrap();
+
+            place_binary(&asset, &content_dir, "taplo", &asset_name).await.unwrap();
+
+            let dest = content_dir.join("taplo");
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                payload,
+                "{algorithm} asset shipped undecoded"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+                assert_eq!(mode & 0o755, 0o755);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn place_binary_keeps_exe_through_a_compression_suffix() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let asset_name = "tool_windows_amd64.exe.gz";
+        let asset = dir.path().join(asset_name);
+        write_compressed(
+            &asset,
+            ocx_util::compression::CompressionAlgorithm::Gzip,
+            b"MZ fake exe",
+        )
+        .await;
+
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir(&content_dir).unwrap();
+
+        place_binary(&asset, &content_dir, "tool", asset_name).await.unwrap();
+
+        assert_eq!(std::fs::read(content_dir.join("tool.exe")).unwrap(), b"MZ fake exe");
+    }
+
+    #[tokio::test]
+    async fn place_binary_refuses_a_corrupt_compressed_asset() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let asset = dir.path().join("tool.gz");
+        std::fs::write(&asset, b"\x1f\x8bnot a gzip stream").unwrap();
+
+        let content_dir = dir.path().join("content");
+        std::fs::create_dir(&content_dir).unwrap();
+
+        place_binary(&asset, &content_dir, "tool", "tool.gz")
+            .await
+            .expect_err("a gzip header over garbage must fail prepare, not publish the bytes");
     }
 
     /// The four properties the chmod is keyed on: it reaches a nested directory
