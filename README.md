@@ -60,9 +60,9 @@ Checklist when bumping:
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
   (`task bazel:patch:check` asserts the same binding in `Cargo.bazel.lock.json`)
 - keep the Bazel pins copied from ocx in sync: `rules_rust`, `rules_shell`,
-  `buildifier_prebuilt` `bazel_dep` versions, the `rules_ocx` `git_override`
-  commit, and `.bazelversion` / `ocx.toml`'s bazel tag against
-  `external/ocx/MODULE.bazel` and `external/ocx/.bazelversion`
+  `buildifier_prebuilt` and `rules_ocx` `bazel_dep` versions, and
+  `.bazelversion` / `ocx.toml`'s bazel tag against `external/ocx/MODULE.bazel`
+  and `external/ocx/.bazelversion`
   (`git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..HEAD -- MODULE.bazel .bazelversion ocx.toml`)
 
 When the bump raises the `ocx` floor (a new subcommand or flag the mirror

@@ -45,9 +45,7 @@ single_version_override(
 
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
-
-# Resolved by the `git_override` below, not the registry.
-bazel_dep(name = "rules_ocx", version = "0.4.0")
+bazel_dep(name = "rules_ocx", version = "0.5.0")
 
 # Equal to rust-toolchain.toml's channel (`task bazel:pin:check`).
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
@@ -214,13 +212,6 @@ crate.annotation_select(
 # query) until this line and the BUILD labels follow; `bazel:pin:check`, which
 # runs no Bazel, names the mismatch first.
 use_repo(crate, "crates", "crates__schemars-1.2.1")
-
-# rules_ocx has no BCR release with Bazel 9 support yet; same commit as ocx.
-git_override(
-    module_name = "rules_ocx",
-    commit = "9ced5ffb79a77d37d6f479498bf32517a49b3dc7",
-    remote = "https://github.com/ocx-sh/rules_ocx",
-)
 
 # `@tools//:<bin>` from the same ocx.toml/ocx.lock pair the shell hook reads.
 ocx = use_extension("@rules_ocx//ocx:extensions.bzl", "ocx")
