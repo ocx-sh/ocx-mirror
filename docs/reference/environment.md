@@ -125,19 +125,22 @@ Release listing was the one leg this did not cover until v0.7.0: `github_release
 
 ### Forwarded `OCX_*` variables {#ocx-forwarding}
 
-`ocx-mirror` spawns the `ocx` binary for publishing (`ocx package push --cascade`) and catalog metadata (`ocx package description push`). The child binary is resolved in **two** rungs (`ocx_mirror_pipeline::ocx_cli`, `resolve_ocx_binary`): `OCX_BINARY_PIN` if it is set and non-empty — `ocx` sets it itself when the mirror runs under `ocx exec` — otherwise `ocx` on `PATH`. There is deliberately no co-located lookup, so in a generated workflow, where the mirror is invoked directly rather than through `ocx exec`, the child `ocx` is whichever one the project toolchain put on `PATH`.
+`ocx-mirror` spawns the `ocx` binary for bundling (`ocx package create`), publishing (`ocx package push --cascade`) and catalog metadata (`ocx package description push`). The child binary is resolved in **two** rungs (`ocx_mirror_pipeline::ocx_cli`, `resolve_ocx_binary`): `OCX_BINARY_PIN` if it is set and non-empty — `ocx` sets it itself when the mirror runs under `ocx exec` — otherwise `ocx` on `PATH`. There is deliberately no co-located lookup, so in a generated workflow, where the mirror is invoked directly rather than through `ocx exec`, the child `ocx` is whichever one the project toolchain put on `PATH`.
 
 Whichever of those three wins must be **ocx 0.5.5 or newer**: an older binary rejects the metadata sidecar `pipeline prepare` writes and fails every push with exit 65. See [Push retry][spec-push-retry] for the full contract.
 
-Since the 0.6 CLI rename three legs raise that — `describe` to **0.6.0**, `announce` to **0.6.1**, `cascade` to **0.6.2** — each rejected by an older binary with exit 64:
+Four legs raise that. Since the 0.6 CLI rename three of them — `describe` to **0.6.0**, `announce` to **0.6.1**, `cascade` to **0.6.2** — are rejected by an older binary with exit 64; `prepare` needs **0.6.3** for a dependency named by tag alone:
 
 | Leg | Spawns | Floor | Why an older binary refuses it |
 |---|---|---|---|
 | `pipeline announce` | `ocx package announce <package> --tags-file` | 0.6.1 | the positional package (0.6.1; `--package` is a hidden alias until 0.7) and `--tags-file` (0.6.0, replaced `--tags-from-file`) |
 | `pipeline describe` | `ocx package description push` | 0.6.0 | `description` did not exist as a subcommand |
 | `pipeline cascade` | `ocx package cascade repair --tags-file` (then its closing announce) | 0.6.2 | `--tags-file` replaced `--announce-tags` with no deprecation window |
+| `pipeline prepare`, `package sync` | `ocx package create --platform --metadata` | 0.6.3 | create pins a dependency the spec names by tag alone to each platform's manifest digest; resolving and then pushing an `ocx.sh/…` pin routed through the index needs [ocx-sh/ocx#504](https://github.com/ocx-sh/ocx/issues/504)'s fix |
 
-The 0.6.2 floor is therefore the effective floor for any mirror repository that announces or cascades — which is all of them. Only a plan/prepare/push-only run stays on the older 0.5.5 floor.
+Every prepare now runs through `ocx package create`, so 0.6.3 is the effective floor for every mirror repository — including a plan/prepare/push-only run.
+
+That create runs as `ocx --remote package create`: a dependency named by tag alone is pinned to what the tag points at in the registry *now*, never to a tag pointer the local index cached on an earlier run. `OCX_OFFLINE` or `OCX_FROZEN` set truthy drops `--remote`, and the child resolves against the local index as those variables ask — `ocx` refuses `--frozen` together with `--remote`.
 
 Resolution-affecting `OCX_*` variables present in the environment are forwarded to that subprocess, so offline mode, registry config, and index paths behave identically inside the child:
 
@@ -145,7 +148,7 @@ Resolution-affecting `OCX_*` variables present in the environment are forwarded 
 
 See the [OCX environment reference][ocx-env] for what each variable does.
 
-**Scope:** `sync`, `pipeline push`, `pipeline describe` (any command that spawns `ocx`).
+**Scope:** `sync`, `pipeline prepare`, `pipeline push`, `pipeline describe` (any command that spawns `ocx`).
 
 ### Signing credentials set on the ocx child {#signing-credentials}
 

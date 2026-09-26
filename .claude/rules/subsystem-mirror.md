@@ -95,9 +95,10 @@ Authority for which crate may depend on which is `crates/crate_map.toml` (enforc
 | `ocx_mirror_pipeline::python_push` | pylock/pypi env-push helpers: read `env-manifest.json`, build the multi-layer `ocx package push --cascade -m META LAYERS…` invocation, spawn it; `register_wheel_layers` also pushes each not-yet-published wheel standalone to its content-addressed `pip-packages/...:<sha256>` repository first, so the app's own layer args' `:from=` mount tail has a source blob to reuse |
 | `ocx_mirror_pipeline::ocx_cli` | The `ocx` subprocess boundary: binary resolution and `OCX_*` env forwarding |
 | `ocx_mirror_pipeline::ocx_cli::push` | `ocx package push` — argv assembly, one attempt, the retry ladder (`PUSH_TIMEOUT`, `push_once`, `push_with_retry`) |
+| `ocx_mirror_pipeline::ocx_cli::create` | `ocx package create` — `CreateRequest` argv (root `--remote` unless `OCX_OFFLINE`/`OCX_FROZEN` is truthy, so a tag-only dependency pins to the registry's current leaf rather than a cached index pointer; `bin_scan` → `--no-bin-scan`/none/`--bin-scan`, `libc_lint: false` → `--no-libc-lint`), one bounded invocation (`CREATE_TIMEOUT`), and `compiled_sidecar_path` (ocx's `<stem>-metadata.json` naming, copied because it lives in `ocx_cli`) |
 | `ocx_mirror_pipeline::ocx_cli::announce` | `ocx package announce <package>` — credential gate over both rungs of `ocx`'s API ladder (`OCX_ANNOUNCE_TOKEN`, and the GitLab job token under `transport: git`), `TagSource`, argv (`--fork`/`--forge`/`--transport` only when the spec sets them), one bounded invocation |
 | `ocx_mirror_pipeline::verify` | `verify(config, client, file, asset_name, declared_digest, require_digest)`: the publisher-declared digest first, then `verify.checksums_file`. The download URL is deliberately **not** a parameter — the check is host-independent, which is what makes rewriting the download host safe. `off` is expressed by the caller passing no digest (`DigestPolicy::apply` at the three `MirrorTask` construction sites), so there is no policy to re-read here; `require` with nothing declared fails the asset *after* the download, one wasted fetch bought for one place owning the policy |
-| `ocx_mirror_pipeline::package` | Extract archive, apply metadata, rebundle |
+| `ocx_mirror_pipeline::package` | Lay the asset out into the content tree (extract, binary placement, the #51 chmod), resolve the spec's metadata file, render the authoring sidecar — bundling is `ocx package create`'s |
 | `ocx_mirror_pipeline::push` | Push to registry + cascade tag compute |
 | `ocx_mirror_pipeline::mirror_task` | `MirrorTask`: self-contained work unit |
 | `ocx_mirror_pipeline::mirror_result` | `MirrorResult`: Pushed/Skipped/Failed |
@@ -139,9 +140,13 @@ Authority for which crate may depend on which is `crates/crate_map.toml` (enforc
 1. Fetch upstream versions (GitHub API or URL index)
 2. Resolve assets per platform (regex match)
 3. Filter versions (min/max, prerelease, backfill cap)
-4. Parallel: download → verify → **extract → `bin_scan` → chmod declared binaries → libc check → write sidecar** → compress → drop tree (two independent semaphores: I/O vs CPU)
+4. Parallel: download → verify → **extract → chmod declared binaries → `ocx package create`** → drop tree (two independent semaphores: I/O vs CPU)
 
-The bolded window is load-bearing. Every step in it must sit between extraction and compression, because the tree is gone afterwards: `bin_scan` derives the `binaries` claim from it, the chmod makes the files that claim names executable, and `libc_lint` reads each interface binary's `PT_INTERP` to check the declared `os.features`. None is recomputable on a resume, and they are not equally covered afterwards: `bin_scan`'s resume path re-runs its own guard (`reject_empty_scan`), the libc check has no equivalent and is reachable only from the bundle block, after the `bundle_path.exists()` early return. A bundle on disk is therefore **not** evidence the libc check passed — it may have been written under `libc_lint: false`, or by a binary predating the check — and flipping `libc_lint` back to `true` does not reach a work dir that already holds a bundle; the operator must discard it. No warning fires for this: it would fire on every resumed run with the on-by-default value. The declared-binaries chmod is uncovered the same way: a bundle written by a binary predating it keeps its 0644 members, and no resume will fix them — discard the bundle to re-prepare it. The publisher-declared digest is the one exception: it reads the downloaded archive rather than the content tree, so the resume branch **does** re-check it, and refuses the bundle outright when the archive is gone (the operator deletes the bundle to re-download and re-verify). The sidecar is written last so a refused version leaves nothing publishable behind.
+The mirror is a thin orchestrator here: it lays the tree out (asset types, `strip_components`, binary renaming, bare compressed binaries — create's `--extract` knows none of that) and then hands it to **one** `ocx package create <content> --platform --metadata --output --force -j` subprocess (`ocx_mirror_pipeline::ocx_cli::create`). Create owns everything the published metadata needs from the tree and the index: it pins tag-only dependencies to the platform's manifest digest (issue #90), runs `bin_scan`, the publish-time validation and the libc check, and writes the bundle plus the compiled `bundle-metadata.json`, which the mirror renames to `metadata.json` (the CI `cp` step's and push's input) after `reject_empty_scan` passes on it. Never re-implement a create step in-process — a second copy of create's projection is what refused every tag-only dependency.
+
+The bolded window is load-bearing, because the tree is gone afterwards. The chmod runs before create (keyed on the *hand-declared* `binaries`, and skipped under `verify`, whose refusal of a non-executable declared name it would otherwise pre-empt). A resume — `bundle.tar.xz` **and** `metadata.json` on disk, and `authoring-metadata.json` (create's `--metadata` input) byte-equal to what the spec renders today — reuses both verbatim and re-runs `reject_empty_scan` on the sidecar. A bundle without its sidecar is an interrupted create, and a changed or missing authoring file means the spec moved; both are created again from the archive still on disk, with the stale sidecar deleted first so a failed re-create cannot leave it adoptable. So a spec metadata fix reaches a work dir `package sync` kept across a failed push, but a flipped `libc_lint` does not — a bundle on disk is **not** evidence the libc check passed — and the operator must discard it. No warning fires for this: it would fire on every resumed run. The publisher-declared digest is the one exception: it reads the downloaded archive rather than the content tree, so the resume branch **does** re-check it, and refuses the bundle outright when the archive is gone (the operator deletes the bundle to re-download and re-verify).
+
+The download-free paths (`pipeline plan`'s drift check, `pipeline patch`) cannot run create, so `ExpectedMetadata` is `published: None` while a dependency is tag-only and adopts the published pin for the same registry/repository/tag (`adopting_pins_from`, the `adopting_binaries_from` precedent). No match after adoption is drift that `patch` refuses by name — only create pins.
 
 ### Phase 2: Push (sequential by version, oldest first)
 
@@ -175,7 +180,7 @@ sweep of its own.
 
 The 75/69 split above only exists from **ocx ≥ 0.5.3** onward, and the 83
 arm only from the ocx release carrying `push --fulcio-url`/`--rekor-url` —
-the floor is 0.6.2 (the submodule pins the v0.6.3 release tag) — the `ocx`
+the floor is 0.6.3 (the submodule pins the v0.6.3 release tag) — the `ocx`
 binary that actually runs the push subprocess, i.e. whatever `ocx.toml` /
 `ocx.lock` toolchain the running `ocx-mirror` is co-located with, not the
 separately-pinned `ocx` version a *generated* downstream workflow bakes into
@@ -194,15 +199,20 @@ demands the key and exits **65** — not a retried code — on every push leg.
 and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` steps carry the
 same floor and moves with the submodule pointer.
 
-**Three legs raise that floor**, each rejected by an older binary with exit
+**Four legs raise that floor.** Three are rejected by an older binary with exit
 **64**: `pipeline announce` (`ocx_mirror_pipeline::ocx_cli::announce` spawns the
 positional package, 0.6.1, and `--tags-file`, the 0.6 replacement for
 `--tags-from-file`), `pipeline describe` (`command/package/pipeline/describe.rs` spawns
 `package description push`, which did not exist as a subcommand — 0.6.0), and
 `pipeline cascade` (`command/package/pipeline/cascade.rs` spawns `cascade repair --tags-file`,
 which replaced `--announce-tags` in **0.6.2** with no window, then reuses
-`invoke_announce`). The effective floor is 0.6.2; `setup-ocx` pins and
-`ocx.toml` move with the submodule pointer.
+`invoke_announce`). The fourth is `pipeline prepare` / `package sync`
+(`ocx_mirror_pipeline::ocx_cli::create` spawns `ocx package create --platform
+--metadata`): create pins a tag-only dependency per platform, and resolving
+then pushing an `ocx.sh/…` index-routed pin needs ocx-sh/ocx#504's fix —
+**0.6.3**. Every prepare spawns create, so the effective floor is 0.6.3 for
+every mirror repository; `setup-ocx` pins and `ocx.toml` move with the
+submodule pointer.
 
 ## Spec Format (YAML)
 
