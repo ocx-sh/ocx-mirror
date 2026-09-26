@@ -21,7 +21,7 @@ async fn staged_non_executable_asset(at: &Path) {
         std::fs::write(&file, b"#!/bin/sh\n").expect("write fixture file");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod fixture file");
     }
-    package::bundle(&content, at, 1).await.expect("build fixture asset");
+    archive(&content, at).await;
     std::fs::remove_dir_all(&content).expect("drop fixture tree");
 }
 
@@ -39,7 +39,7 @@ async fn staged_mixed_mode_asset(at: &Path) {
         std::fs::write(&file, b"#!/bin/sh\n").expect("write fixture file");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).expect("chmod fixture file");
     }
-    package::bundle(&content, at, 1).await.expect("build fixture asset");
+    archive(&content, at).await;
     std::fs::remove_dir_all(&content).expect("drop fixture tree");
 }
 
@@ -55,41 +55,40 @@ async fn staged_non_executable_bin_dir_asset(at: &Path) {
     let file = content.join("bin").join("pwsh");
     std::fs::write(&file, b"#!/bin/sh\n").expect("write fixture file");
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod fixture file");
-    package::bundle(&content, at, 1).await.expect("build fixture asset");
+    archive(&content, at).await;
     std::fs::remove_dir_all(&content).expect("drop fixture tree");
 }
 
-/// Runs the real prepare phase offline: the asset is staged where the
-/// download would have written it, so `prepare_task` skips the fetch and
-/// exercises extract → scan → sidecar → bundle exactly as in production.
+/// Runs the prepare phase offline: the asset is staged where the download
+/// would have written it, so `prepare_task` skips the fetch and runs extract →
+/// chmod → create → sidecar exactly as in production, against the fake create.
 #[cfg(unix)]
 async fn prepare_scanned(spec_dir: &Path, task_dir: &Path, bin_scan: BinScanMode) -> Result<Metadata> {
     prepare_offline(spec_dir, task_dir, bin_scan, true).await
 }
 
-/// The names on disk, as the sidecar `ocx package push --metadata` reads
-/// records them — the file, not the in-memory value, because that file is
-/// what the CI push job actually publishes from.
+/// The names the sidecar `ocx package push --metadata` reads records — the
+/// file, not the in-memory value, because that file is what the CI push job
+/// actually publishes from.
 #[cfg(unix)]
 fn sidecar_binaries(task_dir: &Path) -> Vec<String> {
     let json = std::fs::read_to_string(task_dir.join("metadata.json")).expect("sidecar written");
-    let sidecar: AuthoringMetadata = serde_json::from_str(&json).expect("sidecar parses");
+    let sidecar: Metadata = serde_json::from_str(&json).expect("sidecar parses");
     sidecar
         .binaries()
         .map(|binaries| binaries.iter().map(|name| name.as_str().to_string()).collect())
         .unwrap_or_default()
 }
 
-/// The ordering constraint this feature exists to satisfy: `binaries` is
-/// derived from the extracted content tree, so the metadata cannot be
-/// finalised before the download the way every other field is.
+/// What create compiled is what the run publishes: the returned value (the
+/// in-process push) and `metadata.json` (the CI push) both carry the claim
+/// create filled, not the spec's authoring input.
 ///
-/// Asserted against the sidecar as well as the published projection: the CI
-/// push job publishes from the file, so a claim that reached only the
-/// in-memory value would never leave the runner.
+/// And `bin_scan` reaches create as its own flag: `off` must say so, because
+/// create's default is to scan and fill.
 #[cfg(unix)]
 #[tokio::test]
-async fn bin_scan_auto_fills_binaries_from_the_extracted_tree() {
+async fn prepare_publishes_the_sidecar_create_compiled() {
     let spec = spec_dir_declaring("");
     let work = tempfile::tempdir().expect("tempdir");
 
@@ -97,62 +96,72 @@ async fn bin_scan_auto_fills_binaries_from_the_extracted_tree() {
     let metadata = prepare_scanned(spec.path(), &off, BinScanMode::Off)
         .await
         .expect("prepare succeeds");
-    assert!(
-        metadata.binaries().is_none(),
-        "control: without bin_scan nothing may invent a binaries claim",
-    );
+    assert!(metadata.binaries().is_none(), "control: nothing compiled a claim");
     assert!(sidecar_binaries(&off).is_empty(), "control: sidecar too");
+    assert!(
+        create_invocations(&off)[0].ends_with("--no-bin-scan"),
+        "off must switch create's default scan off: {:?}",
+        create_invocations(&off),
+    );
 
     let auto = work.path().join("auto");
+    stage_compiled_binaries(&auto, spec.path(), &["tool"]);
     let metadata = prepare_scanned(spec.path(), &auto, BinScanMode::Auto)
         .await
         .expect("prepare succeeds");
     assert_eq!(
         metadata.binaries().map(|binaries| binaries.len()),
         Some(1),
-        "the executable under the interface PATH dir must reach the published metadata",
+        "the compiled claim must reach the published metadata",
     );
     assert_eq!(sidecar_binaries(&auto), vec!["tool"], "and the sidecar the push reads");
+    assert!(
+        !create_invocations(&auto)[0].contains("bin-scan"),
+        "auto is create's default and passes no flag: {:?}",
+        create_invocations(&auto),
+    );
 }
 
-/// `verify` is the mode a mirror wants once it hand-lists `binaries`: the
-/// list becomes a regression test against upstream rearranging its archive,
-/// and a disagreement fails the run instead of publishing quietly.
+/// A create refusal — an unresolvable dependency tag, a `binaries` mismatch, a
+/// libc claim the binaries contradict — fails the prepare, carries create's
+/// own explanation, and names the tile an operator has to go and fix.
 #[cfg(unix)]
 #[tokio::test]
-async fn bin_scan_verify_fails_on_an_undeclared_binary() {
+async fn a_create_refusal_fails_the_prepare_naming_the_tile() {
     let spec = spec_dir_declaring(r#","binaries":["other"]"#);
     let work = tempfile::tempdir().expect("tempdir");
+    let task_dir = work.path().join("verify");
+    std::fs::create_dir_all(&task_dir).expect("create task dir");
+    std::fs::write(task_dir.join("fake-create-stderr"), "binary 'tool' is not declared").expect("stage refusal");
 
-    let error = prepare_scanned(spec.path(), &work.path().join("verify"), BinScanMode::Verify)
+    let error = prepare_scanned(spec.path(), &task_dir, BinScanMode::Verify)
         .await
-        .expect_err("an executable the spec does not declare must fail the run");
+        .expect_err("a refused create must fail the run");
     let rendered = format!("{error:#}");
+    for needle in ["tool' is not declared", "mirror/tool", "1.0.0", "linux/amd64"] {
+        assert!(rendered.contains(needle), "the failure must name {needle}: {rendered}");
+    }
     assert!(
-        rendered.contains("tool") && rendered.contains("not declared"),
-        "the failure must name the undeclared binary: {rendered}",
+        !task_dir.join("metadata.json").exists(),
+        "a refused run must leave nothing publishable behind",
     );
-
-    // The same tree under `auto` passes a declared list through untouched —
-    // otherwise the test above would prove nothing about `verify`.
-    let metadata = prepare_scanned(spec.path(), &work.path().join("auto"), BinScanMode::Auto)
-        .await
-        .expect("auto passes a declared claim through unverified");
-    assert_eq!(metadata.binaries().map(|binaries| binaries.len()), Some(1));
+    assert!(
+        create_invocations(&task_dir)[0].ends_with("--bin-scan"),
+        "verify is create's --bin-scan: {:?}",
+        create_invocations(&task_dir),
+    );
 }
 
-/// A resume arrives after the content tree is gone, so re-resolving the
-/// metadata from the spec would silently drop the scanned claim and publish
-/// a bundle whose metadata contradicts what was prepared beside it.
-///
-/// The sidecar the first run wrote is the record, and it is written before
-/// the bundle exists precisely so this readback cannot miss.
+/// A resume arrives after the content tree is gone, so nothing can recompile
+/// the metadata. The compiled sidecar the first run left is the record, and it
+/// is reused without spawning create again.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_resumed_bin_scan_task_keeps_the_scanned_binaries() {
     let spec = spec_dir_declaring("");
     let work = tempfile::tempdir().expect("tempdir");
     let task_dir = work.path().join("resume");
+    stage_compiled_binaries(&task_dir, spec.path(), &["tool"]);
 
     prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
         .await
@@ -172,51 +181,108 @@ async fn a_resumed_bin_scan_task_keeps_the_scanned_binaries() {
         "a resumed run must republish the scanned claim, not drop it",
     );
     assert_eq!(sidecar_binaries(&task_dir), vec!["tool"]);
+    assert_eq!(
+        create_invocations(&task_dir).len(),
+        1,
+        "a resume must not re-create what it cannot recompile",
+    );
 }
 
-/// A resume adopts `binaries` from the old sidecar and *nothing else*.
-///
-/// Carrying the whole sidecar kept the scanned claim but froze every other
-/// field with it, so a spec-side fix landing between the two runs — here a
-/// second env var — was silently discarded on any resumed run and the
-/// corrected metadata never published.
+/// A bundle with no sidecar beside it is a create interrupted between the two
+/// writes. It is not evidence of anything, so the task is created again rather
+/// than refused or trusted.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_resumed_bin_scan_task_still_picks_up_a_spec_metadata_fix() {
+async fn a_bundle_without_its_sidecar_is_created_again() {
     let spec = spec_dir_declaring("");
     let work = tempfile::tempdir().expect("tempdir");
     let task_dir = work.path().join("resume");
 
-    prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+    prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
         .await
         .expect("first run succeeds");
+    std::fs::remove_file(task_dir.join("metadata.json")).expect("drop the sidecar");
 
-    // The spec-side fix, applied after the bundle exists.
-    write_metadata(
-        spec.path(),
-        "bin",
-        "",
-        r#",{"key":"TOOL_HOME","type":"constant","value":"${installPath}","required":false,"visibility":"interface"}"#,
-    );
-
-    let resumed = prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
+    prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
         .await
-        .expect("resume succeeds");
+        .expect("the second run re-creates");
+    assert_eq!(create_invocations(&task_dir).len(), 2, "create must run again");
+    assert!(task_dir.join("metadata.json").exists(), "and the sidecar is back");
+}
+
+/// The TOOL_HOME env var a spec-side fix adds between two runs.
+#[cfg(unix)]
+const TOOL_HOME: &str =
+    r#",{"key":"TOOL_HOME","type":"constant","value":"${installPath}","required":false,"visibility":"interface"}"#;
+
+/// A resume is keyed on the authoring input create compiled from, not on the
+/// bundle existing.
+///
+/// `package sync` keeps its work dir across a failed push, so reusing the
+/// compiled sidecar verbatim silently discarded a spec-side fix landing
+/// between the two runs — here a second env var — and the corrected metadata
+/// never published.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_resumed_task_still_picks_up_a_spec_metadata_fix() {
+    let spec = spec_dir_declaring("");
+    let work = tempfile::tempdir().expect("tempdir");
+    let task_dir = work.path().join("resume");
+
+    prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
+        .await
+        .expect("first run succeeds");
+    write_metadata(spec.path(), "bin", "", TOOL_HOME);
+
+    // As-is: the archive the first run downloaded is still there, and the
+    // re-create must use it rather than fetch.
+    let task = offline_task(spec.path(), BinScanMode::Off, true);
+    let resumed = prepare_as_is(&task, &task_dir).await.expect("resume succeeds");
 
     assert!(
         resumed
             .env()
             .is_some_and(|vars| vars.into_iter().any(|var| var.key == "TOOL_HOME")),
-        "a resumed run must re-resolve everything the spec owns: {:?}",
-        resumed
-            .env()
-            .map(|vars| vars.into_iter().map(|v| v.key.clone()).collect::<Vec<_>>()),
+        "a resumed run must publish the spec's current metadata",
     );
     assert_eq!(
-        resumed.binaries().map(|binaries| binaries.len()),
-        Some(1),
-        "and must still carry the scanned claim it cannot recompute",
+        create_invocations(&task_dir).len(),
+        2,
+        "a changed spec is created again"
     );
+}
+
+/// A re-create that fails must not leave the old sidecar beside the new
+/// authoring input: the next run would read the pair as current and publish
+/// the metadata the spec fix was meant to replace.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_re_create_leaves_no_sidecar_to_adopt() {
+    let spec = spec_dir_declaring("");
+    let work = tempfile::tempdir().expect("tempdir");
+    let task_dir = work.path().join("resume");
+
+    prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
+        .await
+        .expect("first run succeeds");
+    write_metadata(spec.path(), "bin", "", TOOL_HOME);
+
+    std::fs::write(task_dir.join("fake-create-stderr"), "registry unreachable").expect("stage the refusal");
+    prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
+        .await
+        .expect_err("the re-create fails");
+    std::fs::remove_file(task_dir.join("fake-create-stderr")).expect("clear the refusal");
+
+    let resumed = prepare_scanned(spec.path(), &task_dir, BinScanMode::Off)
+        .await
+        .expect("the third run re-creates");
+    assert!(
+        resumed
+            .env()
+            .is_some_and(|vars| vars.into_iter().any(|var| var.key == "TOOL_HOME")),
+        "the stale sidecar must not be adopted",
+    );
+    assert_eq!(create_invocations(&task_dir).len(), 3);
 }
 
 /// A scan that finds nothing must fail the run, not publish `binaries: []`.
@@ -226,14 +292,8 @@ async fn a_resumed_bin_scan_task_still_picks_up_a_spec_metadata_fix() {
 /// in the archive. A typo or an upstream rename yields zero candidates and
 /// the same false "exposes no executables" claim the gate exists to stop —
 /// and under `verify`, with nothing declared and nothing found, the
-/// one-directional diff is trivially empty and it went green.
-///
-/// Both legs use a fixture that declares **no** `binaries`, which is the
-/// only shape reaching this guard: `verify` here is the fill path. For
-/// `(verify, declared)` `resolve_binaries` returns the hand-written list
-/// untouched and nothing observes the tree at all — that gap is ocx's ADR §2
-/// rule that a declared-but-absent name is legal, recorded as a follow-up
-/// and deliberately not asserted here.
+/// one-directional diff is trivially empty and create goes green. So the
+/// mirror checks what create compiled.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_scan_target_missing_from_the_archive_fails_instead_of_claiming_nothing() {
@@ -241,10 +301,13 @@ async fn a_scan_target_missing_from_the_archive_fails_instead_of_claiming_nothin
 
     for (mode, label) in [(BinScanMode::Auto, "auto"), (BinScanMode::Verify, "verify")] {
         let spec = spec_dir_declaring("");
-        // The archive ships `bin/`; the metadata points somewhere else.
+        // The archive ships `bin/`; the metadata points somewhere else, and
+        // create compiles the empty fill that yields.
         write_metadata(spec.path(), "not-in-the-archive", "", "");
+        let task_dir = work.path().join(label);
+        stage_compiled_binaries(&task_dir, spec.path(), &[]);
 
-        let error = prepare_scanned(spec.path(), &work.path().join(label), mode)
+        let error = prepare_scanned(spec.path(), &task_dir, mode)
             .await
             .expect_err("a scan target absent from the archive must fail the run");
         let rendered = format!("{error:#}");
@@ -252,22 +315,27 @@ async fn a_scan_target_missing_from_the_archive_fails_instead_of_claiming_nothin
             rendered.contains("found no executables"),
             "{label}: the failure must say the scan came up empty: {rendered}",
         );
+        assert!(
+            !task_dir.join("metadata.json").exists(),
+            "{label}: and must not leave the sidecar under the name CI and resume read",
+        );
     }
 }
 
 /// The resume path runs the same guard as the fresh path.
 ///
-/// A resumed scanning task takes an early return that skipped
-/// `reject_empty_scan` entirely, so it could republish `binaries: []` — or,
-/// off a sidecar that never carried the field, no claim at all. Either then
-/// reads as "nothing to adopt" on the download-free paths, so `plan` reports
-/// no drift and the mistake is permanent.
+/// A resumed scanning task takes an early return, so without the guard it
+/// could republish `binaries: []` — or, off a sidecar that never carried the
+/// field, no claim at all. Either then reads as "nothing to adopt" on the
+/// download-free paths, so `plan` reports no drift and the mistake is
+/// permanent.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_resumed_scanning_task_rejects_an_unusable_claim() {
     let spec = spec_dir_declaring("");
     let work = tempfile::tempdir().expect("tempdir");
     let task_dir = work.path().join("resume");
+    stage_compiled_binaries(&task_dir, spec.path(), &["tool"]);
 
     prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
         .await
@@ -314,13 +382,10 @@ async fn a_resumed_scanning_task_rejects_an_unusable_claim() {
 /// The spec here is the bug's own shape: PATH is the bare `${installPath}`,
 /// so there is no `bin/` a scan could be pointed at, and the declared
 /// `binaries` list is the only statement of which files are commands.
-/// Asserted against the extracted bundle, not `content/` — prepare drops the
-/// tree, and the bundle is what gets pushed.
+/// Asserted against the tree create was handed — that tree is what it bundles.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_declared_binary_shipped_without_an_exec_bit_is_published_executable() {
-    use std::os::unix::fs::PermissionsExt;
-
     let spec = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         spec.path().join("metadata.json"),
@@ -338,25 +403,13 @@ async fn a_declared_binary_shipped_without_an_exec_bit_is_published_executable()
         .await
         .expect("prepare succeeds");
 
-    let published = work.path().join("published");
-    ocx_util::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
-        .await
-        .expect("the produced bundle extracts");
-
-    let mode = |name: &str| {
-        std::fs::metadata(published.join(name))
-            .unwrap_or_else(|e| panic!("{name} missing from the bundle: {e}"))
-            .permissions()
-            .mode()
-            & 0o777
-    };
     assert_eq!(
-        mode("pwsh"),
+        mode_create_saw(&task_dir, "pwsh"),
         0o755,
-        "a declared binary must be executable in the published bundle",
+        "a declared binary must be executable in the tree create bundles",
     );
     assert_eq!(
-        mode("LICENSE.txt"),
+        mode_create_saw(&task_dir, "LICENSE.txt"),
         0o644,
         "and nothing else may be touched — this is not a blanket chmod -R",
     );
@@ -364,95 +417,70 @@ async fn a_declared_binary_shipped_without_an_exec_bit_is_published_executable()
 
 /// **Limitation pin, not an aspiration.** Under `bin_scan: auto` with no
 /// hand-written `binaries`, the #51 chmod cannot reach a non-executable
-/// file — and the assertions below record that as the behavior.
+/// file — and the assertion below records that as the behavior.
 ///
-/// `resolve_binaries` fills the claim from `scan_interface_binaries`, which
-/// keeps executable candidates only, so a 0644 file never enters the list
-/// the chmod is keyed on: `pwsh` is absent from the published claim *and*
-/// still 0644 in the bundle. A mirror hitting #51 fixes it by declaring
+/// The chmod is keyed on the declared list, and create fills a scanned one
+/// only after it has run — keeping executable candidates only, so a 0644 file
+/// never enters the claim either. A mirror hitting #51 fixes it by declaring
 /// `binaries` by hand, not by switching scan modes. Rewrite this test only
 /// alongside a deliberate decision to let an auto fill claim files it found
 /// non-executable.
 #[cfg(unix)]
 #[tokio::test]
 async fn an_auto_scan_with_no_declared_list_leaves_a_non_executable_binary_unfixed() {
-    use std::os::unix::fs::PermissionsExt;
-
     let spec = spec_dir_declaring("");
     let work = tempfile::tempdir().expect("tempdir");
     let task_dir = work.path().join("task");
     tokio::fs::create_dir_all(&task_dir).await.expect("create task dir");
     staged_mixed_mode_asset(&task_dir.join("asset.tar.xz")).await;
+    stage_compiled_binaries(&task_dir, spec.path(), &["tool"]);
 
     prepare_scanned(spec.path(), &task_dir, BinScanMode::Auto)
         .await
         .expect("prepare succeeds");
 
     assert_eq!(
-        sidecar_binaries(&task_dir),
-        vec!["tool"],
-        "the mechanism: a fill claims only what it found executable",
+        mode_create_saw(&task_dir, "bin/tool"),
+        0o755,
+        "control: upstream's own mode"
     );
-
-    let published = work.path().join("published");
-    ocx_util::archive::Archive::extract(task_dir.join("bundle.tar.xz"), &published)
-        .await
-        .expect("the produced bundle extracts");
-    let mode = |relative: &str| {
-        std::fs::metadata(published.join(relative))
-            .unwrap_or_else(|e| panic!("{relative} missing from the bundle: {e}"))
-            .permissions()
-            .mode()
-            & 0o777
-    };
-    assert_eq!(mode("bin/tool"), 0o755, "control: the claimed binary is executable");
     assert_eq!(
-        mode("bin/pwsh"),
+        mode_create_saw(&task_dir, "bin/pwsh"),
         0o644,
-        "a name no scan claimed stays as upstream shipped it — declare it to have it chmodded",
+        "a name nothing declared stays as upstream shipped it — declare it to have it chmodded",
     );
 }
 
-/// `bin_scan: verify` refuses a declared-but-non-executable binary, and the
-/// chmod must not have papered over it first.
+/// `bin_scan: verify` must get to refuse a declared-but-non-executable binary,
+/// so the chmod must not paper over it first.
 ///
 /// The two features disagree by design: #51's chmod makes a declared name
-/// executable, `verify` fails the run for exactly that state. `verify` wins
-/// — a mirror that asked to be told when upstream changes its archive must
-/// be told — and today that holds only because `resolve_binaries` runs ten
-/// lines above the chmod in `prepare_task`. Swapping the two statements
-/// passes every other test in this file, so the mode assertion below is the
-/// one thing pinning the order.
+/// executable, `verify` fails the run for exactly that state. `verify` wins —
+/// a mirror that asked to be told when upstream changes its archive must be
+/// told — and the refusal is create's, so the mirror has to hand create the
+/// tree untouched. Under `off` the same fixture is fixed up, which is what
+/// makes the `verify` leg an observation rather than an absence.
 #[cfg(unix)]
 #[tokio::test]
 async fn bin_scan_verify_refuses_a_non_executable_binary_before_the_chmod_runs() {
-    use std::os::unix::fs::PermissionsExt;
-
     let spec = spec_dir_declaring(r#","binaries":["pwsh"]"#);
     let work = tempfile::tempdir().expect("tempdir");
-    let task_dir = work.path().join("task");
-    tokio::fs::create_dir_all(&task_dir).await.expect("create task dir");
-    staged_non_executable_bin_dir_asset(&task_dir.join("asset.tar.xz")).await;
 
-    let error = prepare_scanned(spec.path(), &task_dir, BinScanMode::Verify)
-        .await
-        .expect_err("a declared binary that is not executable must fail a verify run");
-    let rendered = format!("{error:#}");
-    assert!(
-        rendered.contains("pwsh") && rendered.contains("not executable"),
-        "the failure must name the offending binary: {rendered}",
-    );
+    for (mode, expected) in [(BinScanMode::Verify, 0o644), (BinScanMode::Off, 0o755)] {
+        let task_dir = work.path().join(format!("{mode:?}"));
+        tokio::fs::create_dir_all(&task_dir).await.expect("create task dir");
+        staged_non_executable_bin_dir_asset(&task_dir.join("asset.tar.xz")).await;
+        stage_compiled_binaries(&task_dir, spec.path(), &["pwsh"]);
 
-    let extracted = task_dir.join("content").join("bin").join("pwsh");
-    assert_eq!(
-        std::fs::metadata(&extracted)
-            .expect("the extracted tree survives a refused run")
-            .permissions()
-            .mode()
-            & 0o777,
-        0o644,
-        "the chmod must not run before verify — a fixed-up mode would make the refusal unreachable",
-    );
+        prepare_scanned(spec.path(), &task_dir, mode)
+            .await
+            .expect("the fake create accepts either tree");
+        assert_eq!(
+            mode_create_saw(&task_dir, "bin/pwsh"),
+            expected,
+            "{mode:?}: the chmod must not run before create's verify — a fixed-up mode makes the refusal unreachable",
+        );
+    }
 }
 
 /// A *named* default variant publishes bare tags beside its prefixed ones,

@@ -34,7 +34,7 @@ cases = 0
 label = "//:ocx_mirror_test"
 crate = "ocx_mirror"
 suite = "ocx_mirror"
-cases = 385
+cases = 401
 
 [[target]]
 label = "//:registry_spec_validation"
@@ -76,7 +76,7 @@ cases = 22
 label = "//crates/ocx_mirror_pipeline:ocx_mirror_pipeline_test"
 crate = "ocx_mirror_pipeline"
 suite = "ocx_mirror_pipeline"
-cases = 472
+cases = 492
 
 [[target]]
 label = "//crates/ocx_mirror_report:ocx_mirror_report_test"

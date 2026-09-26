@@ -89,7 +89,7 @@ pub async fn detect_metadata_drift(
         // Local and free, and the answer for every tile of a healthy mirror —
         // used here only to avoid spawning a network task per clean tile.
         // `image_drifted` below re-runs it as part of the actual decision.
-        if !settled_by_digest(&image, &expected.published, plan.bin_scan)? {
+        if !settled_by_digest(&image, expected.published.as_ref(), plan.bin_scan)? {
             let expected = expected.clone();
             suspects.push((image, expected, plan.bin_scan));
         }
@@ -140,12 +140,18 @@ pub async fn detect_metadata_drift(
 /// the digest would republish the entire fleet the first time serialization
 /// moved.
 ///
-/// Returns the expectation rather than a bare `bool` because under `bin_scan`
-/// the expectation the caller passed in is not the one the comparison ran
-/// against: it is missing `binaries`, and the answer is only meaningful after
-/// the published claim has been carried into it. Handing that adopted
-/// expectation back is what stops `pipeline patch` republishing against the
-/// unadopted one and deleting the claim.
+/// Returns the expectation rather than a bare `bool` because under `bin_scan`,
+/// or with a dependency the spec names by tag alone, the expectation the caller
+/// passed in is not the one the comparison ran against: it is missing
+/// `binaries` or a digest, and the answer is only meaningful after the
+/// published value has been carried into it. Handing that adopted expectation
+/// back is what stops `pipeline patch` republishing against the unadopted one
+/// and deleting the claim.
+///
+/// An expectation still incomplete after adoption — a tag-only dependency the
+/// published document has no match for, because the spec moved the tag or
+/// added the dependency — is drift, and comes back with `published: None`:
+/// only `ocx package create` can pin it, so `patch` has to refuse it.
 pub async fn image_drift(
     publisher: &Publisher,
     identifier: &OciIdentifier,
@@ -153,23 +159,30 @@ pub async fn image_drift(
     expected: &ExpectedMetadata,
     bin_scan: BinScanMode,
 ) -> Result<Option<ExpectedMetadata>, MirrorError> {
-    if settled_by_digest(image, &expected.published, bin_scan)? {
+    if settled_by_digest(image, expected.published.as_ref(), bin_scan)? {
         return Ok(None);
     }
 
     let published = target_registry::fetch_published_metadata(publisher, identifier, image).await?;
+    let adoption_failed = |what: &str, error: anyhow::Error| {
+        MirrorError::SpecInvalid(vec![format!(
+            "failed to carry the published {what} of {} ({}) into the expected metadata: {error:#}",
+            image.version, image.platform
+        )])
+    };
     let expected = match bin_scan.scans() {
         true => expected
             .adopting_binaries_from(&published, &image.platform)
-            .map_err(|error| {
-                MirrorError::SpecInvalid(vec![format!(
-                    "failed to carry the published binaries of {} ({}) into the expected metadata: {error:#}",
-                    image.version, image.platform
-                )])
-            })?,
+            .map_err(|error| adoption_failed("binaries", error))?,
         false => expected.clone(),
     };
-    Ok(metadata_drifted(&published, &expected.published)?.then_some(expected))
+    let expected = expected
+        .adopting_pins_from(&published, &image.platform)
+        .map_err(|error| adoption_failed("dependency pins", error))?;
+    match &expected.published {
+        Some(complete) => Ok(metadata_drifted(&published, complete)?.then_some(expected)),
+        None => Ok(Some(expected)),
+    }
 }
 
 /// Whether the config digest alone proves `image` is current.
@@ -178,15 +191,21 @@ pub async fn image_drift(
 /// declares no `binaries` cannot compute the claim the registry records, so its
 /// digest can never match a correctly published tile and trusting it would
 /// report drift on every one of them; those go straight to the blob read that
-/// adopts the published claim. A spec that declares `binaries` computes the
-/// whole document download-free, scanning or not, and skipping the digest there
-/// buys nothing: it costs a config-blob GET per tile per run, and turns one
-/// unparseable published blob into a `TargetError` that aborts the discover job.
+/// adopts the published claim. A spec naming a dependency by tag alone is
+/// incomplete the same way — `expected` is `None`, since only the published
+/// document knows the digest create pinned. A spec that declares `binaries`
+/// computes the whole document download-free, scanning or not, and skipping the
+/// digest there buys nothing: it costs a config-blob GET per tile per run, and
+/// turns one unparseable published blob into a `TargetError` that aborts the
+/// discover job.
 pub fn settled_by_digest(
     image: &PublishedImage,
-    expected: &Metadata,
+    expected: Option<&Metadata>,
     bin_scan: BinScanMode,
 ) -> Result<bool, MirrorError> {
+    let Some(expected) = expected else {
+        return Ok(false);
+    };
     let complete = !bin_scan.scans() || expected.binaries().is_some();
     Ok(complete && config_bytes_match(image, expected)?)
 }

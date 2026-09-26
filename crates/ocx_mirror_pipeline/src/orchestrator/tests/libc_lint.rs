@@ -4,124 +4,88 @@
 use super::super::*;
 use super::support::*;
 
-// ── libc_lint: the claim the pipeline never read ──────────────────────
+// ── libc_lint and dependency pins: create's checks, reached through prepare ──
 //
-// Linux-only, because `PT_INTERP` is what the check reads and the fixture
-// is a real compiled binary. Never a hand-written byte array: the subject
-// is a binary format, and a fixture the parser never had to face for real
-// proves nothing. Same rule ocx's own libc_lint fixtures follow.
-#[cfg(target_os = "linux")]
-mod libc {
-    use super::*;
+// The libc check and the dependency pinning both run inside `ocx package
+// create` now; what the mirror owns is handing create the right switch and the
+// right input, and publishing what it compiled. The checks themselves are
+// covered where they live, in ocx, and end to end by the acceptance suite.
 
-    /// Stages `bin/tool` as a **dynamically linked** ELF built by the host
-    /// C toolchain, bundled where the download would have landed — so
-    /// `prepare_offline` skips the fetch and the check meets a real
-    /// loader reference.
-    ///
-    /// A missing `cc` is a hard failure, never a skip: linking this very
-    /// test binary already went through a C linker driver, so "cc absent"
-    /// is unreachable wherever this runs and a skip would be a green that
-    /// never ran.
-    async fn stage_dynamic_elf_asset(task_dir: &Path) {
-        tokio::fs::create_dir_all(task_dir).await.expect("create task dir");
-        let content = task_dir.join("upstream-content");
-        std::fs::create_dir_all(content.join("bin")).expect("create fixture tree");
+/// `libc_lint: false` is create's `--no-libc-lint`, and the default passes
+/// nothing — the check runs. A partial bypass on the mirror's side would be a
+/// second opinion on a check the mirror no longer makes.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_libc_opt_out_reaches_create_as_its_own_flag() {
+    let spec = spec_dir_declaring("");
+    let work = tempfile::tempdir().expect("tempdir");
 
-        let source = task_dir.join("tool.c");
-        std::fs::write(&source, "int main(void) { return 0; }\n").expect("write fixture source");
-        let compiled = std::process::Command::new("cc")
-            .arg("-o")
-            .arg(content.join("bin").join("tool"))
-            .arg(&source)
-            .output()
-            .expect("cc must be present: linking this test binary already required a C linker driver");
-        assert!(
-            compiled.status.success(),
-            "cc failed to build the fixture binary: {}",
-            String::from_utf8_lossy(&compiled.stderr)
-        );
+    let checked = work.path().join("checked");
+    prepare_offline(spec.path(), &checked, BinScanMode::Off, true)
+        .await
+        .expect("prepare succeeds");
+    assert!(
+        !create_invocations(&checked)[0].contains("--no-libc-lint"),
+        "the default must leave the check on: {:?}",
+        create_invocations(&checked),
+    );
 
-        package::bundle(&content, &task_dir.join("asset.tar.xz"), 1)
-            .await
-            .expect("build fixture asset");
-        std::fs::remove_dir_all(&content).expect("drop fixture tree");
-    }
+    let bypassed = work.path().join("bypassed");
+    prepare_offline(spec.path(), &bypassed, BinScanMode::Off, false)
+        .await
+        .expect("prepare succeeds");
+    assert!(
+        create_invocations(&bypassed)[0].ends_with("--no-libc-lint"),
+        "libc_lint: false must reach create: {:?}",
+        create_invocations(&bypassed),
+    );
+}
 
-    /// The finding this key exists for, and its escape hatch, asserted
-    /// against one another on the same fixture.
-    ///
-    /// The declared platform is a bare `linux/amd64`. Under `os.features`
-    /// subset matching that is a positive claim of libc universality, so
-    /// publishing a glibc-linked binary under it produces a tile that
-    /// resolves onto musl hosts and dies with a bare `No such file or
-    /// directory`. Before this the pipeline never read the artifact at all.
-    #[tokio::test]
-    async fn a_libc_claim_the_binaries_contradict_fails_the_prepare_unless_opted_out() {
-        let spec = spec_dir_declaring("");
-        let work = tempfile::tempdir().expect("tempdir");
+/// Issue #90: a spec dependency named by tag alone is create's to pin, per
+/// platform. The mirror used to project the authoring metadata itself and
+/// refused the tag before create ever ran; now the tag-only file reaches
+/// create as its `--metadata` input, and the pin create compiled is what both
+/// publish paths carry.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_tag_only_dependency_reaches_create_and_its_pin_is_published() {
+    const PINNED: &str =
+        "ocx.sh/adoptium/temurin:jre-25@sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-        let refused = work.path().join("checked");
-        stage_dynamic_elf_asset(&refused).await;
-        let error = prepare_offline(spec.path(), &refused, BinScanMode::Off, true)
-            .await
-            .expect_err("a glibc binary under a platform declaring no libc must not publish");
-        let rendered = format!("{error:#}");
+    let spec = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        spec.path().join("metadata.json"),
+        r#"{"type":"bundle","version":1,
+            "dependencies":[{"identifier":"ocx.sh/adoptium/temurin:jre-25","name":"temurin","visibility":"private"}]}"#,
+    )
+    .expect("write metadata fixture");
+    let work = tempfile::tempdir().expect("tempdir");
+    let task_dir = work.path().join("task");
+    std::fs::create_dir_all(&task_dir).expect("create task dir");
+    std::fs::write(
+        task_dir.join("fake-compiled.json"),
+        format!(
+            r#"{{"type":"bundle","version":1,
+                "dependencies":[{{"identifier":"{PINNED}","name":"temurin","visibility":"private"}}]}}"#
+        ),
+    )
+    .expect("stage the compiled sidecar");
 
-        // Everything an operator staring at a CI log needs to act: which
-        // spec (by the target it publishes to), which version, which
-        // platform, which file, which libc, and the way through.
-        for needle in [
-            "mirror/tool",
-            "1.0.0",
-            "linux/amd64",
-            "bin/tool",
-            "libc.glibc",
-            "libc_lint: false",
-        ] {
-            assert!(rendered.contains(needle), "message must name {needle}: {rendered}");
-        }
+    let metadata = prepare_offline(spec.path(), &task_dir, BinScanMode::Off, true)
+        .await
+        .expect("a tag-only dependency must not stop the prepare");
 
-        // The other outcome, same fixture, same platform: the opt-out is
-        // the only difference, so a green here is the bypass working and
-        // not the check having quietly stopped applying.
-        let bypassed = work.path().join("bypassed");
-        stage_dynamic_elf_asset(&bypassed).await;
-        prepare_offline(spec.path(), &bypassed, BinScanMode::Off, false)
-            .await
-            .expect("libc_lint: false must publish the same tree");
-        assert!(
-            bypassed.join("bundle.tar.xz").exists(),
-            "the bypassed run must leave a publishable bundle"
-        );
-        assert!(
-            !refused.join("bundle.tar.xz").exists(),
-            "the refused run must leave nothing publishable behind"
-        );
-    }
-
-    /// The opt-out silences one check, not the prepare. A `bin_scan:
-    /// verify` mismatch on the very same tree still fails — otherwise the
-    /// escape hatch for a false libc refusal would quietly become an
-    /// escape hatch for everything the tree is checked for.
-    #[tokio::test]
-    async fn the_opt_out_does_not_suppress_an_unrelated_prepare_failure() {
-        let spec = spec_dir_declaring(r#","binaries":["somethingelse"]"#);
-        let work = tempfile::tempdir().expect("tempdir");
-        let task_dir = work.path().join("task");
-        stage_dynamic_elf_asset(&task_dir).await;
-
-        let error = prepare_offline(spec.path(), &task_dir, BinScanMode::Verify, false)
-            .await
-            .expect_err("an undeclared binary must still fail with the libc check off");
-        let rendered = format!("{error:#}");
-        assert!(
-            rendered.contains("bin_scan"),
-            "the surviving failure must be the bin_scan one: {rendered}"
-        );
-        assert!(
-            !rendered.contains("libc"),
-            "and must not be the libc one, which is bypassed: {rendered}"
-        );
-    }
+    let authoring = std::fs::read_to_string(task_dir.join("authoring-metadata.json")).expect("create's input");
+    assert!(
+        authoring.contains(r#""ocx.sh/adoptium/temurin:jre-25""#),
+        "create must be handed the tag, unpinned: {authoring}",
+    );
+    let pinned: Vec<String> = metadata
+        .dependencies()
+        .iter()
+        .map(|dependency| dependency.identifier.to_string())
+        .collect();
+    assert_eq!(pinned, [PINNED], "the in-process push carries create's pin");
+    let sidecar = std::fs::read_to_string(task_dir.join("metadata.json")).expect("sidecar");
+    assert!(sidecar.contains(PINNED), "and so does the sidecar CI pushes: {sidecar}");
 }
