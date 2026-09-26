@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use ocx_oci::Platform;
-use ocx_package::bundle::BundleBuilder;
 use ocx_package::metadata::authoring::AuthoringMetadata;
 use ocx_package::metadata::binary::Binaries;
 use ocx_util::archive::{Archive, ExtractOptions};
@@ -13,19 +12,17 @@ use ocx_util::compression::CompressionAlgorithm;
 
 use ocx_mirror_spec::{AssetType, MetadataConfig};
 
-/// Lay a downloaded asset out into `content_dir` — the tree a bundle is made
-/// of, and the tree a `bin_scan` reads.
+/// Lay a downloaded asset out into `content_dir` — the tree `ocx package
+/// create` bundles, scans and libc-checks.
 ///
 /// The [`AssetType`] determines how the asset is handled:
 /// - `Archive`: extracted as a tar/zip, with optional `strip_components`.
 /// - `Binary`: placed directly into the content directory under the configured name,
 ///   decompressed first when the asset is a bare `.gz`/`.xz`/`.zst`/`.bz2` file.
 ///
-/// Separate from [`bundle`] because the published metadata is finalised
-/// between the two: `bin_scan` derives the `binaries` claim from this tree, and
-/// the sidecar carrying it must be written before the bundle exists, or a run
-/// interrupted in between would resume off a bundle with no record of what was
-/// scanned.
+/// The mirror keeps this half rather than handing create the raw asset with
+/// `--extract`: create knows nothing of `asset_type: binary`'s renaming or of a
+/// bare compressed binary.
 pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetType, asset_name: &str) -> Result<()> {
     match asset_type {
         AssetType::Archive { strip_components } => {
@@ -39,18 +36,6 @@ pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetTy
             place_binary(asset_path, content_dir, name, asset_name).await?;
         }
     }
-    Ok(())
-}
-
-/// Compress an extracted `content_dir` into the OCX bundle at `bundle_path`.
-///
-/// `compression_threads` is passed directly to `CompressionOptions::with_threads()`.
-/// `0` = auto-detect, `1` = single-threaded, `n` = use n threads.
-pub async fn bundle(content_dir: &Path, bundle_path: &Path, compression_threads: u32) -> Result<()> {
-    BundleBuilder::from_path(content_dir)
-        .with_compression(ocx_util::compression::CompressionOptions::default().with_threads(compression_threads))
-        .create(bundle_path)
-        .await?;
     Ok(())
 }
 
@@ -593,10 +578,11 @@ mod tests {
         );
     }
 
+    /// `content_dir` is exactly the tree `ocx package create` bundles, so it
+    /// must hold the payload and nothing the mirror keeps beside it — a
+    /// metadata file laid out here would ship inside the package.
     #[tokio::test]
-    async fn extract_and_bundle_excludes_metadata_from_content() {
-        use ocx_util::archive::Archive;
-
+    async fn extract_lays_out_the_payload_alone() {
         let dir = tempfile::TempDir::new().unwrap();
 
         let asset = dir.path().join("shfmt_v3.13.0_linux_amd64");
@@ -605,25 +591,17 @@ mod tests {
         let content_dir = dir.path().join("content");
         std::fs::create_dir(&content_dir).unwrap();
 
-        let bundle_path = dir.path().join("bundle.tar.xz");
         let asset_type = AssetType::Binary { name: "shfmt".into() };
-
         extract(&asset, &content_dir, &asset_type, "shfmt_v3.13.0_linux_amd64")
             .await
             .unwrap();
-        bundle(&content_dir, &bundle_path, 1).await.unwrap();
 
-        // Extract the published bundle and inspect its contents. The bundle is a
-        // tar of `content_dir`'s entries at the archive root (the `content/`
-        // prefix is added by install, not the mirror).
-        let extracted = dir.path().join("extracted");
-        Archive::extract(&bundle_path, &extracted).await.unwrap();
-
-        assert!(extracted.join("shfmt").exists(), "tool payload missing from bundle");
-        assert!(
-            !extracted.join("metadata.json").exists(),
-            "metadata.json must not be baked into bundle content",
-        );
+        let mut entries: Vec<String> = std::fs::read_dir(&content_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["shfmt"]);
     }
 
     #[test]

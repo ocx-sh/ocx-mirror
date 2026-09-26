@@ -356,8 +356,8 @@ async fn prepare_env_task(
     let info = composition.into_info();
 
     // No libc lint on this leg — deliberately, not by omission. The archive
-    // path runs `ocx_package::libc_lint::check_declared_libc` between
-    // extraction and compression; nothing equivalent is reachable here, and
+    // path's `ocx package create` runs the libc check between extraction and
+    // compression; nothing equivalent is reachable here, and
     // wiring it would ship a check that can only ever be green:
     //
     // 1. There is no content tree to read. `repack_wheel` streams each wheel

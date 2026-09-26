@@ -10,10 +10,9 @@ use anyhow::{Context, Result};
 use ocx_console::progress::{ProgressManager, Spinner};
 use ocx_oci::Platform;
 use ocx_package::metadata::Metadata;
-use ocx_package::metadata::authoring::AuthoringMetadata;
+use ocx_package::metadata::authoring::{AuthoringDependencies, AuthoringMetadata};
 use ocx_package::publisher::Publisher;
 use ocx_package::version::Version;
-use ocx_package::{bin_scan, libc_lint};
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
@@ -24,6 +23,8 @@ use super::package;
 use super::progress;
 use super::push;
 use super::verify;
+use crate::ocx_cli::create;
+use crate::ocx_cli::resolve_ocx_binary;
 use crate::ocx_cli::sign::{ResolvedSign, invoke_sign_reference};
 use ocx_mirror_error::MirrorError;
 use ocx_mirror_spec::version_platform_map::VersionPlatformMap;
@@ -83,14 +84,19 @@ pub struct VersionManifest {
 pub struct ExpectedMetadata {
     /// The authoring form both projections below are rendered from.
     ///
-    /// Retained rather than discarded after rendering because one field —
-    /// `binaries` under a `bin_scan` — can only be supplied from outside the
-    /// spec, and re-rendering both projections around it is the only way to
-    /// keep them agreeing with each other. See
-    /// [`adopting_binaries_from`](Self::adopting_binaries_from).
+    /// Retained rather than discarded after rendering because two things can
+    /// only be supplied from outside the spec — `binaries` under a `bin_scan`,
+    /// and the digest of a dependency the spec names by tag — and re-rendering
+    /// both projections around them is the only way to keep them agreeing with
+    /// each other. See [`adopting_binaries_from`](Self::adopting_binaries_from)
+    /// and [`adopting_pins_from`](Self::adopting_pins_from).
     authoring: AuthoringMetadata,
     /// Published projection — byte-for-byte the config blob a push writes.
-    pub published: Metadata,
+    ///
+    /// `None` while a dependency is still tag-only: the published form has no
+    /// digest-less dependency, and only `ocx package create` resolves one. An
+    /// expectation in that state is incomplete, never current.
+    pub published: Option<Metadata>,
     /// `-metadata.json` sidecar written beside the bundle.
     pub sidecar_json: String,
 }
@@ -100,14 +106,37 @@ impl ExpectedMetadata {
     ///
     /// The sidecar goes through [`package::sidecar_json`] so both projections
     /// stay rendered from one authoring document.
+    ///
+    /// The published projection runs even while a dependency is tag-only,
+    /// over a copy pinning each such tag to a placeholder digest. A pin is
+    /// the one thing the spec cannot supply, so whatever else the projection
+    /// refuses surfaces here as a spec error — not later, behind a pin
+    /// adoption it has nothing to do with. The placeholder never leaves this
+    /// function.
     pub fn render(authoring: AuthoringMetadata, platform: &Platform) -> Result<Self> {
         let sidecar_json = package::sidecar_json(&authoring, platform)?;
-        let published = authoring.to_published()?;
+        let projected = with_placeholder_pins(&authoring)?.to_published()?;
+        let published = authoring
+            .dependencies()
+            .iter()
+            .all(|dependency| dependency.is_pinned())
+            .then_some(projected);
         Ok(Self {
             authoring,
             published,
             sidecar_json,
         })
+    }
+
+    /// The dependencies still named by tag alone — what makes
+    /// [`published`](Self::published) `None`.
+    pub fn unpinned_dependencies(&self) -> Vec<&ocx_oci::PackageRef> {
+        self.authoring
+            .dependencies()
+            .iter()
+            .filter(|dependency| !dependency.is_pinned())
+            .map(|dependency| &dependency.identifier)
+            .collect()
     }
 
     /// The same expectation, carrying `published`'s `binaries` claim — but only
@@ -134,6 +163,64 @@ impl ExpectedMetadata {
             _ => Ok(self.clone()),
         }
     }
+
+    /// The same expectation, with each tag-only dependency pinned to the digest
+    /// `published` records for the same identifier.
+    ///
+    /// The same rule as [`adopting_binaries_from`](Self::adopting_binaries_from),
+    /// for the other field a download-free path cannot compute: the digest a
+    /// tag resolved to at `ocx package create` time. A published dependency
+    /// matches when registry, repository and tag are equal — the digest is
+    /// exactly what the spec leaves open — so a tile published from this spec
+    /// reads as current. A spec dependency with no such match (the tag moved to
+    /// a different name, or the dependency is new) stays unpinned, and the
+    /// expectation stays incomplete: that is drift only `create` can resolve.
+    ///
+    /// A dependency the spec pins itself is left alone, so a hand-edited digest
+    /// still drifts and patches.
+    pub fn adopting_pins_from(&self, published: &Metadata, platform: &Platform) -> Result<Self> {
+        if self.published.is_some() {
+            return Ok(self.clone());
+        }
+        let AuthoringMetadata::Bundle(mut bundle) = self.authoring.clone();
+        let dependencies = bundle
+            .dependencies
+            .iter()
+            .map(|dependency| {
+                let mut dependency = dependency.clone();
+                if !dependency.is_pinned()
+                    && let Some(recorded) = published
+                        .dependencies()
+                        .iter()
+                        .find(|recorded| recorded.identifier.without_digest() == dependency.identifier)
+                {
+                    dependency.identifier = recorded.identifier.clone().into();
+                }
+                dependency
+            })
+            .collect();
+        bundle.dependencies = AuthoringDependencies::new(dependencies)?;
+        Self::render(AuthoringMetadata::Bundle(bundle), platform)
+    }
+}
+
+/// `authoring` with every tag-only dependency pinned to an all-zero digest.
+fn with_placeholder_pins(authoring: &AuthoringMetadata) -> Result<AuthoringMetadata> {
+    let placeholder = ocx_oci::Digest::Sha256("0".repeat(64));
+    let AuthoringMetadata::Bundle(mut bundle) = authoring.clone();
+    let dependencies = bundle
+        .dependencies
+        .iter()
+        .map(|dependency| {
+            let mut dependency = dependency.clone();
+            if !dependency.is_pinned() {
+                dependency.identifier = dependency.identifier.clone_with_digest(placeholder.clone());
+            }
+            dependency
+        })
+        .collect();
+    bundle.dependencies = AuthoringDependencies::new(dependencies)?;
+    Ok(AuthoringMetadata::Bundle(bundle))
 }
 
 /// Computes the metadata a fresh publish of `platform` would produce today.
@@ -143,9 +230,10 @@ impl ExpectedMetadata {
 /// drift, and `pipeline patch` re-publishes against it — so a spec fix reaches
 /// already-published versions without anyone deleting a tag.
 ///
-/// Under a `bin_scan` the result is therefore incomplete by construction, and
-/// callers must run it through
-/// [`ExpectedMetadata::adopting_binaries_from`] before comparing.
+/// Under a `bin_scan`, or with a dependency named by tag alone, the result is
+/// therefore incomplete by construction, and callers must run it through
+/// [`ExpectedMetadata::adopting_binaries_from`] and
+/// [`ExpectedMetadata::adopting_pins_from`] before comparing.
 pub fn expected_metadata(config: &MetadataConfig, platform: &Platform, spec_dir: &Path) -> Result<ExpectedMetadata> {
     ExpectedMetadata::render(
         package::resolve_metadata(config, &platform.to_string(), spec_dir)?,
@@ -632,35 +720,30 @@ pub fn task_dir(work_dir: &Path, version: &str, platform: &ocx_oci::Platform) ->
 /// acquires `bundle_sem` for the CPU-bound bundling phase. This lets downloads
 /// and compression run independently.
 ///
-/// The published metadata is finalised **between** extraction and compression,
-/// not before the download: a `bin_scan` reads the extracted tree, so no
-/// earlier point in this function can know what `binaries` will say. The libc
-/// check reads the same tree in the same window, giving the sequence
-/// `resolve → download → verify → extract → scan → chmod declared binaries →
-/// libc check → sidecar → compress → drop tree`.
+/// The sequence is `resolve → download → verify → extract → chmod declared
+/// binaries → ocx package create → drop tree`. Create owns everything the
+/// published metadata needs from the tree and the index: it pins tag-only
+/// dependencies to this platform's manifest digest, runs the `bin_scan`, the
+/// publish-time validation and the libc check, and writes the bundle and the
+/// compiled sidecar. The mirror lays the tree out (asset types, strip, binary
+/// renaming, decompression) and keeps the two guards create does not make:
+/// the #51 chmod and [`reject_empty_scan`].
 ///
-/// A resume skips every step of that window, because the tree is gone. They are
-/// not equally covered afterwards. `bin_scan` re-runs its own guard on the
-/// resumed path ([`reject_empty_scan`] below), so an unusable claim still reds.
-/// The libc check has no such equivalent: it is reachable only from the bundle
-/// block, and the early return above happens first. So:
+/// A resume — the bundle **and** the compiled sidecar on disk, compiled from
+/// the authoring metadata the spec renders today — reuses both verbatim,
+/// because the tree create read is gone and nothing short of a re-create can
+/// recompile them. `authoring-metadata.json`, create's `--metadata` input, is
+/// the resume key: when the spec's rendering differs from it byte for byte, or
+/// it is missing, the task is created again from the archive still on disk, so
+/// a spec metadata fix reaches a work dir `package sync` kept across a failed
+/// push. What the key does not cover is the create flags: a bundle on disk is
+/// **not** evidence the libc check passed — it may have been written under
+/// `libc_lint: false`.
 ///
-/// - a bundle on disk is **not** evidence the check passed — it may have been
-///   written under `libc_lint: false`, or by a binary predating the check;
-/// - flipping `libc_lint` back to `true` does not reach a work dir that already
-///   holds a bundle. The operator must discard the bundle to re-check it.
-///
-/// The publisher-declared digest is the exception: it reads the downloaded
-/// archive rather than the content tree, so the resume branch re-runs it and
-/// refuses outright when the archive is gone.
-///
-/// The declared-binaries chmod sits in the same block and is uncovered the same
-/// way: a bundle written by a binary predating it keeps its 0644 members, and no
-/// resume will fix them — discard the bundle to re-prepare it.
-///
-/// No warning is emitted for this. A resume with `libc_lint` on — the default,
-/// and the overwhelmingly common case — would fire it every time, which is
-/// noise, not signal.
+/// A bundle whose sidecar is missing is an interrupted create, and is simply
+/// created again. The publisher-declared digest is the exception to all of
+/// this: it reads the downloaded archive rather than the tree, so the resume
+/// re-checks it and refuses outright when the archive is gone.
 pub(crate) async fn prepare_task(
     task: &MirrorTask,
     task_dir: &Path,
@@ -683,25 +766,20 @@ pub(crate) async fn prepare_task(
     let Some(config) = &task.metadata_config else {
         anyhow::bail!("no metadata configuration provided in spec");
     };
+    // Resolved before the download so a spec that does not parse fails before
+    // a byte moves.
     let authoring = package::resolve_metadata(config, &task.platform.to_string(), &task.spec_dir)?;
+    // Create's `--metadata` input, and the resume key: the compiled sidecar is
+    // only this run's answer when create compiled it from these exact bytes.
+    let authoring_path = task_dir.join("authoring-metadata.json");
+    let authoring_json = package::sidecar_json(&authoring, &task.platform)?;
 
-    if bundle_path.exists() {
-        // Resume. An earlier run already extracted this bundle's content tree
-        // and discarded it, so a `bin_scan` has nothing left to read. Everything
-        // the *spec* owns is re-resolved from the spec, so a spec-side fix — an
-        // env var, an entrypoint — still reaches a resumed run; only `binaries`,
-        // the one field no download-free path can recompute, is adopted from the
-        // sidecar that run wrote. Carrying the whole sidecar instead discarded
-        // every unrelated metadata fix on any resumed run.
-        let authoring = match task.bin_scan.scans() {
-            true => adopt_resumed_binaries(authoring, &sidecar_path).await?,
-            false => authoring,
-        };
-        // The same guard the fresh path runs. A resume that adopts an empty or
-        // absent claim would publish it, and `adopting_binaries_from` then reads
-        // the absent field as "nothing to adopt" — so plan reports no drift and
-        // the mistake is permanent.
-        reject_empty_scan(&authoring, task)?;
+    if bundle_path.exists()
+        && sidecar_path.exists()
+        && tokio::fs::read_to_string(&authoring_path)
+            .await
+            .is_ok_and(|compiled_from| compiled_from == authoring_json)
+    {
         // The one download-window check a resume can still run: the declared
         // digest reads the downloaded archive, not the content tree that run
         // discarded. It is the control #75's whole safety argument rests on —
@@ -725,8 +803,24 @@ pub(crate) async fn prepare_task(
             ),
             (None, _) => {}
         }
-        let metadata = finalize_metadata(&authoring, &task.platform, &sidecar_path).await?;
+        // The same guard the fresh path runs, over the same compiled file: a
+        // sidecar edited or written by an older binary may carry an empty or
+        // absent claim, and republishing it makes the mistake permanent.
+        let metadata = read_compiled_sidecar(&sidecar_path).await?;
+        reject_empty_scan(&metadata, task)?;
         return Ok((bundle_path, metadata));
+    }
+
+    // Whatever sidecar is here was compiled from other input, or its create was
+    // interrupted. Dropped before create runs, so a create that fails now
+    // cannot leave it beside a matching authoring file for the next run to
+    // adopt.
+    match tokio::fs::remove_file(&sidecar_path).await {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            return Err(error)
+                .with_context(|| format!("failed to remove the stale sidecar {}", sidecar_path.display()));
+        }
+        _ => {}
     }
 
     // --- Download phase (I/O-bound) ---
@@ -759,10 +853,9 @@ pub(crate) async fn prepare_task(
 
     // --- Bundle phase (CPU-bound) ---
     //
-    // Extraction, the bin-scan and compression share one permit: the scan reads
-    // the tree extraction just wrote and compression consumes the same tree, so
-    // releasing in between would only widen the window in which an extracted
-    // tree occupies disk without letting any other task make progress.
+    // Extraction and create share one permit: create reads the tree extraction
+    // just wrote, so releasing in between would only widen the window in which
+    // an extracted tree occupies disk without letting any other task progress.
     let metadata = {
         let _permit = bundle_sem.acquire().await.expect("semaphore closed");
 
@@ -783,46 +876,83 @@ pub(crate) async fn prepare_task(
         })
         .await??;
 
-        // The one metadata input that does not exist before the download. Every
-        // other one is resolvable from the spec alone, which is what lets
-        // `expected_metadata` stay download-free for `plan` and `patch`.
-        let scanned = bin_scan::resolve_binaries(&content_dir, authoring, &task.platform, task.bin_scan.into())
-            .await
-            .with_context(|| format!("bin_scan failed for {} {}", task.normalized_version, task.platform))?;
-        reject_empty_scan(&scanned, task)?;
         // Issue #51: a tar or zip member keeps whatever mode upstream shipped, and
         // some upstreams ship their interface binary at 0644 (PowerShell's `pwsh`).
         // `asset_type: binary` never had the problem — `place_binary` chmods 0755 —
         // so this closes the asymmetry on the archive path, triggered by the one
-        // list that says which files are commands. Both asset types route through
-        // here; on the binary path it is a no-op.
-        if let Some(binaries) = scanned.binaries() {
+        // list that says which files are commands.
+        //
+        // Skipped under `verify`, which exists to refuse exactly this state: a
+        // declared name present but not executable fails create's scan, and
+        // fixing the mode first would make that refusal unreachable.
+        //
+        // ponytail: keyed on the *declared* list, because create fills a scanned
+        // one only after this runs. The gap is empty in practice — a fill claims
+        // only files it found executable — so a scanned claim never names a file
+        // this would have had to fix.
+        if task.bin_scan != BinScanMode::Verify
+            && let Some(binaries) = authoring.binaries()
+        {
             package::ensure_declared_binaries_executable(&content_dir, binaries).await?;
         }
-        // The second reader of the same tree, in the same window and for the
-        // same reason: what a binary demands of a host's C library is only
-        // knowable from the binary. After the scan because it inspects the
-        // `PATH` directories the scanned metadata names, and before the sidecar
-        // is written so a refused version leaves nothing on disk claiming to be
-        // publishable.
-        check_declared_libc(&content_dir, &scanned, task).await?;
-        let metadata = finalize_metadata(&scanned, &task.platform, &sidecar_path).await?;
 
-        let cd = content_dir.clone();
-        let bp = bundle_path.clone();
-        tokio::task::spawn_blocking(move || {
-            tokio::runtime::Handle::current().block_on(async {
-                package::bundle(&cd, &bp, compression_threads).await?;
-                let _ = tokio::fs::remove_dir_all(&cd).await;
-                Ok::<_, anyhow::Error>(())
-            })
-        })
-        .await??;
+        tokio::fs::write(&authoring_path, &authoring_json)
+            .await
+            .with_context(|| format!("failed to write {}", authoring_path.display()))?;
+        let request = create::CreateRequest {
+            content_dir: &content_dir,
+            platform: &task.platform,
+            metadata: &authoring_path,
+            output: &bundle_path,
+            compression_threads,
+            bin_scan: task.bin_scan,
+            libc_lint: task.libc_lint,
+            remote: create::resolves_tags_remotely(),
+        };
+        let ocx_binary = resolve_ocx_binary().map_err(|error| anyhow::anyhow!(error))?;
+        create::create(&ocx_binary, &request.args(), create::CREATE_TIMEOUT)
+            .await
+            .with_context(|| {
+                format!(
+                    "ocx package create refused {} {} {}",
+                    task.target.repository, task.normalized_version, task.platform,
+                )
+            })?;
+
+        // Checked before the sidecar takes the name CI and resume look for, so a
+        // refused scan leaves nothing either of them would treat as publishable.
+        let compiled_path = create::compiled_sidecar_path(&bundle_path);
+        let metadata = read_compiled_sidecar(&compiled_path).await?;
+        reject_empty_scan(&metadata, task)?;
+        tokio::fs::rename(&compiled_path, &sidecar_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to move {} to {}",
+                    compiled_path.display(),
+                    sidecar_path.display()
+                )
+            })?;
+        // Best-effort: the bundle is written, and a leftover tree is only disk.
+        let _ = tokio::fs::remove_dir_all(&content_dir).await;
 
         metadata
     }; // bundle permit released
 
     Ok((bundle_path, metadata))
+}
+
+/// The published-form sidecar `ocx package create` compiled.
+async fn read_compiled_sidecar(path: &Path) -> Result<Metadata> {
+    let json = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("failed to read the compiled sidecar {}", path.display()))?;
+    serde_json::from_str(&json).with_context(|| {
+        format!(
+            "failed to parse the compiled sidecar {} — delete the bundle beside it to re-prepare",
+            path.display()
+        )
+    })
 }
 
 /// Fails a scanning task that ends up with no usable `binaries` claim.
@@ -837,18 +967,18 @@ pub(crate) async fn prepare_task(
 /// without one came off a sidecar that disagrees with its own bundle.
 ///
 /// **This observes the tree only when the scan filled the field.** For
-/// `(verify, declared)` `resolve_binaries` returns the metadata unchanged, so
-/// what arrives here is the hand-written list and nothing about the archive has
-/// been established. Catching a vanished directory in that case needs ocx to
-/// stop treating a declared-but-absent name as legal (ADR §2) — recorded as a
+/// `(verify, declared)` create passes the declaration through, so what arrives
+/// here is the hand-written list and nothing about the archive has been
+/// established. Catching a vanished directory in that case needs ocx to stop
+/// treating a declared-but-absent name as legal (ADR §2) — recorded as a
 /// follow-up, not fixable here.
 ///
 /// ponytail: an empty result stands in for "the target directories are
 /// missing", which avoids re-deriving ocx's `strip_components` wildcard walk. A
 /// package whose interface directory exists but holds no executables lands in
 /// the same error, and that is also a spec worth failing.
-fn reject_empty_scan(scanned: &AuthoringMetadata, task: &MirrorTask) -> Result<()> {
-    if task.bin_scan.scans() && scanned.binaries().is_none_or(|binaries| binaries.is_empty()) {
+fn reject_empty_scan(metadata: &Metadata, task: &MirrorTask) -> Result<()> {
+    if task.bin_scan.scans() && metadata.binaries().is_none_or(|binaries| binaries.is_empty()) {
         anyhow::bail!(
             "bin_scan for {} {} found no executables — the metadata's ${{installPath}} PATH \
              directories are missing from the extracted archive, or hold nothing executable. \
@@ -859,92 +989,6 @@ fn reject_empty_scan(scanned: &AuthoringMetadata, task: &MirrorTask) -> Result<(
         );
     }
     Ok(())
-}
-
-/// Checks what the packaged binaries demand of a host's C library against what
-/// the platform key claims they demand, and fails this task if the claim is
-/// false.
-///
-/// `os.features` subset matching reads an omitted `libc.glibc` as "needs no
-/// particular libc", which resolves onto every host — so a glibc-linked mirror
-/// tile published under a bare `linux/amd64` lands on Alpine and dies with a
-/// bare `No such file or directory` naming a file that is plainly there. That
-/// has already happened to a bazel mirror. Nothing else in this pipeline reads
-/// the artifact, so nothing else can catch it.
-///
-/// `libc_lint: false` skips the whole call — refusals and unresolvable-scope
-/// failures alike, exactly as `ocx package create --no-libc-lint` does. A
-/// partial bypass would leave a bug in the un-bypassed half still able to stop
-/// a mirror, which is the availability failure the key exists to prevent.
-///
-/// The context names the repository the run publishes to (one spec per target,
-/// so it names which of a repo's specs to fix), the version and the platform;
-/// the offending file, its dynamic loader, the libc it needs and the corrected
-/// platform key all come from [`LibcLintError`](ocx_package::libc_lint::LibcLintError).
-async fn check_declared_libc(content_dir: &Path, metadata: &AuthoringMetadata, task: &MirrorTask) -> Result<()> {
-    if !task.libc_lint {
-        // Gated on the lint's own scope predicate, not the key alone: the check
-        // inspects nothing on darwin/* or windows/*, so on those legs of a
-        // matrix the two runs are identical and a warning would name a
-        // verification that was never going to happen.
-        if libc_lint::checks_declared_libc(&task.platform) {
-            log::warn!(
-                "[{}] libc_lint: false — {} {} publishes without checking its declared os.features \
-                 against the packaged binaries",
-                task.target.repository,
-                task.normalized_version,
-                task.platform,
-            );
-        }
-        return Ok(());
-    }
-    libc_lint::check_declared_libc(content_dir, metadata, &task.platform)
-        .await
-        .with_context(|| {
-            format!(
-                "libc check refused {} {} {} — declare the libc its binaries need, or set \
-                 `libc_lint: false` in the spec to publish without the check",
-                task.target.repository, task.normalized_version, task.platform,
-            )
-        })
-}
-
-/// Writes the `-metadata.json` sidecar beside the bundle and returns the
-/// published projection the in-process push carries in `Info`.
-async fn finalize_metadata(authoring: &AuthoringMetadata, platform: &Platform, sidecar: &Path) -> Result<Metadata> {
-    let expected = ExpectedMetadata::render(authoring.clone(), platform)?;
-    tokio::fs::write(sidecar, &expected.sidecar_json)
-        .await
-        .with_context(|| format!("failed to write {}", sidecar.display()))?;
-    Ok(expected.published)
-}
-
-/// `authoring` carrying the `binaries` claim an earlier run scanned, read back
-/// off the sidecar it left behind.
-///
-/// Only reached on a resume under `bin_scan`, where the content tree is gone and
-/// a re-scan is impossible. Everything else in `authoring` is the freshly
-/// re-resolved spec, so a spec-side fix still lands; only this one field comes
-/// from the sidecar. A spec that declares `binaries` itself owns the field and
-/// is left alone — the same rule
-/// [`ExpectedMetadata::adopting_binaries_from`] applies on the download-free
-/// paths.
-async fn adopt_resumed_binaries(authoring: AuthoringMetadata, sidecar: &Path) -> Result<AuthoringMetadata> {
-    if authoring.binaries().is_some() {
-        return Ok(authoring);
-    }
-    let json = tokio::fs::read_to_string(sidecar).await.with_context(|| {
-        format!(
-            "cannot resume a bin_scan bundle without its sidecar {} — remove the bundle to re-scan",
-            sidecar.display()
-        )
-    })?;
-    let recorded: AuthoringMetadata =
-        serde_json::from_str(&json).with_context(|| format!("failed to parse {}", sidecar.display()))?;
-    Ok(match recorded.binaries() {
-        Some(binaries) => authoring.with_binaries(binaries.clone()),
-        None => authoring,
-    })
 }
 
 /// Phase 2: Push a prepared bundle to the registry with optional cascade.

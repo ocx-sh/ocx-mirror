@@ -131,6 +131,7 @@ def push_stub_ocx_package(
     work_dir: Path,
     *,
     content: bytes = b"stub",
+    platform: str = "linux/amd64",
 ) -> None:
     """Pushes a minimal one-layer Bundle package to ``{registry}/{ref}`` via
     the real ``ocx`` binary.
@@ -140,6 +141,9 @@ def push_stub_ocx_package(
     package would land on one manifest digest — and a cascade scenario
     (S-009) needs `1.2` and `latest` to resolve to *different* digests for
     the assertion to be able to fail.
+
+    ``platform`` is the index entry the push merges into ``ref``'s tag, so two
+    calls with different platforms (and content) build a multi-platform tag.
 
     Used to stand in for a private interpreter package: `ocx-mirror`'s
     in-process interpreter-digest resolution (``fetch_manifest_digest``)
@@ -174,7 +178,7 @@ def push_stub_ocx_package(
             "package",
             "push",
             "-p",
-            "linux/amd64",
+            platform,
             "-i",
             f"{registry}/{ref}",
             "-m",

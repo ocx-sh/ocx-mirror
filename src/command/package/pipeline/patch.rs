@@ -56,7 +56,7 @@ use crate::pipeline::ocx_cli::announce::{
 use crate::pipeline::ocx_cli::push::{PUSH_TIMEOUT, build_push_args, push_once};
 use crate::pipeline::ocx_cli::resolve_ocx_binary;
 use crate::pipeline::ocx_cli::sign::{ResolvedSign, resolve_sign_from_env, sweep_index_tags};
-use crate::pipeline::orchestrator;
+use crate::pipeline::orchestrator::{self, ExpectedMetadata};
 use crate::pipeline::target_registry::{self, PublishedImage};
 use crate::spec::{self, MirrorSpec, strip_build};
 
@@ -176,7 +176,11 @@ impl Patch {
                     continue;
                 };
 
-                if let Err(refusal) = layout_unchanged(&publisher, &identifier, image, &expected.published).await? {
+                let Some(complete) = expected.published.as_ref() else {
+                    failures.push(format!("{tag} ({}): {}", image.platform, unpinned_refusal(&expected)));
+                    continue;
+                };
+                if let Err(refusal) = layout_unchanged(&publisher, &identifier, image, complete).await? {
                     failures.push(format!("{tag} ({}): {refusal}", image.platform));
                     continue;
                 }
@@ -309,6 +313,30 @@ fn closing_verdict(sweep: Result<(), MirrorError>, failures: Vec<String>) -> (Ve
         // one failure twice.
         Ok(()) => (Vec::new(), Err(MirrorError::ExecutionFailed(failures))),
     }
+}
+
+/// Why a tile whose spec names a dependency by a tag the published document
+/// does not record cannot be patched.
+///
+/// Patch never downloads and never runs `ocx package create`, and create is the
+/// only thing that pins a tag to a platform's manifest digest. Pushing the tag
+/// unpinned is not an option either: the published form has no digest-less
+/// dependency, and `ocx package push` refuses one.
+///
+/// Nor will `plan`/`prepare` reprocess it: a version the registry already
+/// holds is never re-prepared. The only remedy is the documented one — delete
+/// the published tags and re-mirror.
+fn unpinned_refusal(expected: &ExpectedMetadata) -> String {
+    let dependencies: Vec<String> = expected
+        .unpinned_dependencies()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    format!(
+        "dependency {} changed, and only `ocx package create` pins a dependency, which patch never runs — \
+         delete this version's published tags and re-mirror it",
+        dependencies.join(", "),
+    )
 }
 
 /// Whether `expected` still describes the layers `image` already published.

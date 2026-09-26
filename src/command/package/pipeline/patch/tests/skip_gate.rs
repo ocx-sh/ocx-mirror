@@ -84,7 +84,7 @@ fn a_strip_components_change_is_a_layout_change_not_a_metadata_fix() {
 #[tokio::test]
 async fn matching_metadata_skips_without_a_registry_call() {
     let expected = expected_metadata();
-    let bytes = serde_json::to_vec(&expected.published).expect("serializes");
+    let bytes = serde_json::to_vec(expected.published.as_ref().expect("the fixture is complete")).expect("serializes");
     let image = image_recording(&Algorithm::Sha256.hash(&bytes).to_string());
 
     let drift = image_drift(
@@ -120,5 +120,42 @@ async fn a_differing_config_digest_never_settles_as_a_skip() {
         !matches!(result, Ok(None)),
         "a config digest that differs must never settle as 'already current': {}",
         result.is_ok(),
+    );
+}
+
+/// A spec dependency whose tag no published document records cannot be
+/// patched: patch never runs `ocx package create`, the only thing that pins a
+/// tag, and the published form has no unpinned shape to push. The refusal
+/// names the dependency and the remedy (#90).
+#[test]
+fn a_moved_dependency_tag_is_refused_with_the_remedy() {
+    let platform: ocx_oci::Platform = "linux/amd64".parse().expect("valid platform");
+    let authoring = serde_json::from_slice(
+        br#"{"type":"bundle","version":1,
+            "dependencies":[{"identifier":"ocx.sh/adoptium/temurin:jre-25","name":"temurin"}]}"#,
+    )
+    .expect("metadata fixture parses");
+    let published: ocx_package::metadata::Metadata = serde_json::from_str(&format!(
+        r#"{{"type":"bundle","version":1,
+            "dependencies":[{{"identifier":"ocx.sh/adoptium/temurin:jre-21@sha256:{}","name":"temurin"}}]}}"#,
+        "1".repeat(64)
+    ))
+    .expect("published fixture parses");
+
+    let expected = ExpectedMetadata::render(authoring, &platform)
+        .expect("renders")
+        .adopting_pins_from(&published, &platform)
+        .expect("adopts");
+    assert!(expected.published.is_none(), "a moved tag must leave nothing pushable");
+
+    let refusal = unpinned_refusal(&expected);
+    assert!(
+        refusal.contains("ocx.sh/adoptium/temurin:jre-25"),
+        "names the dependency: {refusal}"
+    );
+    assert!(
+        refusal.contains("delete this version's published tags and re-mirror")
+            && refusal.contains("ocx package create"),
+        "and the remedy: {refusal}"
     );
 }

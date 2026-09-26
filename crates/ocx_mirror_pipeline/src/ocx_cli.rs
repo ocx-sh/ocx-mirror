@@ -8,7 +8,8 @@
 //! The whole subprocess boundary lives here at the pipeline layer so every
 //! caller shares one implementation: this module owns binary resolution and
 //! `OCX_*` env forwarding, [`push`] owns the `ocx package push` invocation and
-//! its retry ladder, and [`announce`] owns `ocx package announce`.
+//! its retry ladder, [`create`] owns `ocx package create`, and [`announce`]
+//! owns `ocx package announce`.
 //!
 //! It was previously split — the two helpers here, the invocations inside
 //! `command::package::pipeline::push` — which made a command module the owner
@@ -16,6 +17,7 @@
 //! reach upward to get at it.
 
 pub mod announce;
+pub mod create;
 pub mod push;
 pub mod sign;
 

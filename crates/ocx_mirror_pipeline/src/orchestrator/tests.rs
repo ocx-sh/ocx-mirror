@@ -15,6 +15,8 @@ mod support;
 
 #[path = "tests/bin_scan.rs"]
 mod bin_scan;
+#[path = "tests/expected_pins.rs"]
+mod expected_pins;
 #[path = "tests/libc_lint.rs"]
 mod libc_lint;
 #[path = "tests/resume_digest.rs"]

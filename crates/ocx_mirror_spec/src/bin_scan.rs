@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
-use ocx_package::bin_scan::ScanMode;
 use serde::Deserialize;
 
 /// `bin_scan:` — whether a mirror run derives the published `binaries` claim
 /// from the extracted content tree instead of the spec's metadata file alone.
 ///
-/// A 1:1 mapping of `ocx`'s [`ScanMode`], declared here because that type is
-/// not `Deserialize` and the spec is the only place a mirror states the
-/// choice. A plain boolean would collapse `verify` into `auto`, and `verify`
+/// A 1:1 mapping of `ocx`'s `ocx_package::bin_scan::ScanMode`, reaching it as
+/// `ocx package create`'s flags (`ocx_mirror_pipeline::ocx_cli::create`) —
+/// declared here because that type is not `Deserialize` and the spec is the
+/// only place a mirror states the choice. A plain boolean would collapse `verify` into `auto`, and `verify`
 /// is the mode a mirror actually wants once it hand-lists `binaries`: it turns
 /// the list into a regression test against upstream rearranging its archive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -41,16 +41,6 @@ impl BinScanMode {
     }
 }
 
-impl From<BinScanMode> for ScanMode {
-    fn from(mode: BinScanMode) -> Self {
-        match mode {
-            BinScanMode::Off => ScanMode::Off,
-            BinScanMode::Auto => ScanMode::Auto,
-            BinScanMode::Verify => ScanMode::Verify,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,20 +48,15 @@ mod tests {
     /// The wire spellings are the spec grammar — a rename here is a breaking
     /// `mirror.yml` change, not a refactor.
     #[test]
-    fn wire_spellings_map_onto_ocx_scan_modes() {
-        for (yaml, mode, scan) in [
-            ("off", BinScanMode::Off, ScanMode::Off),
-            ("auto", BinScanMode::Auto, ScanMode::Auto),
-            ("verify", BinScanMode::Verify, ScanMode::Verify),
+    fn wire_spellings_parse_to_their_modes() {
+        for (yaml, mode) in [
+            ("off", BinScanMode::Off),
+            ("auto", BinScanMode::Auto),
+            ("verify", BinScanMode::Verify),
         ] {
             let parsed: BinScanMode =
                 serde_yaml_ng::from_str(yaml).unwrap_or_else(|e| panic!("'{yaml}' must parse as a bin_scan mode: {e}"));
             assert_eq!(parsed, mode, "'{yaml}' parsed as the wrong mode");
-            assert_eq!(
-                ScanMode::from(parsed),
-                scan,
-                "'{yaml}' maps onto the wrong ocx ScanMode"
-            );
         }
     }
 

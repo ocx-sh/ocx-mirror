@@ -20,6 +20,12 @@ fn spec_expectation() -> ExpectedMetadata {
     ExpectedMetadata::render(authoring, &scan_platform()).expect("the fixture renders both projections")
 }
 
+/// The published projection of an expectation every fixture here renders
+/// complete — none of them names a dependency.
+fn published_form(expected: &ExpectedMetadata) -> &Metadata {
+    expected.published.as_ref().expect("the fixture pins every dependency")
+}
+
 fn scan_platform() -> Platform {
     "linux/amd64".parse().expect("valid platform")
 }
@@ -60,17 +66,17 @@ fn image_recording(config_digest: &str) -> PublishedImage {
 #[test]
 fn only_an_incomplete_bin_scan_tile_skips_its_config_digest() {
     let expected = spec_expectation();
-    let bytes = serde_json::to_vec(&expected.published).expect("serializes");
+    let bytes = serde_json::to_vec(published_form(&expected)).expect("serializes");
     // The strongest possible case for a skip: the digests are identical.
     let image = image_recording(&Algorithm::Sha256.hash(&bytes).to_string());
 
     assert!(
-        settled_by_digest(&image, &expected.published, BinScanMode::Off).expect("digest compares"),
+        settled_by_digest(&image, expected.published.as_ref(), BinScanMode::Off).expect("digest compares"),
         "control: without a bin_scan an identical config digest must settle the tile",
     );
     for mode in [BinScanMode::Auto, BinScanMode::Verify] {
         assert!(
-            !settled_by_digest(&image, &expected.published, mode).expect("digest compares"),
+            !settled_by_digest(&image, expected.published.as_ref(), mode).expect("digest compares"),
             "{mode:?} on a spec declaring no binaries must fall through to the blob read that \
              adopts the published claim, even on an identical config digest",
         );
@@ -85,12 +91,12 @@ fn only_an_incomplete_bin_scan_tile_skips_its_config_digest() {
     )
     .expect("declared fixture parses");
     let complete = ExpectedMetadata::render(declared, &scan_platform()).expect("renders");
-    let bytes = serde_json::to_vec(&complete.published).expect("serializes");
+    let bytes = serde_json::to_vec(published_form(&complete)).expect("serializes");
     let image = image_recording(&Algorithm::Sha256.hash(&bytes).to_string());
 
     for mode in [BinScanMode::Off, BinScanMode::Auto, BinScanMode::Verify] {
         assert!(
-            settled_by_digest(&image, &complete.published, mode).expect("digest compares"),
+            settled_by_digest(&image, complete.published.as_ref(), mode).expect("digest compares"),
             "{mode:?} with a declared claim is fully computable and must settle on the digest",
         );
     }
@@ -105,7 +111,7 @@ fn only_an_incomplete_bin_scan_tile_skips_its_config_digest() {
 fn adopting_carries_the_published_binaries_into_both_projections() {
     let expected = spec_expectation();
     assert!(
-        expected.published.binaries().is_none(),
+        published_form(&expected).binaries().is_none(),
         "the spec-resolved expectation must start without binaries, or this test proves nothing",
     );
 
@@ -114,7 +120,7 @@ fn adopting_carries_the_published_binaries_into_both_projections() {
         .expect("adoption renders");
 
     assert_eq!(
-        adopted.published.binaries().map(|binaries| binaries.len()),
+        published_form(&adopted).binaries().map(|binaries| binaries.len()),
         Some(2),
         "the drift comparison must see the published claim",
     );
@@ -133,16 +139,17 @@ fn a_tile_differing_only_by_its_scanned_binaries_is_current() {
     let expected = spec_expectation();
 
     assert!(
-        metadata_drifted(&published, &expected.published).expect("compares"),
+        metadata_drifted(&published, published_form(&expected)).expect("compares"),
         "control: unadopted, the published claim reads as drift — this is the bug being prevented",
     );
     assert!(
         !metadata_drifted(
             &published,
-            &expected
-                .adopting_binaries_from(&published, &scan_platform())
-                .expect("adoption renders")
-                .published,
+            published_form(
+                &expected
+                    .adopting_binaries_from(&published, &scan_platform())
+                    .expect("adoption renders")
+            ),
         )
         .expect("compares"),
         "with the claim adopted, the tile must read as current",
@@ -176,12 +183,12 @@ fn a_spec_declared_binaries_claim_is_never_adopted_away() {
         .expect("adoption renders");
 
     assert_eq!(
-        adopted.published.binaries().map(|binaries| binaries.len()),
+        published_form(&adopted).binaries().map(|binaries| binaries.len()),
         Some(2),
         "the spec's declared list must survive adoption untouched",
     );
     assert!(
-        metadata_drifted(&published, &adopted.published).expect("compares"),
+        metadata_drifted(&published, published_form(&adopted)).expect("compares"),
         "a corrected hand-written list must report drift so the fix can land",
     );
 }
@@ -201,11 +208,34 @@ fn adopting_from_a_tile_without_binaries_changes_nothing() {
         .expect("adoption renders");
 
     assert!(
-        adopted.published.binaries().is_none(),
+        published_form(&adopted).binaries().is_none(),
         "nothing to adopt must leave the expectation untouched",
     );
     assert!(
-        metadata_drifted(&published, &adopted.published).expect("compares"),
+        metadata_drifted(&published, published_form(&adopted)).expect("compares"),
         "a tile that really has drifted (strip_components) must still report drift",
     );
+}
+
+/// A spec naming a dependency by tag alone cannot compute the digest the
+/// registry records, exactly as a scan cannot compute `binaries` — so its
+/// tiles must never settle on the config digest, and must fall through to the
+/// blob read that adopts the published pin (#90).
+#[test]
+fn an_expectation_with_an_unpinned_dependency_never_settles_by_digest() {
+    let authoring = serde_json::from_slice(
+        br#"{"type":"bundle","version":1,
+            "dependencies":[{"identifier":"ocx.sh/adoptium/temurin:jre-25","name":"temurin"}]}"#,
+    )
+    .expect("metadata fixture parses");
+    let expected = ExpectedMetadata::render(authoring, &scan_platform()).expect("renders");
+    assert!(expected.published.is_none(), "the fixture must be the incomplete shape");
+
+    let image = image_recording(&Algorithm::Sha256.hash(b"anything").to_string());
+    for mode in [BinScanMode::Off, BinScanMode::Auto, BinScanMode::Verify] {
+        assert!(
+            !settled_by_digest(&image, expected.published.as_ref(), mode).expect("digest compares"),
+            "{mode:?}: an unpinned expectation must go to the blob read",
+        );
+    }
 }
