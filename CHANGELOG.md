@@ -5,6 +5,41 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-09-27
+
+### Added
+
+- Port ocx's test and build telemetry *(telemetry)*
+- Ocx-mirror version command with baked build provenance
+- Root --format/--json output option shared with ocx
+- Prepare through ocx package create, pinning tag-only deps *(pipeline)*
+- Publish site-patched installers beside the manifest *(dist)*
+
+### Changed
+
+- Import ocx's registry client bounds and default_threads
+- Split the crate into a Cargo workspace
+- Link ocx_python from external/ocx *(python)*
+- Adopt the ocx PackageRef/OciIdentifier split
+
+### Documentation
+
+- Record the Bazel, crate-split and ocx_python decision *(adr)*
+- Align rules, skills and README with the workspace and Bazel loop
+- Bazel-crate-split run ledger *(agents)*
+- Ledger — version command follow-up *(agents)*
+- A-11 — provenance build.rs kept out of every cache key *(adr)*
+- Ledger — version command, cache proof, oracle *(agents)*
+- Ledger — version command landed on #89 *(agents)*
+- A-12 — root output format as its own amendment *(adr)*
+- Bazel for every lane on the shared remote cache, superseding C11 *(adr)*
+- Document create-based prepare and the ocx 0.6.3 floor
+
+### Fixed
+
+- Build release nextest with __testing so it keeps the test binary *(ci)*
+- Decompress bare single-file compressed binary assets *(pipeline)*
+
 ## [0.6.2] - 2026-09-22
 
 ### Added
@@ -38,6 +73,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Name the repair verb on a metadata-drift plan entry *(pipeline)*
 - Refuse a flat per-platform map, and its non-platform keys *(spec)*
 - Refuse a catalog path that resolves to nothing *(spec)*
+
+### Release
+
+- V0.6.2
 
 ## [0.6.1] - 2026-09-15
 
@@ -375,6 +414,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.6.3]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.2..v0.6.3
 [0.6.2]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.1..v0.6.2
 [0.6.1]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.0..v0.6.1
 [0.6.0]: https://github.com/ocx-sh/ocx-mirror/compare/v0.5.7..v0.6.0

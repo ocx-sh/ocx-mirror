@@ -6,7 +6,7 @@ purpose: it is non-functional from Bazel 9.1.0 on.
 
 module(
     name = "ocx_mirror",
-    version = "0.6.2",
+    version = "0.6.3",
 )
 
 bazel_dep(name = "rules_rust", version = "0.74.0")

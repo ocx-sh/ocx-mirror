@@ -18,7 +18,7 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_error"},
-    version = "0.6.2",
+    version = "0.6.3",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_report",
@@ -43,7 +43,7 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_error"},
-    version = "0.6.2",
+    version = "0.6.3",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_report",

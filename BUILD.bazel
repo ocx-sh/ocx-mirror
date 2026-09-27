@@ -63,7 +63,7 @@ rust_library(
         "//release:stamped": ["//release:provenance"],
         "//conditions:default": ["testing_provenance.env"],
     }),
-    version = "0.6.2",
+    version = "0.6.3",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_mirror_error",
         "//crates/ocx_mirror_http",
@@ -97,7 +97,7 @@ rust_library(
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env_files = ["testing_provenance.env"],
-    version = "0.6.2",
+    version = "0.6.3",
     deps = all_crate_deps(normal = True) + [
         "//crates/ocx_mirror_error:ocx_mirror_error_jsonschema",
         "//crates/ocx_mirror_http",
@@ -134,7 +134,7 @@ rust_library(
     crate_root = "build.rs",
     edition = "2024",
     tags = ["manual"],
-    version = "0.6.2",
+    version = "0.6.3",
 )
 
 rust_binary(
@@ -147,7 +147,7 @@ rust_binary(
     crate_root = "src/main.rs",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
-    version = "0.6.2",
+    version = "0.6.3",
     visibility = ["//visibility:public"],
     deps = all_crate_deps(normal = True) + [":ocx_mirror"],
 )
