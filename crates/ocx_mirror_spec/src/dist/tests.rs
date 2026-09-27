@@ -630,3 +630,153 @@ publish:
     assert!(errors[1].starts_with("publish.dist.snapshots: "), "{}", errors[1]);
     assert!(errors[1].contains("{sha256}"), "{}", errors[1]);
 }
+
+// ── publish.installers ──────────────────────────────────────────────────────
+
+fn installers(block: &str) -> DistSpec {
+    valid(&format!(
+        "output: ./public\npublish:\n  base_url: https://art.test/ocx-dist\n  installers:{block}\n"
+    ))
+}
+
+#[test]
+fn installers_are_off_unless_the_spec_asks_for_them() {
+    // Opt-in: a mirror written before the key existed must emit exactly the
+    // tree it always did.
+    let spec = valid(MINIMAL);
+
+    assert!(spec.publish.installer_docs().expect("resolves").is_none());
+    assert!(
+        installers(" false")
+            .publish
+            .installer_docs()
+            .expect("resolves")
+            .is_none()
+    );
+}
+
+#[test]
+fn installers_true_rides_the_existing_dist_tree() {
+    let spec = installers(" true");
+    let docs = spec.publish.installer_docs().expect("resolves").expect("switched on");
+
+    assert_eq!(docs.path, "{filename}");
+    assert_eq!(docs.snapshots.as_deref(), Some("install/{sha256}/{filename}"));
+    // Beside that version's archives: the default is the archive layout.
+    assert_eq!(docs.versions.as_deref(), Some("{tag}/{filename}"));
+    assert_eq!(docs.shells.len(), 5);
+    assert_eq!(docs.source, "https://setup.ocx.sh/latest/{shell}");
+    assert!(spec.validate(Path::new(SPEC_PATH)).is_empty());
+}
+
+#[test]
+fn the_version_copy_follows_a_gitlab_layout() {
+    let spec = valid(
+        r#"
+output: ./public
+publish:
+  base_url: https://gitlab.test/api/v4/projects/42/packages/generic/ocx
+  layout: "{version}/{filename}"
+  installers:
+    path: "install/latest/{filename}"
+"#,
+    );
+    let docs = spec.publish.installer_docs().expect("resolves").expect("switched on");
+
+    assert_eq!(docs.versions.as_deref(), Some("{version}/{filename}"));
+    assert!(spec.validate(Path::new(SPEC_PATH)).is_empty());
+}
+
+#[test]
+fn a_layout_naming_the_target_cannot_host_a_version_copy_by_default() {
+    let spec = valid(
+        r#"
+output: ./public
+publish:
+  base_url: https://art.test/ocx-dist
+  layout: "{tag}/{target}/{filename}"
+  installers: true
+"#,
+    );
+
+    let errors = spec.validate(Path::new(SPEC_PATH));
+    assert!(
+        errors.iter().any(|error| error.contains("publish.installers.versions")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn switching_the_pinned_copies_off_keeps_only_the_rolling_one() {
+    let spec = installers("\n    snapshots: false\n    versions: false");
+    let docs = spec.publish.installer_docs().expect("resolves").expect("switched on");
+
+    assert!(docs.snapshots.is_none());
+    assert!(docs.versions.is_none());
+}
+
+#[test]
+fn every_installer_template_rule_is_a_validation_error() {
+    for (block, field) in [
+        // No shell placeholder: five installers onto one path.
+        ("\n    path: install.sh", "publish.installers.path"),
+        // No digest: every run overwrites the previous pin.
+        (
+            "\n    snapshots: \"install/{filename}\"",
+            "publish.installers.snapshots",
+        ),
+        // No version: every release overwrites the previous one.
+        ("\n    versions: \"v/{filename}\"", "publish.installers.versions"),
+        ("\n    path: \"../{filename}\"", "publish.installers.path"),
+        ("\n    path: \"{target}/{filename}\"", "publish.installers.path"),
+        ("\n    shells: []", "publish.installers.shells"),
+        (
+            "\n    source: \"http://plain.test/{shell}\"",
+            "publish.installers.source",
+        ),
+    ] {
+        let errors = installers(block).validate(Path::new(SPEC_PATH));
+        assert!(
+            errors.iter().any(|error| error.starts_with(field)),
+            "{block:?} must fail {field}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn site_values_take_a_scalar_or_a_file() {
+    let spec = installers("\n    ca_bundle: { file: ./corp-ca.pem }\n    managed_config: reg.test/ocx/cfg:v1");
+    let docs = spec.publish.installer_docs().expect("resolves").expect("switched on");
+
+    assert!(matches!(docs.ca_bundle, Some(ValueSource::File(_))));
+    assert!(matches!(docs.managed_config, Some(ValueSource::Literal(_))));
+    assert!(spec.validate(Path::new(SPEC_PATH)).is_empty());
+}
+
+#[test]
+fn an_unknown_installers_key_is_refused() {
+    assert!(parse("output: ./p\npublish:\n  base_url: https://a.test\n  installers:\n    mirror_url: x\n").is_err());
+}
+
+#[test]
+fn installers_need_the_manifest_they_point_at() {
+    for (dist, installers_block) in [
+        ("false", " true"),
+        ("{snapshots: false}", " true"),
+        ("{snapshots: false}", "\n    versions: false"),
+    ] {
+        let spec = valid(&format!(
+            "output: ./public\npublish:\n  base_url: https://art.test/ocx-dist\n  dist: {dist}\n  installers:{installers_block}\n"
+        ));
+        let errors = spec.validate(Path::new(SPEC_PATH));
+        assert!(
+            errors.iter().any(|error| error.starts_with("publish.installers")),
+            "dist {dist} with installers{installers_block:?} must be refused: {errors:?}"
+        );
+    }
+
+    let rolling_only = valid(
+        "output: ./public\npublish:\n  base_url: https://art.test/ocx-dist\n  dist: {snapshots: false}\n  installers:\n    snapshots: false\n    versions: false\n",
+    );
+    assert!(rolling_only.validate(Path::new(SPEC_PATH)).is_empty());
+}

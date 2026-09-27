@@ -45,7 +45,10 @@ impl Sync {
     /// only that some did.
     pub async fn execute(&self, printer: &DataInterface) -> Result<(), MirrorError> {
         let spec = spec::load_dist_spec(&self.spec).await?;
-        let report = execute_dist_sync(&spec, self.options.dry_run).await?;
+        // `load_dist_spec` has already read the file, so it has a parent; a
+        // bare file name's parent is "", which joins as the current directory.
+        let spec_dir = self.spec.parent().unwrap_or(std::path::Path::new(""));
+        let report = execute_dist_sync(&spec, spec_dir, self.options.dry_run).await?;
         report_dist_sync(&report, self.options.format, printer);
 
         match report.failures() {

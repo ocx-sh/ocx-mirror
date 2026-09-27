@@ -10,6 +10,7 @@
 use ocx_console::{Cell, DataInterface};
 use serde::Serialize;
 
+use super::installers::InstallerReport;
 use super::upload::UploadOutcome;
 use crate::options::OutputFormat;
 
@@ -26,6 +27,11 @@ pub struct DistSyncReport {
     /// out rather than left for them to compose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
+    /// One row per published installer shell — planned paths under
+    /// `--dry-run`, written ones otherwise. Empty when `publish.installers`
+    /// is off.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub installers: Vec<InstallerReport>,
     pub counters: RunCounters,
     /// `true` when nothing was written or uploaded.
     pub dry_run: bool,
@@ -199,6 +205,13 @@ pub fn report_dist_sync(report: &DistSyncReport, format: OutputFormat, printer: 
 
             if let Some(snapshot) = &report.snapshot {
                 println!("manifest: {snapshot}");
+            }
+            for installer in &report.installers {
+                let mut line = format!("installer {}: {}", installer.shell, installer.path);
+                for extra in [&installer.snapshot, &installer.version].into_iter().flatten() {
+                    line.push_str(&format!(", {extra}"));
+                }
+                println!("{line}");
             }
             println!("{}", report.summary_line());
         }

@@ -239,6 +239,8 @@ pub enum BoundOrigin {
     Url,
     /// Produced by a generator command.
     Generator,
+    /// Read from a file.
+    File,
 }
 
 impl fmt::Display for BoundOrigin {
@@ -247,6 +249,7 @@ impl fmt::Display for BoundOrigin {
             Self::Spec => write!(f, "spec"),
             Self::Url => write!(f, "url"),
             Self::Generator => write!(f, "generator"),
+            Self::File => write!(f, "file"),
         }
     }
 }
@@ -308,6 +311,7 @@ async fn resolve_bound(bound: &Bound, field: &str, spec_dir: &Path) -> Result<(S
         ValueSource::Literal(_) => BoundOrigin::Spec,
         ValueSource::Url(_) => BoundOrigin::Url,
         ValueSource::Generator(_) => BoundOrigin::Generator,
+        ValueSource::File(_) => BoundOrigin::File,
     };
     Ok((value, origin))
 }

@@ -21,6 +21,9 @@ use ocx_oci::ssrf::host_is_trusted;
 use serde::Deserialize;
 use url::Url;
 
+use crate::ValueSource;
+use crate::layout::{InstallerTemplate, InstallerTemplateKind, InstallerValues};
+
 /// The upstream manifest every mirror run starts from.
 const DEFAULT_SOURCE: &str = "https://setup.ocx.sh/dist.json";
 
@@ -35,6 +38,18 @@ const DEFAULT_DIST_PATH: &str = "dist.json";
 /// Where a content-addressed snapshot lands when `publish.dist.snapshots` is
 /// omitted.
 const DEFAULT_SNAPSHOT_LAYOUT: &str = "dist/{sha256}.json";
+
+/// Where a rolling installer lands when `publish.installers.path` is omitted:
+/// the root, beside the rolling `dist.json`.
+const DEFAULT_INSTALLER_PATH: &str = "{filename}";
+
+/// Where a pinned installer lands when `publish.installers.snapshots` is
+/// omitted.
+const DEFAULT_INSTALLER_SNAPSHOTS: &str = "install/{sha256}/{filename}";
+
+/// The upstream installers — setup.ocx.sh's *stored* stable pointer, not the
+/// `/sh` friendly path, which only exists as a CDN rewrite onto it.
+const DEFAULT_INSTALLER_SOURCE: &str = "https://setup.ocx.sh/latest/{shell}";
 
 /// Backoff schedule when `upload.retry_delays` is omitted, in seconds.
 ///
@@ -223,6 +238,13 @@ pub struct Publish {
     /// from the one written there.
     #[serde(default)]
     pub dist: DistPublish,
+
+    /// Site-patched copies of the setup.ocx.sh installers, published beside
+    /// the manifest. **Opt-in**: absent or `false` publishes none, so a mirror
+    /// that predates this key emits exactly the tree it always did; `true` is
+    /// the block with its defaults. See [`InstallersLayout`].
+    #[serde(default)]
+    pub installers: InstallersPublish,
 }
 
 fn default_layout() -> String {
@@ -305,6 +327,183 @@ impl Default for Snapshots {
     }
 }
 
+/// `publish.installers` — `false` (the default), `true`, or the block.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum InstallersPublish {
+    /// `true` is the default block; `false` publishes no installer.
+    Switch(bool),
+    Layout(Box<InstallersLayout>),
+}
+
+impl Default for InstallersPublish {
+    fn default() -> Self {
+        Self::Switch(false)
+    }
+}
+
+/// Where the patched installers land, which shells, and what they carry.
+///
+/// Three copies per shell, the same rolling-plus-pinned doctrine as
+/// [`DistLayout`]:
+///
+/// - `path` — rolling, republished every run, embeds the rolling manifest URL.
+/// - `snapshots` — named by the digest of its own patched bytes, embeds the
+///   manifest *snapshot* URL, so one URL pins the script, the site values and
+///   the ocx release set together.
+/// - `versions` — the snapshot's bytes again, at a path named by the ocx
+///   version the manifest calls latest, so a user can ask for "the installer
+///   that installs 0.6.3". Re-pointed when the site values change, like a
+///   cascade tag.
+///
+/// The defaults ride the tree `dist sync` already writes: the rolling copies
+/// sit at the root beside `dist.json`, the version copies beside that
+/// version's archives (derived from `publish.layout`). A GitLab generic
+/// package registry has no route for a root file, exactly as for `dist.json`,
+/// and overrides `path` the same way.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct InstallersLayout {
+    /// Rolling copy, over `{filename}` / `{shell}`. Defaults to `{filename}`.
+    #[serde(default = "default_installer_path")]
+    pub path: String,
+
+    /// Pinned copy, over `{sha256}` plus `{filename}` / `{shell}`, or `false`.
+    /// Defaults to `install/{sha256}/{filename}`.
+    #[serde(default)]
+    pub snapshots: TemplateSwitch,
+
+    /// Per-ocx-version copy, over `{version}` / `{tag}` plus `{filename}` /
+    /// `{shell}`, or `false`. Defaults to `publish.layout` with the installer's
+    /// filename — beside that version's archives.
+    #[serde(default)]
+    pub versions: TemplateSwitch,
+
+    /// Which installers to publish. Defaults to all five.
+    #[serde(default = "Shell::all")]
+    pub shells: Vec<Shell>,
+
+    /// Where each upstream installer is fetched from, over `{shell}` /
+    /// `{filename}`. Defaults to setup.ocx.sh's stored stable pointer.
+    #[serde(default = "default_installer_source")]
+    pub source: String,
+
+    /// Embedded as `OCX_INSTALL_CA_BUNDLE`: a path on the installing machine,
+    /// or the PEM text itself — `{file: …}` inlines a local file so nothing
+    /// has to be distributed beside the script.
+    #[cfg_attr(
+        feature = "jsonschema",
+        schemars(with = "Option<crate::value_source::ValueSourceSchema>")
+    )]
+    pub ca_bundle: Option<ValueSource>,
+
+    /// Embedded as `OCX_MANAGED_CONFIG`, the managed-config OCI reference.
+    #[cfg_attr(
+        feature = "jsonschema",
+        schemars(with = "Option<crate::value_source::ValueSourceSchema>")
+    )]
+    pub managed_config: Option<ValueSource>,
+}
+
+/// A template with an on/off switch: `true` (the default template), `false`,
+/// or a template string.
+#[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum TemplateSwitch {
+    Switch(bool),
+    Template(String),
+}
+
+impl Default for TemplateSwitch {
+    fn default() -> Self {
+        Self::Switch(true)
+    }
+}
+
+impl Default for InstallersLayout {
+    fn default() -> Self {
+        Self {
+            path: default_installer_path(),
+            snapshots: TemplateSwitch::default(),
+            versions: TemplateSwitch::default(),
+            shells: Shell::all(),
+            source: default_installer_source(),
+            ca_bundle: None,
+            managed_config: None,
+        }
+    }
+}
+
+fn default_installer_path() -> String {
+    DEFAULT_INSTALLER_PATH.to_string()
+}
+
+fn default_installer_source() -> String {
+    DEFAULT_INSTALLER_SOURCE.to_string()
+}
+
+/// One of the five installer dialects setup.ocx.sh publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[cfg_attr(feature = "jsonschema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Shell {
+    Sh,
+    Pwsh,
+    Nu,
+    Fish,
+    Elvish,
+}
+
+impl Shell {
+    fn all() -> Vec<Shell> {
+        vec![Shell::Sh, Shell::Pwsh, Shell::Nu, Shell::Fish, Shell::Elvish]
+    }
+
+    /// The public URL word — `/sh`, `/pwsh` on setup.ocx.sh.
+    #[must_use]
+    pub fn segment(self) -> &'static str {
+        match self {
+            Shell::Sh => "sh",
+            Shell::Pwsh => "pwsh",
+            Shell::Nu => "nu",
+            Shell::Fish => "fish",
+            Shell::Elvish => "elvish",
+        }
+    }
+
+    /// The canonical artifact name, `install.<ext>`.
+    #[must_use]
+    pub fn filename(self) -> &'static str {
+        match self {
+            Shell::Sh => "install.sh",
+            Shell::Pwsh => "install.ps1",
+            Shell::Nu => "install.nu",
+            Shell::Fish => "install.fish",
+            Shell::Elvish => "install.elv",
+        }
+    }
+}
+
+/// [`Publish::installers`] with every switch and default applied.
+#[derive(Debug)]
+pub struct InstallerDocs<'a> {
+    /// Rolling template.
+    pub path: String,
+    /// Snapshot template, `None` when switched off.
+    pub snapshots: Option<String>,
+    /// Version template, `None` when switched off.
+    pub versions: Option<String>,
+    /// Deduplicated, in declaration order.
+    pub shells: Vec<Shell>,
+    /// Upstream URL template.
+    pub source: String,
+    pub ca_bundle: Option<&'a ValueSource>,
+    pub managed_config: Option<&'a ValueSource>,
+}
+
 /// [`Publish::dist`] with every switch applied: where each document is
 /// written, and whether each is uploaded.
 ///
@@ -341,6 +540,69 @@ impl Publish {
             upload_path: upload,
             upload_snapshots,
         }
+    }
+}
+
+impl Publish {
+    /// Resolve [`Self::installers`]: `None` when switched off.
+    ///
+    /// # Errors
+    ///
+    /// A message for a `versions` default that cannot be derived from
+    /// `layout` — a layout naming `{target}` or `{channel}` has no single
+    /// directory per version for the installer to sit in.
+    pub fn installer_docs(&self) -> Result<Option<InstallerDocs<'_>>, String> {
+        let default = InstallersLayout::default();
+        let layout = match &self.installers {
+            InstallersPublish::Switch(false) => return Ok(None),
+            InstallersPublish::Switch(true) => &default,
+            InstallersPublish::Layout(layout) => layout.as_ref(),
+        };
+
+        let snapshots = match &layout.snapshots {
+            TemplateSwitch::Switch(false) => None,
+            TemplateSwitch::Switch(true) => Some(DEFAULT_INSTALLER_SNAPSHOTS.to_string()),
+            TemplateSwitch::Template(template) => Some(template.clone()),
+        };
+        let versions = match &layout.versions {
+            TemplateSwitch::Switch(false) => None,
+            TemplateSwitch::Switch(true) => {
+                if self.layout.contains("{target}") || self.layout.contains("{channel}") {
+                    return Err(format!(
+                        "publish.installers.versions: cannot be derived from publish.layout {:?} — it names \
+                         {{target}} or {{channel}}, so a version has no single directory to put an installer \
+                         in; set `versions:` to a template, or `false`",
+                        self.layout
+                    ));
+                }
+                Some(self.layout.clone())
+            }
+            TemplateSwitch::Template(template) => Some(template.clone()),
+        };
+
+        let mut shells = Vec::with_capacity(layout.shells.len());
+        for shell in &layout.shells {
+            if !shells.contains(shell) {
+                shells.push(*shell);
+            }
+        }
+
+        Ok(Some(InstallerDocs {
+            path: layout.path.clone(),
+            snapshots,
+            versions,
+            shells,
+            source: layout.source.clone(),
+            // A `true` switch has no values; only the block carries them.
+            ca_bundle: match &self.installers {
+                InstallersPublish::Layout(layout) => layout.ca_bundle.as_ref(),
+                InstallersPublish::Switch(_) => None,
+            },
+            managed_config: match &self.installers {
+                InstallersPublish::Layout(layout) => layout.managed_config.as_ref(),
+                InstallersPublish::Switch(_) => None,
+            },
+        }))
     }
 }
 
@@ -449,6 +711,8 @@ impl DistSpec {
             errors.push(format!("publish.dist.snapshots: {error}"));
         }
 
+        self.validate_installers(&mut errors);
+
         if let Some(upload) = &self.upload {
             for name in upload.headers.keys() {
                 if name.eq_ignore_ascii_case("authorization") {
@@ -475,6 +739,81 @@ impl DistSpec {
         }
 
         errors
+    }
+
+    /// Every `publish.installers` rule.
+    fn validate_installers(&self, errors: &mut Vec<String>) {
+        let docs = match self.publish.installer_docs() {
+            Ok(Some(docs)) => docs,
+            Ok(None) => return,
+            Err(error) => {
+                errors.push(error);
+                return;
+            }
+        };
+
+        // An installer embeds a manifest URL; publishing it while the manifest
+        // it names is switched off ships an installer that 404s on first use.
+        let dist = self.publish.dist_docs();
+        if !dist.upload_path {
+            errors.push(
+                "publish.installers: needs the rolling manifest the installers point at — \
+                 `publish.dist` is switched off"
+                    .to_string(),
+            );
+        }
+        if !dist.upload_snapshots && (docs.snapshots.is_some() || docs.versions.is_some()) {
+            errors.push(
+                "publish.installers: the pinned and per-version installers point at the manifest snapshot, \
+                 but `publish.dist.snapshots` is false; set `installers.snapshots: false` and \
+                 `installers.versions: false`, or turn snapshots back on"
+                    .to_string(),
+            );
+        }
+
+        for (field, template, kind) in [
+            ("path", Some(&docs.path), InstallerTemplateKind::Rolling),
+            ("snapshots", docs.snapshots.as_ref(), InstallerTemplateKind::Snapshot),
+            ("versions", docs.versions.as_ref(), InstallerTemplateKind::Version),
+        ] {
+            if let Some(template) = template
+                && let Err(error) = InstallerTemplate::parse(template, kind, true)
+            {
+                errors.push(format!("publish.installers.{field}: {error}"));
+            }
+        }
+
+        if docs.shells.is_empty() {
+            errors.push(
+                "publish.installers.shells: name at least one shell — an empty list publishes nothing".to_string(),
+            );
+        }
+
+        // Checked as the URL the first shell renders to: the placeholders are
+        // closed-set path components, so every shell has the same scheme and
+        // host.
+        match InstallerTemplate::parse(&docs.source, InstallerTemplateKind::Rolling, false).and_then(|template| {
+            template.expand(&InstallerValues {
+                filename: Shell::Sh.filename(),
+                shell: Shell::Sh.segment(),
+                sha256: "",
+                version: "",
+                tag: "",
+            })
+        }) {
+            Ok(rendered) => match Url::parse(&rendered) {
+                Ok(url) => self.validate_transport("publish.installers.source", &url, errors),
+                Err(error) => errors.push(format!("publish.installers.source: {rendered:?} is not a URL: {error}")),
+            },
+            Err(error) => errors.push(format!("publish.installers.source: {error}")),
+        }
+
+        if let Some(value) = docs.ca_bundle {
+            value.validate("publish.installers.ca_bundle", errors);
+        }
+        if let Some(value) = docs.managed_config {
+            value.validate("publish.installers.managed_config", errors);
+        }
     }
 
     /// Refuse a plaintext URL whose host is not explicitly trusted, and any

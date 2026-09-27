@@ -44,6 +44,7 @@
 //! than as a file, 404ing when the sibling does not exist yet and synthesising
 //! its own body when it does.
 
+mod installers;
 pub mod manifest;
 pub mod report;
 pub mod upload;
@@ -95,7 +96,7 @@ const MANIFEST_FETCH_CEILING: usize = 8 * 1024 * 1024;
 /// the only field this layer reads, and borrowing the whole struct would put an
 /// upward edge on `command::` for nothing. (`registry_sync` does take its
 /// options struct — it reads four of that one's five fields.)
-pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyncReport, MirrorError> {
+pub async fn execute_dist_sync(spec: &DistSpec, spec_dir: &Path, dry_run: bool) -> Result<DistSyncReport, MirrorError> {
     let client = build_client()?;
 
     // Before the first byte moves. Resolving credentials here rather than at
@@ -133,6 +134,17 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
         )]));
     }
 
+    // Before any archive moves: a broken upstream installer or a site value
+    // no installer can carry fails the run in seconds, not after the transfer.
+    let installers = match spec
+        .publish
+        .installer_docs()
+        .map_err(|error| MirrorError::SpecInvalid(vec![error]))?
+    {
+        Some(docs) => Some(installers::prepare(&client, &docs, &manifest, spec_dir).await?),
+        None => None,
+    };
+
     // Already validated at spec load; parsed again here because the template
     // is a value, not a validation result.
     let template = LayoutTemplate::parse(&spec.publish.layout)
@@ -161,6 +173,18 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     // The rolling manifest is a fixed path in the same tree, so it claims
     // first; the snapshot cannot collide — its path carries a 64-hex digest.
     claimed.insert(docs.path.clone(), "publish.dist.path".to_string());
+    // The installers' fixed paths claim next, so an archive rendering onto one
+    // fails its own row rather than overwriting an installer (or the reverse).
+    // Two installer paths colliding is a spec error, whole-run.
+    if let Some(prepared) = &installers {
+        for (path, label) in prepared.claims() {
+            if let Some(first) = claimed.insert(path.to_string(), label.clone()) {
+                return Err(MirrorError::SpecInvalid(vec![format!(
+                    "publish.installers: {label} renders to {path:?}, already claimed by {first}"
+                )]));
+            }
+        }
+    }
     let mut planned: Vec<PlannedRow> = Vec::with_capacity(manifest.releases.len());
     // Indexed rather than pushed, so the report keeps manifest order whatever
     // order the fetches below finish in.
@@ -277,6 +301,9 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     //
     // `--dry-run`: the flag promises a report of what *would* be mirrored,
     // so writing the manifest would be the one side effect it rules out.
+    if dry_run && let Some(prepared) = &installers {
+        report.installers = prepared.planned();
+    }
     if report.has_failures() || dry_run {
         return Ok(report);
     }
@@ -285,8 +312,16 @@ pub async fn execute_dist_sync(spec: &DistSpec, dry_run: bool) -> Result<DistSyn
     report.manifest_sha256 = Some(digest);
     report.snapshot = Some(snapshot.clone());
 
+    // After the manifest: the pinned copies embed the snapshot's URL.
+    if let Some(prepared) = &installers {
+        report.installers = prepared
+            .write(&spec.output, &spec.publish.base_url, &docs.path, &snapshot)
+            .await?;
+    }
+
     if let Some(uploader) = &uploader {
         upload_manifest(uploader, spec, &docs, &snapshot, &mut report).await?;
+        upload_installers(uploader, spec, &mut report).await?;
     }
 
     Ok(report)
@@ -358,6 +393,52 @@ async fn upload_manifest(
         report
             .counters
             .record(put(uploader, relative, &spec.output.join(relative), precheck).await?);
+    }
+    Ok(())
+}
+
+/// PUT the installers, after the manifest they point at.
+///
+/// Pinned copies first (content-addressed, so HEAD-skippable), then the
+/// per-version copies, then the rolling copies **last** — the same rule as the
+/// manifest pair: a user fetching the rolling installer mid-run gets either the
+/// old one or the new one, and both name a manifest already in the store. A
+/// per-version path is re-pointed when the site values change, so it is never
+/// HEAD-skipped.
+///
+/// # Errors
+///
+/// [`MirrorError::ExecutionFailed`] on a rejected upload.
+async fn upload_installers(
+    uploader: &Uploader,
+    spec: &DistSpec,
+    report: &mut DistSyncReport,
+) -> Result<(), MirrorError> {
+    let mut puts: Vec<(String, Precheck)> = Vec::new();
+    puts.extend(
+        report
+            .installers
+            .iter()
+            .filter_map(|installer| installer.snapshot.clone())
+            .map(|path| (path, Precheck::HeadFirst)),
+    );
+    puts.extend(
+        report
+            .installers
+            .iter()
+            .filter_map(|installer| installer.version.clone())
+            .map(|path| (path, Precheck::Unconditional)),
+    );
+    puts.extend(
+        report
+            .installers
+            .iter()
+            .map(|installer| (installer.path.clone(), Precheck::Unconditional)),
+    );
+    for (relative, precheck) in puts {
+        tracing::info!("PUT {relative}");
+        let outcome = put(uploader, &relative, &spec.output.join(&relative), precheck).await?;
+        report.counters.record(outcome);
     }
     Ok(())
 }

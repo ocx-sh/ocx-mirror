@@ -754,13 +754,14 @@ versions:
 | `version` | string or object | **Yes** | The edge's value: a literal, or where to get one. |
 | `inclusive` | boolean | **Yes** | Whether a candidate equal to the edge is inside the window. No default in this form. |
 
-`version` takes the same three spellings `source.url_index` does:
+`version` takes the same spellings `source.url_index` does, plus `file`:
 
 | Form | Meaning |
 |------|---------|
 | `version: "3.0.0"` | A literal, identical to the shorthand except that `inclusive` is stated. |
 | `version: {url: <https url>}` | The response body, fetched once per run. |
 | `version: {generator: {command: [...], working_directory: ..., timeout_seconds: 60}}` | The command's stdout, run once per run. `command` is required; `working_directory` resolves from the spec directory; `timeout_seconds` defaults to 60. |
+| `version: {file: <path>}` | The file's contents, read once per run, relative to the spec directory. |
 
 **Semantics:**
 

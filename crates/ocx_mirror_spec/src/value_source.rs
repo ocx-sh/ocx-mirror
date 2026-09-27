@@ -10,7 +10,7 @@
 //! `versions.max` it is "something [`crate::filter::version_cmp`] can relate".
 
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -19,9 +19,9 @@ use serde::de;
 use ocx_mirror_error::MirrorError;
 use ocx_mirror_source::generator::GeneratorConfig;
 
-/// Body cap for a `url:` value. The values this carries are tens of bytes; the
-/// cap exists so a hostile or misconfigured endpoint cannot stream a run out
-/// of memory, not to leave room for growth.
+/// Body cap for a `url:` or `file:` value. A version is tens of bytes and a
+/// corporate CA chain a few KB; the cap exists so a hostile or misconfigured
+/// endpoint cannot stream a run out of memory, not to leave room for growth.
 const VALUE_FETCH_CEILING: usize = 64 * 1024;
 
 /// Bound on one value fetch. [`ocx_mirror_http::builder`] sets only a connect
@@ -40,6 +40,27 @@ pub enum ValueSource {
     Url(String),
     /// The stdout of a command, run once per run.
     Generator(GeneratorConfig),
+    /// The contents of a file, read once per run. Relative paths resolve
+    /// against the spec's directory, the way a generator's working directory
+    /// does.
+    File(PathBuf),
+}
+
+/// The JSON-schema shape of a [`ValueSource`] — schema-only, since the real
+/// type deserializes through a visitor that `schemars` cannot see through.
+#[cfg(feature = "jsonschema")]
+#[derive(schemars::JsonSchema)]
+#[serde(untagged)]
+#[expect(dead_code, reason = "exists only to be rendered into the dist.yml schema")]
+pub(crate) enum ValueSourceSchema {
+    /// Written in the spec.
+    Literal(String),
+    /// Exactly one of `url`, `generator`, `file`.
+    Map {
+        url: Option<String>,
+        generator: Option<serde_json::Value>,
+        file: Option<String>,
+    },
 }
 
 /// The map spelling of a [`ValueSource`].
@@ -53,6 +74,7 @@ pub enum ValueSource {
 struct ValueSourceMap {
     url: Option<String>,
     generator: Option<GeneratorConfig>,
+    file: Option<PathBuf>,
 }
 
 impl<'de> Deserialize<'de> for ValueSource {
@@ -67,7 +89,7 @@ impl<'de> de::Visitor<'de> for ValueSourceVisitor {
     type Value = ValueSource;
 
     fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a literal string, or a map with exactly one of `url` or `generator`")
+        f.write_str("a literal string, or a map with exactly one of `url`, `generator` or `file`")
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
@@ -78,12 +100,15 @@ impl<'de> de::Visitor<'de> for ValueSourceVisitor {
         let raw = ValueSourceMap::deserialize(de::value::MapAccessDeserializer::new(map))?;
         // Same exactly-one-of shape, and the same wording, as
         // `UrlIndexSource`'s `url`/`versions`/`generator` match.
-        match (raw.url, raw.generator) {
-            (Some(url), None) => Ok(ValueSource::Url(url)),
-            (None, Some(generator)) => Ok(ValueSource::Generator(generator)),
-            (None, None) => Err(de::Error::custom("a value source requires one of: url, generator")),
+        match (raw.url, raw.generator, raw.file) {
+            (Some(url), None, None) => Ok(ValueSource::Url(url)),
+            (None, Some(generator), None) => Ok(ValueSource::Generator(generator)),
+            (None, None, Some(file)) => Ok(ValueSource::File(file)),
+            (None, None, None) => Err(de::Error::custom(
+                "a value source requires one of: url, generator, file",
+            )),
             _ => Err(de::Error::custom(
-                "a value source must have exactly one of: url, generator",
+                "a value source must have exactly one of: url, generator, file",
             )),
         }
     }
@@ -120,6 +145,11 @@ impl ValueSource {
                     errors.push(format!("{field}.generator.command must be a non-empty list"));
                 }
             }
+            Self::File(path) => {
+                if path.as_os_str().is_empty() {
+                    errors.push(format!("{field}.file must be a non-empty path"));
+                }
+            }
         }
     }
 
@@ -137,13 +167,16 @@ impl ValueSource {
     /// the generator cannot be run, the bytes are not UTF-8, or the value is
     /// empty after trimming. [`MirrorError::ExecutionFailed`] when the TLS
     /// backend cannot be built.
-    pub(crate) async fn resolve(&self, field: &str, spec_dir: &Path) -> Result<String, MirrorError> {
+    pub async fn resolve(&self, field: &str, spec_dir: &Path) -> Result<String, MirrorError> {
         let bytes = match self {
             Self::Literal(value) => return Ok(value.trim().to_string()),
             Self::Url(url) => fetch(url).await.map_err(|error| name_the_field(field, error))?,
             Self::Generator(generator) => ocx_mirror_source::generator::run(generator, spec_dir)
                 .await
                 .map_err(|error| MirrorError::SourceError(format!("{field}: {error:#}")))?,
+            Self::File(path) => read_file(&spec_dir.join(path))
+                .await
+                .map_err(|error| name_the_field(field, error))?,
         };
 
         let text = String::from_utf8(bytes)
@@ -167,6 +200,23 @@ fn name_the_field(field: &str, error: MirrorError) -> MirrorError {
         MirrorError::SourceError(message) => MirrorError::SourceError(format!("{field}: {message}")),
         other => other,
     }
+}
+
+/// Read one value from a file, bounded like a fetched one.
+async fn read_file(path: &Path) -> Result<Vec<u8>, MirrorError> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| MirrorError::SourceError(format!("cannot read {}: {error}", path.display())))?;
+    if metadata.len() > VALUE_FETCH_CEILING as u64 {
+        return Err(MirrorError::SourceError(format!(
+            "{} is {} bytes, above the {VALUE_FETCH_CEILING}-byte ceiling for a spec value",
+            path.display(),
+            metadata.len()
+        )));
+    }
+    tokio::fs::read(path)
+        .await
+        .map_err(|error| MirrorError::SourceError(format!("cannot read {}: {error}", path.display())))
 }
 
 /// Fetch one value over HTTP, bounded in size and in time.

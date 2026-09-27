@@ -59,7 +59,10 @@ pub use concurrency_config::{ConcurrencyConfig, resolve_compression_threads};
 // `DistSpec` joins the tier `MirrorSpec` and `RegistrySpec` occupy, which is
 // what makes `tests/dist_spec_validation.rs` reachable without touching
 // the root's `lib.rs`. Its children ride along so the pipeline can name them.
-pub use dist::{DistDocs, DistLayout, DistPublish, DistSpec, Identity, Publish, Select, Snapshots, Upload};
+pub use dist::{
+    DistDocs, DistLayout, DistPublish, DistSpec, Identity, InstallerDocs, InstallersLayout, InstallersPublish, Publish,
+    Select, Shell, Snapshots, TemplateSwitch, Upload,
+};
 pub use forge::{ForgeKind, WriteTransport, forge_is_gitlab};
 #[allow(unused_imports)]
 // Glob so the crate root stays the one path in-crate callers use — the split

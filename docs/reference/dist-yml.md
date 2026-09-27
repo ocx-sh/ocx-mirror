@@ -139,6 +139,7 @@ publish:
 | `base_url` | URL | Yes | Public base every mirrored `url` is composed from. Trailing slashes are ignored; a query or fragment is refused. |
 | `layout` | string | No | Path shape of the archives below `base_url`. Defaults to `{tag}/{filename}`. |
 | `dist` | bool or object | No | Where the two manifest documents land, and whether they are uploaded. See [`dist`](#dist). |
+| `installers` | bool or object | No | Publish site-patched copies of the setup.ocx.sh installers. **Off** unless set. See [`installers`](#installers). |
 
 `layout` is plain substitution over five placeholders — `{version}`, `{tag}`, `{target}`, `{filename}`, `{channel}` — with no template engine. An unknown placeholder is a load error rather than an empty string, because an empty expansion would collapse a path segment and quietly collide every release onto one path.
 
@@ -215,6 +216,73 @@ publish:
 OCX_INSTALL_DIST_URL=https://gitlab.corp.example/api/v4/projects/42/packages/generic/ocx/dist/latest.json
 ```
 
+### `installers` {#installers}
+
+```yaml
+publish:
+  installers:
+    shells: [sh, pwsh]
+    ca_bundle: { file: ./corp-ca.pem }
+    managed_config: registry.corp.example/ocx/managed-config:v1
+```
+
+Publishes the setup.ocx.sh installers with this mirror baked in, so an operator hands users **one URL** instead of four environment variables. Each installer carries an embedded configuration block of four `@OCX_*@` placeholders ([www-setup README](https://github.com/ocx-sh/www-setup#corporate-mirrors-one-patched-installer)); this fills them in the run that writes the manifest they point at.
+
+**Opt-in.** Absent or `installers: false` publishes nothing and fetches nothing, so a mirror written before this key existed emits exactly the tree it always did. `installers: true` is the block with every default.
+
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `path` | string | `{filename}` | The rolling copy, re-published every run. Embeds the rolling manifest URL. |
+| `snapshots` | string or `false` | `install/{sha256}/{filename}` | The pinned copy, named by the digest of its own patched bytes. Embeds the manifest **snapshot** URL. |
+| `versions` | string or `false` | `publish.layout` with the installer's filename | The pinned bytes again, at a path named by the ocx release the manifest calls `latest`. |
+| `shells` | list | all five | Any of `sh`, `pwsh`, `nu`, `fish`, `elvish`. |
+| `source` | URL template | `https://setup.ocx.sh/latest/{shell}` | Where each upstream installer is fetched. `https` unless the host is in [`trusted_hosts`](#trusted-hosts). |
+| `ca_bundle` | value | unset | Embedded as `OCX_INSTALL_CA_BUNDLE`: a path on the installing machine, or the PEM itself. |
+| `managed_config` | value | unset | Embedded as `OCX_MANAGED_CONFIG`, the managed-config OCI reference (`host/repo:tag`). |
+
+The templates substitute `{filename}` (`install.sh`, `install.ps1`, `install.nu`, `install.fish`, `install.elv`) and `{shell}` (`sh` … `elvish`), and every template must name one of the two. `snapshots` must also name `{sha256}`, and `versions` must name `{version}` or `{tag}` — otherwise every run, or every release, would overwrite the previous copy. The rolling and per-version paths are claimed against the archive layout and the manifest paths, so a collision fails the run instead of overwriting.
+
+Installers point at the manifest, so they need it published: `publish.dist: false` with installers on is refused, and so is `dist.snapshots: false` while the pinned or per-version installers — which embed the snapshot URL — are on.
+
+With the defaults the installers ride the tree `dist sync` already writes:
+
+```text
+public/
+├── dist.json                    rolling manifest
+├── install.sh  install.ps1 …    rolling installers   → embed …/dist.json
+├── dist/<sha256>.json           pinned manifest
+├── install/<sha256>/install.sh  pinned installer     → embeds …/dist/<sha256>.json
+└── v0.6.3/
+    ├── ocx-<target>.tar.gz
+    └── install.sh               the pinned installer again → installs 0.6.3
+```
+
+```sh
+curl -fsSL https://art.corp.example/ocx-dist/install.sh | sh                # latest
+curl -fsSL https://art.corp.example/ocx-dist/v0.6.3/install.sh | sh         # a release
+curl -fsSL https://art.corp.example/ocx-dist/install/<sha256>/install.sh | sh   # fully reproducible
+```
+
+The pinned copy fixes three things with one URL: the installer script, the site values, and the manifest snapshot — and so the ocx release it installs. The per-version copy is the same bytes and is **re-pointed** when the site values change, like a cascade tag; a pinned copy never changes.
+
+**What is filled.** The manifest URL always — `base_url` plus `dist.path` for the rolling copy, plus the snapshot path for the pinned ones. `ca_bundle` and `managed_config` when set; an unset one stays a placeholder, which the installer ignores. `OCX_INSTALL_MIRROR_URL` never: every manifest row already names the mirror (see [rewrite](#rewrite)). Precedence in the installer stays *environment > embedded > built-in*, so a user can still override any of them.
+
+`ca_bundle` and `managed_config` take a literal, `{file: <path>}` (read at sync time, relative to the spec's directory — so the certificate travels inside the script and nothing is distributed beside it), `{url: …}` or `{generator: …}` — the same value shape as [`mirror.yml`'s `versions.min`/`max`](mirror-yml.md). A value containing a single quote (or a typographic one, which PowerShell also reads as a quote) is refused, since every dialect single-quotes it, as is a multi-line `managed_config`. Backslashes are doubled for fish alone, whose single quotes are not raw.
+
+**Checked before anything moves.** Every upstream installer is fetched, and checked to carry each placeholder about to be filled, before the first archive is probed. An upstream that renamed a placeholder fails the run in seconds rather than silently shipping an installer without the corporate CA. `--dry-run` fetches them too and reports the planned paths.
+
+GitLab has no route for a root file, exactly as for `dist.json`, and overrides `path` the same way; the version copies follow the `{version}/{filename}` layout into each release's package on their own:
+
+```yaml
+publish:
+  base_url: https://gitlab.corp.example/api/v4/projects/42/packages/generic/ocx
+  layout: "{version}/{filename}"
+  dist:
+    path: dist/latest.json
+  installers:
+    path: "install/latest/{filename}"
+```
+
 ## `upload` {#upload}
 
 ```yaml
@@ -279,14 +347,14 @@ Files fall into two classes, and only one of them is skippable:
 
 | Class | Files | Behaviour |
 |-------|-------|-----------|
-| **Immutable** | archives at the rendered layout, the snapshot at `dist.snapshots` | Asked for first; one the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
-| **Rolling** | the manifest at `dist.path` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
+| **Immutable** | archives at the rendered layout, the snapshot at `dist.snapshots`, the pinned installers at `installers.snapshots` | Asked for first; one the store already holds is left alone. The path pins the bytes, so "already there" means "already correct". |
+| **Rolling** | the manifest at `dist.path`, the installers at `installers.path` and `installers.versions` | `PUT` every run, unconditionally. The path outlives its contents, so "already there" says nothing about *which* version is there. |
 
 The destination is the authority for the immutable class: a file deleted from the store is re-uploaded by the next run instead of being skipped forever by stale local state.
 
 Every upload announces four checksums — `X-Checksum-Md5`, `X-Checksum-Sha1`, `X-Checksum-Sha256` and `X-Checksum-Sha512` — computed from the body being sent. Artifactory records a client checksum per algorithm and reports *"Client did not publish a checksum value"* for each header that was absent, so all four are sent rather than only the one the manifest happens to carry. (Artifactory consumes the first three; SHA-512 is there for stores that take it.)
 
-Each archive is probed, downloaded, verified and uploaded as one unit, so one row's `PUT` overlaps another's `GET` — a link is full duplex, and the two-phase shape this replaced left one direction idle throughout each phase. The manifest documents still follow every archive: **archives, then the content-addressed snapshot, then `dist.json` last**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store.
+Each archive is probed, downloaded, verified and uploaded as one unit, so one row's `PUT` overlaps another's `GET` — a link is full duplex, and the two-phase shape this replaced left one direction idle throughout each phase. The manifest documents still follow every archive: **archives, then the content-addressed snapshot, then `dist.json`**. A consumer reading mid-run therefore resolves either the old manifest or the new one, and both are fully backed by bytes already in the store. [Installers](#installers) follow the manifest they name — pinned copies, then per-version copies, then the rolling copies last — under the same rule, and a run that publishes no manifest publishes no installer either.
 
 !!! note "GitLab generic packages are immutable by default"
 
@@ -379,4 +447,8 @@ export OCX_INSTALL_DIST_URL=https://art.corp.example/artifactory/ocx-dist/dist.j
 curl -fsSL https://setup.ocx.sh/sh | sh
 ```
 
-In a fully disconnected network the installer script itself is served from the same store, since `setup.ocx.sh` is unreachable — copy `install.sh` beside `dist.json` and paste its URL instead.
+In a fully disconnected network the installer script itself must be served from the same store, since `setup.ocx.sh` is unreachable — add `installers: true` under `publish:` and the run publishes it beside `dist.json`, already pointing at it:
+
+```sh
+curl -fsSL https://art.corp.example/artifactory/ocx-dist/install.sh | sh
+```

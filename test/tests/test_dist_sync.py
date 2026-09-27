@@ -240,6 +240,7 @@ def write_spec(
     retry_delays: list[int] | None = None,
     max_downloads: int | None = None,
     max_uploads: int | None = None,
+    installers: str | None = None,
 ) -> Path:
     body = [
         "kind: dist",
@@ -256,6 +257,9 @@ def write_spec(
         # Verbatim YAML — `false`, or a flow mapping such as
         # `{path: dist/latest.json, snapshots: false}`.
         body.append(f"  dist: {dist}")
+    if installers is not None:
+        # Verbatim YAML, indented under `installers:` — `true`, or block lines.
+        body.append(f"  installers: {installers}")
     if min_version:
         body += ["select:", f"  min_version: '{min_version}'"]
     if upload:
@@ -1143,3 +1147,243 @@ def test_retain_archives_true_repopulates_the_tree_when_the_store_is_already_war
     archive_puts = [path for path in upload_store.paths("PUT")[puts_before:] if path.startswith("/v0.5.8/")]
     assert archive_puts == [], "the store already holds the archives, so their PUT stays skipped"
     assert json.loads(result.stdout)["counters"]["failed"] == 0
+
+
+# ---------------------------------------------------------------------------
+# publish.installers
+# ---------------------------------------------------------------------------
+
+SHELLS = {"sh": "install.sh", "pwsh": "install.ps1", "nu": "install.nu", "fish": "install.fish", "elvish": "install.elv"}
+
+# The embedded configuration block and its guard, as `www-setup/src/install.sh`
+# spells them: single-quoted values, and an `ocx_cfg` whose pattern carries no
+# complete token, so an unreplaced placeholder falls back to the default.
+UPSTREAM_SH = """#!/bin/sh
+__ocx_cfg_dist_url='@OCX_INSTALL_DIST_URL@'
+__ocx_cfg_mirror_url='@OCX_INSTALL_MIRROR_URL@'
+__ocx_cfg_ca_bundle='@OCX_INSTALL_CA_BUNDLE@'
+__ocx_cfg_managed_config='@OCX_MANAGED_CONFIG@'
+ocx_cfg() {
+    case "$1" in
+        @OCX_*@) printf '%s' "$2" ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+printf 'dist=%s\\n' "$(ocx_cfg "$__ocx_cfg_dist_url" https://setup.ocx.sh/dist.json)"
+printf 'mirror=%s\\n' "$(ocx_cfg "$__ocx_cfg_mirror_url" "")"
+printf 'ca=%s\\n' "$(ocx_cfg "$__ocx_cfg_ca_bundle" "")"
+printf 'managed=%s\\n' "$(ocx_cfg "$__ocx_cfg_managed_config" "")"
+"""
+
+
+def publish_upstream_installers(asset_server, body: str = UPSTREAM_SH) -> str:
+    """Serve one installer per shell and return the `source:` template."""
+    directory = asset_server.dir / "installers"
+    directory.mkdir(exist_ok=True)
+    for shell in SHELLS:
+        (directory / shell).write_text(body.replace("#!/bin/sh", f"#!/bin/sh\n# {shell}"))
+    return asset_server.url("installers/{shell}")
+
+
+def installers_block(source: str, *lines: str) -> str:
+    return "\n".join(["", f"    source: '{source}'", *(f"    {line}" for line in lines)])
+
+
+def run_installer(path: Path) -> dict[str, str]:
+    result = subprocess.run(["sh", str(path)], capture_output=True, text=True, check=True)
+    values = {}
+    for line in result.stdout.split("\n"):
+        if "=" in line:
+            key, _, value = line.partition("=")
+            values[key] = value
+        elif line and values:
+            # A multi-line value (a PEM) continues the previous key.
+            last = list(values)[-1]
+            values[last] += "\n" + line
+    return values
+
+
+def test_installers_are_off_unless_asked_for(dist_mirror, asset_server, tmp_path):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    publish_upstream_installers(asset_server)
+    output = tmp_path / "public"
+    spec = write_spec(tmp_path / "dist.yml", source, output)
+
+    dist_mirror.run("dist", "sync", str(spec))
+
+    assert not any(output.rglob("install.*")), "a spec without publish.installers publishes none"
+    assert not any("/installers/" in request for request in asset_server.requests), "nor fetches any"
+
+
+def test_installers_ride_the_dist_tree_and_embed_the_matching_manifest(dist_mirror, asset_server, tmp_path):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(asset_server)
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml", source, output, installers=installers_block(installer_source)
+    )
+
+    result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
+
+    report = json.loads(result.stdout)
+    base = "https://art.corp.test/ocx-dist"
+    assert [row["shell"] for row in report["installers"]] == list(SHELLS)
+    for row in report["installers"]:
+        filename = SHELLS[row["shell"]]
+        rolling = output / filename
+        pinned = output / row["snapshot"]
+        version = output / "v0.5.8" / filename
+        assert row["path"] == filename, "the rolling copy sits at the root, beside dist.json"
+        assert row["version"] == f"v0.5.8/{filename}", "the version copy sits beside that version's archives"
+        # The pin is named by its own bytes, so the name verifies the file.
+        assert row["snapshot"] == f"install/{hashlib.sha256(pinned.read_bytes()).hexdigest()}/{filename}"
+        assert version.read_bytes() == pinned.read_bytes()
+        assert f"'{base}/dist.json'" in rolling.read_text()
+        assert f"'{base}/{report['snapshot']}'" in pinned.read_text(), "the pin embeds the manifest snapshot"
+        assert "'@OCX_INSTALL_MIRROR_URL@'" in rolling.read_text(), "the manifest is already rewritten"
+
+
+def test_a_patched_installer_resolves_every_embedded_value(dist_mirror, asset_server, tmp_path):
+    """The quoting contract end to end: a multi-line PEM survives the shell."""
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(asset_server)
+    pem = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUQ\n-----END CERTIFICATE-----"
+    (tmp_path / "corp-ca.pem").write_text(pem + "\n")
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml",
+        source,
+        output,
+        installers=installers_block(
+            installer_source,
+            "shells: [sh]",
+            "ca_bundle: {file: corp-ca.pem}",
+            "managed_config: registry.corp.test/ocx/cfg:v1",
+        ),
+    )
+
+    dist_mirror.run("dist", "sync", str(spec))
+
+    values = run_installer(output / "install.sh")
+    assert values == {
+        "dist": "https://art.corp.test/ocx-dist/dist.json",
+        "mirror": "",
+        "ca": pem,
+        "managed": "registry.corp.test/ocx/cfg:v1",
+    }
+    assert not (output / "install.ps1").exists(), "only the listed shells are published"
+
+
+def test_a_gitlab_registry_takes_every_installer_under_a_package_version(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    """Same override shape as `publish.dist.path`: GitLab has no root route."""
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(asset_server)
+    output = tmp_path / "public"
+    base = "/api/v4/projects/42/packages/generic/ocx"
+    spec = write_spec(
+        tmp_path / "dist.yml",
+        source,
+        output,
+        base_url=upload_store.url(base),
+        layout="{version}/{filename}",
+        dist="{path: dist/latest.json}",
+        installers=installers_block(installer_source, "shells: [sh]", "path: 'install/latest/{filename}'"),
+        upload=True,
+    )
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    result = dist_mirror.run("dist", "sync", str(spec), "--format", "json")
+
+    [row] = json.loads(result.stdout)["installers"]
+    puts = upload_store.paths("PUT")
+    assert puts[-1] == f"{base}/install/latest/install.sh", f"the rolling installer is published last: {puts}"
+    assert puts.index(f"{base}/dist/latest.json") < puts.index(f"{base}/{row['snapshot']}"), (
+        f"every installer follows the manifest it names: {puts}"
+    )
+    assert f"{base}/0.5.8/install.sh" in puts, f"the version copy joins the version's package: {puts}"
+
+
+def test_a_second_upload_skips_the_pinned_installer_but_republishes_the_rolling_one(
+    dist_mirror, asset_server, upload_store, tmp_path
+):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(asset_server)
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml",
+        source,
+        output,
+        base_url=upload_store.url(),
+        installers=installers_block(installer_source, "shells: [sh]"),
+        upload=True,
+    )
+    dist_mirror.env["DIST_USER"] = "ci"
+    dist_mirror.env["DIST_PASSWORD"] = "hunter2"
+
+    first = json.loads(dist_mirror.run("dist", "sync", str(spec), "--format", "json").stdout)
+    dist_mirror.run("dist", "sync", str(spec))
+
+    [row] = first["installers"]
+    puts = upload_store.paths("PUT")
+    assert puts.count(f"/{row['snapshot']}") == 1, f"an unchanged pin is written once: {puts}"
+    assert puts.count("/install.sh") == 2, f"the rolling installer is republished every run: {puts}"
+    assert puts.count("/v0.5.8/install.sh") == 2, f"a version copy is re-pointed, never HEAD-skipped: {puts}"
+
+
+def test_an_upstream_installer_without_the_placeholder_fails_before_any_archive_moves(
+    dist_mirror, asset_server, tmp_path
+):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(
+        asset_server, UPSTREAM_SH.replace("@OCX_INSTALL_CA_BUNDLE@", "@OCX_CA@")
+    )
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml",
+        source,
+        output,
+        installers=installers_block(installer_source, "ca_bundle: /etc/corp-ca.pem"),
+    )
+
+    result = dist_mirror.run("dist", "sync", str(spec), check=False)
+
+    assert result.returncode != 0
+    assert "@OCX_INSTALL_CA_BUNDLE@" in result.stderr, result.stderr
+    assert not any("/v0.5.8/" in request for request in asset_server.requests), "no archive was fetched"
+    assert not (output / "dist.json").exists()
+
+
+def test_an_installer_path_colliding_with_the_manifest_is_refused(dist_mirror, asset_server, tmp_path):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(asset_server)
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml",
+        source,
+        output,
+        dist="{path: install.sh}",
+        installers=installers_block(installer_source, "shells: [sh]"),
+    )
+
+    result = dist_mirror.run("dist", "sync", str(spec), check=False)
+
+    assert result.returncode == 65, result.stderr
+    assert "publish.dist.path" in result.stderr, result.stderr
+
+
+def test_a_dry_run_plans_the_installers_and_writes_nothing(dist_mirror, asset_server, tmp_path):
+    source = publish_upstream(asset_server, [("0.5.8", "stable")])
+    installer_source = publish_upstream_installers(asset_server)
+    output = tmp_path / "public"
+    spec = write_spec(
+        tmp_path / "dist.yml", source, output, installers=installers_block(installer_source, "shells: [sh]")
+    )
+
+    result = dist_mirror.run("dist", "sync", str(spec), "--dry-run", "--format", "json")
+
+    [row] = json.loads(result.stdout)["installers"]
+    assert row == {"shell": "sh", "path": "install.sh", "version": "v0.5.8/install.sh"}
+    assert not output.exists() or not any(output.iterdir())

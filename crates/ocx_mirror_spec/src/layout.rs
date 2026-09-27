@@ -2,8 +2,8 @@
 // Copyright 2026 The OCX Authors
 
 //! `publish.layout` — where one archive lands, below both `output:` and
-//! `publish.base_url` — and `publish.dist`, where the two manifest documents
-//! land.
+//! `publish.base_url` — `publish.dist`, where the two manifest documents
+//! land, and `publish.installers`, where the patched installers land.
 //!
 //! The same rendered path is the file written on disk *and* the tail of the
 //! `url` stamped into the mirrored manifest, so the two can never disagree
@@ -267,6 +267,165 @@ impl SnapshotTemplate {
     #[must_use]
     pub fn expand(&self, sha256_hex: &str) -> String {
         self.template.replace(Self::PLACEHOLDER, sha256_hex)
+    }
+}
+
+/// Which `publish.installers` template is being parsed — each admits a
+/// different placeholder set and requires a different one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallerTemplateKind {
+    /// `path` — the rolling copy, and `source` — the upstream URL.
+    Rolling,
+    /// `snapshots` — one copy per patched-bytes digest.
+    Snapshot,
+    /// `versions` — one copy per ocx release.
+    Version,
+}
+
+impl InstallerTemplateKind {
+    fn known(self) -> &'static str {
+        match self {
+            Self::Rolling => "{filename} and {shell}",
+            Self::Snapshot => "{filename}, {shell} and {sha256}",
+            Self::Version => "{filename}, {shell}, {version} and {tag}",
+        }
+    }
+}
+
+/// One piece of a parsed installer template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstallerSegment {
+    Literal(String),
+    Filename,
+    Shell,
+    Sha256,
+    Version,
+    Tag,
+}
+
+/// The values an installer template substitutes. A placeholder the template's
+/// kind does not admit is never read, so callers pass `""` for those.
+#[derive(Debug, Clone, Copy)]
+pub struct InstallerValues<'a> {
+    pub filename: &'a str,
+    pub shell: &'a str,
+    pub sha256: &'a str,
+    pub version: &'a str,
+    pub tag: &'a str,
+}
+
+/// A parsed `publish.installers` template (`path`, `snapshots`, `versions`,
+/// `source`).
+///
+/// Same closed-set doctrine as [`LayoutTemplate`]. Every template must name
+/// `{filename}` or `{shell}`, or the five shells would render to one path; a
+/// snapshot must name `{sha256}` and a version copy `{version}` or `{tag}`, for
+/// the reason [`SnapshotTemplate`] requires its digest.
+#[derive(Debug, Clone)]
+pub struct InstallerTemplate {
+    segments: Vec<InstallerSegment>,
+}
+
+impl InstallerTemplate {
+    /// Parse one installer template of the given kind.
+    ///
+    /// Literals are containment-checked for every kind but
+    /// [`InstallerTemplateKind::Rolling`] used as `source`, which is a URL —
+    /// the caller passes `check_containment: false` there.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::UnknownPlaceholder`] for a placeholder the kind does not
+    /// admit, [`LayoutError::MissingPlaceholder`] for a missing required one,
+    /// [`LayoutError::UnterminatedPlaceholder`], and
+    /// [`LayoutError::EscapingTemplate`] for literals that leave `output:`.
+    pub fn parse(
+        template: &str,
+        kind: InstallerTemplateKind,
+        check_containment: bool,
+    ) -> Result<InstallerTemplate, LayoutError> {
+        let mut segments = Vec::new();
+        let mut rest = template;
+
+        while let Some(open) = rest.find('{') {
+            let (literal, after_open) = (&rest[..open], &rest[open + 1..]);
+            let Some(close) = after_open.find('}') else {
+                return Err(LayoutError::UnterminatedPlaceholder {
+                    template: template.to_string(),
+                });
+            };
+            let placeholder = match (&after_open[..close], kind) {
+                ("filename", _) => InstallerSegment::Filename,
+                ("shell", _) => InstallerSegment::Shell,
+                ("sha256", InstallerTemplateKind::Snapshot) => InstallerSegment::Sha256,
+                ("version", InstallerTemplateKind::Version) => InstallerSegment::Version,
+                ("tag", InstallerTemplateKind::Version) => InstallerSegment::Tag,
+                (unknown, _) => {
+                    return Err(LayoutError::UnknownPlaceholder {
+                        name: unknown.to_string(),
+                        known: kind.known(),
+                    });
+                }
+            };
+            if !literal.is_empty() {
+                segments.push(InstallerSegment::Literal(literal.to_string()));
+            }
+            segments.push(placeholder);
+            rest = &after_open[close + 1..];
+        }
+        if !rest.is_empty() {
+            segments.push(InstallerSegment::Literal(rest.to_string()));
+        }
+
+        let names = |wanted: &[InstallerSegment]| segments.iter().any(|segment| wanted.contains(segment));
+        let missing = |name| LayoutError::MissingPlaceholder {
+            template: template.to_string(),
+            name,
+        };
+        if !names(&[InstallerSegment::Filename, InstallerSegment::Shell]) {
+            // Renders as '{filename}' or '{shell}' inside the message's braces.
+            return Err(missing("filename}' or '{shell"));
+        }
+        match kind {
+            InstallerTemplateKind::Snapshot if !names(&[InstallerSegment::Sha256]) => {
+                return Err(missing("sha256"));
+            }
+            InstallerTemplateKind::Version if !names(&[InstallerSegment::Version, InstallerSegment::Tag]) => {
+                return Err(missing("version}' or '{tag"));
+            }
+            _ => {}
+        }
+
+        if check_containment {
+            check_literals(template)?;
+        }
+        Ok(InstallerTemplate { segments })
+    }
+
+    /// Render the template.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::UnsafeValue`] when a substituted value is not a single
+    /// safe path component — `version` and `tag` come off a foreign manifest.
+    pub fn expand(&self, values: &InstallerValues<'_>) -> Result<String, LayoutError> {
+        let mut out = String::new();
+        for segment in &self.segments {
+            let (field, value) = match segment {
+                InstallerSegment::Literal(literal) => {
+                    out.push_str(literal);
+                    continue;
+                }
+                InstallerSegment::Filename => ("filename", values.filename),
+                InstallerSegment::Shell => ("shell", values.shell),
+                InstallerSegment::Sha256 => ("sha256", values.sha256),
+                InstallerSegment::Version => ("version", values.version),
+                InstallerSegment::Tag => ("tag", values.tag),
+            };
+            check_path_component(field, value)?;
+            out.push_str(value);
+        }
+        Ok(out)
     }
 }
 

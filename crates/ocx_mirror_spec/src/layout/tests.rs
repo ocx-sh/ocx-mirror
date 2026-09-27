@@ -218,3 +218,59 @@ fn the_rolling_manifest_path_is_plain_and_contained() {
         );
     }
 }
+
+// ── InstallerTemplate ───────────────────────────────────────────────────────
+
+fn installer_values() -> InstallerValues<'static> {
+    InstallerValues {
+        filename: "install.sh",
+        shell: "sh",
+        sha256: "abc123",
+        version: "0.6.3",
+        tag: "v0.6.3",
+    }
+}
+
+#[test]
+fn each_installer_kind_renders_its_own_placeholders() {
+    for (template, kind, rendered) in [
+        ("{filename}", InstallerTemplateKind::Rolling, "install.sh"),
+        (
+            "install/{sha256}/{filename}",
+            InstallerTemplateKind::Snapshot,
+            "install/abc123/install.sh",
+        ),
+        ("{tag}/{filename}", InstallerTemplateKind::Version, "v0.6.3/install.sh"),
+        ("{version}/{shell}", InstallerTemplateKind::Version, "0.6.3/sh"),
+    ] {
+        let parsed = InstallerTemplate::parse(template, kind, true).expect("the template must parse");
+        assert_eq!(parsed.expand(&installer_values()).expect("must expand"), rendered);
+    }
+}
+
+#[test]
+fn a_placeholder_outside_the_kind_is_unknown() {
+    // A rolling path has no digest and no version: naming one would render
+    // an empty segment.
+    let error = InstallerTemplate::parse("{sha256}/{filename}", InstallerTemplateKind::Rolling, true)
+        .expect_err("a rolling path has no digest");
+    assert!(matches!(error, LayoutError::UnknownPlaceholder { .. }));
+}
+
+#[test]
+fn an_installer_template_without_a_shell_placeholder_is_refused() {
+    let error = InstallerTemplate::parse("install/{sha256}", InstallerTemplateKind::Snapshot, true)
+        .expect_err("five shells onto one path");
+    assert!(error.to_string().contains("'{filename}' or '{shell}'"), "{error}");
+}
+
+#[test]
+fn a_foreign_version_that_is_not_a_path_component_is_refused() {
+    let template = InstallerTemplate::parse("{version}/{filename}", InstallerTemplateKind::Version, true)
+        .expect("the template must parse");
+    let values = InstallerValues {
+        version: "../../etc",
+        ..installer_values()
+    };
+    assert!(matches!(template.expand(&values), Err(LayoutError::UnsafeValue { .. })));
+}
