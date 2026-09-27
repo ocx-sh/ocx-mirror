@@ -119,6 +119,17 @@ exit 65. Also run the mirror's `ocx exec -- task verify` when the change is
 something the mirror consumes — the mirror builds against the submodule as it
 stands.
 
+Two ways this gate lies:
+
+- **Stale Bazel lock.** After moving `external/ocx` to a fresh ocx main, delete
+  its gitignored `Cargo.bazel.lock.json` before `task bazel:bootstrap` —
+  bootstrap repins only when the file is absent, and a stale one reds
+  `scripts:self-test` with "lockfile is out of date for crates".
+- **Unconsumed `pub` item.** A new `pub` item in `ocx_util` that only the mirror
+  uses needs an in-workspace consumer or an `OCX_UTIL_WITHOUT_CONSUMER` entry.
+  The Linux/Bazel run passes without one; ocx's macOS/Windows CI reds on
+  `every_public_item_of_ocx_util_has_a_consumer`, costing a full CI round.
+
 ## Step 3 — the single verified commit
 
 Precondition: step 2 green, submodule clean, merge-base with `origin/main` equal

@@ -1,0 +1,27 @@
+{
+  "artifact": "ocx-upstream-pr",
+  "cost_min": 0,
+  "entries": [
+    "20260924T224027Z-ddc4ac75.json"
+  ],
+  "first_seen": "2026-09-24T22:40:27Z",
+  "fixed": {
+    "at": "2026-09-27T10:33:39Z",
+    "by": "report .agents/retro/reports/2026-09-27.md P-2",
+    "stale_versions": []
+  },
+  "folded_at": "2026-09-27T10:32:01Z",
+  "folds": 1,
+  "id": "ocx-upstream-pr-stale-bazel-lock",
+  "kind": "pitfall",
+  "last_seen": "2026-09-24T22:40:27Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "low",
+  "status": "fixed",
+  "title": "ocx verify reds on a stale Cargo.bazel.lock.json after moving external/ocx; bootstrap does not repin",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}

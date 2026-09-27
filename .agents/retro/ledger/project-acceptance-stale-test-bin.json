@@ -1,0 +1,25 @@
+{
+  "artifact": "project",
+  "cost_min": 0,
+  "entries": [
+    "20260927T093920Z-0166afa9.json"
+  ],
+  "first_seen": "2026-09-27T09:39:20Z",
+  "fixed": {
+    "at": "2026-09-27T10:33:39Z",
+    "by": "report .agents/retro/reports/2026-09-27.md P-4",
+    "stale_versions": []
+  },
+  "folded_at": "2026-09-27T10:32:01Z",
+  "folds": 1,
+  "id": "project-acceptance-stale-test-bin",
+  "kind": "pitfall",
+  "last_seen": "2026-09-27T09:39:20Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "fixed",
+  "title": "documented single-test pytest command runs a stale test/bin/ocx-mirror",
+  "v": 1,
+  "versions": []
+}

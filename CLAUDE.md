@@ -122,10 +122,11 @@ and reads the same file unless `--define=ocx_mirror_provenance=release`
 provenance from `release/`; `ocx-mirror --json version` saying
 `"channel": "test"` is a test build.
 
-Single acceptance test:
+Single acceptance test (the task rebuilds and points the harness at the fresh
+binary; a bare `uv run pytest` runs whatever stale `test/bin/ocx-mirror` holds):
 
 ```sh
-cd test && uv run pytest tests/test_mirror.py::<name> -v
+cd test && task -- tests/test_mirror.py::<name> -v
 ```
 
 **Bazel loop (Linux).** `task rust:test:unit` and `task rust:verify` run

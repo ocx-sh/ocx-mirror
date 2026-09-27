@@ -1,0 +1,27 @@
+{
+  "artifact": "ocx-upstream-pr",
+  "cost_min": 0,
+  "entries": [
+    "20260924T235344Z-b02e0b33.json"
+  ],
+  "first_seen": "2026-09-24T23:53:44Z",
+  "fixed": {
+    "at": "2026-09-27T10:33:39Z",
+    "by": "report .agents/retro/reports/2026-09-27.md P-3",
+    "stale_versions": []
+  },
+  "folded_at": "2026-09-27T10:32:01Z",
+  "folds": 1,
+  "id": "ocx-upstream-pr-ocx-util-consumer-gate",
+  "kind": "pitfall",
+  "last_seen": "2026-09-24T23:53:44Z",
+  "occurrences": 1,
+  "scope": "project",
+  "severity": "medium",
+  "status": "fixed",
+  "title": "mirror-only pub item in ocx_util passes local verify, reds ocx CI's pub-item-consumer gate",
+  "v": 1,
+  "versions": [
+    "unknown"
+  ]
+}
