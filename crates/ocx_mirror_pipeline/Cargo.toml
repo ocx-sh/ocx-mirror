@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 ocx_config.workspace = true
 ocx_console.workspace = true
+ocx_env.workspace = true
 ocx_exit.workspace = true
 ocx_index.workspace = true
 ocx_mirror_error.workspace = true

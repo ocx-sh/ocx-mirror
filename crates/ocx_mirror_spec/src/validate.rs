@@ -596,13 +596,13 @@ fn is_env_variable_name(name: &str) -> bool {
 
 /// Whether `name` is one of the variables ocx's plugin dispatch scrubs.
 ///
-/// The source of truth is ocx's own list — `ocx_config::env::keys::CREDENTIAL_KEYS`
-/// (`external/ocx/crates/ocx_config/src/env.rs`), the same constant
+/// The source of truth is ocx's own list — `ocx_env::credential_keys()`
+/// (`external/ocx/crates/ocx_env/src/lib.rs`), the same list
 /// `app/plugin_dispatch.rs` removes from the child environment. Naming it
-/// rather than copying the three strings is what keeps a rename upstream from
+/// rather than copying the strings is what keeps a rename upstream from
 /// silently reopening the hole: drift there is otherwise invisible here.
 fn is_dispatch_scrubbed(name: &str) -> bool {
-    ocx_config::env::keys::CREDENTIAL_KEYS.contains(&name)
+    ocx_env::credential_keys().any(|key| key == name)
 }
 
 /// Refuse one [`Ref`] under `sign:`, naming `field` and never the value.
@@ -733,7 +733,7 @@ fn check_key(key: &KeyConfig) -> Result<(), MirrorError> {
 ///   `Ref::Literal` — those two fields accept only `env://`/`file://`.
 /// - an `env://NAME` not matching `^[A-Z_][A-Z0-9_]*$`.
 /// - an `env://NAME` naming a variable ocx's plugin dispatch scrubs
-///   (`ocx_config::env::keys::CREDENTIAL_KEYS`) — readable on a direct run,
+///   (`ocx_env::credential_keys()`) — readable on a direct run,
 ///   empty under dispatch, so the spec's meaning depends on the caller.
 /// - a `file://` whose path is empty.
 ///

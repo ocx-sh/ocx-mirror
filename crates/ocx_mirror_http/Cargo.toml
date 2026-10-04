@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 ocx_config.workspace = true
+ocx_env.workspace = true
 ocx_oci.workspace = true
 ocx_util.workspace = true
 log.workspace = true

@@ -552,7 +552,7 @@ fn an_env_ref_with_a_well_formed_variable_name_is_accepted() {
 /// `identity_token` are resolved by the mirror and fail before the first push.
 #[test]
 fn an_env_ref_naming_a_dispatch_scrubbed_variable_is_refused() {
-    for name in ocx_config::env::keys::CREDENTIAL_KEYS {
+    for name in ocx_env::credential_keys() {
         for (field, block) in [
             ("sign.key", format!("key: env://{name}\n")),
             ("sign.key.ref", format!("key:\n  ref: env://{name}\n")),

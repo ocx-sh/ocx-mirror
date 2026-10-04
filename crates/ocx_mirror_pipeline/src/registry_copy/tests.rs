@@ -140,6 +140,8 @@ fn server_error(code: u16) -> OciDistributionError {
 
 fn registry_error(code: OciErrorCode) -> OciDistributionError {
     OciDistributionError::RegistryError {
+        // The classifier reads the envelope, never the status.
+        status: 400,
         envelope: OciEnvelope {
             errors: vec![OciError {
                 code,

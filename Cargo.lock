@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_config"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "chrono",
  "dirs",
@@ -3421,6 +3421,7 @@ dependencies = [
  "futures",
  "libc",
  "log",
+ "ocx_env",
  "ocx_oci",
  "ocx_trust",
  "ocx_util",
@@ -3437,7 +3438,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_console"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "chrono",
  "clap",
@@ -3446,6 +3447,7 @@ dependencies = [
  "console",
  "indicatif",
  "log",
+ "ocx_env",
  "ocx_util",
  "rpassword",
  "serde",
@@ -3455,15 +3457,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ocx_env"
+version = "0.6.4"
+
+[[package]]
 name = "ocx_exit"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ocx_index"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3471,6 +3477,7 @@ dependencies = [
  "libc",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_exit",
  "ocx_oci",
  "ocx_store",
@@ -3495,6 +3502,7 @@ dependencies = [
  "log",
  "ocx_config",
  "ocx_console",
+ "ocx_env",
  "ocx_exit",
  "ocx_index",
  "ocx_mirror_error",
@@ -3546,6 +3554,7 @@ version = "0.6.3"
 dependencies = [
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_mirror_test_support",
  "ocx_oci",
  "ocx_util",
@@ -3571,6 +3580,7 @@ dependencies = [
  "md-5",
  "ocx_config",
  "ocx_console",
+ "ocx_env",
  "ocx_exit",
  "ocx_index",
  "ocx_mirror_error",
@@ -3645,6 +3655,7 @@ dependencies = [
  "chrono",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_exit",
  "ocx_index",
  "ocx_mirror_error",
@@ -3676,7 +3687,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_oci"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-compression",
  "async-trait",
@@ -3695,6 +3706,7 @@ dependencies = [
  "lzma-rust2",
  "oci-client",
  "ocx_console",
+ "ocx_env",
  "ocx_exit",
  "ocx_util",
  "reqwest",
@@ -3717,7 +3729,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_package"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3727,6 +3739,7 @@ dependencies = [
  "futures",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_index",
  "ocx_oci",
  "ocx_store",
@@ -3745,7 +3758,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_python"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "ocx_oci",
  "ocx_package",
@@ -3765,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_sign"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3773,6 +3786,7 @@ dependencies = [
  "clap_builder",
  "hex",
  "log",
+ "ocx_env",
  "ocx_exit",
  "ocx_oci",
  "ocx_trust",
@@ -3798,12 +3812,13 @@ dependencies = [
 
 [[package]]
 name = "ocx_store"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "dunce",
  "hex",
  "log",
  "ocx_config",
+ "ocx_env",
  "ocx_oci",
  "ocx_util",
  "serde",
@@ -3817,9 +3832,10 @@ dependencies = [
 
 [[package]]
 name = "ocx_trust"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "log",
+ "ocx_env",
  "ocx_util",
  "regex",
  "schemars 1.2.1",
@@ -3832,10 +3848,11 @@ dependencies = [
 
 [[package]]
 name = "ocx_util"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "async-trait",
  "bzip2",
+ "chrono",
  "dunce",
  "flate2",
  "fs4",

@@ -327,7 +327,7 @@ pub(crate) async fn list_upstream_versions(
         // archive sources it does apply to — so it says so instead. Named, not
         // valued: this line reaches a durable CI log.
         if let Some(source_type) = spec.source.env_type_name()
-            && ocx_util::env::var(spec::URL_REWRITE_ENV).is_some_and(|value| !value.is_empty())
+            && ocx_env::dynamic(spec::URL_REWRITE_ENV).is_some_and(|value| !value.is_empty())
         {
             log::warn!(
                 "{} does not apply to source.type '{source_type}' — point source.indexes at the proxy instead",
@@ -352,8 +352,10 @@ async fn crawl_source(spec: &MirrorSpec, spec_dir: &std::path::Path) -> Result<V
             tag_pattern,
             ..
         } => {
-            let token = ocx_util::env::var("GITHUB_TOKEN");
-            let octocrab = source::github_release::api_client(token.as_deref())?;
+            // Not declared by ocx_env (the GitHub API token is the mirror's own input), so the
+            // by-name secret read: the value never formats.
+            let token = ocx_env::dynamic_secret("GITHUB_TOKEN").filter(|token| !token.expose().is_empty());
+            let octocrab = source::github_release::api_client(token.as_ref().map(ocx_env::Sensitive::expose))?;
 
             let pattern = regex::Regex::new(tag_pattern)
                 .map_err(|e| MirrorError::SpecInvalid(vec![format!("invalid tag_pattern: {e}")]))?;
