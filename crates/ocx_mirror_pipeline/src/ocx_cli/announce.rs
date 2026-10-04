@@ -17,7 +17,7 @@ use ocx_mirror_spec::{AnnounceConfig, WriteTransport};
 
 /// The operator's own announce credential — rung 1 of `ocx`'s forge
 /// credential ladder, and the name the skip notice tells them to set.
-pub const ENV_ANNOUNCE_TOKEN: &str = ocx_config::env::keys::OCX_ANNOUNCE_TOKEN;
+pub const ENV_ANNOUNCE_TOKEN: &str = ocx_env::OCX_ANNOUNCE_TOKEN.declaration().name;
 
 /// Whether `ocx package announce` would find a credential for `config`.
 ///
@@ -34,14 +34,9 @@ pub const ENV_ANNOUNCE_TOKEN: &str = ocx_config::env::keys::OCX_ANNOUNCE_TOKEN;
 /// attempted must not red a run that published exactly what it was asked to.
 pub fn announce_credential_present(config: &AnnounceConfig) -> bool {
     let job_token = config.transport() == WriteTransport::Git
-        && non_empty("GITLAB_CI").is_some()
-        && non_empty("CI_JOB_TOKEN").is_some();
-    non_empty(ENV_ANNOUNCE_TOKEN).is_some() || job_token
-}
-
-/// An environment variable's value, or `None` when it is unset **or** empty.
-fn non_empty(key: &str) -> Option<String> {
-    ocx_util::env::var(key).filter(|value| !value.is_empty())
+        && ocx_env::GITLAB_CI.get().is_some()
+        && ocx_env::CI_JOB_TOKEN.get().is_some();
+    ocx_env::OCX_ANNOUNCE_TOKEN.get().is_some() || job_token
 }
 
 /// What the skip notice tells the operator to do about a missing credential.

@@ -54,8 +54,9 @@ pub struct CreateRequest<'a> {
 /// resolution, and `--frozen` refuses `--remote` outright. The child inherits
 /// both and applies them itself.
 pub fn resolves_tags_remotely() -> bool {
-    use ocx_config::env::keys;
-    !(ocx_util::env::flag(keys::OCX_OFFLINE, false) || ocx_util::env::flag(keys::OCX_FROZEN, false))
+    // A malformed value reads as unset here; the child `ocx` refuses it with its own error.
+    let on = |var: &'static ocx_env::EnvVar| var.bool_or(false).unwrap_or(false);
+    !(on(&ocx_env::OCX_OFFLINE) || on(&ocx_env::OCX_FROZEN))
 }
 
 impl CreateRequest<'_> {

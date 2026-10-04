@@ -93,7 +93,7 @@ fn create_argv_leads_with_remote_only_when_asked() {
 /// `OCX_FROZEN` makes `ocx` refuse `--remote` outright.
 #[tokio::test]
 async fn tags_resolve_remotely_unless_the_operator_pins_resolution_locally() {
-    use ocx_config::env::keys::{OCX_FROZEN, OCX_OFFLINE};
+    let (frozen_key, offline_key) = (ocx_env::OCX_FROZEN.name, ocx_env::OCX_OFFLINE.name);
 
     let _lock = ocx_mirror_test_support::OCX_ENV_LOCK.lock().await;
     for (offline, frozen, remote) in [
@@ -102,7 +102,7 @@ async fn tags_resolve_remotely_unless_the_operator_pins_resolution_locally() {
         (Some("1"), None, false),
         (None, Some("true"), false),
     ] {
-        let _env = ocx_mirror_test_support::EnvRestore::set(&[(OCX_OFFLINE, offline), (OCX_FROZEN, frozen)]);
+        let _env = ocx_mirror_test_support::EnvRestore::set(&[(offline_key, offline), (frozen_key, frozen)]);
         assert_eq!(
             resolves_tags_remotely(),
             remote,

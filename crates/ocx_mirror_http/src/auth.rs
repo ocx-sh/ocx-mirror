@@ -139,10 +139,12 @@ fn from_env(host: &str) -> Result<Option<Credential>, AuthError> {
     let user_env = format!("OCX_AUTH_{slug}_USER");
     let token_env = format!("OCX_AUTH_{slug}_TOKEN");
 
-    let user = ocx_util::env::var(&user_env);
-    let token = ocx_util::env::var(&token_env);
+    let user = ocx_env::OCX_AUTH_USER.get_slot(&slug);
+    let token = ocx_env::OCX_AUTH_TOKEN
+        .get_slot(&slug)
+        .map(ocx_env::Sensitive::into_inner);
 
-    let Some(declared) = ocx_util::env::var(&type_env) else {
+    let Some(declared) = ocx_env::OCX_AUTH_TYPE.get_slot(&slug) else {
         // No declared type: the pair means Basic, a lone token means Bearer.
         // Same inference as `ocx_oci::auth::get_env_auth`.
         return Ok(match (user, token) {
@@ -180,7 +182,7 @@ fn from_netrc(host: &str) -> Option<Credential> {
 
 /// `$NETRC` when set, else the conventional per-user file.
 fn netrc_path() -> Option<PathBuf> {
-    if let Some(explicit) = ocx_util::env::var("NETRC").filter(|value| !value.is_empty()) {
+    if let Some(explicit) = ocx_env::dynamic("NETRC").filter(|value| !value.is_empty()) {
         return Some(PathBuf::from(explicit));
     }
     let home = std::env::var_os("HOME")

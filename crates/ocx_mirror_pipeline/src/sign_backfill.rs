@@ -336,7 +336,7 @@ impl ItemError {
     /// The envelope for a child exit, slug and integer derived from one code.
     fn from_exit(exit: i32) -> Self {
         Self {
-            code: ErrorCategory::from_exit_code(sign_exit_code(exit)),
+            code: sign_exit_code(exit).category(),
             exit,
         }
     }

@@ -97,7 +97,7 @@ static EXTRA_ROOTS: OnceLock<ExtraRoots> = OnceLock::new();
 ///
 /// The [`TlsError`] `ocx_config` raised, verbatim; the caller classifies it.
 pub fn install_extra_roots() -> Result<(), TlsError> {
-    let env = ocx_util::env::var(ocx_config::env::keys::OCX_EXTRA_CA_CERTS);
+    let env = ocx_env::OCX_EXTRA_CA_CERTS.get();
     let roots = ocx_config::tls::resolve_extra_roots(&ocx_config::Config::default(), env.as_deref(), None)?;
     ocx_util::tls::install_sigstore_roots(roots.clone());
     // A second install is a no-op: the roots validated at startup are what
@@ -232,10 +232,8 @@ mod tests {
         ocx_mirror_test_support::install_crypto_provider();
         assert!(extra_roots().is_empty(), "nothing is installed yet");
 
-        let restore = ocx_mirror_test_support::EnvRestore::set(&[(
-            ocx_config::env::keys::OCX_EXTRA_CA_CERTS,
-            Some(TEST_ROOT_PEM),
-        )]);
+        let restore =
+            ocx_mirror_test_support::EnvRestore::set(&[(ocx_env::OCX_EXTRA_CA_CERTS.name, Some(TEST_ROOT_PEM))]);
         let installed = install_extra_roots();
         drop(restore);
         installed.expect("a well-formed PEM bundle installs");
@@ -243,7 +241,7 @@ mod tests {
 
         // The variable is unset again, so this resolves to the empty set — and
         // must neither fail nor replace what startup validated.
-        let _restore = ocx_mirror_test_support::EnvRestore::set(&[(ocx_config::env::keys::OCX_EXTRA_CA_CERTS, None)]);
+        let _restore = ocx_mirror_test_support::EnvRestore::set(&[(ocx_env::OCX_EXTRA_CA_CERTS.name, None)]);
         install_extra_roots().expect("a second install is a no-op, not an error");
         assert_eq!(
             extra_roots().len(),

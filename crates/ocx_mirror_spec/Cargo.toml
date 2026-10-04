@@ -17,6 +17,7 @@ jsonschema = ["dep:schemars", "ocx_mirror_source/jsonschema"]
 
 [dependencies]
 ocx_config.workspace = true
+ocx_env.workspace = true
 ocx_index.workspace = true
 ocx_mirror_error.workspace = true
 ocx_mirror_http.workspace = true

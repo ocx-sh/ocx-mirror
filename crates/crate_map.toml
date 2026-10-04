@@ -24,6 +24,7 @@ ocx_mirror_test_support = []
 allowed = [
     "ocx_config",
     "ocx_console",
+    "ocx_env",
     "ocx_exit",
     "ocx_index",
     "ocx_oci",
