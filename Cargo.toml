@@ -57,6 +57,7 @@ publish = false
 # `src/tracing_init.rs` (a verbatim copy) and `ocx_mirror_error::tls_exit_code`.
 ocx_config = { path = "external/ocx/crates/ocx_config" }
 ocx_console = { path = "external/ocx/crates/ocx_console" }
+ocx_env = { path = "external/ocx/crates/ocx_env" }
 ocx_exit = { path = "external/ocx/crates/ocx_exit" }
 ocx_index = { path = "external/ocx/crates/ocx_index" }
 ocx_oci = { path = "external/ocx/crates/ocx_oci" }
@@ -215,6 +216,7 @@ vergen-gix.workspace = true
 [dependencies]
 ocx_config.workspace = true
 ocx_console.workspace = true
+ocx_env.workspace = true
 ocx_exit.workspace = true
 ocx_index.workspace = true
 ocx_oci.workspace = true

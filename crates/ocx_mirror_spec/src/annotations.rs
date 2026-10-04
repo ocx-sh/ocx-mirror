@@ -79,10 +79,10 @@ const GITHUB: &str = "github";
 /// the two markers `ocx`'s own detection reads, under the spelling its flag
 /// accepts.
 fn ci_provider() -> Option<&'static str> {
-    if ocx_util::env::var("GITHUB_ACTIONS").as_deref() == Some("true") {
+    if ocx_env::GITHUB_ACTIONS.get().as_deref() == Some("true") {
         return Some(GITHUB);
     }
-    if ocx_util::env::var("GITLAB_CI").as_deref() == Some("true") {
+    if ocx_env::GITLAB_CI.get().as_deref() == Some("true") {
         return Some("gitlab");
     }
     None

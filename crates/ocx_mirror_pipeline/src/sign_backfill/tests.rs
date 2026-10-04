@@ -65,7 +65,7 @@ fn item(tag: &str, platform: Option<&str>, status: ItemStatus) -> ItemReport {
 fn failed_item(tag: &str, exit: i32) -> ItemReport {
     let mut row = item(tag, None, ItemStatus::Failed);
     row.error = Some(ItemError {
-        code: ErrorCategory::from_exit_code(ocx_mirror_error::sign_exit_code(exit)),
+        code: ocx_mirror_error::sign_exit_code(exit).category(),
         exit,
     });
     row

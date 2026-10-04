@@ -120,7 +120,7 @@ impl UrlRewrite {
     /// [`apply`](Self::apply) is reached through, so normalising here covers
     /// the spec form and the environment form in one place.
     pub fn resolve(spec: Option<&Self>) -> Result<Option<Self>, MirrorError> {
-        let Some(raw) = ocx_util::env::var(URL_REWRITE_ENV).filter(|value| !value.is_empty()) else {
+        let Some(raw) = ocx_env::dynamic(URL_REWRITE_ENV).filter(|value| !value.is_empty()) else {
             return Ok(spec.cloned().map(Self::normalized));
         };
 
