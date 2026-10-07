@@ -7,11 +7,11 @@ use ocx_exit::ExitCode;
 // ── closing verdict ───────────────────────────────────────────────────
 
 fn sweep_failure() -> MirrorError {
-    // 83 — Rekor unreachable: the retryable one, and the code that must
+    // 75 — Rekor unreachable: the retryable one, and the code that must
     // survive the aggregation below it.
     MirrorError::SignFailed {
         target: "ghcr.io/example/mirror".to_string(),
-        code: 83,
+        code: 75,
     }
 }
 
@@ -28,7 +28,7 @@ fn a_sweep_failure_wins_the_exit_code_over_the_aggregation() {
     let (_, verdict) = closing_verdict(Err(sweep_failure()), vec![announce_failure()]);
 
     let error = verdict.expect_err("the sweep failed");
-    assert_eq!(error.kind_exit_code(), ExitCode::TransparencyLogUnavailable, "{error}");
+    assert_eq!(error.kind_exit_code(), ExitCode::TempFail, "{error}");
 }
 
 /// …and the failures it outranks are still reported. `patch` writes no

@@ -991,8 +991,8 @@ async fn run_announce(
 ///
 /// # Errors
 /// [`MirrorError::SignFailed`] carrying the child's own exit code, so a Rekor
-/// outage (83) stays distinguishable from a missing identity (78) and from a
-/// registry without a Referrers API (84).
+/// outage (75) stays distinguishable from a missing identity (78) and from a
+/// registry without a Referrers API (82).
 async fn sign_run_indexes(
     sign: Option<&ResolvedSign>,
     spec: &MirrorSpec,

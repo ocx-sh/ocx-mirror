@@ -485,15 +485,23 @@ fn a_row_carries_its_targets_tag_platform_and_subject() {
 // ── C-069 · the worst classified failure ────────────────────────────────────
 
 /// The pinned case: a run that hit both a transparency-log outage and a data
-/// error exits **83**.
+/// error exits **75**.
 ///
-/// 83 tells CI "run me again"; 65 tells CI "a human must read the report".
-/// When both happened, 83 is the answer that gets the remaining work done —
+/// 75 tells CI "run me again"; 65 tells CI "a human must read the report".
+/// When both happened, 75 is the answer that gets the remaining work done —
 /// and the 65 rows are still in `items`.
 #[test]
 fn a_transparency_log_outage_outranks_a_data_error() {
-    assert_eq!(worst_exit(&[65, 83]), ExitCode::TransparencyLogUnavailable);
-    assert_eq!(worst_exit(&[83, 65]), ExitCode::TransparencyLogUnavailable);
+    assert_eq!(worst_exit(&[65, 75]), ExitCode::TempFail);
+    assert_eq!(worst_exit(&[75, 65]), ExitCode::TempFail);
+}
+
+/// 82 is a registry or build that cannot carry signatures: a human decision,
+/// but one the report names, so it outranks a data error's "read the report".
+#[test]
+fn an_unsupported_capability_outranks_a_data_error() {
+    assert_eq!(worst_exit(&[65, 82]), ExitCode::Unsupported);
+    assert_eq!(worst_exit(&[82, 65]), ExitCode::Unsupported);
 }
 
 /// PKG-28: retries-exhausted-on-transient and hard not-found never collapse
@@ -552,7 +560,7 @@ fn a_mixed_run_is_partial_failure() {
         items: vec![
             item("3.28.1", None, ItemStatus::Succeeded),
             item("3.28.0", None, ItemStatus::Succeeded),
-            failed_item("3.27.9", 83),
+            failed_item("3.27.9", 75),
             item("3.26.0", None, ItemStatus::Skipped),
             item("3.25.0", None, ItemStatus::Skipped),
             item("3.24.0", None, ItemStatus::Skipped),
@@ -565,8 +573,8 @@ fn a_mixed_run_is_partial_failure() {
     assert_eq!(summary.succeeded, 2);
     assert_eq!(summary.failed, 1);
     assert_eq!(summary.skipped, 3);
-    assert_eq!(summary.exit_code, ExitCode::TransparencyLogUnavailable as u8);
-    assert_eq!(report.exit_code(), ExitCode::TransparencyLogUnavailable);
+    assert_eq!(summary.exit_code, ExitCode::TempFail as u8);
+    assert_eq!(report.exit_code(), ExitCode::TempFail);
 }
 
 /// Nothing succeeded: `failure`, not `partial_failure`. The two call for
@@ -619,7 +627,7 @@ fn the_envelope_carries_summary_and_items() {
         items: vec![
             item("3.28.1", None, ItemStatus::Succeeded),
             skipped,
-            failed_item("3.27.9", 83),
+            failed_item("3.27.9", 75),
         ],
     };
 
@@ -627,7 +635,7 @@ fn the_envelope_carries_summary_and_items() {
 
     assert!(value.is_object(), "the envelope is an object, never a bare array");
     assert_eq!(value["summary"]["status"], "partial_failure");
-    assert_eq!(value["summary"]["exit_code"], 83);
+    assert_eq!(value["summary"]["exit_code"], 75);
     assert_eq!(value["items"][0]["status"], "succeeded");
     // `null`, not absent: a script must tell "the index itself" from a field
     // that happened not to be emitted.
@@ -637,8 +645,8 @@ fn the_envelope_carries_summary_and_items() {
     assert_eq!(value["items"][1]["discovery"], "referrers_api");
     assert_eq!(value["items"][1]["platform"], "linux/amd64");
     assert_eq!(value["items"][2]["status"], "failed");
-    assert_eq!(value["items"][2]["error"]["code"], "transparency_log_unavailable");
-    assert_eq!(value["items"][2]["error"]["exit"], 83);
+    assert_eq!(value["items"][2]["error"]["code"], "temp_fail");
+    assert_eq!(value["items"][2]["error"]["exit"], 75);
 }
 
 /// The slug is `ocx`'s own frozen `error.kind` vocabulary, so a backfill row
