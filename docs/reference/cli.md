@@ -358,7 +358,7 @@ Five rules make the narrowing unambiguous:
 ```json
 {
   "summary": { "status": "partial_failure", "total": 42, "succeeded": 39,
-               "failed": 2, "skipped": 1, "exit_code": 83 },
+               "failed": 2, "skipped": 1, "exit_code": 75 },
   "items": [
     { "tag": "3.28.1", "platform": null, "status": "succeeded",
       "subject": "sha256:…" },
@@ -367,7 +367,7 @@ Five rules make the narrowing unambiguous:
       "reason": "already_signed" },
     { "tag": "3.27.9", "platform": "linux/arm64", "status": "failed",
       "subject": "sha256:…",
-      "error": { "code": "transparency_log_unavailable", "exit": 83 } }
+      "error": { "code": "temp_fail", "exit": 75 } }
   ]
 }
 ```
@@ -443,7 +443,7 @@ Full field reference — [`dist.yml`][ref-dist-yml].
 
 ## Exit codes {#exit-codes}
 
-Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
+Codes align with BSD `sysexits.h`, shared with the `ocx` CLI. A code names the caller's next action; `ocx` retired 83–87, and a signing child's `error.detail` slug (`referrers_unsupported`, `unsupported_key_backend`, `transparency_log_unavailable`) says which feature failed.
 
 | Code | Meaning | Raised by |
 |------|---------|-----------|
@@ -453,14 +453,13 @@ Codes align with BSD `sysexits.h`, shared with the `ocx` CLI.
 | 65 | Data error: spec validation failed, renderer drift (`--check`) — including a generated workflow left behind by a spec dropped from `--spec` — JUnit/plan/run-summary malformed, cascade findings remain; for `registry sync`, `registry.yml` validation failed (bad `target`/`destination`/`as:`/glob syntax, duplicate `as:`, a missing `{registry}` placeholder with more than one source, an expanded destination that fails the OCI grammar or collides with another package) or a source declared an index `format_version` newer than this build supports; for `dist sync`, `dist.yml` validation failed (empty `output`, a plaintext or userinfo-bearing `source`/`publish.base_url`, an unknown `publish.layout` placeholder, an invalid `publish.installers` template, a site value carrying a single quote, an installer path colliding with another path, an `Authorization` entry in `upload.headers`) or the upstream manifest declared a `schema` newer than this build supports; for every command, the startup CA gate — `OCX_EXTRA_CA_CERTS` names a file that is not a certificate bundle | all |
 | 69 | Upstream source or target registry unreachable; Discord 5xx / timeout; for `registry sync`, a source's index tree could not be fetched (unreachable, an unparseable or hostless base URL, or a host refused by the SSRF floor), a root's `repository` pointer was unparseable or SSRF-refused, or the destination registry answered a blob-presence probe without a definite yes or no, aborting the whole run; for `dist sync`, the upstream `dist.json` could not be fetched or parsed, or its body exceeded the 8 MiB cap, or an upstream installer or a `publish.installers` site value could not be fetched or read | `sync`, `check`, `plan`, `push`, `notify`, `pipeline patch`, `pipeline sign`, `registry sync`, `dist sync` |
 | 74 | I/O error: template render or file write failure; for `registry sync`, a local write into the served index tree failed (root document, `c/index.json`, `config.json`, a dispatch object, a README/logo object or its removal, or `--repair-catalog`); for `dist sync`, a write into `output:` failed (an archive, `dist.json`, or a snapshot); for every command, the startup CA gate — `OCX_EXTRA_CA_CERTS` names an unreadable file | `pipeline generate ci`, `push`, `registry sync`, `dist sync`; the CA gate: all |
-| 75 | Transient failure, retried automatically with capped, jittered backoff and surfaced only once retries are exhausted — either a plain registry push retry (see [`pipeline push`](#pipeline-push)) or a signing child's (`ocx package push --sign` / `ocx package sign`) transient failure | `sync`, `push`, `pipeline patch`, `pipeline sign` |
-| 77 | Discord 401/403 — webhook secret likely rotated; also a signing offline-refusal (`--offline`), carried through unchanged from the `ocx` child | `pipeline notify`, `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 75 | Transient failure, retried automatically with capped, jittered backoff and surfaced only once retries are exhausted — either a plain registry push retry (see [`pipeline push`](#pipeline-push)) or a signing child's (`ocx package push --sign` / `ocx package sign`) transient failure, a transparency-log (Rekor) outage included — carried through unchanged from the `ocx` child's own classified exit | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 77 | Discord 401/403 — webhook secret likely rotated; also a permission refusal during signing, carried through unchanged from the `ocx` child | `pipeline notify`, `sync`, `push`, `pipeline patch`, `pipeline sign` |
 | 78 | Config error during signing — carried through unchanged from the `ocx` child's own classified exit; for every command, the startup CA gate — `OCX_EXTRA_CA_CERTS` holds inline text that is not a certificate bundle | `sync`, `push`, `pipeline patch`, `pipeline sign`; the CA gate: all |
 | 79 | Spec file not found | all |
 | 80 | Authentication failure during signing — carried through unchanged from the `ocx` child's own classified exit | `sync`, `push`, `pipeline patch`, `pipeline sign` |
-| 83 | Transparency log (Rekor) unavailable during signing — retried automatically, same code once retries are exhausted; carried through unchanged from the `ocx` child's own classified exit | `sync`, `push`, `pipeline patch`, `pipeline sign` |
-| 84 | Referrers unsupported at the destination and the fallback index was refused during signing — carried through unchanged from the `ocx` child | `sync`, `push`, `pipeline patch`, `pipeline sign` |
-| 85 | KMS key backend not implemented — a `sign.key` reference used one of the five KMS schemes (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`), none of which ocx 0.6.0 implements; carried through unchanged from the `ocx` child | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 81 | Policy block during signing — a signing offline-refusal (`--offline`) or another local safeguard, carried through unchanged from the `ocx` child; loosen the flag or pass `--force` where `ocx` offers it | `sync`, `push`, `pipeline patch`, `pipeline sign` |
+| 82 | Unsupported during signing — the destination has no Referrers API and the fallback index was refused, or a `sign.key` reference used one of the five KMS schemes (`awskms://`, `gcpkms://`, `azurekms://`, `hashivault://`, `k8s://`) that `ocx` does not implement; never retried, carried through unchanged from the `ocx` child | `sync`, `push`, `pipeline patch`, `pipeline sign` |
 
 <!-- external -->
 [discord]: https://discord.com/developers/docs/resources/webhook
