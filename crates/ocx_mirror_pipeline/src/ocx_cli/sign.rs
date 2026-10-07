@@ -483,8 +483,8 @@ pub(crate) async fn invoke_sign_sweep(
 ///
 /// # Errors
 /// [`MirrorError::SignFailed`] carrying the child's own exit code, so a Rekor
-/// outage (83) stays distinguishable from a missing identity (78) and from a
-/// registry without a Referrers API (84).
+/// outage (75) stays distinguishable from a missing identity (78) and from a
+/// registry without a Referrers API (82).
 pub async fn sweep_index_tags(
     sign: Option<&ResolvedSign>,
     tags: &[String],

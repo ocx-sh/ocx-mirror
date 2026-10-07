@@ -82,22 +82,19 @@ fn only_a_temporary_fault_is_worth_retrying() {
         push_exit_is_transient(Some(ExitCode::TempFail as i32)),
         "75 is the temporary fault that may clear",
     );
-    // C-057: 83 joined the set with `--sign`. A push that landed and then
-    // could not reach Rekor is the same "try again" class as a registry
-    // timeout — and without this the whole version is thrown away over a
-    // transparency log that was briefly down.
-    assert!(
-        push_exit_is_transient(Some(ExitCode::TransparencyLogUnavailable as i32)),
-        "83 is a Rekor outage, which a retry can clear",
-    );
-    // The two neighbours are deliberately NOT in the set: 84 is a registry
-    // with no Referrers API and 85 a key backend this binary was not built
-    // with. Both are permanent facts, and retrying either only slows the
-    // failure down.
-    for permanent in [ExitCode::ReferrersUnsupported, ExitCode::UnsupportedKeyBackend] {
+    // C-057: a push that landed and then could not reach Rekor answers 75 as
+    // well, so the one assertion above covers the transparency log too —
+    // without it the whole version is thrown away over a log that was
+    // briefly down.
+    //
+    // 82 is deliberately NOT in the set: a registry with no Referrers API or
+    // a key backend this binary was not built with is a permanent fact, and
+    // retrying it only slows the failure down. 81 is a local policy refusal,
+    // equally deterministic.
+    for permanent in [ExitCode::Unsupported, ExitCode::PolicyBlocked] {
         assert!(
             !push_exit_is_transient(Some(permanent as i32)),
-            "{permanent:?} is a permanent fact about the destination or the binary",
+            "{permanent:?} is a permanent fact about the destination, the binary or the policy",
         );
     }
 

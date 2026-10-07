@@ -152,8 +152,8 @@ The download-free paths (`pipeline plan`'s drift check, `pipeline patch`) cannot
 ### Phase 2: Push (sequential by version, oldest first)
 
 1. Push bundle to registry, each attempt bounded by a 3600s timeout; a
-   transient failure (`ocx package push` exit 75, or exit 83 once `sign:` is
-   set — a transparency-log outage; exit 69 is never retried, since a rerun
+   transient failure (`ocx package push` exit 75, a transparency-log outage
+   under `sign:` included; exit 69 and 82 are never retried, since a rerun
    would not change that outcome) is retried up to `concurrency.max_retries`
    extra attempts with 1s-doubling-to-30s-capped backoff plus ±10% jitter
 2. Cascade derived tags if enabled (X.Y.Z → X.Y → X → latest)
@@ -179,9 +179,11 @@ lands, the closing sign sweep signs each index once its tag is written, and
 the legacy in-process leg signs per reference (platform, then tag) with no
 sweep of its own.
 
-The 75/69 split above only exists from **ocx ≥ 0.5.3** onward, and the 83
-arm only from the ocx release carrying `push --fulcio-url`/`--rekor-url` —
-the floor is 0.6.3 (the submodule pins the v0.6.3 release tag) — the `ocx`
+The 75/69 split above only exists from **ocx ≥ 0.5.3** onward, and the
+Rekor-outage-as-75 arm only from the ocx release carrying the exit-code collapse
+(83–87 retired, 82 is `Unsupported`; `adr_exit_code_taxonomy.md` in
+`ocx-sh/ocx`) — an older `ocx` exits 83 for that outage, which this build no
+longer retries; the floor is whatever release the submodule pointer names — the `ocx`
 binary that actually runs the push subprocess, i.e. whatever `ocx.toml` /
 `ocx.lock` toolchain the running `ocx-mirror` is co-located with, not the
 separately-pinned `ocx` version a *generated* downstream workflow bakes into

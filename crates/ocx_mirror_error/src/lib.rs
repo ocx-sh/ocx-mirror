@@ -97,8 +97,9 @@ pub enum MirrorError {
     ///
     /// Carries the child's own exit code rather than a message so
     /// [`Self::kind_exit_code`] can hand it straight back (C-056): the sign
-    /// taxonomy is `ocx`'s, and collapsing 83 (Rekor down, retryable) onto 85
-    /// (key backend not built) would tell an operator to fix the wrong thing.
+    /// taxonomy is `ocx`'s, and collapsing 75 (transient, retryable) onto 82
+    /// (unsupported by the registry, forge or build) would tell an operator to
+    /// fix the wrong thing.
     /// `target` names the reference — never a secret, which by construction
     /// never reaches an argv word or a message.
     SignFailed { target: String, code: i32 },
@@ -182,10 +183,7 @@ pub fn sign_exit_code(code: i32) -> ExitCode {
         c if c == ExitCode::NotFound as i32 => ExitCode::NotFound,
         c if c == ExitCode::AuthError as i32 => ExitCode::AuthError,
         c if c == ExitCode::PolicyBlocked as i32 => ExitCode::PolicyBlocked,
-        c if c == ExitCode::DirtyRcBlock as i32 => ExitCode::DirtyRcBlock,
-        c if c == ExitCode::TransparencyLogUnavailable as i32 => ExitCode::TransparencyLogUnavailable,
-        c if c == ExitCode::ReferrersUnsupported as i32 => ExitCode::ReferrersUnsupported,
-        c if c == ExitCode::UnsupportedKeyBackend as i32 => ExitCode::UnsupportedKeyBackend,
+        c if c == ExitCode::Unsupported as i32 => ExitCode::Unsupported,
         _ => ExitCode::Failure,
     }
 }
@@ -437,15 +435,17 @@ mod tests {
     #[test]
     fn a_failed_sign_carries_the_child_exit_code() {
         let cases = [
-            (83, ExitCode::TransparencyLogUnavailable),
-            (84, ExitCode::ReferrersUnsupported),
-            (85, ExitCode::UnsupportedKeyBackend),
+            (82, ExitCode::Unsupported),
+            (81, ExitCode::PolicyBlocked),
             (80, ExitCode::AuthError),
             (77, ExitCode::PermissionDenied),
             (78, ExitCode::ConfigError),
             (75, ExitCode::TempFail),
             (65, ExitCode::DataError),
             (64, ExitCode::UsageError),
+            // 83-87 are retired for good (`ocx_exit::RETIRED`): an `ocx` that
+            // still answers one is older than this build and reads as 1.
+            (83, ExitCode::Failure),
             // Unrecognised — including a code a newer `ocx` may allocate —
             // degrades to 1 rather than to a wrong meaning.
             (0xFF, ExitCode::Failure),
@@ -468,11 +468,11 @@ mod tests {
     fn a_failed_sign_names_the_reference_and_the_code() {
         let rendered = MirrorError::SignFailed {
             target: "ghcr.io/ocx-sh/shfmt:3.8.0".into(),
-            code: 83,
+            code: 75,
         }
         .to_string();
         assert!(rendered.contains("ghcr.io/ocx-sh/shfmt:3.8.0"), "got: {rendered}");
-        assert!(rendered.contains("83"), "got: {rendered}");
+        assert!(rendered.contains("75"), "got: {rendered}");
     }
 
     /// C-054/C-055: the message names the field and the variable, and 78 sends

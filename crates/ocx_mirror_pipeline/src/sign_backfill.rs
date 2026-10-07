@@ -208,11 +208,11 @@ fn matching_candidate<'a>(candidates: &'a [SignatureCandidate], filter: &SignFil
 /// [`MirrorError::SignFailed`] and out.
 ///
 /// "Worst" is ordered by what the operator does next, most-actionable first,
-/// because that is the only ordering a CI job can act on. A run that exits 83
+/// because that is the only ordering a CI job can act on. A run that exits 75
 /// says "the transparency log was down, run me again"; one that exits 65 says
-/// "a human must read the report". When both happened, 83 is the answer that
+/// "a human must read the report". When both happened, 75 is the answer that
 /// gets the remaining work done — and the 65 rows are still in `items`. This
-/// is what C-069's "83 + 65 → 83" pins.
+/// is what C-069's "75 + 65 → 75" pins.
 fn worst_exit(codes: &[i32]) -> ExitCode {
     codes
         .iter()
@@ -225,23 +225,19 @@ fn worst_exit(codes: &[i32]) -> ExitCode {
 fn severity_rank(code: ExitCode) -> u8 {
     match code {
         // Re-run and it may well pass.
-        ExitCode::TempFail | ExitCode::TransparencyLogUnavailable => 0,
+        ExitCode::TempFail => 0,
         // A credential to refresh.
         ExitCode::AuthError | ExitCode::PermissionDenied => 1,
-        // A spec or a key backend to change.
-        ExitCode::ConfigError | ExitCode::UnsupportedKeyBackend => 2,
-        // A registry that cannot carry signatures at all.
-        ExitCode::ReferrersUnsupported => 3,
+        // A spec to change.
+        ExitCode::ConfigError => 2,
+        // A registry or build that cannot carry signatures at all.
+        ExitCode::Unsupported => 3,
         // The registry answered, and the answer was no.
         ExitCode::Unavailable | ExitCode::NotFound => 4,
         // A human must read the report.
         ExitCode::UsageError | ExitCode::DataError => 5,
         // Everything a failed child can otherwise produce.
-        ExitCode::Success
-        | ExitCode::Failure
-        | ExitCode::IoError
-        | ExitCode::PolicyBlocked
-        | ExitCode::DirtyRcBlock => 6,
+        ExitCode::Success | ExitCode::Failure | ExitCode::IoError | ExitCode::PolicyBlocked => 6,
         // `ExitCode` is `#[non_exhaustive]`: a code a newer `ocx_exit` adds
         // ranks last rather than failing this build, the same direction
         // `sign_exit_code` already degrades in.
@@ -712,8 +708,8 @@ impl Backfill<'_> {
     /// One `ocx package sign`, retried on a transient child exit (C-069).
     ///
     /// The same ladder and the same transient set as the push leg, reused
-    /// rather than restated: 75 is a retryable transient and 83 is a
-    /// transparency-log outage, and both are answered by waiting.
+    /// rather than restated: 75 is the retryable transient, a
+    /// transparency-log outage included, answered by waiting.
     async fn invoke_with_retry(&self, image: &native::Reference, target: &SignTarget) -> Result<(), i32> {
         let platform = target.platform.as_ref().map(ToString::to_string);
         let reference = image.whole();

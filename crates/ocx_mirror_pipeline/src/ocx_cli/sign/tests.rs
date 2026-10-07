@@ -607,7 +607,7 @@ fn stub_ocx(dir: &Path, body: &str) -> PathBuf {
 /// The child's exit code reaches [`MirrorError::SignFailed`] intact, and its
 /// stderr is not swallowed.
 ///
-/// 83 is the case with teeth: `ocx` uses it for a Rekor outage, and it is the
+/// 75 is the case with teeth: `ocx` uses it for a Rekor outage, and it is the
 /// one sign failure the push ladder retries. Collapsed to 1 here, the retry
 /// never happens and the operator is told the tool failed.
 #[cfg(unix)]
@@ -615,7 +615,7 @@ fn stub_ocx(dir: &Path, body: &str) -> PathBuf {
 fn a_failing_sign_child_carries_its_exit_code() {
     let _env_lock = ocx_mirror_test_support::ocx_env_lock();
     let dir = tempfile::tempdir().expect("tempdir");
-    let script = stub_ocx(dir.path(), "echo 'rekor unavailable' >&2\nexit 83");
+    let script = stub_ocx(dir.path(), "echo 'rekor unavailable' >&2\nexit 75");
     // SAFETY: test-only env var, serialized by `ocx_env_lock()`.
     unsafe { std::env::set_var("OCX_BINARY_PIN", &script) };
 
@@ -623,7 +623,7 @@ fn a_failing_sign_child_carries_its_exit_code() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let error = rt
         .block_on(invoke_sign_reference(&resolved, "ghcr.io/ocx-sh/shfmt:3.8.0", None))
-        .expect_err("exit 83 is a failed signature");
+        .expect_err("exit 75 is a failed signature");
 
     // SAFETY: same lock, same variable — see the set above.
     unsafe { std::env::remove_var("OCX_BINARY_PIN") };
@@ -631,9 +631,9 @@ fn a_failing_sign_child_carries_its_exit_code() {
     let MirrorError::SignFailed { target, code } = &error else {
         panic!("expected SignFailed, got {error:?}");
     };
-    assert_eq!(*code, 83);
+    assert_eq!(*code, 75);
     assert_eq!(target, "ghcr.io/ocx-sh/shfmt:3.8.0");
-    assert_eq!(error.kind_exit_code(), ExitCode::TransparencyLogUnavailable);
+    assert_eq!(error.kind_exit_code(), ExitCode::TempFail);
 }
 
 /// A hung sign is killed, not orphaned.

@@ -35,7 +35,7 @@
 //! - [`MirrorError::TargetError`] (exit 69) from the fail-safe registry reads.
 //! - [`MirrorError::ExecutionFailed`] when a re-push or the closing announce
 //!   fails.
-//! - [`MirrorError::SignFailed`] (83/84/85/…) when the closing index sweep
+//! - [`MirrorError::SignFailed`] (75/82/…) when the closing index sweep
 //!   could not sign an index this run re-emitted.
 
 use std::collections::{BTreeMap, HashSet};
@@ -295,7 +295,7 @@ impl Patch {
 ///
 /// The sweep's exit code wins over the aggregation, exactly as `pipeline push`
 /// orders it: an index this run could not sign is a failure whose code the
-/// operator acts on (83 Rekor, 84 no Referrers API, 85 …), and flattening it
+/// operator acts on (75 Rekor down, 82 no Referrers API …), and flattening it
 /// into `ExecutionFailed` (1) would lose that.
 ///
 /// What does *not* carry over from `push` is dropping `failures` on that path.

@@ -145,14 +145,13 @@ pub struct PushAttemptError {
 /// it is run again (registry connect failure, timeout, rate limit), and 69
 /// means rerunning will not change the outcome.
 ///
-/// 83 joins it once `--sign` is on the argv (C-057): a push that landed and
-/// then could not reach Rekor exits 83, and Rekor being briefly unavailable is
-/// the same "try again" class as a registry timeout. It is deliberately narrow
-/// — 84 (registry has no Referrers API) and 85 (key backend not built) are
-/// permanent facts about the destination and the binary, and retrying either
-/// buys nothing.
+/// 75 is the whole set, `--sign` included (C-057): a push that landed and then
+/// could not reach Rekor exits 75 too, the same "try again" class as a registry
+/// timeout. It is deliberately narrow — 82 (a registry with no Referrers API, a
+/// key backend not built) is a permanent fact about the destination and the
+/// binary, and retrying it buys nothing.
 ///
-/// A registry denial never reaches either code — 403 is 80 (auth), which is
+/// A registry denial never reaches 75 — 403 is 80 (auth), which is
 /// deterministic and not retried. `None` (signal-killed) is not retried either:
 /// the signal came from outside, and the runner that sent it is usually about
 /// to send another.
@@ -164,11 +163,7 @@ pub struct PushAttemptError {
 /// missing verb, 65 is the ordinary data-error code here and a version guess
 /// would misdirect a genuine bad-metadata run. The floor is documented instead.
 pub(crate) fn push_exit_is_transient(code: Option<i32>) -> bool {
-    matches!(
-        code,
-        Some(code)
-            if code == ExitCode::TempFail as i32 || code == ExitCode::TransparencyLogUnavailable as i32
-    )
+    code == Some(ExitCode::TempFail as i32)
 }
 
 /// Delay before attempt `attempt + 1`, doubling from
@@ -260,7 +255,7 @@ pub async fn push_once(
 }
 
 /// Run one push argv to a verdict: attempt it, and retry a transient failure
-/// (`ocx package push` exit 75 or 83, per [`push_exit_is_transient`]) up to
+/// (`ocx package push` exit 75, per [`push_exit_is_transient`]) up to
 /// `budget` further times with [`push_retry_delay`] between attempts.
 ///
 /// Shared by both publish paths — the archive leg via [`invoke_push`], the env

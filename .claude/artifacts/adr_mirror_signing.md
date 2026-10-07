@@ -22,6 +22,7 @@ Format: MADR. Six numbered decisions (D1…D6), each with its own option table.
 **Domain Tags:** pipeline | spec | push | ci | security | docs
 **Supersedes:** `adr_registry_mirror_sync.md` Open question 3 (v1 "detect referrers, refuse to copy") — the deferral rationale ("signing is in active development in ocx and not ready") expired when ocx 0.6.0 shipped the engine.
 **Superseded By:** N/A
+**Amended By:** ocx's `adr_exit_code_taxonomy.md` (ocx-sh/ocx#580, tracked as ocx-sh/ocx#583): ocx retired exit codes 83-87 and made 82 `Unsupported`. D2's exit-code table below is historical: the Rekor outage (83) is now 75 and is the whole of the push retry set, referrers-unsupported (84) and the KMS backend (85) are 82, and the offline refusal (77) is 81.
 
 ---
 
