@@ -35,6 +35,26 @@ use ocx_mirror_spec::LockOptions;
 /// package; a healthy pull finishes in seconds.
 const INTERPRETER_PULL_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// The part of `ocx --format json package pull` this reads: each requested
+/// identifier mapped to its package root. The machine-interface contract wraps
+/// the map in `{schema_version, paths}`; releases before it print the bare map.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum PullReport {
+    Wrapped {
+        paths: std::collections::HashMap<String, PathBuf>,
+    },
+    Bare(std::collections::HashMap<String, PathBuf>),
+}
+
+impl PullReport {
+    fn into_paths(self) -> std::collections::HashMap<String, PathBuf> {
+        match self {
+            Self::Wrapped { paths } | Self::Bare(paths) => paths,
+        }
+    }
+}
+
 /// Shells `ocx --format json package pull <interpreter_package>` and probes
 /// the materialized package root for a `bin/python3` executable at any depth
 /// (`<root>/content/**/bin/python3`) — the concrete interpreter path `uv`
@@ -70,13 +90,14 @@ pub async fn materialize_interpreter(interpreter_package: &str) -> Result<PathBu
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let roots: std::collections::HashMap<String, PathBuf> = serde_json::from_str(stdout.trim()).map_err(|e| {
+    let report: PullReport = serde_json::from_str(stdout.trim()).map_err(|e| {
         format!(
             "failed to parse ocx package pull JSON output: {e}\nstdout: {}",
             stdout.trim()
         )
     })?;
-    let root = roots
+    let root = report
+        .into_paths()
         .get(interpreter_package)
         .ok_or_else(|| format!("ocx package pull output missing entry for '{interpreter_package}'"))?
         .clone();
@@ -515,6 +536,36 @@ mod tests {
         write_executable_script(
             &stub,
             &format!(
+                "#!/bin/sh\necho '{{\"schema_version\": 1, \"paths\": {{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}}}'\n",
+                interpreter_root.path().display()
+            ),
+        );
+
+        // SAFETY: test-only env var, serialized by `env_lock()`.
+        unsafe {
+            std::env::set_var("OCX_BINARY_PIN", &stub);
+        }
+        let result = materialize_interpreter("ocx.sh/python/cpython:3.13.1").await;
+        unsafe {
+            std::env::remove_var("OCX_BINARY_PIN");
+        }
+
+        assert_eq!(result.unwrap(), bin.join("python3"));
+    }
+
+    #[tokio::test]
+    async fn materialize_interpreter_reads_the_bare_map_older_releases_print() {
+        let _guard = env_lock().await;
+        let interpreter_root = tempfile::tempdir().unwrap();
+        let bin = interpreter_root.path().join("content/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python3"), "").unwrap();
+
+        let scripts_dir = tempfile::tempdir().unwrap();
+        let stub = scripts_dir.path().join("ocx");
+        write_executable_script(
+            &stub,
+            &format!(
                 "#!/bin/sh\necho '{{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}'\n",
                 interpreter_root.path().display()
             ),
@@ -557,7 +608,10 @@ mod tests {
         let _guard = env_lock().await;
         let scripts_dir = tempfile::tempdir().unwrap();
         let stub = scripts_dir.path().join("ocx");
-        write_executable_script(&stub, "#!/bin/sh\necho '{\"some-other-package\": \"/tmp/x\"}'\n");
+        write_executable_script(
+            &stub,
+            "#!/bin/sh\necho '{\"schema_version\": 1, \"paths\": {\"some-other-package\": \"/tmp/x\"}}'\n",
+        );
 
         // SAFETY: test-only env var, serialized by `env_lock()`.
         unsafe {
@@ -583,7 +637,7 @@ mod tests {
         write_executable_script(
             &stub,
             &format!(
-                "#!/bin/sh\necho '{{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}'\n",
+                "#!/bin/sh\necho '{{\"schema_version\": 1, \"paths\": {{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}}}'\n",
                 interpreter_root.path().display()
             ),
         );

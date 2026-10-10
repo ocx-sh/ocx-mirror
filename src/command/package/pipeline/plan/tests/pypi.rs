@@ -263,7 +263,7 @@ fn install_pypi_stubs(uv_lock_body: &str, uv_exit_code: u32) -> (tempfile::TempD
     write_executable_script(
         &ocx_stub,
         &format!(
-            "#!/bin/sh\necho '{{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}'\n",
+            "#!/bin/sh\necho '{{\"schema_version\": 1, \"paths\": {{\"ocx.sh/python/cpython:3.13.1\": \"{}\"}}}}'\n",
             interpreter_root.path().display()
         ),
     );
