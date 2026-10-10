@@ -21,6 +21,8 @@ import shutil
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from conftest import WebhookCapture
 from src.mirror_runner import MirrorRunner
 
@@ -134,6 +136,7 @@ def _passing_junit(version: str, platform: str) -> str:
 </testsuites>"""
 
 
+@pytest.mark.ocx_contract_site("push")
 def test_full_pipeline_against_registry(
     mirror: MirrorRunner,
     registry: str,
