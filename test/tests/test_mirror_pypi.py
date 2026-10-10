@@ -189,7 +189,7 @@ def _write_ocx_pull_stub(tmp_path: Path, interpreter_package: str) -> Path:
     (bin_dir / "python3").write_text("")
 
     stub = tmp_path / "ocx-pull-stub.sh"
-    payload = json.dumps({interpreter_package: str(interpreter_root)})
+    payload = json.dumps({"schema_version": 1, "paths": {interpreter_package: str(interpreter_root)}})
     _write_executable(stub, f"#!/bin/sh\necho '{payload}'\n")
     return stub
 
@@ -243,8 +243,12 @@ def _write_spec(
     index: str,
     interpreter_package: str,
     build_timestamp: str | None = None,
+    universal: bool = True,
 ) -> Path:
     stamp = f"\nbuild_timestamp: {build_timestamp}\n" if build_timestamp else ""
+    # A universal lock resolves for `--python-version` and pulls nothing; only
+    # `universal: false` materialises `interpreter_package` for `--python`.
+    lock = "" if universal else "  lock:\n    universal: false\n"
     spec = f"""name: {package}
 target:
   registry: {registry}
@@ -260,7 +264,7 @@ python:
   version: "3.13.1"
   abi: cp313
   interpreter_package: "{interpreter_package}"
-{stamp}
+{lock}{stamp}
 wheels:
   linux/amd64: ~
 
@@ -480,6 +484,89 @@ def test_plan_maps_missing_uv_binary_to_execution_failed(mirror_binary: Path, st
 # ---------------------------------------------------------------------------
 # Positive: full plan -> prepare against a pypi fixture
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.ocx_contract_site("lock_derive")
+def test_plan_resolves_against_the_interpreter_a_real_ocx_pull_materialised(
+    mirror_binary: Path,
+    ocx_binary: Path,
+    registry: str,
+    tmp_path: Path,
+) -> None:
+    """`materialize_interpreter` parses the JSON `ocx --format json package pull` prints.
+
+    No `OCX_BINARY_PIN` stub: the pull is a real one against the registry, so
+    a change in the pull report's shape (the key naming the package, the root
+    it maps to) reds here and not at the next live mirror run. The `uv` stub
+    records its argv; the `--python` it was handed must be the `bin/python3`
+    the pull left under `OCX_HOME`.
+    """
+    unique = uuid.uuid4().hex[:8]
+    package = "console-pkg"
+    interpreter_ref = f"python/cpython-lockderive-{unique}:3.13.1"
+    push_stub_ocx_package(
+        ocx_binary, registry, interpreter_ref, tmp_path / "push-setup", member="bin/python3"
+    )
+    interpreter_package = f"{registry}/{interpreter_ref}"
+
+    wheel_filename = "console_pkg-1.0.0-py3-none-any.whl"
+    wheel_bytes = FIXTURE_WHEEL.read_bytes()
+    releases = {"1.0.0": [{"filename": wheel_filename, "yanked": False}]}
+    index, server = _start_fake_pypi(
+        projects={package: _project_json(releases)},
+        wheels={wheel_filename: wheel_bytes},
+    )
+    try:
+        uv_ok = _write_uv_stub(
+            tmp_path,
+            "uv-ok.sh",
+            _canned_pylock(
+                package,
+                "1.0.0",
+                wheel_filename,
+                f"{index}/wheels/{wheel_filename}",
+                hashlib.sha256(wheel_bytes).hexdigest(),
+            ),
+            0,
+        )
+        uv_argv = tmp_path / "uv-argv.txt"
+        uv_recording = tmp_path / "uv-recording.sh"
+        _write_executable(uv_recording, f"#!/bin/sh\nprintf '%s\\n' \"$@\" > '{uv_argv}'\nexec '{uv_ok}' \"$@\"\n")
+
+        spec_path = _write_spec(
+            tmp_path,
+            registry=registry,
+            repository=f"pypi-lockderive-{unique}",
+            package=package,
+            index=index,
+            interpreter_package=interpreter_package,
+            universal=False,
+        )
+        ocx_home = tmp_path / "ocx-home"
+        result = _run_mirror(
+            mirror_binary,
+            [
+                "package", "pipeline", "plan",
+                "--spec", str(spec_path),
+                "--locks-dir", str(tmp_path / "locks"),
+                "--format", "json",
+            ],
+            {
+                "OCX_INSECURE_REGISTRIES": registry,
+                "OCX_BINARY_PIN": str(ocx_binary.resolve()),
+                "OCX_HOME": str(ocx_home),
+                "OCX_MIRROR_UV": str(uv_recording),
+            },
+        )
+    finally:
+        server.shutdown()
+
+    assert result.returncode == 0, f"plan failed: {result.stderr}"
+    argv = uv_argv.read_text().splitlines()
+    assert "--python" in argv, f"a non-universal lock resolves against a materialised interpreter: {argv}"
+    interpreter = Path(argv[argv.index("--python") + 1])
+    assert interpreter.is_file() and interpreter.name == "python3", interpreter
+    assert ocx_home in interpreter.parents, f"the interpreter must come from this run's pull: {interpreter}"
 
 
 def test_plan_then_prepare_produces_env_bundle(

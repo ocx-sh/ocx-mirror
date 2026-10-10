@@ -131,6 +131,7 @@ def push_stub_ocx_package(
     work_dir: Path,
     *,
     content: bytes = b"stub",
+    member: str = "bin/marker",
     platform: str = "linux/amd64",
 ) -> None:
     """Pushes a minimal one-layer Bundle package to ``{registry}/{ref}`` via
@@ -141,6 +142,10 @@ def push_stub_ocx_package(
     package would land on one manifest digest — and a cascade scenario
     (S-009) needs `1.2` and `latest` to resolve to *different* digests for
     the assertion to be able to fail.
+
+    ``member`` is the layer file's path inside the package content; a test that
+    needs ``ocx package pull`` to materialise a runnable-looking interpreter
+    names ``bin/python3`` here.
 
     ``platform`` is the index entry the push merges into ``ref``'s tag, so two
     calls with different platforms (and content) build a multi-platform tag.
@@ -161,7 +166,7 @@ def push_stub_ocx_package(
 
     layer_path = work_dir / "stub-layer.tar.gz"
     with tarfile.open(layer_path, "w:gz") as tar:
-        info = tarfile.TarInfo(name="bin/marker")
+        info = tarfile.TarInfo(name=member)
         info.size = len(content)
         tar.addfile(info, io.BytesIO(content))
 

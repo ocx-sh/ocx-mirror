@@ -46,9 +46,11 @@ sh_test(
         "//:renovate.json",
         "//:src/command/package/pipeline/generate/ci/matrix.rs",
         "//:tests/fixtures/wheels/console_pkg-1.0.0-py3-none-any.whl",
-        # The Sigstore stack the runner brings up and the golden cosign keys
-        # test_signing.py reads, both from the pinned submodule.
+        # The Sigstore stack the runner brings up, the golden cosign keys
+        # test_signing.py reads, and the fake forge test_ocx_spawn_sites.py
+        # loads, all from the pinned submodule.
         "@ocx_test//:docker-compose.yml",
+        "@ocx_test//:fake_forge",
         "@ocx_test//:golden_keys",
         "@ocx_test//:sigstore",
         "@tools//:ocx",

@@ -328,6 +328,7 @@ def test_pipeline_plan_reports_the_resolved_bounds(
     )
 
 
+@pytest.mark.ocx_contract_site("create")
 def test_pipeline_prepare_bundles_the_declared_platform(
     mirror: MirrorRunner, pipeline_spec: Path, mirror_work_dir: Path
 ) -> None:

@@ -11,6 +11,9 @@ markers = [
     # PUTs answer a chosen status — the only way to drive `dist sync`'s retry
     # loop end to end through the real HTTP client.
     "upload_store: configure the fake upload store (fail_puts=N, status=S)",
+    # Read by ocx's `task satellite:contract` (scripts/satellite_contract.py in
+    # ocx, which registers it too): one id per `ocx` spawn site a test pins.
+    "ocx_contract_site(site): the ocx spawn site this test pins",
 ]
 
 [dependency-groups]
