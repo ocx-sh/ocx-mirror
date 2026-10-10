@@ -117,6 +117,19 @@ def _write_spec_yaml(
     path.write_text("\n".join(lines) + "\n")
 
 
+def _indexed_tags(ocx: OcxRunner, repository: str) -> list[str]:
+    """The tags `ocx index list` reports for `repository`.
+
+    Reads both report shapes: the `{schema_version, items}` array of the
+    machine-interface contract, and the bare `{repository: [tags]}` map of
+    the releases before it.
+    """
+    report = ocx.json("index", "list", repository)
+    if "items" not in report:
+        return report[repository]
+    return next(entry["tags"] for entry in report["items"] if entry["package"] == repository)
+
+
 def _yaml_scalar(value) -> str:
     """Render a Python scalar as the YAML the spec parser expects."""
     if isinstance(value, bool):
@@ -332,8 +345,7 @@ def test_sync_mirrors_versions(
 
     # Verify tags exist via ocx
     ocx.plain("index", "update", unique_mirror_repo)
-    data = ocx.json("index", "list", unique_mirror_repo)
-    tags = data[unique_mirror_repo]
+    tags = _indexed_tags(ocx, unique_mirror_repo)
     assert "1.0.0" in tags
     assert "2.0.0" in tags
 
@@ -398,8 +410,7 @@ def test_sync_cascade_creates_rolling_tags(
 
     # Verify rolling tags
     ocx.plain("index", "update", unique_mirror_repo)
-    data = ocx.json("index", "list", unique_mirror_repo)
-    tags = data[unique_mirror_repo]
+    tags = _indexed_tags(ocx, unique_mirror_repo)
     for expected in ["1.2.3", "1.2", "1", "latest"]:
         assert expected in tags, f"Expected tag '{expected}' in {tags}"
 
@@ -436,8 +447,7 @@ def test_sync_version_min_filter(
     mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     ocx.plain("index", "update", f"{unique_mirror_repo}:2.0.0")
-    data = ocx.json("index", "list", unique_mirror_repo)
-    tags = data[unique_mirror_repo]
+    tags = _indexed_tags(ocx, unique_mirror_repo)
     assert "2.0.0" in tags
     assert "1.0.0" not in tags
 
@@ -508,7 +518,7 @@ def test_sync_resolved_max_from_url_is_inclusive(
     mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     ocx.plain("index", "update", f"{unique_mirror_repo}:2.0.0")
-    tags = ocx.json("index", "list", unique_mirror_repo)[unique_mirror_repo]
+    tags = _indexed_tags(ocx, unique_mirror_repo)
     assert "2.0.0" in tags, f"an inclusive ceiling mirrors the version it names: {tags}"
     assert "3.0.0" not in tags, f"nothing above the ceiling: {tags}"
 
@@ -542,7 +552,7 @@ def test_sync_resolved_max_from_generator_is_exclusive_when_declared(
     mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     ocx.plain("index", "update", f"{unique_mirror_repo}:1.0.0")
-    tags = ocx.json("index", "list", unique_mirror_repo)[unique_mirror_repo]
+    tags = _indexed_tags(ocx, unique_mirror_repo)
     assert "1.0.0" in tags, f"everything below the ceiling is mirrored: {tags}"
     assert "2.0.0" not in tags, f"an exclusive ceiling drops the version it names: {tags}"
 
@@ -579,7 +589,7 @@ def test_sync_resolved_min_from_url_is_exclusive_when_declared(
     mirror.run("package", "sync", str(spec_path), "--work-dir", str(mirror.temp_dir))
 
     ocx.plain("index", "update", f"{unique_mirror_repo}:2.0.0")
-    tags = ocx.json("index", "list", unique_mirror_repo)[unique_mirror_repo]
+    tags = _indexed_tags(ocx, unique_mirror_repo)
     assert "2.0.0" in tags, f"above an exclusive floor is mirrored: {tags}"
     assert "1.0.0" not in tags, f"an exclusive floor drops the version it names: {tags}"
 
