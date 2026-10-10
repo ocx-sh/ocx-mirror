@@ -20,3 +20,14 @@ filegroup(
     name = "golden_keys",
     srcs = glob(["tests/fixtures/golden/keys/**"]),
 )
+
+# test/tests/test_ocx_spawn_sites.py's announce test: ocx's own fake forge and
+# the two sibling modules it imports by bare name.
+filegroup(
+    name = "fake_forge",
+    srcs = [
+        "tests/fake_forge.py",
+        "tests/fake_gitlab.py",
+        "tests/git_http_fixture.py",
+    ],
+)
