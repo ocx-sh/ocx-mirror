@@ -336,3 +336,71 @@ platforms:
         "ubuntu:24.04 should have inferred shell 'bash'; got errors: {shell_errors:?}"
     );
 }
+
+// ── platforms.<p>.toolchain ────────────────────────────────────────────
+
+fn toolchain_errors(platforms: &str) -> Vec<String> {
+    let yaml = format!("{MINIMAL_BASE_YAML}\nplatforms:\n{platforms}");
+    let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+    spec.validate(Path::new("test.yml"))
+        .into_iter()
+        .filter(|e| e.contains("toolchain"))
+        .collect()
+}
+
+#[test]
+fn toolchain_is_absent_by_default_and_anchor_shareable() {
+    let yaml = format!(
+        "{MINIMAL_BASE_YAML}\nplatforms:\n  windows/arm64:\n    runner: windows-11-arm\n    toolchain: &tc {{ project: ocx.toml, groups: [default, lint] }}\n  linux/amd64:\n    runner: ubuntu-latest\n    toolchain: *tc\n  darwin/arm64:\n    runner: macos-latest\n"
+    );
+    let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+    let platforms = spec.platforms.unwrap();
+    assert_eq!(
+        platforms["windows/arm64"].toolchain.as_ref().unwrap().groups_input(),
+        "default,lint"
+    );
+    assert_eq!(platforms["linux/amd64"].toolchain.as_ref().unwrap().project, "ocx.toml");
+    assert!(platforms["darwin/arm64"].toolchain.is_none());
+}
+
+#[test]
+fn toolchain_without_groups_pulls_default() {
+    let yaml = format!(
+        "{MINIMAL_BASE_YAML}\nplatforms:\n  linux/amd64:\n    runner: x\n    toolchain: {{ project: ocx.toml }}\n"
+    );
+    let spec: MirrorSpec = serde_yaml_ng::from_str(&yaml).unwrap();
+    assert_eq!(
+        spec.platforms.unwrap()["linux/amd64"]
+            .toolchain
+            .as_ref()
+            .unwrap()
+            .groups_input(),
+        "default"
+    );
+}
+
+#[test]
+fn toolchain_with_containers_is_rejected() {
+    let errors = toolchain_errors(
+        "  linux/amd64:\n    runner: x\n    toolchain: { project: ocx.toml }\n    containers:\n      - { image: \"ubuntu:24.04\" }\n",
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("cannot be combined with containers")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn toolchain_rejects_unsafe_values() {
+    let errors =
+        toolchain_errors("  linux/amd64:\n    runner: x\n    toolchain: { project: ocx.toml, groups: [\"a,b\"] }\n");
+    assert!(errors.iter().any(|e| e.contains("toolchain.groups")), "{errors:?}");
+}
+
+#[test]
+fn toolchain_requires_project() {
+    let yaml = format!(
+        "{MINIMAL_BASE_YAML}\nplatforms:\n  linux/amd64:\n    runner: x\n    toolchain: {{ groups: [lint] }}\n"
+    );
+    assert!(serde_yaml_ng::from_str::<MirrorSpec>(&yaml).is_err());
+}
