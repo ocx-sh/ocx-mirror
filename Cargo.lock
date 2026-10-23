@@ -3570,7 +3570,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3610,7 +3610,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_error"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "ocx_config",
@@ -3627,7 +3627,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_http"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "log",
  "ocx_config",
@@ -3644,7 +3644,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_pipeline"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3685,7 +3685,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_report"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "ocx_mirror_http",
  "ocx_mirror_test_support",
@@ -3701,7 +3701,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_source"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "http",
@@ -3726,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_spec"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3756,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_mirror_test_support"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "rustls",
  "tokio",

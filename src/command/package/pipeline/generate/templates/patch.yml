@@ -30,6 +30,7 @@ jobs:
       - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
         with:
           version: "{OCX_CLI_VERSION}"
+          groups: default
 {REGISTRY_AUTH_STEPS}      - name: Patch published metadata
         if: ${{ steps.creds.outputs.have == 'true' }}
         env:

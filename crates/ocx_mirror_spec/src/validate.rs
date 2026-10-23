@@ -356,6 +356,30 @@ pub fn validate_platforms(platforms: &HashMap<String, PlatformConfig>, errors: &
             validate_exclude_entry(key, index, entry, errors);
         }
 
+        if let Some(toolchain) = &config.toolchain {
+            if config.containers.is_some() {
+                errors.push(format!(
+                    "platforms: '{key}': toolchain cannot be combined with containers (container legs never load the host project)"
+                ));
+            }
+            // Rendered into a matrix value; `,` joins groups.
+            let bad = |v: &str, extra: &[char]| {
+                v.is_empty()
+                    || v.chars()
+                        .any(|c| c.is_control() || c == '"' || c == '\\' || extra.contains(&c))
+            };
+            if bad(&toolchain.project, &[]) {
+                errors.push(format!(
+                    "platforms: '{key}': toolchain.project must be a non-empty path without quotes, backslashes or control characters"
+                ));
+            }
+            if toolchain.groups.iter().any(|g| bad(g, &[',', ' '])) {
+                errors.push(format!(
+                    "platforms: '{key}': toolchain.groups entries must be non-empty names without commas, spaces, quotes or control characters"
+                ));
+            }
+        }
+
         if let Some(containers) = &config.containers {
             if containers.is_empty() {
                 errors.push(format!(
