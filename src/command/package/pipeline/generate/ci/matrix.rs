@@ -54,6 +54,9 @@ pub struct MatrixLeg {
     /// gates every piece of setup machinery out of the rendered workflow.
     container_dockerfile: String,
     shell: String,
+    /// `(project, groups)` for the leg's `setup-ocx` step; `None` loads no
+    /// project. Native legs only.
+    toolchain: Option<(String, String)>,
     tests: Vec<RenderedTest>,
 }
 
@@ -164,6 +167,7 @@ pub fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                         docker_platform: spec::platform_without_features(platform_key),
                         container_dockerfile,
                         shell,
+                        toolchain: None,
                         tests: effective_tests.clone(),
                     });
                 }
@@ -180,6 +184,7 @@ pub fn build_matrix(spec: &MirrorSpec) -> Vec<MatrixLeg> {
                     docker_platform: String::new(),
                     container_dockerfile: String::new(),
                     shell: shell.to_string(),
+                    toolchain: config.toolchain.as_ref().map(|t| (t.project.clone(), t.groups_input())),
                     tests: effective_tests,
                 });
             }
@@ -242,6 +247,13 @@ pub fn render_matrix_entries(legs: &[MatrixLeg]) -> String {
                 .collect::<Vec<_>>()
                 .join("\n");
             out.push_str(&format!("            container_dockerfile: |\n{indented}\n"));
+        }
+        // Only toolchain legs carry these keys; elsewhere the missing
+        // `matrix.ocx_project` evaluates empty, i.e. no project loaded.
+        if let Some((project, groups)) = &leg.toolchain {
+            out.push_str(&format!(
+                "            ocx_project: {project:?}\n            ocx_groups: {groups:?}\n"
+            ));
         }
         out.push_str(&format!("            shell: {}\n", leg.shell));
         // Inline the test entries so they are visible in the generated YAML.

@@ -81,7 +81,7 @@ pub(crate) use platform_keys::*;
 pub use platform_keys::{
     image_to_container_id, infer_libc_from_image, platform_key_slug, platform_slug, platform_without_features,
 };
-pub use platforms_config::{ContainerConfig, ExcludeEntry, PlatformConfig, Severity};
+pub use platforms_config::{ContainerConfig, ExcludeEntry, PlatformConfig, Severity, ToolchainConfig};
 #[allow(unused_imports)]
 pub(crate) use prescan::*;
 pub use python_config::{LockOptions, PythonConfig};
