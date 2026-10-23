@@ -744,6 +744,16 @@ fn every_setup_ocx_step_pins_the_renderer_ocx_version() {
                 continue;
             }
             steps += 1;
+            // Without one of these, setup-ocx pulls every `[group.*]` tool, and one
+            // with no leaf for the runner (gitleaks on windows/arm64) exits 78.
+            let rest = lines[index + 3..index + 6].join("\n");
+            assert!(
+                rest.starts_with("          groups: default") || rest.contains("project: "),
+                "{} line {}: setup-ocx must not pull the project's non-default groups:\n{}",
+                path.display(),
+                index + 1,
+                rest,
+            );
             assert!(
                 lines[index + 1..].join("\n").starts_with(&expected),
                 "{} line {}: setup-ocx must pin the renderer's ocx version, got:\n{}",
@@ -1041,4 +1051,23 @@ fn a_label_set_renders_as_a_flow_sequence_and_a_single_label_stays_bare() {
         workflow.contains("    runs-on: ${{ matrix.runner }}\n"),
         "`runs-on` must keep reading the matrix key verbatim, got:\n{workflow}"
     );
+}
+
+// ── platforms.<p>.toolchain ───────────────────────────────────────────
+
+#[test]
+fn toolchain_keys_render_only_on_legs_that_declare_it() {
+    let base = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mirror-minimal.yml"
+    ))
+    .unwrap();
+    let spec = base.replace(
+        "  linux/amd64:\n    runner: ubuntu-latest\n",
+        "  linux/amd64:\n    runner: ubuntu-latest\n    toolchain: { project: ocx.toml, groups: [default, lint] }\n  darwin/arm64:\n    runner: macos-latest\n",
+    );
+    let wf = workflow_of(&spec);
+    assert_eq!(wf.matches("ocx_project: \"ocx.toml\"").count(), 1, "{wf}");
+    assert!(wf.contains("ocx_groups: \"default,lint\""), "{wf}");
+    assert!(wf.contains("project: ${{ matrix.ocx_project }}"), "{wf}");
 }

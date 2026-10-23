@@ -75,6 +75,34 @@ impl ContainerConfig {
     }
 }
 
+/// The ocx project a native test leg activates (`setup-ocx`'s `project:` and
+/// `groups:` inputs).
+///
+/// Absent on a platform, the leg loads no project and runs against the
+/// bootstrap `ocx` alone: a repository tool with no build for the runner's
+/// platform would otherwise exit 78 on a bare pull. Share one definition across
+/// platforms with a YAML anchor.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolchainConfig {
+    /// Path to an `ocx.toml`, relative to the repository root.
+    pub project: String,
+    /// Groups to pull and activate. Empty means only `default`.
+    #[serde(default)]
+    pub groups: Vec<String>,
+}
+
+impl ToolchainConfig {
+    /// The `groups:` input value: comma-joined, or `default` when none declared.
+    pub fn groups_input(&self) -> String {
+        if self.groups.is_empty() {
+            "default".to_string()
+        } else {
+            self.groups.join(",")
+        }
+    }
+}
+
 /// Configuration for one platform target in the test pipeline.
 ///
 /// A platform without `containers` runs tests natively on the declared GHA
@@ -113,6 +141,11 @@ pub struct PlatformConfig {
     /// Default shell for native legs (e.g. `bash`, `pwsh`).
     #[serde(default)]
     pub shell: Option<String>,
+    /// Ocx project this platform's native test leg activates. Absent: none.
+    /// Rejected together with `containers` (those legs run a static `ocx` in
+    /// docker and never see the host project).
+    #[serde(default)]
+    pub toolchain: Option<ToolchainConfig>,
     /// Per-platform test override. When set, replaces the top-level `tests:`
     /// list entirely for this platform — no partial merge.
     #[serde(default)]
