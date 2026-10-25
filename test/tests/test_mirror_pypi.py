@@ -703,12 +703,11 @@ def test_plan_then_prepare_produces_env_bundle(
         entrypoints = json.loads(metadata_path.read_text())["entrypoints"]
         assert "console-pkg" in entrypoints, f"the console script must synthesize: {entrypoints}"
         assert entrypoints["console-pkg"]["command"] == "python", entrypoints
-        # And the composed env always also carries `python` itself. Without it a
-        # bare `python` in a spec's test script resolves to the HOST interpreter
-        # under `ocx package test` (or fails to spawn on an image that has none).
-        # It carries no `command`, so `ocx launcher exec` resolves the name on
-        # the self-view PATH -- the private interpreter's bin/, never itself.
-        assert entrypoints.get("python") == {}, f"the composed env must ship a `python` entrypoint: {entrypoints}"
+        # ocx-sh/ocx#642: the composed env no longer synthesizes a `python`
+        # entrypoint unless the selection names it, so the tool's own PATH
+        # stops shadowing the consumer's interpreter. The pinned external/ocx
+        # predates that and still ships `{}`; drop that arm on the next bump.
+        assert entrypoints.get("python", None) in (None, {}), f"unselected `python` must not gain a command: {entrypoints}"
         layer_path = (work_dir / tag / env_entry["layers"][0]["path"]).resolve()
         assert layer_path.exists(), f"repacked wheel layer must exist: {layer_path}"
     finally:
