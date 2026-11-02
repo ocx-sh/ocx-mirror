@@ -20,7 +20,7 @@ identical except:
 * `REPO_ROOT`, `Finding`, `codes`, `report` and `expect` are inlined (ocx's
   `bazel_gate_proofs` is not ported);
 * fixtures live in `tests/fixtures/bep/`, and the persistence scan reads the
-  mirror's `taskfiles/bazel.taskfile.yml` and `.github/workflows/verify.yml`.
+  mirror's `taskfiles/bazel.taskfile.yml` and `.github/workflows/basic-repo.yml`.
 
 Three rules the code below holds, each proved by `--self-test`:
 
@@ -1569,7 +1569,7 @@ def prove_bep_not_persisted() -> int:
     # The mirror's corpus: its one BEP producer (`bazel:build:nobuild`, plus
     # `bazel:test:unit`'s floor stream) and the workflow that calls it.
     taskfile = REPO_ROOT / "taskfiles" / "bazel.taskfile.yml"
-    workflow = REPO_ROOT / ".github" / "workflows" / "verify.yml"
+    workflow = REPO_ROOT / ".github" / "workflows" / "basic-repo.yml"
     live = {path.name: path.read_text(encoding="utf-8") for path in (taskfile, workflow)}
     recipe = live[taskfile.name]
     expect(

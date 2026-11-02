@@ -32,17 +32,54 @@ nothing to tear down. Everything else binds all four shapes.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-PROC-01 | Every text `open()`, `read_text()` and `write_text()` names its `encoding=`, and every captured subprocess names `encoding=` **and** `errors=`. Both default to `locale.getpreferredencoding(False)`, not UTF-8, so one non-ASCII byte raises `UnicodeDecodeError` on a `LANG=C` image and nowhere else — a failure indistinguishable from flake, reproducing on one CI runner and not the next. `errors="replace"` in a black-box harness, which asserts on behaviour and can tolerate a mangled character; `errors="strict"` (the default) in `ocx-sdk-python`, where substituting U+FFFD silently corrupts bytes the caller re-emits. Binary mode is exempt, having nothing to decode. | `ruff check --isolated --preview --select PLW1514 --output-format concise .` — any diagnostic is a finding, `All checks passed!` is the pass. **`--preview` is load-bearing**: without it `PLW1514` is inert and the same file reads clean, and `--isolated` keeps a project ignore from silencing it. That rule covers files only, never `subprocess`, so also `rg -n --glob '*.py' --glob '!**/.venv/**' -e 'text=True' -e 'universal_newlines=True' .` — every hit is a candidate, and a hit whose own call passes no `encoding=` is the finding. Both harness runners are hits today | MUST |
+| PY-PROC-01 | Every text `open()`, `read_text()` and `write_text()` names its `encoding=`, and every captured subprocess names `encoding=` **and** `errors=`. Both default to `locale.getpreferredencoding(False)`, not UTF-8, so one non-ASCII byte raises `UnicodeDecodeError` on a `LANG=C` image and nowhere else — a failure indistinguishable from flake, reproducing on one CI runner and not the next. `errors="replace"` in a black-box harness, which asserts on behaviour and can tolerate a mangled character; `errors="strict"` (the default) in `ocx-sdk-python`, where substituting U+FFFD silently corrupts bytes the caller re-emits. Binary mode is exempt, having nothing to decode. | `ruff check --isolated --preview --select PLW1514 --output-format concise .` — any diagnostic is a finding, `All checks passed!` is the pass. **`--preview` is load-bearing**: without it `PLW1514` is inert and the same file reads clean, and `--isolated` keeps a project ignore from silencing it. That rule covers files only, never `subprocess`, so also see block PY-PROC-01 — every hit is a candidate, and a hit whose own call passes no `encoding=` is the finding. Both harness runners are hits today | MUST |
 | PY-PROC-04 | Commands are argv lists. Never `shell=True`, never `os.system`, never `os.popen` — the argv form is the only thing that makes "all characters, including shell metacharacters, can safely be passed to child processes" true, and a shell in the loop turns every interpolated tag, path or package name into an injection site. PEP 750 t-strings do not change this: PEP 787, the t-string-safe `subprocess`/`shlex.sh()` proposal, is **Deferred** to 3.15 at the earliest, so do not soften the rule in anticipation of it. | `ruff check --isolated --select S602,S604,S605 --output-format concise .` — any printed diagnostic is a finding; `All checks passed!` is the pass. `S605` covers both `os.system` and `os.popen`; `S602`/`S604` cover `shell=True`. `--isolated` is load-bearing — a project `per-file-ignores` entry for `S` silences the whole gate and it reads clean. Both harnesses are at zero today, so this is a don't-regress check | MUST |
+
+```sh
+# PY-PROC-01
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e text=True -e universal_newlines=True --
+```
 
 ## Draining and Teardown
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-PROC-02 | A child that may have to be killed early is spawned with `start_new_session=True` (or `process_group=0` on 3.11+) and killed as a **group** via `os.killpg`. `subprocess.run(timeout=)` and `proc.kill()` reap the direct child only and leave any grandchild it spawned alive — proven with live PIDs, not inferred. Guard the signal on `proc.returncode is None`: a reaped child's pid, and the pgid that equals it, can be reissued to an unrelated process (bpo-38630, CWE-367). Never hand-roll this with `preexec_fn`, which is documented as unsafe in a threaded parent. Scoped to sites that spawn something they may need to kill, not to every call. | `rg -n --glob '*.py' --glob '!**/.venv/**' -e '\.terminate\(\)' -e '\.kill\(\)' .` lists every teardown site. For each file, `rg --files-without-match --glob '*.py' -e 'start_new_session' -e 'process_group' <file>` — the path printed is the finding, silence is the pass. Behavioural: cancel mid-run, then `pgrep -g <pgid>` — a pid printed is the orphan | SHOULD |
-| PY-PROC-03 | A `Popen` holding `stdout=PIPE`/`stderr=PIPE` is reaped by `communicate()`, never by a bare `.wait()`/`.poll()`. The child blocks once it has written one pipe buffer — measured at 65536 bytes on Linux, per stream, so either stream alone is enough — and the parent then waits forever for a process waiting on the parent. `subprocess.run(capture_output=True)` is `communicate()` underneath and is safe by construction; N concurrent `Popen`s reaped by a list comprehension of `.wait()` is the textbook hang, and the harness has a live one. | `rg -l --glob '*.py' --glob '!**/.venv/**' 'Popen\(' .` names every file that spawns directly. For each, `rg --files-without-match --glob '*.py' 'communicate\(' <file>` — the path printed is the finding, silence is the pass. Discard a hit whose `Popen` passes no `stdout=`/`stderr=` pipe | MUST |
-| PY-PROC-05 | Every group-kill path branches on the platform. `os.killpg`, `os.getpgid` and `start_new_session` are POSIX-only, and on Windows `os.killpg` raises `AttributeError` rather than no-opping — so an unguarded group kill converts a cleanup path into a hard failure on the `windows-latest` jobs this fleet really runs. The Windows branch is `creationflags=subprocess.CREATE_NEW_PROCESS_GROUP` at spawn plus `send_signal(CTRL_BREAK_EVENT)`, or a plain `proc.kill()` where reaping just the child is enough. | `rg -l --glob '*.py' --glob '!**/.venv/**' -e 'os\.killpg' -e 'os\.getpgid' -e 'start_new_session' .` names the POSIX-only callers. For each, `rg --files-without-match --glob '*.py' -e 'sys\.platform' -e 'os\.name' -e 'hasattr\(os' <file>` — the path printed is the finding, silence is the pass | MUST |
-| PY-PROC-06 | Cancelling the task that awaits an `asyncio` subprocess does **not** kill the child (gh-88050): the coroutine unwinds and the process keeps running, unreaped, past the end of the test or request that owned it. Every `asyncio.create_subprocess_*` site catches `asyncio.CancelledError`, kills the child, awaits it, and re-raises. | `rg -l --glob '*.py' --glob '!**/.venv/**' 'create_subprocess_' .` names every async spawn. For each, `rg --files-without-match --glob '*.py' 'CancelledError' <file>` — the path printed is the finding. Behavioural: cancel the awaiting task, then assert the child's `returncode` is set | SHOULD |
+| PY-PROC-02 | A child that may have to be killed early is spawned with `start_new_session=True` (or `process_group=0` on 3.11+) and killed as a **group** via `os.killpg`. `subprocess.run(timeout=)` and `proc.kill()` reap the direct child only and leave any grandchild it spawned alive — proven with live PIDs, not inferred. Guard the signal on `proc.returncode is None`: a reaped child's pid, and the pgid that equals it, can be reissued to an unrelated process (bpo-38630, CWE-367). Never hand-roll this with `preexec_fn`, which is documented as unsafe in a threaded parent. Scoped to sites that spawn something they may need to kill, not to every call. | see block PY-PROC-02 (1) lists every teardown site. For each file, see block PY-PROC-02 (2) — the path printed is the finding, silence is the pass. Behavioural: cancel mid-run, then `pgrep -g <pgid>` — a pid printed is the orphan | SHOULD |
+| PY-PROC-03 | A `Popen` holding `stdout=PIPE`/`stderr=PIPE` is reaped by `communicate()`, never by a bare `.wait()`/`.poll()`. The child blocks once it has written one pipe buffer — measured at 65536 bytes on Linux, per stream, so either stream alone is enough — and the parent then waits forever for a process waiting on the parent. `subprocess.run(capture_output=True)` is `communicate()` underneath and is safe by construction; N concurrent `Popen`s reaped by a list comprehension of `.wait()` is the textbook hang, and the harness has a live one. | see block PY-PROC-03 (1) names every file that spawns directly. For each, see block PY-PROC-03 (2) — the path printed is the finding, silence is the pass. Discard a hit whose `Popen` passes no `stdout=`/`stderr=` pipe | MUST |
+| PY-PROC-05 | Every group-kill path branches on the platform. `os.killpg`, `os.getpgid` and `start_new_session` are POSIX-only, and on Windows `os.killpg` raises `AttributeError` rather than no-opping — so an unguarded group kill converts a cleanup path into a hard failure on the `windows-latest` jobs this fleet really runs. The Windows branch is `creationflags=subprocess.CREATE_NEW_PROCESS_GROUP` at spawn plus `send_signal(CTRL_BREAK_EVENT)`, or a plain `proc.kill()` where reaping just the child is enough. | see block PY-PROC-05 (1) names the POSIX-only callers. For each, see block PY-PROC-05 (2) — the path printed is the finding, silence is the pass | MUST |
+| PY-PROC-06 | Cancelling the task that awaits an `asyncio` subprocess does **not** kill the child (gh-88050): the coroutine unwinds and the process keeps running, unreaped, past the end of the test or request that owned it. Every `asyncio.create_subprocess_*` site catches `asyncio.CancelledError`, kills the child, awaits it, and re-raises. | see block PY-PROC-06 (1) names every async spawn. For each, see block PY-PROC-06 (2) — the path printed is the finding. Behavioural: cancel the awaiting task, then assert the child's `returncode` is set | SHOULD |
+
+```sh
+# PY-PROC-02 (1)
+FILE=src/app/cli.py    # the file to search
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e '\.terminate\(\)' -e '\.kill\(\)' --
+# PY-PROC-02 (2)
+grep -L -E -e start_new_session -e process_group -- "$FILE"
+```
+
+```sh
+# PY-PROC-03 (1)
+FILE=src/app/cli.py    # the file to search
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -l -E -e 'Popen\(' --
+# PY-PROC-03 (2)
+grep -L -E -e 'communicate\(' -- "$FILE"
+```
+
+```sh
+# PY-PROC-05 (1)
+FILE=src/app/cli.py    # the file to search
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -l -E -e 'os\.killpg' -e 'os\.getpgid' -e start_new_session --
+# PY-PROC-05 (2)
+grep -L -E -e 'sys\.platform' -e 'os\.name' -e 'hasattr\(os' -- "$FILE"
+```
+
+```sh
+# PY-PROC-06 (1)
+FILE=src/app/cli.py    # the file to search
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -l -E -e create_subprocess_ --
+# PY-PROC-06 (2)
+grep -L -E -e CancelledError -- "$FILE"
+```
 
 The deadlock is not a style point and does not need a hostile child to
 reproduce. `fcntl.F_GETPIPE_SZ` reports 65536 bytes here; a child that writes
@@ -96,7 +133,14 @@ except subprocess.TimeoutExpired:
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-PROC-07 | A `subprocess.run` either passes `check=True` or has its `.returncode` read in the same scope — `check=False` with nobody reading the result turns a CLI exit-code regression into a green test. A returncode **below zero is a signal number, not an error code**: `-15` is SIGTERM, `-9` is SIGKILL, so a bare `returncode != 0` cannot tell "the CLI failed correctly" from "we killed it," and a test that terminates a child asserts the specific negative value it expects. | `ruff check --isolated --select PLW1510 --output-format concise .` — any diagnostic is a finding, and `--isolated` keeps a project ignore from silencing it. `PLW1510` is `subprocess-run-without-check`: it fires on an **omitted** `check=`, never on a missing `timeout=`, and no ruff or bandit rule checks for a missing timeout at all — verified against 0.16.1, not assumed. Then `rg -n --glob '*.py' --glob '!**/.venv/**' 'check=False' .` — a hit with no `.returncode` read in the same function is a finding, and no lint covers it. Then `rg -n --glob '*.py' --glob '!**/.venv/**' 'returncode != 0' .` — a hit in a scope that also calls `.terminate()`/`.kill()` is a finding | SHOULD |
+| PY-PROC-07 | A `subprocess.run` either passes `check=True` or has its `.returncode` read in the same scope — `check=False` with nobody reading the result turns a CLI exit-code regression into a green test. A returncode **below zero is a signal number, not an error code**: `-15` is SIGTERM, `-9` is SIGKILL, so a bare `returncode != 0` cannot tell "the CLI failed correctly" from "we killed it," and a test that terminates a child asserts the specific negative value it expects. | `ruff check --isolated --select PLW1510 --output-format concise .` — any diagnostic is a finding, and `--isolated` keeps a project ignore from silencing it. `PLW1510` is `subprocess-run-without-check`: it fires on an **omitted** `check=`, never on a missing `timeout=`, and no ruff or bandit rule checks for a missing timeout at all — verified against 0.16.1, not assumed. Then see block PY-PROC-07 (1) — a hit with no `.returncode` read in the same function is a finding, and no lint covers it. Then see block PY-PROC-07 (2) — a hit in a scope that also calls `.terminate()`/`.kill()` is a finding | SHOULD |
+
+```sh
+# PY-PROC-07 (1)
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e check=False --
+# PY-PROC-07 (2)
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e 'returncode != 0' --
+```
 
 ## What Agents Get Wrong Here
 

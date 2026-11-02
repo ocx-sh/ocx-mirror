@@ -13,7 +13,7 @@
 # Bazel writes that environment into every BEP and hands it to repository
 # rules. `telemetry:bazel` still reads both from the task env.
 #
-# Tasks CI calls append `{{.CLI_ARGS}}` after the command word, so verify.yml
+# Tasks CI calls append `{{.CLI_ARGS}}` after the command word, so the CI workflows
 # can hand a *build* option through — `--config=ci`, the execution log, and on
 # the `main` push alone `--remote_upload_local_results=true`.
 #
@@ -192,6 +192,17 @@ tasks:
     cmds:
       - task: bootstrap
       - '{{.BAZEL}} build --jobs={{.JOBS}} //...'
+
+  build:test-binary:
+    desc: Build //:ocx-mirror (the `__testing` placeholders) and stage it at test/bin/ocx-mirror for `test:accept:native`
+    dir: '{{.ROOT_DIR}}'
+    platforms: [linux]
+    cmds:
+      - task: bootstrap
+      # The download flag stays after CLI_ARGS: CI's `--config=ci` expands to minimal in place, and a cached run then leaves no binary for the cp.
+      - '{{.BAZEL}} build --jobs={{.JOBS}} {{.CLI_ARGS}} --remote_download_outputs=toplevel //:ocx-mirror'
+      - mkdir -p test/bin
+      - cp -L bazel-bin/ocx-mirror test/bin/ocx-mirror
 
   build:release:
     desc: The release binary for TARGET (a //platforms triple, default x86_64-unknown-linux-musl), real provenance, at target/bazel/release/ocx-mirror-<TARGET>[.exe]
@@ -486,7 +497,7 @@ tasks:
       command line is a silent cold build — and, on the `main` push, a write
       lane that uploads nothing. That happened: a variable name docs.taskfile.yml
       also declared made go-task 3.53 render this file's `{{.BAZEL}}` without
-      its `CACHE_RC`. verify.yml runs this right after writing the credential.
+      its `CACHE_RC`. basic-repo.yml runs this right after writing the credential.
     cmd: |
       if [ -f "${RUNNER_TEMP:-/nonexistent}/bazel-cache.rc" ]; then
         case '{{.BAZEL}}' in
@@ -595,7 +606,7 @@ tasks:
       - task: bootstrap
       # `cargo metadata` runs through the Bazel toolchain's cargo (the script's
       # `bazel run @rules_rust//tools/upstream_wrapper:cargo`): no host Rust.
-      # RUN_FLAGS: build options for that `bazel run` — verify.yml's main-push
+      # RUN_FLAGS: build options for that `bazel run` — the trusted-lane
       # lane passes its upload grant, or the wrapper compile never reaches the
       # shared cache and every later run rebuilds it.
       - python3 scripts/bazel_build_drift.py --bazel '{{.BAZEL}}' --run-flags='{{.RUN_FLAGS}}'

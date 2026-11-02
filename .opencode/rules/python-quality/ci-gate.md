@@ -24,9 +24,23 @@ nothing, and the whole file is built around that.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-GATE-01 | A subject gets exactly one contributor-and-CI command (`task verify` or equivalent) **before** any lint or type rule is turned on for it. Turn a rule on first and the two invocations drift the moment someone runs the tool directly — which is then discovered as a CI failure nobody can reproduce locally. | `rg -n --glob 'taskfile.yml' --glob 'Taskfile.yml' --glob 'Makefile' -e 'verify:' -e 'ci:' <project-dir>` — empty output is the finding: no single command exists yet, so no gate may be added to this subject until one does. | MUST |
+| PY-GATE-01 | A subject gets exactly one contributor-and-CI command (`task verify` or equivalent) **before** any lint or type rule is turned on for it. Turn a rule on first and the two invocations drift the moment someone runs the tool directly — which is then discovered as a CI failure nobody can reproduce locally. | see block PY-GATE-01 — empty output is the finding: no single command exists yet, so no gate may be added to this subject until one does. | MUST |
 | PY-GATE-02 | Every gate is a required, blocking status check on the merge path — never a pre-commit hook as the primary mechanism, and never an advisory comment. A gate that an author can skip by choosing not to run it is documentation. It also has to be able to go red: see the softened-job check below. | `gh api repos/OWNER/REPO/rules/branches/main --jq '.[].type'` — the gate job's absence from a `required_status_checks` rule is the finding, and empty output means nothing gates the branch at all. Watched red on a live repository whose `main` had no ruleset. `git commit --no-verify` succeeding locally is expected and proves nothing either way. | MUST |
-| PY-GATE-07 | A suite that is configured and passes but that no workflow invokes gets wired in during the same cycle that discovers it, not deferred. Wiring in a suite that is already green costs one line; leaving it costs a silent drift nobody sees until the day it is finally run and everything has broken at once. | `rg -l --glob 'pyproject.toml' 'tool.pytest.ini_options' <repo-root>` lists every project with a configured suite. For each one's directory name D: `rg -n --glob '*.yml' --glob '*.yaml' -e 'D/' -e 'D:' .github/workflows` — empty output for that name is the violation. Search the compound form, never the bare word: a bare directory name collides with unrelated workflow text and reports a false pass. | SHOULD |
+| PY-GATE-07 | A suite that is configured and passes but that no workflow invokes gets wired in during the same cycle that discovers it, not deferred. Wiring in a suite that is already green costs one line; leaving it costs a silent drift nobody sees until the day it is finally run and everything has broken at once. | see block PY-GATE-07 (1) lists every project with a configured suite. For each one's directory name D: see block PY-GATE-07 (2) — empty output for that name is the violation. Search the compound form, never the bare word: a bare directory name collides with unrelated workflow text and reports a false pass. | SHOULD |
+
+```sh
+# PY-GATE-01
+PROJECT_DIR=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$PROJECT_DIR/**/taskfile.yml" ":(glob)$PROJECT_DIR/**/Taskfile.yml" ":(glob)$PROJECT_DIR/**/Makefile" | xargs -0 -r grep -H -n -E -e verify: -e ci: --
+```
+
+```sh
+# PY-GATE-07 (1)
+REPO_ROOT=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$REPO_ROOT/**/pyproject.toml" | xargs -0 -r grep -l -E -e tool.pytest.ini_options --
+# PY-GATE-07 (2)
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -H -n -E -e D/ -e D: --
+```
 
 A required check that cannot fail is worse than no check: it occupies the slot,
 shows a green tick, and reports nothing. Two spellings soften a job into that
@@ -35,7 +49,7 @@ state, and both look like ordinary workflow hygiene in a diff —
 the `run:` line. Watched red on both, plus a bare `exit 0`:
 
 ```
-rg -n --glob '*.yml' --glob '*.yaml' -e 'continue-on-error: true' -e 'run: .*\|\| true' -e 'exit 0$' .github/workflows
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -H -n -E -e 'continue-on-error: true' -e 'run: .*\|\| true' -e 'exit 0$' --
 ```
 
 Every hit on a job named as a required check is the violation; empty output is
@@ -96,9 +110,20 @@ usually the only one that mattered.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-GATE-03 | A lint adoption with more than roughly 200 violations left after safe autofix lands as named, bounded buckets per rule code — never a generated baseline, and never a directory-wide suppression. A baseline flattens the one structure that makes a large remainder tractable, and nothing ever forces it to shrink: every violation inside it is exempt forever, and "clean up the baseline" competes with every other backlog item indefinitely. | `rg -n --glob 'ruff.toml' --glob '.ruff.toml' --glob 'pyproject.toml' '"ALL"' <repo-root>` — a hit under `per-file-ignores` is the violation, empty is the pass; a hit under `select` is a different and legitimate choice. | MUST |
-| PY-GATE-04 | Tools resolve through the project pin, never through `$PATH`. A globally installed linter shadowing the pinned one is not hypothetical — measured on a live development machine, `$PATH` resolved to 0.16.1 while the project pin was 0.16.3: two different linters, same machine, same moment, and the contributor sees a clean tree CI rejects. | `rg -n --glob '*.yml' --glob '*.yaml' -e 'run: ruff ' -e 'run: pyright' -e 'run: pytest' -e 'run: mypy' .github/workflows` — every hit invokes a bare tool name and is the violation; the pinned forms are `uv run …` or the task. Then run `ruff --version` and `uv run ruff --version` in the project directory: two different numbers is the violation. | MUST |
+| PY-GATE-03 | A lint adoption with more than roughly 200 violations left after safe autofix lands as named, bounded buckets per rule code — never a generated baseline, and never a directory-wide suppression. A baseline flattens the one structure that makes a large remainder tractable, and nothing ever forces it to shrink: every violation inside it is exempt forever, and "clean up the baseline" competes with every other backlog item indefinitely. | see block PY-GATE-03 — a hit under `per-file-ignores` is the violation, empty is the pass; a hit under `select` is a different and legitimate choice. | MUST |
+| PY-GATE-04 | Tools resolve through the project pin, never through `$PATH`. A globally installed linter shadowing the pinned one is not hypothetical — measured on a live development machine, `$PATH` resolved to 0.16.1 while the project pin was 0.16.3: two different linters, same machine, same moment, and the contributor sees a clean tree CI rejects. | see block PY-GATE-04 — every hit invokes a bare tool name and is the violation; the pinned forms are `uv run …` or the task. Then run `ruff --version` and `uv run ruff --version` in the project directory: two different numbers is the violation. | MUST |
 | PY-GATE-08 | A `# noqa` or `# type: ignore` always names its code. One line of config, not a paragraph: select ruff's `PGH` group, which denies both bare forms. Any new hit is an agent taking the fast path to green. | `ruff check --select PGH <repo-root>` — `PGH003` and `PGH004` findings are the violation. Watched red on a bare `# noqa` and a bare `# type: ignore`, silent on `# noqa: F401` and `# type: ignore[assignment]`. | SHOULD |
+
+```sh
+# PY-GATE-03
+REPO_ROOT=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$REPO_ROOT/**/ruff.toml" ":(glob)$REPO_ROOT/**/.ruff.toml" ":(glob)$REPO_ROOT/**/pyproject.toml" | xargs -0 -r grep -H -n -E -e '"ALL"' --
+```
+
+```sh
+# PY-GATE-04
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -H -n -E -e 'run: ruff ' -e 'run: pyright' -e 'run: pytest' -e 'run: mypy' --
+```
 
 ## Workflow Hardening
 
@@ -115,8 +140,18 @@ the reasoning next to the trigger rather than suppressing the rule.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-GATE-05 | `${{ }}` never appears directly inside a `run:` block; every value flows through an `env:`-declared intermediate variable first. A branch name, tag or input interpolated straight into a shell line is substituted before the shell parses it, so the value becomes script rather than data. | `rg -n --glob '*.yml' --glob '*.yaml' 'run: .*\$\{\{' .github/workflows` — every hit is the violation, and an `env:` intermediate is correctly not matched. That grep provably misses the multi-line block form: watched silent on an interpolation two lines below a `run:` key. So the check that binds is `zizmor --format plain .github/workflows` reporting zero `template-injection` findings; the grep is the zero-install partial, not a substitute. | MUST |
-| PY-GATE-06 | Every third-party action is pinned by commit SHA with a version comment, in *every* workflow — the release one included. The convention usually holds everywhere except the file that ships the artifact, which is the highest-stakes place for it to lapse. | `rg -n --glob '*.yml' --glob '*.yaml' -e 'uses: [^@]+@v[0-9]' -e 'uses: [^@]+@main' -e 'uses: [^@]+@master' .github/workflows` — every hit is a floating ref and the violation; empty is the pass. A SHA pin and a local `uses: ./…` are both correctly unmatched. | SHOULD |
+| PY-GATE-05 | `${{ }}` never appears directly inside a `run:` block; every value flows through an `env:`-declared intermediate variable first. A branch name, tag or input interpolated straight into a shell line is substituted before the shell parses it, so the value becomes script rather than data. | see block PY-GATE-05 — every hit is the violation, and an `env:` intermediate is correctly not matched. That grep provably misses the multi-line block form: watched silent on an interpolation two lines below a `run:` key. So the check that binds is `zizmor --format plain .github/workflows` reporting zero `template-injection` findings; the grep is the zero-install partial, not a substitute. | MUST |
+| PY-GATE-06 | Every third-party action is pinned by commit SHA with a version comment, in *every* workflow — the release one included. The convention usually holds everywhere except the file that ships the artifact, which is the highest-stakes place for it to lapse. | see block PY-GATE-06 — every hit is a floating ref and the violation; empty is the pass. A SHA pin and a local `uses: ./…` are both correctly unmatched. | SHOULD |
+
+```sh
+# PY-GATE-05
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -H -n -E -e 'run: .*\$\{\{' --
+```
+
+```sh
+# PY-GATE-06
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -H -n -E -e 'uses: [^@]+@v[0-9]' -e 'uses: [^@]+@main' -e 'uses: [^@]+@master' --
+```
 
 ## What Agents Get Wrong Here
 

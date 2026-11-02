@@ -1,0 +1,158 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+name: verify-basic
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: verify-basic-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+          fetch-depth: 0 # `task secrets` (gitleaks git) scans the full history
+      - uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,lint
+          bazel-cache: trusted
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      - run: task ci:lint
+      - run: task lock:check
+      - run: task baseline:check
+      - run: task secrets
+      - run: |
+          # actionlint + zizmor, both pinned in taskfiles/baseline.taskfile.yml
+          task workflows:lint
+      # The helper script holds the credential; a self-hosted runner keeps $RUNNER_TEMP between jobs.
+      - name: Remove the Bazel cache credential
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/bazel-cache-helper" "$RUNNER_TEMP/bazel-cache.rc"
+
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,test
+          bazel-cache: trusted
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      - run: task ci:test
+      - name: Push JUnit telemetry
+        if: always()
+        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          report: target/reports/junit/*.xml
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      - name: Publish JUnit report
+        if: always()
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: target/reports/junit/*.xml
+          require_tests: false
+          # Fork PR tokens cannot write checks: annotate only.
+          annotate_only: ${{ github.event.pull_request.head.repo.fork == true }}
+      # The helper script holds the credential; a self-hosted runner keeps $RUNNER_TEMP between jobs.
+      - name: Remove the Bazel cache credential
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/bazel-cache-helper" "$RUNNER_TEMP/bazel-cache.rc"
+
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,build
+          # Org secret, presented on every event that carries it; fork PRs see empty secrets and run uncached.
+          bazel-cache: trusted
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      - run: task ci:build
+      # The helper script holds the credential; a self-hosted runner keeps $RUNNER_TEMP between jobs.
+      - name: Remove the Bazel cache credential
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/bazel-cache-helper" "$RUNNER_TEMP/bazel-cache.rc"
+
+  docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,docs
+          bazel-cache: trusted
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      - run: task ci:docs
+      - name: Upload docs reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-reports
+          path: target/reports/
+          if-no-files-found: ignore
+          retention-days: 14
+          overwrite: true # a job rerun uploads the same name again; without it the step 409s and fails the job
+      # The helper script holds the credential; a self-hosted runner keeps $RUNNER_TEMP between jobs.
+      - name: Remove the Bazel cache credential
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/bazel-cache-helper" "$RUNNER_TEMP/bazel-cache.rc"
+
+  # Repo-owned jobs: .github/workflows/basic-repo.yml is seeded once and belongs to the repo from then on.
+  repo:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/basic-repo.yml
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+      OTEL_OTLP_AUTH: ${{ secrets.OTEL_OTLP_AUTH }}
+
+  # The single required check: every job succeeded (or was skipped).
+  basic-gate:
+    if: always()
+    needs: [lint, test, build, docs, repo]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require success or skipped
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS" > /dev/null

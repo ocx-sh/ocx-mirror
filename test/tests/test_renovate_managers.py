@@ -18,7 +18,8 @@ from pathlib import Path
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-RENOVATE_JSON = PROJECT_ROOT / "renovate.json"
+# renovate.json is template-owned and extends the conventions preset; the mirror's own managers live here.
+RENOVATE_JSON = PROJECT_ROOT / ".github" / "renovate-local.json"
 
 
 def _managers() -> list[dict]:

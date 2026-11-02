@@ -42,6 +42,10 @@ venv/
 # Logs / runtime
 # =============================================================================
 *.log
+# grim client output is committed whole: a missing fixture fails grim:check on a fresh clone.
+!.claude/skills/**/*.log
+!.agents/skills/**/*.log
+!.opencode/**/*.log
 *.pid
 *.sock
 

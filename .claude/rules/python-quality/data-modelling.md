@@ -33,9 +33,27 @@ Severity maps onto the house tiers: MUST = Block, SHOULD = Warn.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-MODEL-01 | Every dataclass is `frozen=True, slots=True`. Anything else carries a one-line comment naming why — "stateful adapter, holds a live client" is a reason; omission is not. Unfrozen means unhashable, and unslotted means a misspelled attribute assignment silently creates a new one instead of raising. | Two commands, because frozen and slots are a conjunction and one `-e` list would pass a class carrying only one of them. `rg --pcre2 -n --glob '*.py' -e '@(dataclasses\.)?dataclass(\(\))?\s*$' -e '@(dataclasses\.)?dataclass\((?![^)]*frozen=True)' src` then the same with `slots=True`. Every printed line is a violation; empty output is the pass. | SHOULD |
-| PY-MODEL-02 | `slots=True` and `functools.cached_property` never appear on the same class — the decorator needs a per-instance `__dict__` and slots removes it. The class still *defines* cleanly; the `TypeError` waits for the first property access, so a smoke test that never reaches that attribute passes. A class needing weak references adds `weakref_slot=True`, which is itself an error without `slots=True`. | `rg -lU --pcre2 --glob '*.py' '@(dataclasses\.)?dataclass\([^)]*slots=True[\s\S]{0,600}?@cached_property' src` — every listed file pairs the two within one class-sized window; empty output is the pass. This rule exists because PY-MODEL-01 makes `slots=True` the default and therefore sets the trap. | MUST |
-| PY-MODEL-03 | Hashability is decided, not inherited. At the `eq=True, frozen=False` default `__hash__` becomes `None` and the class blows up at its first `set()` or dict-key use, not at definition. A hand-written `__eq__` returns `NotImplemented` — never `False` — for a type it does not recognise, and comes with a matching `__hash__`. | `ruff check --select PLW1641 .` — a class defining `__eq__` with no `__hash__`; empty output is the pass, and the rule is stable, not preview. Then `rg -nU --pcre2 --glob '*.py' 'def __eq__[^\n]*\n(?:[^\n]*\n){0,3}?[^\n]*return False' .` — every hit is the violation. Do not re-verify the unhashable *use* site by hand: pyright's `reportUnhashable` is `error` from Basic mode up and already catches it wherever pyright runs. | MUST |
+| PY-MODEL-01 | Every dataclass is `frozen=True, slots=True`. Anything else carries a one-line comment naming why — "stateful adapter, holds a live client" is a reason; omission is not. Unfrozen means unhashable, and unslotted means a misspelled attribute assignment silently creates a new one instead of raising. | Two commands, because frozen and slots are a conjunction and one `-e` list would pass a class carrying only one of them. see block PY-MODEL-01 then the same with `slots=True`. Every printed line is a violation; empty output is the pass. | SHOULD |
+| PY-MODEL-02 | `slots=True` and `functools.cached_property` never appear on the same class — the decorator needs a per-instance `__dict__` and slots removes it. The class still *defines* cleanly; the `TypeError` waits for the first property access, so a smoke test that never reaches that attribute passes. A class needing weak references adds `weakref_slot=True`, which is itself an error without `slots=True`. | see block PY-MODEL-02 — every listed file pairs the two within one class-sized window; empty output is the pass. This rule exists because PY-MODEL-01 makes `slots=True` the default and therefore sets the trap. | MUST |
+| PY-MODEL-03 | Hashability is decided, not inherited. At the `eq=True, frozen=False` default `__hash__` becomes `None` and the class blows up at its first `set()` or dict-key use, not at definition. A hand-written `__eq__` returns `NotImplemented` — never `False` — for a type it does not recognise, and comes with a matching `__hash__`. | `ruff check --select PLW1641 .` — a class defining `__eq__` with no `__hash__`; empty output is the pass, and the rule is stable, not preview. Then see block PY-MODEL-03 — every hit is the violation. Do not re-verify the unhashable *use* site by hand: pyright's `reportUnhashable` is `error` from Basic mode up and already catches it wherever pyright runs. | MUST |
+
+```sh
+# PY-MODEL-01
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ':(glob)src/**/*.py' | xargs -0 -r awk -f "$CHECKS/dataclass-frozen.awk" --
+```
+
+```sh
+# PY-MODEL-02
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ':(glob)src/**/*.py' | xargs -0 -r awk -f "$CHECKS/slots-cached-property.awk" --
+```
+
+```sh
+# PY-MODEL-03
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' | xargs -0 -r awk -f "$CHECKS/eq-return-false.awk" --
+```
 
 ```python
 # wrong — a definitive answer, so Python never tries the other operand
@@ -53,14 +71,25 @@ Severity maps onto the house tiers: MUST = Block, SHOULD = Warn.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-MODEL-04 | A closed set of string values is a `StrEnum`, not the same literal retyped in three modules. A typo in a bare literal is a silently-never-matching branch; a typo in a member name is an `AttributeError` at import. Legacy `class X(str, Enum)` becomes `StrEnum`. | `ruff check --select UP042 .` — but **`UP042` is inert below `target-version = "py311"`, and ruff infers that from `requires-python`**: a package declaring `>=3.10` while actually running 3.12 gets an empty, meaningless pass. Pin `target-version` to the interpreter in use or this check cannot go red. For the repeated-literal half, take each string that names a state, kind or outcome and run `rg -l --glob '*.py' '"human-review-required"' src` against it — three or more modules is the finding, one or two is not. | SHOULD |
+| PY-MODEL-04 | A closed set of string values is a `StrEnum`, not the same literal retyped in three modules. A typo in a bare literal is a silently-never-matching branch; a typo in a member name is an `AttributeError` at import. Legacy `class X(str, Enum)` becomes `StrEnum`. | `ruff check --select UP042 .` — but **`UP042` is inert below `target-version = "py311"`, and ruff infers that from `requires-python`**: a package declaring `>=3.10` while actually running 3.12 gets an empty, meaningless pass. Pin `target-version` to the interpreter in use or this check cannot go red. For the repeated-literal half, take each string that names a state, kind or outcome and run see block PY-MODEL-04 against it — three or more modules is the finding, one or two is not. | SHOULD |
 | PY-MODEL-05 | Every `datetime` is timezone-aware. A naive one compares and subtracts against an aware one by raising `TypeError`, and serializes to a timestamp nothing downstream can place. | `ruff check --select DTZ .` — empty output is the pass. `DTZ` is not in ruff's default selection, so a gate that omits the family reports nothing and looks identical to a clean run. | SHOULD |
+
+```sh
+# PY-MODEL-04
+git ls-files -z --cached --others --exclude-standard -- ':(glob)src/**/*.py' | xargs -0 -r grep -l -E -e '"human-review-required"' --
+```
 
 ## Serialization Determinism
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-MODEL-06 | Anything a digest is taken over, or that lands in version control, serializes byte-identically: `sort_keys=True` passed explicitly, no set iteration, no reliance on dict insertion order, explicit `separators`. Ordering that happens to hold because the input was pre-sorted is an undeclared invariant — the next added key loses it silently, and the diff shows up as churn in a committed artifact. Binds writers only; a payload that never reaches a file or a digest is out of scope. | `rg -n --pcre2 --glob '*.py' 'json\.dumps?\((?![^\n]*sort_keys)' src` — every call whose opening line does not declare an ordering; empty output is the pass. One false-positive shape, and only one: a multi-line call that passes `sort_keys` further down, which three lines of reading settles. Then the cross-run check, the only one that sees set iteration: `PYTHONHASHSEED=1 python -m <writer> > a.json`, `PYTHONHASHSEED=2 python -m <writer> > b.json`, `diff a.json b.json` — a printed diff is the violation, empty is the pass. | MUST |
+| PY-MODEL-06 | Anything a digest is taken over, or that lands in version control, serializes byte-identically: `sort_keys=True` passed explicitly, no set iteration, no reliance on dict insertion order, explicit `separators`. Ordering that happens to hold because the input was pre-sorted is an undeclared invariant — the next added key loses it silently, and the diff shows up as churn in a committed artifact. Binds writers only; a payload that never reaches a file or a digest is out of scope. | see block PY-MODEL-06 — every call whose opening line does not declare an ordering; empty output is the pass. One false-positive shape, and only one: a multi-line call that passes `sort_keys` further down, which three lines of reading settles. Then the cross-run check, the only one that sees set iteration: `PYTHONHASHSEED=1 python -m <writer> > a.json`, `PYTHONHASHSEED=2 python -m <writer> > b.json`, `diff a.json b.json` — a printed diff is the violation, empty is the pass. | MUST |
+
+```sh
+# PY-MODEL-06
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ':(glob)src/**/*.py' | xargs -0 -r awk -f "$CHECKS/json-dumps-sort-keys.awk" --
+```
 
 ## The Lint Gate
 

@@ -68,7 +68,7 @@ py_library(
         (
             "bep_to_otlp",
             [
-                "//:.github/workflows/verify.yml",
+                "//:.github/workflows/basic-repo.yml",
                 "//:taskfiles/bazel.taskfile.yml",
                 "//:tests/fixtures/bep/cache_states.json",
                 "//:tests/fixtures/bep/crates_build.json",

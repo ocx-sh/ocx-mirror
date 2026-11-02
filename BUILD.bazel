@@ -357,7 +357,7 @@ exports_files(
         ".github/actions/bazel-cache-rc/selftest.sh",
         ".github/actions/bazel-cache-rc/write_rc.py",
         ".github/actions/test-telemetry/action.yml",
-        ".github/workflows/verify.yml",
+        ".github/workflows/basic-repo.yml",
         "crates/TEST_TARGET_MAP.toml",
         "taskfiles/bazel.taskfile.yml",
         "taskfiles/telemetry.taskfile.yml",

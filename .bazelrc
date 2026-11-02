@@ -4,6 +4,9 @@
 # read-only), no --lockfile_mode (that is `task bazel:mod:check`'s job). Tasks
 # pass --jobs explicitly: a home ~/.bazelrc outranks this file.
 
+# OCX baseline: the shared cache flags, the `ci` config and the basic/deep test tiers.
+import %workspace%/bazel/baseline.bazelrc
+
 # The server is a scheduler; left alone the JVM sizes its heap off host RAM.
 startup --host_jvm_args=-Xmx2g
 

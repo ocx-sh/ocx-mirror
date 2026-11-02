@@ -8,7 +8,7 @@
 
 Only the `main` push writes the shared cache, so a branch run can never show a
 cache hit. What it can show is that two runs on one tree asked the cache for
-the same keys: `verify.yml` writes `--execution_log_compact_file` on each CI
+the same keys: `verify-basic.yml`'s Bazel steps write `--execution_log_compact_file` on each CI
 Bazel test invocation, and this turns each log into one sorted
 `<label>\\t<mnemonic>\\t<hash>/<size>` line per spawn. `diff` of two runs' files
 is the comparison; an empty diff is two runs with identical action keys.
