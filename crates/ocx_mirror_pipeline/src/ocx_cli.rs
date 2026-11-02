@@ -72,5 +72,53 @@ pub fn forward_ocx_env(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// The `error` object of the document a failing `ocx --format json` prints on
+/// stdout. Only the fields the operator needs; `kind` and `detail` are slugs,
+/// never secrets.
+#[derive(serde::Deserialize)]
+struct ErrorBody {
+    kind: String,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ErrorDocument {
+    error: ErrorBody,
+}
+
+/// What to show the operator when an `ocx` child fails: its stderr, or its
+/// stdout when stderr said nothing — plus `[kind: detail]` when stdout is an
+/// ocx error document (`--format json` failures, ocx >= 0.6.4).
+///
+/// Older ocx prints no document, so stdout then parses as nothing and the
+/// result is exactly the stderr-else-stdout text.
+pub fn failure_detail(stderr: &str, stdout: &str) -> String {
+    let doc = serde_json::from_str::<ErrorDocument>(stdout.trim())
+        .ok()
+        .map(|d| d.error);
+    let text = match (stderr.trim(), &doc) {
+        ("", Some(body)) => body.message.as_deref().unwrap_or("").trim(),
+        ("", None) => stdout.trim(),
+        (text, _) => text,
+    };
+    match &doc {
+        Some(body) => {
+            let tag = match &body.detail {
+                Some(detail) => format!("{}: {detail}", body.kind),
+                None => body.kind.clone(),
+            };
+            if text.is_empty() {
+                format!("[{tag}]")
+            } else {
+                format!("{text} [{tag}]")
+            }
+        }
+        None => text.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests;

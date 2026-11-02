@@ -443,35 +443,6 @@ fn a_single_reference_narrows_into_a_platform_only_when_asked() {
     );
 }
 
-/// A failing sign child's message reaches the operator from whichever stream
-/// carried it.
-///
-/// Under `--format json` ocx reports a failure in its stdout envelope, so a
-/// sweep whose every tag failed arrives with an empty stderr — and logging
-/// stderr alone left `ERROR signing … failed with exit code 79` as the entire
-/// account of what went wrong.
-#[test]
-fn a_failing_sign_child_is_reported_from_whichever_stream_spoke() {
-    let envelope = r#"{"exit_code":79,"data":{"tags":[{"tag":"3.8.0","status":"failed"}]}}"#;
-
-    assert_eq!(
-        failure_detail("", envelope),
-        envelope,
-        "stdout is used when stderr is silent"
-    );
-    assert_eq!(
-        failure_detail("  \n ", envelope),
-        envelope,
-        "whitespace-only stderr is silent"
-    );
-    assert_eq!(
-        failure_detail("no ambient credential provider\n", envelope),
-        "no ambient credential provider",
-        "stderr still wins when it has something to say",
-    );
-    assert_eq!(failure_detail("", ""), "", "both silent is not a panic");
-}
-
 /// A `skipped` row is the ordinary outcome, not a failure (C-058).
 ///
 /// `push --sign` already signed a bare manifest inline, so the sweep leaving

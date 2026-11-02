@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::forward_ocx_env;
+use super::{failure_detail, forward_ocx_env};
 use ocx_mirror_spec::{AnnounceConfig, WriteTransport};
 
 /// The operator's own announce credential — rung 1 of `ocx`'s forge
@@ -210,10 +210,11 @@ pub async fn invoke_announce(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(format!(
             "ocx package announce exited {}: {}",
             output.status,
-            stderr.trim()
+            failure_detail(&stderr, &stdout)
         ));
     }
 
@@ -241,7 +242,7 @@ pub async fn invoke_announce(
 /// per distinct curated tag, which is the file set a real run would commit. The
 /// `--fork` path returns it empty by construction, so it is the *dry run's*
 /// only quantitative fact and never the real run's.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Default, serde::Deserialize)]
 pub struct AnnounceReport {
     pub status: String,
     #[serde(default)]
@@ -250,4 +251,59 @@ pub struct AnnounceReport {
     pub written_paths: Vec<String>,
     #[serde(default)]
     pub reserved_tags_dropped: Vec<String>,
+    /// `absent | live | spent | stale` (ocx >= 0.6.4); `None` from older ocx.
+    #[serde(default)]
+    pub branch_state: Option<String>,
+    #[serde(default)]
+    pub base_sha: Option<String>,
+    /// `fast_forward | accumulate | reset`.
+    #[serde(default)]
+    pub ref_update: Option<String>,
+    /// Tags carried onto a rebuilt root from a `stale` branch.
+    #[serde(default)]
+    pub carried: Vec<String>,
+    #[serde(default)]
+    pub pull_request_number: Option<u64>,
+    #[serde(default)]
+    pub pull_request_author: Option<String>,
+    /// Tags whose rows this run removed because the registry no longer has them.
+    #[serde(default)]
+    pub removed: Vec<String>,
+    /// Durable tags the registry lacks, kept in the index.
+    #[serde(default)]
+    pub durable_missing: Vec<String>,
 }
+
+impl AnnounceReport {
+    /// One line naming the noteworthy branch facts, or `None` when the run had
+    /// none (including every report from an ocx that predates the fields).
+    pub fn branch_note(&self) -> Option<String> {
+        let mut notes = Vec::new();
+        if self.branch_state.as_deref() == Some("stale") {
+            notes.push("stale announce branch rebuilt".to_string());
+        }
+        if self.ref_update.as_deref() == Some("reset") {
+            notes.push("branch ref reset".to_string());
+        }
+        if !self.carried.is_empty() {
+            notes.push(format!("{} tag(s) carried from the stale branch", self.carried.len()));
+        }
+        if let Some(author) = self.pull_request_author.as_deref() {
+            notes.push(format!("pull request opened by {author}"));
+        }
+        if !self.removed.is_empty() {
+            notes.push(format!("{} gone tag(s) removed", self.removed.len()));
+        }
+        if !self.durable_missing.is_empty() {
+            notes.push(format!(
+                "{} durable tag(s) missing from the registry, kept",
+                self.durable_missing.len()
+            ));
+        }
+        (!notes.is_empty()).then(|| notes.join("; "))
+    }
+}
+
+#[cfg(test)]
+#[path = "announce/tests.rs"]
+mod tests;
