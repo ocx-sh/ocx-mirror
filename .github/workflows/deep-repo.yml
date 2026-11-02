@@ -1,0 +1,34 @@
+# Seeded once by ocx-sh/conventions; this file belongs to the repo from here on.
+# verify-deep calls it as its `repo` job: the repo-owned jobs of the nightly and labelled deep tier.
+# A called workflow sees only the secrets it declares, so keep every secret the `repo_workflows` answer
+# lists declared under `on.workflow_call.secrets`.
+name: deep-repo
+
+on:
+  workflow_call:
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+      BAZEL_CACHE_READ_AUTH:
+        required: false
+      OTEL_OTLP_AUTH:
+        required: false
+
+permissions: {}
+
+jobs:
+  # The release build matrix with nothing published (the former build-check.yml): every leg release.yml and
+  # deploy-dev.yml run, with the `check` channel baked in so a stray artifact can never pass for a dev or
+  # release binary. Artifacts expire after a day (build-matrix.yml) and no publish job follows. Read-only
+  # cache: build-matrix.yml takes the read credential alone.
+  build-matrix:
+    name: Release build matrix
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      # A SemVer the smoke can assert on, visibly not a publishable version.
+      version_semver: 0.0.0-check+${{ github.run_id }}
+      channel: check
+    secrets:
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}

@@ -6,6 +6,9 @@ vars:
   REPORTS_ROOT: '{{.ROOT_DIR}}/target/reports'
 
 includes:
+  baseline:
+    taskfile: ./taskfiles/baseline.taskfile.yml
+    flatten: true
   rust: ./taskfiles/rust.taskfile.yml
   release: ./taskfiles/release.taskfile.yml
   docs: ./taskfiles/docs.taskfile.yml
@@ -81,9 +84,101 @@ tasks:
       # would never run it. Bare `bash`, no network, no real credential, ~1 s.
       - bash .github/actions/bazel-cache-rc/selftest.sh
 
+  # The tier aliases the conventions baseline's workflows call (`verify-basic.yml`
+  # runs ci:lint / ci:test / ci:build / ci:docs, `verify-deep.yml` ci:deep). They are
+  # the Linux CI arms of `task verify`, split so a tier can be re-run alone; every
+  # Bazel call passes `--config=ci` (.bazelrc: minimal downloads, test reports kept)
+  # and `JOBS=auto`. The Bazel acceptance suite and the sharded native run are
+  # repo-owned jobs in basic-repo.yml, not a tier.
+  # The baseline's commit-msg gate, widened by the rolling `Checkpoint` commit (`task checkpoint`,
+  # /commit's working phase) that /finalize rewrites into conventional commits before landing.
+  hooks:repo-commit-msg:
+    desc: "commit-msg gate: a conventional subject, or the rolling Checkpoint (arg: the message file)"
+    silent: true
+    cmds:
+      - cmd: |
+          read -r msg < {{.CLI_ARGS}} || true
+          case "$msg" in Merge\ *|Revert\ \"*|Checkpoint) exit 0 ;; esac
+          re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+'
+          if [[ $msg =~ $re ]]; then exit 0; fi
+          echo "commit subject must be '<type>[(scope)][!]: <subject>' (type: feat fix docs style refactor perf test build ci chore revert) or 'Checkpoint'" >&2
+          exit 1
+
+  # Ahead of the first Bazel command of a CI job: the C++ toolchain is autoconfigured once per output
+  # base and bakes `lld` in as the linker when it exists. The runner image has gold and no `ld.lld`, and
+  # the linker is part of every link's action key, so without it these lanes miss the cache the other
+  # lanes (and ocx) share. A no-op off CI and where lld is already installed.
+  .ci:lld:
+    internal: true
+    platforms: [linux]
+    status:
+      - '[ "${CI:-}" != true ] || command -v ld.lld >/dev/null'
+    cmds:
+      - sudo apt-get update && sudo apt-get install -y lld
+
+  ci:lint:
+    desc: 'Lint tier: fmt + clippy, licenses, claude hooks, Bazel static gates (pin, lint, lockfile, fork patches, BUILD drift, tag guard, graph load)'
+    cmds:
+      - task: .ci:lld
+      - task: rust:lint
+      - task: rust:license:check
+      - task: rust:license:deps
+      - task: claude:hooks:test
+      - task: bazel:pin:check
+      - task: bazel:lint
+      - task: bazel:mod:check
+      - task: bazel:patch:check
+      - task: bazel:build:nobuild
+        vars: {JOBS: auto}
+      - task: bazel:build:drift
+        vars: {JOBS: auto}
+      - task: bazel:tag:guard
+
+  ci:test:
+    desc: 'Test tier: gate-script self-tests, Bazel unit tests, the coverage floor (JUnit to target/reports/junit/)'
+    cmds:
+      - task: .ci:lld
+      - task: bazel:test:scripts
+        vars: {JOBS: auto, CLI_ARGS: '--config=ci'}
+      - task: bazel:test:unit
+        vars: {JOBS: auto, CLI_ARGS: '--config=ci'}
+      - task: bazel:test:coverage
+        vars: {JOBS: auto, CLI_ARGS: '--config=ci'}
+      # The per-case report `bazel:test:unit` writes, where the template's test job reads it.
+      - cmd: |
+          mkdir -p target/reports/junit
+          if [ -f target/bazel/junit.xml ]; then cp target/bazel/junit.xml target/reports/junit/unit.xml; fi
+        silent: true
+
+  ci:build:
+    desc: 'Build tier: the jsonschema feature graph'
+    cmds:
+      - task: .ci:lld
+      - task: bazel:build:jsonschema
+        vars: {JOBS: auto, CLI_ARGS: '--config=ci'}
+
+  ci:docs:
+    desc: Docs tier — the Bazel mkdocs --strict site build (//docs:site); no Lighthouse gate, the site has no deploy
+    cmds:
+      - task: docs:build
+        vars: {JOBS: auto, CLI_ARGS: '--config=ci'}
+
+  ci:deep:
+    desc: Deep tier — n/a here; the release build matrix is a repo-owned job in deep-repo.yml
+    cmds:
+      - mkdir -p target/reports/junit
+      - echo "n/a - the deep tier is deep-repo.yml (release build matrix)"
+
+  verify:scoped:
+    desc: Scoped gate for agents and quick loops — tests only what the change reaches (Bazel rdeps vs origin/main), claude hooks, baseline contract; never the full `task verify`
+    cmds:
+      - task: bazel:test:scoped
+      - task: claude:hooks:test
+      - task: baseline:check
+
   # Two-phase verify: parallel lint, then sequential build+test
   verify:
-    desc: Full quality gate
+    desc: Full quality gate (CI runs it sharded; agents run `verify:scoped`, not this)
     summary: |
       Phase 1 (parallel): rustfmt + clippy (`rust:lint` — the Bazel lanes on
         Linux, cargo elsewhere); off Linux also the gate-script and telemetry

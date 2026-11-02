@@ -35,8 +35,20 @@ single-member loop is the reference implementation to copy.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-SEC-01 | Never call `.extractall()` or a batch `.extract()` on an archive the process downloaded — resolve one member, check it, stream it. Where a batch extract is genuinely unavoidable, `filter='data'` is written at the call site and never inherited from the interpreter: the default is `fully_trusted` below Python 3.14 and every package here floors below that, so an unfiltered `extractall()` on the stated minimum Python behaves exactly as it did before CVE-2007-4559 was fixed. `zipfile` has no `filter=` — it strips `..` and absolute prefixes itself but never inspects link members, so `stat.S_ISLNK(info.external_attr >> 16)` rejection is what replaces the filter there. | `rg -n --glob '**/*.py' 'extractall\(' <src>` — every hit needs a read; one without an explicit `filter=` is the violation. Then `ruff check --select S202 --no-cache --isolated <src>`, which is **not** a substitute: measured, S202 sees a `zipfile` `.extractall()` only when `tarfile` happens to be imported in the same file, so a pure-`zipfile` module gets zero coverage from it | MUST |
-| PY-SEC-02 | Cap member count and cumulative decompressed bytes **inside** the read loop, against a named module constant, aborting before the next chunk is pulled from the decompressor. `ZipInfo.file_size` and `TarInfo.size` are attacker-supplied header metadata, not verified properties, and a check that runs after the read has already lost: measured on CPython 3.14, 64 MiB of zeros deflates to 65 KB (1027:1 in one layer) and `zf.read()` puts all 64 MiB resident before a post-hoc size test can run. | `rg -n --glob '**/*.py' -e 'file_size' -e '\.size >' <src>` — zero output is expected and clean; any hit used as the bound rather than reported is the violation. Then the fixture: unpack a member that deflates at ~1000:1 and assert the extractor raises at the constant, with peak resident bytes near the cap and not near the payload | MUST |
+| PY-SEC-01 | Never call `.extractall()` or a batch `.extract()` on an archive the process downloaded — resolve one member, check it, stream it. Where a batch extract is genuinely unavoidable, `filter='data'` is written at the call site and never inherited from the interpreter: the default is `fully_trusted` below Python 3.14 and every package here floors below that, so an unfiltered `extractall()` on the stated minimum Python behaves exactly as it did before CVE-2007-4559 was fixed. `zipfile` has no `filter=` — it strips `..` and absolute prefixes itself but never inspects link members, so `stat.S_ISLNK(info.external_attr >> 16)` rejection is what replaces the filter there. | see block PY-SEC-01 — every hit needs a read; one without an explicit `filter=` is the violation. Then `ruff check --select S202 --no-cache --isolated <src>`, which is **not** a substitute: measured, S202 sees a `zipfile` `.extractall()` only when `tarfile` happens to be imported in the same file, so a pure-`zipfile` module gets zero coverage from it | MUST |
+| PY-SEC-02 | Cap member count and cumulative decompressed bytes **inside** the read loop, against a named module constant, aborting before the next chunk is pulled from the decompressor. `ZipInfo.file_size` and `TarInfo.size` are attacker-supplied header metadata, not verified properties, and a check that runs after the read has already lost: measured on CPython 3.14, 64 MiB of zeros deflates to 65 KB (1027:1 in one layer) and `zf.read()` puts all 64 MiB resident before a post-hoc size test can run. | see block PY-SEC-02 — zero output is expected and clean; any hit used as the bound rather than reported is the violation. Then the fixture: unpack a member that deflates at ~1000:1 and assert the extractor raises at the constant, with peak resident bytes near the cap and not near the payload | MUST |
+
+```sh
+# PY-SEC-01
+SRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'extractall\(' --
+```
+
+```sh
+# PY-SEC-02
+SRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e file_size -e '\.size >' --
+```
 
 ```python
 # Wrong — the header is not a bound, and the join is steered by the archive.
@@ -70,28 +82,65 @@ through something that excludes or scrubs the value.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-SEC-03 | A credential value reaches no observable surface: not a log line, not an exception message, not a `repr()`, not `argv`, and not the environment of a child process. Concretely — it travels to a child on stdin (`--password-stdin` plus `input=`), never as an argv element, because argv is world-readable through `ps` and `/proc/<pid>/cmdline`; a field holding one is declared `field(..., repr=False)`, so exclusion is a property of the type rather than a habit every future `logger.debug(self)` has to remember; and redaction happens at **one** chokepoint covering argv, captured stderr and the text carried on raised errors, not per call site. Captured stdout is deliberately exempt: substituting inside the JSON payload a caller is about to parse corrupts the document. PY-SEC-04 is the mechanism for the environment half. | `rg -n --glob '**/*.py' -e 'run\(\[[^\]]*token' -e 'run\(\[[^\]]*password' -e 'Popen\(\[[^\]]*token' -e 'Popen\(\[[^\]]*password' <src>` — each hit puts a credential in an argv literal, and zero output is expected and clean; the compliant `run(argv, input=token)` shape is correctly not matched. Then `rg -n --glob '**/*.py' -e 'token: ' -e 'password: ' -e 'secret: ' <src>` — the trailing `: ` anchors it to a declaration; each hit that declares a field and lacks `repr=False` is the violation | MUST |
-| PY-SEC-04 | A child process that does not need the parent's environment is given an explicitly constructed `dict` naming what it gets. Never `os.environ.copy()`, never `{**os.environ, ...}`, and never an unset `env=` where the parent may hold a registry token — an allowlist bounds the blast radius to what is named, instead of handing every ambient credential in a developer's shell to every process the child spawns in turn. SHOULD rather than MUST because the fleet's only gap is four `subprocess.run` calls to `git` with fixed argv, where no credential-relevant behaviour turns on an inherited variable; the next hook that shells out to something less trusted inherits the gap by default unless it names its environment. | `rg -n --glob '**/*.py' -e 'os\.environ\.copy\(\)' -e '\{\*\*os\.environ' -e 'env=os\.environ' <src>` — each hit is a violation; zero output is expected and clean. This cannot see an *implicit* unset `env=`, so each `subprocess.run`/`Popen` site still needs the argument read | SHOULD |
+| PY-SEC-03 | A credential value reaches no observable surface: not a log line, not an exception message, not a `repr()`, not `argv`, and not the environment of a child process. Concretely — it travels to a child on stdin (`--password-stdin` plus `input=`), never as an argv element, because argv is world-readable through `ps` and `/proc/<pid>/cmdline`; a field holding one is declared `field(..., repr=False)`, so exclusion is a property of the type rather than a habit every future `logger.debug(self)` has to remember; and redaction happens at **one** chokepoint covering argv, captured stderr and the text carried on raised errors, not per call site. Captured stdout is deliberately exempt: substituting inside the JSON payload a caller is about to parse corrupts the document. PY-SEC-04 is the mechanism for the environment half. | see block PY-SEC-03 (1) — each hit puts a credential in an argv literal, and zero output is expected and clean; the compliant `run(argv, input=token)` shape is correctly not matched. Then see block PY-SEC-03 (2) — the trailing `: ` anchors it to a declaration; each hit that declares a field and lacks `repr=False` is the violation | MUST |
+| PY-SEC-04 | A child process that does not need the parent's environment is given an explicitly constructed `dict` naming what it gets. Never `os.environ.copy()`, never `{**os.environ, ...}`, and never an unset `env=` where the parent may hold a registry token — an allowlist bounds the blast radius to what is named, instead of handing every ambient credential in a developer's shell to every process the child spawns in turn. SHOULD rather than MUST because the fleet's only gap is four `subprocess.run` calls to `git` with fixed argv, where no credential-relevant behaviour turns on an inherited variable; the next hook that shells out to something less trusted inherits the gap by default unless it names its environment. | see block PY-SEC-04 — each hit is a violation; zero output is expected and clean. This cannot see an *implicit* unset `env=`, so each `subprocess.run`/`Popen` site still needs the argument read | SHOULD |
+
+```sh
+# PY-SEC-03 (1)
+SRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'run\(\[[^]]*token' -e 'run\(\[[^]]*password' -e 'Popen\(\[[^]]*token' -e 'Popen\(\[[^]]*password' --
+# PY-SEC-03 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'token: ' -e 'password: ' -e 'secret: ' --
+```
+
+```sh
+# PY-SEC-04
+SRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'os\.environ\.copy\(\)' -e '\{\*\*os\.environ' -e 'env=os\.environ' --
+```
 
 ## Paths From Outside
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-SEC-05 | Never build a destination by joining a raw `.filename`/`.name` from an archive, a wire document, or a PR-supplied field onto a directory. Resolve by base name, or resolve both sides and compare with `Path.is_relative_to()` / `os.path.commonpath()`. A `.startswith()` on a resolved path is not a containment check: `/dest-evil` is a string prefix of `/dest`, and appending a separator still admits a resolved symlink that shares the prefix while denoting a different directory. | Two checks, both printing only violations, both silent on the reference loop above. Raw-member joins, in either idiom: `rg -n --glob '**/*.py' -e 'join\([^)]*\.filename' -e 'join\([^)]*\.name\b' -e '/ ?[\w.]*\w+\.filename' -e '/ ?[\w.]*\w+\.name\b' <src>`. Naive containment: `rg -nU --glob '**/*.py' -e 'realpath\([\s\S]{0,160}?startswith\(' -e 'resolve\(\)[\s\S]{0,160}?startswith\(' <src>`. Both are unions — every hit is independently a violation, none of them is a condition on another | MUST |
+| PY-SEC-05 | Never build a destination by joining a raw `.filename`/`.name` from an archive, a wire document, or a PR-supplied field onto a directory. Resolve by base name, or resolve both sides and compare with `Path.is_relative_to()` / `os.path.commonpath()`. A `.startswith()` on a resolved path is not a containment check: `/dest-evil` is a string prefix of `/dest`, and appending a separator still admits a resolved symlink that shares the prefix while denoting a different directory. | Two checks, both printing only violations, both silent on the reference loop above. Raw-member joins, in either idiom: see block PY-SEC-05 (1). Naive containment: see block PY-SEC-05 (2). Both are unions — every hit is independently a violation, none of them is a condition on another | MUST |
+
+```sh
+# PY-SEC-05 (1)
+SRC=src    # the directory to search
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'join\([^)]*\.filename' -e 'join\([^)]*\.name($|[^[:alnum:]_])' -e '/ ?[[:alnum:]_.]*[[:alnum:]_]+\.filename' -e '/ ?[[:alnum:]_.]*[[:alnum:]_]+\.name($|[^[:alnum:]_])' --
+# PY-SEC-05 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r awk -f "$CHECKS/resolve-startswith.awk" --
+```
 
 ## Untrusted Text in Messages
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-SEC-06 | Every value the process did not produce — a subprocess's stderr, an API response field, a filename, a schema-validated but PR-supplied identifier — is `!r`-wrapped when it is interpolated into an exception message or any string a caller may print. `repr()` renders control bytes as their `\x..` literal, so this is free and already idiomatic; raw ANSI reaching a terminal is CWE-150, and the sibling Rust binary in this catalog shipped exactly that defect. The failure mode is one bare interpolation sitting beside `!r`-wrapped siblings in the same message, which reads as correct at review speed. | `rg -n --glob '**/*.py' 'f"[^"]*\{[a-z_][\w.\[\]()]*\}' <module>` — each hit is an interpolation with no conversion. Scope it to the module under change: whole-tree this is legitimately noisy, and the real finding it caught was a single bare `{tag_name}` between two `!r`-wrapped values on one line | SHOULD |
+| PY-SEC-06 | Every value the process did not produce — a subprocess's stderr, an API response field, a filename, a schema-validated but PR-supplied identifier — is `!r`-wrapped when it is interpolated into an exception message or any string a caller may print. `repr()` renders control bytes as their `\x..` literal, so this is free and already idiomatic; raw ANSI reaching a terminal is CWE-150, and the sibling Rust binary in this catalog shipped exactly that defect. The failure mode is one bare interpolation sitting beside `!r`-wrapped siblings in the same message, which reads as correct at review speed. | see block PY-SEC-06 — each hit is an interpolation with no conversion. Scope it to the module under change: whole-tree this is legitimately noisy, and the real finding it caught was a single bare `{tag_name}` between two `!r`-wrapped values on one line | SHOULD |
+
+```sh
+# PY-SEC-06
+MODULE=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$MODULE/**/*.py" | xargs -0 -r grep -H -n -E -e 'f"[^"]*\{[a-z_][][:alnum:]_.[()]*\}' --
+```
 
 ## The Security Gate
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-SEC-07 | Every shipped package selects `ruff`'s `S` family. It is one line in a config `ruff` already runs, and it is what makes `pickle`/`marshal` (`S301`, `S302`), `yaml.load` (`S506`), `eval`/`exec` (`S307`), `tempfile.mktemp` (`S306`) and unsafe hashes (`S324`) gated rather than remembered. `S105`/`S106` fire on `*_TOKEN`/`*_TOKEN_ENV` constants that hold variable *names*: 3 of the 4 hits fleet-wide are that false positive, and the answer is a per-site `# noqa: S105` naming why, never dropping the code from the family. `bandit` stays runnable and advisory for the three checks `ruff` never ported — `B325`, `B614`, `B615` — and for nothing else. | `rg --files-without-match '"S"' --glob '**/pyproject.toml' <root>` — every listed manifest that configures `ruff` is a violation. Then `rg -n --glob '**/pyproject.toml' '"S105"' <root>` — a hit inside `[tool.ruff.lint] ignore` is the violation; inside `per-file-ignores` it is not | MUST |
+| PY-SEC-07 | Every shipped package selects `ruff`'s `S` family. It is one line in a config `ruff` already runs, and it is what makes `pickle`/`marshal` (`S301`, `S302`), `yaml.load` (`S506`), `eval`/`exec` (`S307`), `tempfile.mktemp` (`S306`) and unsafe hashes (`S324`) gated rather than remembered. `S105`/`S106` fire on `*_TOKEN`/`*_TOKEN_ENV` constants that hold variable *names*: 3 of the 4 hits fleet-wide are that false positive, and the answer is a per-site `# noqa: S105` naming why, never dropping the code from the family. `bandit` stays runnable and advisory for the three checks `ruff` never ported — `B325`, `B614`, `B615` — and for nothing else. | see block PY-SEC-07 (1) — every listed manifest that configures `ruff` is a violation. Then see block PY-SEC-07 (2) — a hit inside `[tool.ruff.lint] ignore` is the violation; inside `per-file-ignores` it is not | MUST |
 | PY-SEC-08 | A security lint counts as enforced only after it has been watched go red, against a planted violation, at the exact path and config the CI job passes it. A rule selected where it cannot fire certifies every unchecked change as checked, and the failure is invisible because the output is identical to a clean tree. This is not hypothetical here: a shipped `S307`-based rule is selected at a scope that reaches no file, so `eval("1+1")` passes it today. | Write the violation the rule names into a file inside the tree CI actually scans, run the project's own gate command verbatim, and confirm a non-zero exit naming that file. A green run on a planted violation is the violation — then delete the plant | MUST |
 | PY-SEC-09 | `pip-audit` runs in CI, and a finding is triaged as runtime-reachable or build-only before anyone dismisses it. The distinction is the whole value: a `gitpython` advisory reached only through the docs toolchain is not the same finding as an `idna` advisory reached transitively through `httpx` in a shipped package. `uv audit` and `UV_MALWARE_CHECK` are faster and OSV-backed but explicitly preview, so they do not gate anything yet. | `uv export --no-hashes --no-emit-project --output-file <req.txt>` then `pip-audit -r <req.txt>` — a non-zero exit lists the vulnerable pins. The export step is load-bearing, not ceremony: run directly against a `uv` venv, `pip-audit` fails on the project's own unpublished distribution and neither `--skip-editable` nor `--local` fixes it | SHOULD |
+
+```sh
+# PY-SEC-07 (1)
+ROOT=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$ROOT/**/pyproject.toml" | xargs -0 -r grep -L -E -e '"S"' --
+# PY-SEC-07 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$ROOT/**/pyproject.toml" | xargs -0 -r grep -H -n -E -e '"S105"' --
+```
 
 ## What Agents Get Wrong Here
 

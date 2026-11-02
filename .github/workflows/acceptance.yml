@@ -1,0 +1,174 @@
+name: Acceptance
+
+# The native acceptance suite, sharded, with one merge job that judges the suite floor and the skip and
+# xfail ceilings over every shard's report together (a floor is a property of the whole suite, never of
+# one shard). Reusable: basic-repo.yml calls it on every pull request. Shape ported from ocx's
+# acceptance.yml, cut to what the mirror needs: Linux only, one binary source (a Bazel build).
+#
+# Jobs: `plan` (shard list) -> `binary` (Bazel build of //:ocx-mirror) -> `shard` (pytest against that
+# binary, no Bazel and no cache credential) -> `merge` (floor and ceilings). The cache credential lives
+# in `binary` alone, so it never shares a runner with the tests.
+#
+# `shard-count` is the knob: raise it and each module lands in exactly one shard (scripts/accept_shard.py,
+# `modules[I::N]`); the merge job requires one report per shard. The Bazel `//test:acceptance` suite
+# (`task bazel:test:accept`, one cached sh_test) is a separate, repo-owned job in basic-repo.yml.
+
+on:
+  workflow_call:
+    inputs:
+      shard-count:
+        description: Number of shards the suite is split into.
+        type: number
+        default: 1
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+      BAZEL_CACHE_READ_AUTH:
+        required: false
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - name: Plan the shards
+        id: plan
+        env:
+          SHARD_COUNT: ${{ inputs.shard-count }}
+        run: |
+          set -euo pipefail
+          case "$SHARD_COUNT" in
+            ''|0|*[!0-9]*) echo "::error::shard-count must be a positive integer, got '$SHARD_COUNT'"; exit 1 ;;
+          esac
+          echo "shards=[$(seq -s, 0 "$((SHARD_COUNT - 1))")]" >> "$GITHUB_OUTPUT"
+
+  # Builds the binary once for every shard. The only job here that holds the cache credential.
+  binary:
+    name: Build binary
+    needs: plan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - name: Setup
+        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,build
+          bazel-cache: ${{ secrets.BAZEL_CACHE_WRITE_AUTH != '' && 'trusted' || 'read' }}
+          cache-read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      - name: Install lld
+        # The linker the host C++ toolchain autoconfigures to is part of every link's action key; the
+        # shared cache is only hit when every lane picks the same one (see .bazelrc).
+        run: sudo apt-get update && sudo apt-get install -y lld
+      - name: Build
+        run: task bazel:build:test-binary JOBS=auto -- --config=ci
+      - name: Remove the Bazel cache credential
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/bazel-cache-helper" "$RUNNER_TEMP/bazel-cache.rc"
+      - name: Upload binary
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: acceptance-binary
+          path: test/bin/ocx-mirror
+          overwrite: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  shard:
+    name: Acceptance (shard-${{ matrix.shard }}-of-${{ inputs.shard-count }})
+    needs: [plan, binary]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # One level is enough: the Sigstore compose file lives in external/ocx/test, and the shard
+          # builds nothing (the nested forks are for the Bazel build).
+          submodules: true
+      # Puts `ocx` and `uv` (the project toolchain) on PATH; no cache credential reaches this job.
+      - name: Setup
+        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,test
+      - name: Download binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: acceptance-binary
+          path: test/bin
+      - name: Prepare binary
+        run: chmod +x test/bin/ocx-mirror
+      - name: Run Acceptance Tests
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_COUNT: ${{ inputs.shard-count }}
+          # The harness brings the Sigstore stack up from ocx's compose file; the sibling ../ocx
+          # checkout it defaults to does not exist here.
+          OCX_SIGSTORE_COMPOSE: ${{ github.workspace }}/external/ocx/test/docker-compose.yml
+        run: task test:accept:native SHARD_COUNT="$SHARD_COUNT" SHARD_INDEX="$SHARD_INDEX"
+      - name: Stop Docker services
+        if: always()
+        run: |
+          docker compose -f external/ocx/test/docker-compose.yml --profile sigstore down 2>/dev/null || true
+          docker compose -f test/docker-compose.yml down 2>/dev/null || true
+      - name: Upload shard JUnit
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: accept-junit-shard-${{ matrix.shard }}
+          path: target/accept/junit/*.xml
+          # A rerun of the shard uploads this name again, and the action refuses a name the run holds.
+          overwrite: true
+          retention-days: 1
+
+  # The floor and the skip/xfail ceilings are properties of the whole suite, so they are judged over
+  # every shard's report together, never per shard.
+  merge:
+    name: Acceptance (merged)
+    needs: shard
+    if: ${{ !cancelled() && needs.shard.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download shard reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: accept-junit-shard-*
+          path: accept-junit
+          merge-multiple: true
+      - name: Suite floor and ceilings
+        env:
+          SHARD_COUNT: ${{ inputs.shard-count }}
+        run: python3 scripts/accept_floor.py --junit "$GITHUB_WORKSPACE/accept-junit" --expect-shards "$SHARD_COUNT"
+      # Annotations and the job summary only: the caller grants `contents: read`, so no check run.
+      - name: Publish acceptance results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: accept-junit/*.xml
+          require_tests: false
+          annotate_only: true

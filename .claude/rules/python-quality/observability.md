@@ -34,7 +34,15 @@ project strips control bytes from untrusted text before it reaches a terminal.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-OBS-01 | A library configures nothing: `logging.getLogger(__name__)` at module scope, at most one `NullHandler` attached to the package logger in `__init__.py`, and no `basicConfig`, `addHandler`, `dictConfig` or `setLevel` anywhere else in the package. Handler, format and level belong to the application; a library that sets them silently overrides its consumer's setup and their tests. Naming a logger with a string literal instead of `__name__` is a legitimate decision when the intent is the package-root logger — but it is a decision, and it carries an adjacent comment saying so. | `rg -n --glob '**/*.py' -e 'basicConfig\(' -e 'addHandler\(' -e 'dictConfig\(' <libsrc>` — every hit outside a single `NullHandler` attach is the violation; zero output is expected and clean. Then `rg -n --glob '**/*.py' 'getLogger\(\s*[\x27"]' <libsrc>` — each hit is a hardcoded logger name. The grep is the only check available: measured, `LOG002` fires only on `__file__`/`__cached__` and never on a plain string, so selecting it here proves nothing | MUST |
+| PY-OBS-01 | A library configures nothing: `logging.getLogger(__name__)` at module scope, at most one `NullHandler` attached to the package logger in `__init__.py`, and no `basicConfig`, `addHandler`, `dictConfig` or `setLevel` anywhere else in the package. Handler, format and level belong to the application; a library that sets them silently overrides its consumer's setup and their tests. Naming a logger with a string literal instead of `__name__` is a legitimate decision when the intent is the package-root logger — but it is a decision, and it carries an adjacent comment saying so. | see block PY-OBS-01 (1) — every hit outside a single `NullHandler` attach is the violation; zero output is expected and clean. Then see block PY-OBS-01 (2) — each hit is a hardcoded logger name. The grep is the only check available: measured, `LOG002` fires only on `__file__`/`__cached__` and never on a plain string, so selecting it here proves nothing | MUST |
+
+```sh
+# PY-OBS-01 (1)
+LIBSRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$LIBSRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'basicConfig\(' -e 'addHandler\(' -e 'dictConfig\(' --
+# PY-OBS-01 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$LIBSRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'getLogger\([[:space:]]*['\''"]' --
+```
 
 ```python
 # Wrong — a library module reconfiguring whichever application imported it.
@@ -57,7 +65,13 @@ sites.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-OBS-02 | Every handler the application installs writes to stderr or to a file, never to stdout. `logging.StreamHandler()` already defaults to `sys.stderr`, so the bare constructor is correct and the violation is always an explicit `sys.stdout` — which is why it reads as deliberate to a reviewer and is never questioned. A handler pointed at stdout interleaves diagnostics into the payload byte stream something downstream parses, and no amount of discipline at the call sites prevents it: the call site says `_LOG.debug(...)`, the destination was chosen in a different file. The same holds for a hook whose protocol owns stdout — logging there needs its own stderr or file handler, or it corrupts the JSON the harness reads. | `rg -n --glob '**/*.py' -e 'StreamHandler\(sys\.stdout' -e 'stream=sys\.stdout' <src>` — each hit is a violation; zero output is expected and clean. The escapes are load-bearing: an unescaped `(` makes this a regex parse error, which exits 2 with no output and reads as a clean tree. Watched red on a planted `basicConfig(stream=sys.stdout)` and a planted `StreamHandler(sys.stdout)`, and silent on the bare `StreamHandler()` that is already correct | MUST |
+| PY-OBS-02 | Every handler the application installs writes to stderr or to a file, never to stdout. `logging.StreamHandler()` already defaults to `sys.stderr`, so the bare constructor is correct and the violation is always an explicit `sys.stdout` — which is why it reads as deliberate to a reviewer and is never questioned. A handler pointed at stdout interleaves diagnostics into the payload byte stream something downstream parses, and no amount of discipline at the call sites prevents it: the call site says `_LOG.debug(...)`, the destination was chosen in a different file. The same holds for a hook whose protocol owns stdout — logging there needs its own stderr or file handler, or it corrupts the JSON the harness reads. | see block PY-OBS-02 — each hit is a violation; zero output is expected and clean. The escapes are load-bearing: an unescaped `(` makes this a regex parse error, which exits 2 with no output and reads as a clean tree. Watched red on a planted `basicConfig(stream=sys.stdout)` and a planted `StreamHandler(sys.stdout)`, and silent on the bare `StreamHandler()` that is already correct | MUST |
+
+```sh
+# PY-OBS-02
+SRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'StreamHandler\(sys\.stdout' -e 'stream=sys\.stdout' --
+```
 
 ## Log Calls, Where They Exist
 
@@ -80,14 +94,29 @@ is an ERROR reported as a WARNING to keep the log looking calm.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-OBS-04 | A single-shot batch CLI's machine-readable contract is its exit code plus its structured stdout — never a log line a caller greps. Four parts, all required: one typed exception per failure class a caller would act on differently, each mapped to exactly one exit code; every raise carrying the values that made it fail, inline in the message, at the point of failure; exactly one top-level handler that maps modeled errors to stderr plus their exit code; and anything unmodeled left to propagate as a full traceback, which is strictly more diagnostic than a hand-written handler because nobody had to anticipate it. A program built this way is fully observable with no `logging` at all — adding it would add a channel and remove nothing. | `rg -c --glob '**/*.py' 'except \w*Error' <entrypoint>` — a count above one is the violation, and a top-level `except Exception` is the violation at any count because it swallows the bugs the traceback exists for. Then `rg -n --glob '**/*.py' 'raise \w*Error\(\s*"[^{"]*"\s*\)' <src>` — each hit raises a constant message carrying none of the values that failed | MUST |
+| PY-OBS-04 | A single-shot batch CLI's machine-readable contract is its exit code plus its structured stdout — never a log line a caller greps. Four parts, all required: one typed exception per failure class a caller would act on differently, each mapped to exactly one exit code; every raise carrying the values that made it fail, inline in the message, at the point of failure; exactly one top-level handler that maps modeled errors to stderr plus their exit code; and anything unmodeled left to propagate as a full traceback, which is strictly more diagnostic than a hand-written handler because nobody had to anticipate it. A program built this way is fully observable with no `logging` at all — adding it would add a channel and remove nothing. | see block PY-OBS-04 (1) — a count above one is the violation, and a top-level `except Exception` is the violation at any count because it swallows the bugs the traceback exists for. Then see block PY-OBS-04 (2) — each hit raises a constant message carrying none of the values that failed | MUST |
+
+```sh
+# PY-OBS-04 (1)
+ENTRYPOINT=src/app/cli.py    # the file to search
+SRC=src    # the directory to search
+grep -H -c -E -e 'except [[:alnum:]_]*Error' -- "$ENTRYPOINT"
+# PY-OBS-04 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'raise [[:alnum:]_]*Error\([[:space:]]*"[^{"]*"[[:space:]]*\)' --
+```
 
 ## Untrusted Text and Secrets
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
 | PY-OBS-05 | One function strips C0 control and escape bytes from text the process did not produce, and every terminal-facing write goes through it. A package name, a PR-supplied path, or an upstream error reflected into a message can carry ANSI that moves the cursor, clears the screen, rewrites the window title or renders a fake prompt (CWE-150) — and the same unstripped newlines forge log lines for whoever reads the log afterwards (CWE-117). No project in this fleet strips control characters anywhere today; a maintainer running the validator locally is a real TTY-attached path, and this is the one genuinely uncovered gap here. No grep decides it — whether a string is attacker-influenced is not syntactic. | A runtime assertion against the project's own sink: feed it `"\x1b]0;pwned\x07\x1b[2Jinnocent"`, capture the stream, and assert `"\x1b" not in captured`. Watched red against a bare `print(text)` sink — `VIOLATION: raw ESC reached stdout: '\x1b]0;pwned\x07\x1b[2Jinnocent\n'` — and green against a `"".join(c for c in text if c.isprintable() or c in "\n\t")` sink | SHOULD |
-| PY-OBS-06 | Redaction sits between a record and its handlers — a `logging.Filter`, or the same explicit redactor already applied to argv and captured stderr — and captured stdout is exempt by design, because substituting inside the JSON payload a caller is about to parse corrupts the document. A third-party library's own logger is never turned up where its output is persisted: `httpx` has emitted `https://user:pass@host` at request level and `urllib3.connectionpool` has emitted presigned URLs carrying their auth parameters, and neither passes through this project's redactor (CWE-532). None of this needs a dependency — `extra=` plus a `Formatter` subclass plus a `Filter` is a complete answer, which is why a zero-runtime-dependency SDK already ships it; `structlog` and `rich` buy ergonomics, not capability. | `rg -n --glob '**/*.py' -e 'getLogger\("httpx' -e 'getLogger\("httpcore' -e 'getLogger\("urllib3' <src>` — each hit that lowers a third-party logger's level rather than raising it is the violation, and zero output is expected and clean. Then plant a token-shaped value through the log path and assert the captured sink shows the redaction marker rather than the value | MUST |
+| PY-OBS-06 | Redaction sits between a record and its handlers — a `logging.Filter`, or the same explicit redactor already applied to argv and captured stderr — and captured stdout is exempt by design, because substituting inside the JSON payload a caller is about to parse corrupts the document. A third-party library's own logger is never turned up where its output is persisted: `httpx` has emitted `https://user:pass@host` at request level and `urllib3.connectionpool` has emitted presigned URLs carrying their auth parameters, and neither passes through this project's redactor (CWE-532). None of this needs a dependency — `extra=` plus a `Formatter` subclass plus a `Filter` is a complete answer, which is why a zero-runtime-dependency SDK already ships it; `structlog` and `rich` buy ergonomics, not capability. | see block PY-OBS-06 — each hit that lowers a third-party logger's level rather than raising it is the violation, and zero output is expected and clean. Then plant a token-shaped value through the log path and assert the captured sink shows the redaction marker rather than the value | MUST |
+
+```sh
+# PY-OBS-06
+SRC=src    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC/**/*.py" | xargs -0 -r grep -H -n -E -e 'getLogger\("httpx' -e 'getLogger\("httpcore' -e 'getLogger\("urllib3' --
+```
 
 ```python
 class RedactingFilter(logging.Filter):
