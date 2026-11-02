@@ -102,6 +102,9 @@ impl Announce {
 /// commits that fixed the same defect next door.
 pub(crate) fn log_report(dry_run: bool, report: &AnnounceReport, config: &spec::AnnounceConfig, target: &str) {
     let stranded = is_stranded(dry_run, report);
+    if let Some(note) = report.branch_note() {
+        log::info!("[announce] {target}: {note}");
+    }
     for line in report_lines(dry_run, report, config, target) {
         if stranded {
             log::warn!("{line}");
@@ -257,6 +260,7 @@ mod tests {
             pull_request_url: pull_request_url.map(str::to_string),
             written_paths: Vec::new(),
             reserved_tags_dropped: Vec::new(),
+            ..AnnounceReport::default()
         }
     }
 
