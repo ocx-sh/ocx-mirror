@@ -199,8 +199,8 @@ depends on.
 travels on `--platform`), and an older `ocx package push` / `package test`
 demands the key and exits **65** — not a retried code — on every push leg.
 `ocx.toml` pins `ocx` itself for exactly this reason, so a local `task verify`
-and CI agree; `.github/workflows/verify.yml`'s `setup-ocx` steps carry the
-same floor and moves with the submodule pointer.
+and CI agree; the baseline setup action (`ocx-sh/conventions` `actions/setup`, pinned in
+`verify-basic.yml`) carries the same floor and moves with the baseline version.
 
 **Four legs raise that floor.** Three are rejected by an older binary with exit
 **64**: `pipeline announce` (`ocx_mirror_pipeline::ocx_cli::announce` spawns the

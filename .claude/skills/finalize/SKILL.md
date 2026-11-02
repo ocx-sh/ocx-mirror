@@ -163,7 +163,7 @@ Squash-all right when branch really one changelog entry — e.g. feature across 
 
 ### 6. Quality gate after rebase
 
-After rebase, `task verify` must still pass on new HEAD. Run it. On fail:
+After rebase, run the checks the series touched (`task verify:scoped`) on the new HEAD; CI is the full gate (no full local `task verify`). On fail:
 
 1. Show failure.
 2. User fixes (rebases can expose test interactions invisible in messy history).

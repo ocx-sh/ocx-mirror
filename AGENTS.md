@@ -1,6 +1,6 @@
-# CLAUDE.md
+# ocx-mirror — Agent Instructions
 
-Guide Claude Code (claude.ai/code) in this repo.
+Guide AI coding agents (Claude Code, Codex, OpenCode) in this repo. `CLAUDE.md` is a one-line pointer here.
 
 ## What is ocx-mirror
 
@@ -102,11 +102,14 @@ document the four-line job, let them own the pipeline.
 
 ## Build & Development
 
-Task runner [`task`](https://taskfile.dev). `task` (fast check),
-`task verify` (full gate), `task rust:verify` (Rust-only loop gate),
+Task runner [`task`](https://taskfile.dev). `task setup` (toolchain, grim client files, git hooks), `task` (fast check),
+`task verify:scoped` (what the change reaches), `task rust:verify` (Rust-only loop gate),
+`task verify` (full gate — CI runs it; **agents never run it locally**, 20–30 min),
 `task test:parallel` (acceptance), `task docs:serve`. Toolchain via direnv +
 `ocx direnv export` (`ocx.toml`). Always `cargo fmt` (`task
-rust:format:apply`) before commit, `task verify` after implementation.
+rust:format:apply`) before commit, `task verify:scoped` after implementation.
+Verification levels → [workflow-git.md](./.claude/rules/workflow-git.md). The deep
+tier (`verify-deep`: nightly, or the `run-deep` label) is not dispatched per PR.
 On Linux and in CI, fmt, clippy and the `jsonschema` feature check are Bazel
 lanes too — `bazel:lint:fmt`, `bazel:lint:clippy` (`.bazelrc` configs
 `rustfmt`/`clippy`, first-party targets only, warnings denied),
@@ -218,3 +221,22 @@ model → [workflow-git.md](./.claude/rules/workflow-git.md).
 > the same commit it lands. Grimoire-package distribution of the ocx-ported
 > surface is a planned follow-up; the lore bundles in `grimoire.toml` are
 > already grimoire-managed.
+
+## CI and baseline
+
+This repo follows the [ocx-sh/conventions](https://github.com/ocx-sh/conventions) baseline (copier, `.copier-answers.yml`).
+Template-owned files — `taskfiles/baseline.taskfile.yml`, `.pre-commit-config.yaml`, `cliff.toml`, `renovate.json`,
+`CLAUDE.md`, `.gitleaks.toml`, `.github/zizmor.yml`, `.github/workflows/verify-{basic,deep}.yml`, `bazel/baseline.bazelrc` —
+are never hand-edited: change ocx-sh/conventions, then `task copier:update`; `task baseline:check` fails on drift.
+Repo-owned Renovate rules live in `.github/renovate-local.json` (renovate.json only extends the preset).
+
+| Tier | Workflow | Runs |
+|---|---|---|
+| Basic (every PR, `basic-gate` is the one required check) | `verify-basic.yml` | `task ci:lint`, `ci:test`, `ci:build`, `ci:docs` (taskfile.yml), then `basic-repo.yml`: Conventional Commits, `Acceptance (Bazel)` (`//test:acceptance`, one cached sh_test), `Acceptance (sharded)` |
+| Deep (nightly, `run-deep` label) | `verify-deep.yml` | `task ci:deep` on ubuntu/macos/windows (stub), then `deep-repo.yml`: the release build matrix with nothing published |
+| Release (tag) | `release.yml` | `basic-repo.yml` as the gate, then the build matrix and publish |
+
+Sharded acceptance: `acceptance.yml` (reusable; `plan` → `binary` → `shard` matrix → `merge`). `shard-count` is the one knob
+(set in `basic-repo.yml`, currently 1); modules are split by `scripts/accept_shard.py`, the merge job judges
+`test/SUITE_FLOOR`, `SKIP_CEILING` and `XFAIL_CEILING` over all shards via `scripts/accept_floor.py`. Locally:
+`task bazel:build:test-binary`, then `task test:accept:native SHARD_COUNT=2 SHARD_INDEX=0` and `task test:accept:floor JUNIT_DIR=…`.

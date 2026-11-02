@@ -87,11 +87,44 @@ Before writing new code, ask:
 
 ---
 
+## Don't Own Non-Domain Code
+
+Ask **before** the reusability questions above: *should this code exist in this repo at
+all?* Separation of concerns applies across the repo boundary too. Build what the product
+**is**; serialization, compression, hashing, HTTP, TLS, dates, globbing, terminal
+rendering are solved elsewhere. A library is tested by every one of its users — code you
+own is tested only by the fixtures you thought to write.
+
+**Bar for owning it** (fork / vendor / hand-roll) — narrow, and only one of:
+
+1. **No library implements the requirement**, verified by searching, not assumed.
+2. **A library exists but leaks substantial features genuinely needed** — precedent: the
+   `oci-client` fork (`external/ocx/external/rust-oci-client`), forked for missing capability, not a
+   disliked API.
+3. A few lines with no edge cases (YAGNI — no dep for a one-liner).
+
+"Our format is slightly non-standard" does **not** qualify: delegate everything standard,
+own only the deviation as a named, tested seam.
+
+**Warn-tier**, escalating to **Block** for anything parsing/emitting an external wire
+format (serializers, codecs, escaping) — those fail silently, past local fixtures.
+
+> Worked example: a hand-written JSON emitter used escape boundary `> 0x7F` instead of
+> `>= 0x7F`; its unit test *and* doc comment both affirmed the wrong rule, and no golden
+> fixture contained the offending byte.
+
+**Review implication.** Invisible to diff-scoped review — when the file already exists, no
+reviewer of the *change* is prompted to question the *file*. Ask it whenever a diff
+touches a module whose subject is not the product's domain.
+
+---
+
 ## Code Review Checklist (All Languages)
 
 - [ ] Errors propagated with context, not swallowed; logged once at boundary
 - [ ] No god objects — each module/class single responsibility
 - [ ] Follows existing codebase patterns (grep before inventing)
+- [ ] Nothing non-domain is hand-owned — no hand-rolled serializer/codec/escaping where a maintained library fits (see "Don't Own Non-Domain Code"); applies to files the diff merely *touches*, not only files it adds
 - [ ] Generic logic in library layer, command-specific in application layer
 - [ ] No premature abstractions — extraction justified by real duplication
 - [ ] External input validated at system boundaries
@@ -157,6 +190,71 @@ Verification claims must be evidence-backed. Hedging in review verdicts, commit 
 - Premature celebration before verification evidence: **Warn-tier**
 - Stating "verified" without citing evidence: **Block-tier** (false verification)
 
+### Unchecked Green
+
+A green result is evidence only if a red one was reachable. The structural
+sibling of unevidenced "verified": a check whose passing state is
+indistinguishable from the check never having run.
+
+**The test**: demonstrate **both** outcomes. Show it red, show it green, on
+inputs you control. Either one alone is half a proof — "it can go red" does
+not rule out a check that is always red, and "it went green" is the state a
+check that never ran is in. If you cannot produce both, you do not have a
+check — you have a habit. Applies to any config whose failure mode is
+"quietly does less" (unmatched globs, `paths:` on rule files) as much as to
+tests.
+
+A detector that can match its own invocation is measuring itself. `pgrep
+<term>` run from a shell whose command line contains `<term>` matches that
+shell in every state, so it returns the same answer whether or not the thing
+exists — and the obvious filter can just as easily suppress both. Process and
+log greps are where this bites, because they get reached for as corroboration
+exactly when a real handshake is unavailable.
+
+Corollary: a mutation that *fails* to turn the check red means "I have not
+found every guard yet", not "the check is weak". Two independent guards
+defending one property both pass when either alone is deleted — keep
+mutating until one reds.
+
+The harness is not exempt. **Prove the mutation landed before trusting the
+result** — a script that reports success unconditionally makes a no-op edit
+indistinguishable from a real one, and the check then passes for the wrong
+reason. Gate the run on the mutated text actually being present.
+
+Cheapest tells: a tolerated *range* of exit codes; an assertion on file text
+where a parser exists; a skip whose message names a cause it never observed.
+
+- Claiming a check works without having seen it red: **Warn-tier**
+- Shipping a check whose red state was never reachable: **Block-tier**
+
+### A green is only as wide as what ran
+
+The scope a result is reported under must be the scope that was checked. Each of
+these greens is *true of what it measured* — the defect is the broader name it
+is filed under, because the breadth is where the trust goes.
+
+One shape, many faces: a filtered run (`--test x -- <two names>`) read as the
+target; a subset gate whose name outran its scope; a gate checking a
+*neighbouring* property (a link checker reporting on doc links while nothing
+compiled a doctest body); a probe reading a stream that is always empty
+(`git merge-base --is-ancestor` writes nothing to stdout, so stdout answers the
+same either way); a counter incremented above the test that would have rejected
+the record; a reader that does not descend where the subject lives (`syn::visit`
+does not enter macro arguments, so a scan of `assert!`-heavy code sees almost
+nothing and reports clean).
+
+- **A filtered or partial run is never evidence for a verdict** — fine for
+  iteration. "Green on the tests I changed" is not green.
+- **Name the scope beside the result.** Unstated scope is read as the name's.
+- **A gate checking a neighbouring property is not the gate.** Say which
+  property it establishes before citing it.
+- **Floor a derived check on its reader, not only its subject** — assert how
+  much it read, or a reader that stopped is indistinguishable from a clean tree.
+- **A corroborating number can corroborate a phantom.** Once a discrepancy is
+  asserted, only a diff that *names its subject* settles it.
+
+- Reporting a green under a scope wider than the one that ran: **Block-tier**
+
 ---
 
 ## See Also — Language-Specific Quality Rules
@@ -167,4 +265,4 @@ Each path-scoped — loads automatically when editing files of that language:
 - `quality-python.md` — Python-specific quality (type hints, async, modern tooling)
 - `quality-typescript.md` — TypeScript-specific quality (strict mode, ESM, narrowing)
 - `quality-bash.md` — Bash script safety (`set -euo pipefail`, quoting, shellcheck)
-- `quality-vite.md` — Vite build-tool opinions (Vite 7/8, VitePress, Rolldown)
+- `quality-vite.md` — Vite build-tool opinions (Vite 7/8, Astro, Rolldown)

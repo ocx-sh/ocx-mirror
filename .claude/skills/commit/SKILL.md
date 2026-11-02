@@ -117,7 +117,7 @@ Otherwise, `AskUserQuestion`:
 - Stage files **by name**, never `git add -A` / `.`. Prevents accidentally-committed secrets **and** bug where pre-staged files from previous session get swept into commit whose message doesn't describe them.
 - Warn before staging anything matching `.env*`, `*credentials*`, `*.pem`, `*.key`, or `token` patterns; require explicit confirmation.
 - **`--amend` must fold dirty tree into HEAD.** When `/commit --amend` invoked and working tree has uncommitted changes, those changes **must** be staged and included in amend — `--amend` with nothing staged silently becomes message-only amend that drops user's active work. Always `git add <files>` before `git commit --amend`, even when user only asked to "amend". After amend, run `git show --stat HEAD` and confirm expected files appear in diff stat before reporting success.
-- **Verification is on you — no pre-commit hooks here.** For code changes, run at minimum `task` (fast check) before committing; run `task verify` before declaring the work done or handing to `/finalize`. AI-config/docs-only changes may commit on a fast check.
+- **Verification is on you — no pre-commit hooks here.** For code changes, run at minimum `task` (fast check) before committing; run `task verify:scoped` before declaring the work done or handing to `/finalize` (no full local `task verify`). AI-config/docs-only changes may commit on a fast check.
 - Commit with HEREDOC:
 
   ```sh
