@@ -26,7 +26,7 @@ Type ambiguous? Ask user. Mixed tasks (e.g., "fix bug + refactor nearby code") s
 ## Shared Gates (All Work Types)
 
 - **Start**: GitHub context check (above), branch confirm (never commit on `main`)
-- **End**: `task verify` passes, changes committed per [workflow-git.md](./workflow-git.md)
+- **End**: the scoped gate for the change passes (`task verify:scoped`; no full local `task verify`, CI runs it), changes committed per [workflow-git.md](./workflow-git.md)
 - **Planning artifacts**: stored in `.claude/artifacts/`, templates from `.claude/templates/artifacts/`
 
 ## Scope Escalation

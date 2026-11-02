@@ -53,13 +53,25 @@ Branch ready to fast-forward onto `main` when **all** hold:
 - [ ] No `Checkpoint` commits remain
 - [ ] No "bundle" commits mixing unrelated concerns (working-phase bundles must split or squash)
 - [ ] Each commit one concern
-- [ ] `task verify` passes on final state
+- [ ] The checks the series touched pass (`task verify:scoped`); CI runs the full gate
 
 `/finalize` checks each and proposes rebase plan for anything that fails.
 
 ## Quality Gate
 
-No pre-commit hooks in this repo — verification is on you. Every branch must pass `task verify` before landing on `main`; `/finalize` runs it after the rebase. During working phase, run at minimum `task` (fast check) after code changes, `task verify` before declaring work done.
+The baseline's prek hooks gate the commit message (conventional subject); verification is on you.
+
+**Verification levels — no full `task verify` locally.** It takes 20–30 min, and CI runs the whole pipeline (`verify-basic`) on every push; the deep tier (`verify-deep`) is nightly or the `run-deep` label — never dispatch it per PR. Pick the level the change needs, the agent decides:
+
+| Change | Level before committing |
+|---|---|
+| Docs, comments, AI config, plan artifacts | none |
+| Code in one or a few crates | `task rust:verify` (Rust loop gate) or `task verify:scoped` (Bazel rdeps of what changed vs `origin/main`, claude hooks, baseline contract) |
+| `verify:scoped` escalates (taskfile, BUILD/bzl, `scripts/**`, workflows) | run what the edit touches (`bazel:build:drift`, `scripts:self-test`, `workflows:lint`, …) |
+| Finalize | what the series touched; CI is the full gate |
+| `release:` | `task release:prepare` runs the full `task verify` |
+
+Never a full `task verify` otherwise, not even "for the signal" — push (the human does) and read CI.
 
 ## Phase Boundaries — When to Use Which Skill
 

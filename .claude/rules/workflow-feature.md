@@ -62,4 +62,4 @@ Every plan in `.claude/state/plans/plan_*.md` carries a `## Status` block at the
 
 ## Quality Gates
 
-Run `task verify` (fmt check + clippy + license + build + unit tests + acceptance tests). See `.claude/rules/quality-core.md` for canonical gate list.
+Run `task verify:scoped` (no full local `task verify`: CI runs fmt, clippy, licenses, Bazel gates, unit and acceptance tests on every push). See `.claude/rules/quality-core.md` for canonical gate list.

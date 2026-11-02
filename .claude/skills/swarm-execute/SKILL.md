@@ -119,7 +119,7 @@ See `overlays.md` "codex axis" for when fires per tier. Use
 after Claude loop converges. Skipped gracefully when the Codex
 companion plugin is unavailable.
 
-- **Preconditions**: loop exited, `task verify` green, working tree
+- **Preconditions**: loop exited, `task verify:scoped` green, working tree
   clean except intended diff.
 - **Invocation**: delegate to `codex-adversary` with `--scope code-diff
   --base main`. Codex load `AGENTS.md` automatically — do not inject
@@ -154,7 +154,7 @@ Max concurrent workers: 8 (per `workflow-swarm.md`).
 
 ## Quality Gates & Git Protocol
 
-- `task --list` to discover workflows; `task verify` is final gate (`task rust:verify` runs during review loop)
+- `task --list` to discover workflows; `task verify:scoped` is the local final gate, CI the full one (`task rust:verify` runs during review loop)
 - Stage and commit with conventional commit message; never push
 - Use `task checkpoint` for work-in-progress saves
 
