@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import json
 import os
 import platform
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -23,12 +25,35 @@ _ARCH_MAP = {
 }
 
 
+def ocx_command() -> Path:
+    """The ``ocx`` under test: ``OCX_COMMAND``, else the prebuilt ``test/bin/ocx``."""
+    if env_path := os.environ.get("OCX_COMMAND"):
+        return Path(env_path)
+    binary = Path(__file__).resolve().parents[1] / "bin" / "ocx"
+    return binary.with_suffix(".exe") if sys.platform == "win32" else binary
+
+
+@functools.cache
 def current_platform() -> str:
-    """Return the current platform in OCI format (e.g. ``linux/amd64``)."""
-    system = platform.system().lower()
-    machine = platform.machine().lower()
-    arch = _ARCH_MAP.get(machine, machine)
-    return f"{system}/{arch}"
+    """The host platform in OCI format (e.g. ``linux/amd64``), as the binary under test reports it.
+
+    Never from Python when the binary can say: on Windows ``platform.machine()`` asks WMI and, on a
+    timeout, falls back to ``PROCESSOR_ARCHITECTURE`` and caches that per process. An x64 interpreter
+    emulated on an arm64 runner then answers ``amd64`` in one xdist worker, which publishes fixtures
+    the arm64 ``ocx`` never selects. ``platforms[0]`` is a ``linux/amd64+libc.glibc`` string (the
+    feature suffix is stripped) or an ``{os, architecture}`` object, depending on the ocx version.
+    """
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            about = OcxRunner(ocx_command(), Path(home), "localhost:0").json("--offline", "about")
+        host = about["platforms"][0]
+        if isinstance(host, dict):
+            return f"{host['os']}/{host['architecture']}"
+        return host.split("+", 1)[0]
+    except (OSError, AssertionError, ValueError, LookupError, AttributeError):
+        # No usable ocx (not built yet) or one whose `about` lacks `platforms`.
+        machine = platform.machine().lower()
+        return f"{platform.system().lower()}/{_ARCH_MAP.get(machine, machine)}"
 
 
 def registry_dir(registry: str) -> str:

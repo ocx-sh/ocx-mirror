@@ -1,8 +1,9 @@
-# Ported verbatim from ocx's .github/actions/bazel-cache-rc/ (ocx-sh/ocx@bda3c9d2,
+# Ported verbatim from ocx's .github/actions/bazel-cache-rc/ (ocx-sh/ocx@a1fa4bcc,
 # the external/ocx pin). ADR rulings, DX-/BZL-/C-/WP- ids, `plan`, and
 # quality-core.md sections cited below are ocx's: .claude/artifacts/
 # adr_bazel_build_adoption.md, plan_bazel_build_adoption.md, .claude/rules/.
-# Re-sync by copying; keep this note.
+# Re-sync by copying; keep this note. Intentional divergence: the `read-auth`
+# mode (read vs write credential), which upstream retired; policy decision pending.
 
 name: Bazel Cache Credential
 description: >-
