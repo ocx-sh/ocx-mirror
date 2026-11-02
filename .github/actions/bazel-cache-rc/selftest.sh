@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Ported verbatim from ocx's .github/actions/bazel-cache-rc/ (ocx-sh/ocx@bda3c9d2,
+# Ported verbatim from ocx's .github/actions/bazel-cache-rc/ (ocx-sh/ocx@a1fa4bcc,
 # the external/ocx pin). ADR rulings, DX-/BZL-/C-/WP- ids, `plan`, and
 # quality-core.md sections cited below are ocx's: .claude/artifacts/
 # adr_bazel_build_adoption.md, plan_bazel_build_adoption.md, .claude/rules/.
-# Re-sync by copying; keep this note.
+# Re-sync by copying; keep this note. Intentional divergence: the `read-auth`
+# mode (read vs write credential), which upstream retired; policy decision pending.
 #
 # Red/green proof for `.github/actions/bazel-cache-rc`.
 #
@@ -13,7 +14,7 @@
 # reachable from a check (plan C-029), so every property below is established
 # against a scratch `$RUNNER_TEMP` and a fake credential this script invents.
 #
-# Seven properties, each shown **both** red and green, because a green whose red
+# Eight properties, each shown **both** red and green, because a green whose red
 # was never reachable is indistinguishable from a check that never ran
 # (quality-core.md § Unchecked Green):
 #
@@ -25,6 +26,7 @@
 #   5. nothing already at those paths is ever written through
 #   6. the read credential is a quoted `--remote_header` and no helper at all
 #   7. a second credential source is refused, and the refusal is not the leak
+#   8. a RUNNER_TEMP with a space stays one rc token; one with a quote is refused
 #
 # The step bodies are read out of `action.yml` with a YAML parser rather than
 # copied here, so this script cannot drift into proving something the action no
@@ -132,7 +134,7 @@ assert_shape() {
     [ -f "$helper" ] || return 1
     [ "$(stat -c %a "$rc")" = "600" ] || return 1
     [ "$(stat -c %a "$helper")" = "700" ] || return 1
-    [ "$(cat "$rc")" = "build --credential_helper=bazel-cache.ocx.sh=$helper" ] || return 1
+    [ "$(cat "$rc")" = "build --credential_helper=bazel-cache.ocx.sh='$helper'" ] || return 1
 }
 
 # 0 when the directory is untouched. Non-existence, not emptiness — and over the
@@ -537,5 +539,104 @@ run_guarded "$SUBJECT" "$temp" "$SECRET" "" >/dev/null
 [ -f "$temp/bazel-cache.rc" ] || fail "a commented-out rc header was read as a live source"
 green "a commented-out header is not a source; the rc was written"
 rm -f "$GITHUB_WORKSPACE/.bazelrc"
+
+# A quoted `try-import` (a path with a space stays one token) is followed shell-style, or the file
+# behind it is never read. Also: an import the guard cannot parse may still be read by Bazel, so it
+# is refused rather than skipped.
+printf "try-import '%%workspace%%/.bazelrc.user'\n" >"$GITHUB_WORKSPACE/.bazelrc"
+printf "build --remote_header='%s'\n" "$SECRET" >"$GITHUB_WORKSPACE/.bazelrc.user"
+temp="$(scratch t7e)"
+if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET" "")"; then
+    fail "a credential reached only through a quoted \`try-import\` was not seen"
+fi
+assert_refused "$output" "$temp" || fail "the refusal is not the contracted one: $output"
+grep -qF "$GITHUB_WORKSPACE/.bazelrc.user:1" <<<"$output" ||
+    fail "the refusal does not name the imported file: $output"
+red "a header behind a quoted \`try-import\` -> refused, naming .bazelrc.user:1"
+
+mutant="$(scratch m7e)"
+mutate 'target = shlex.split(raw)[0]' 'target = raw' \
+    <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch t7er)"
+run_guarded "$mutant" "$temp" "$SECRET" "" >/dev/null
+[ -f "$temp/bazel-cache.rc" ] ||
+    fail "the quote-blind mutant wrote nothing - the red is not measuring the quoted import"
+red "with the target taken as typed, the rc lands beside the header behind a quoted import"
+rm -f "$GITHUB_WORKSPACE/.bazelrc.user"
+
+printf "try-import '%%workspace%%/d#x/.bazelrc.user\n" >"$GITHUB_WORKSPACE/.bazelrc"
+temp="$(scratch t7f)"
+if output="$(run_guarded "$SUBJECT" "$temp" "$SECRET" "")"; then
+    fail "an import the guard cannot parse was cleared"
+fi
+assert_refused "$output" "$temp" || fail "the refusal is not the contracted one: $output"
+red "an import with an unterminated quote -> refused, naming .bazelrc:1"
+
+mutant="$(scratch m7f)"
+mutate ' or unparseable_import(line)' '' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch t7fr)"
+run_guarded "$mutant" "$temp" "$SECRET" "" >/dev/null
+[ -f "$temp/bazel-cache.rc" ] ||
+    fail "the parse-blind mutant wrote nothing - the red is not measuring the unparseable import"
+red "skipping the line instead, the rc lands beside whatever that import reads"
+rm -f "$GITHUB_WORKSPACE/.bazelrc"
+
+# ---------------------------------------------------------------------------
+printf '\n[8] a RUNNER_TEMP with a space stays one rc token; one with a single quote is refused\n'
+# ---------------------------------------------------------------------------
+# Bazel reads an rc line shell-style, so an unquoted path with a space splits in two and the helper is never found.
+# Judged by `shlex`, not by comparing text. `shlex` keeps a backslash inside single quotes and Bazel drops it, so
+# the two agree only because the writer refuses a backslash; this check measures the split, not every Bazel rule.
+helper_line_is_one_token() {
+    python3 -c '
+import shlex, sys
+
+rc, helper = sys.argv[1:]
+line = open(rc, encoding="utf-8").read().splitlines()[0]
+sys.exit(shlex.split(line) != ["build", "--credential_helper=bazel-cache.ocx.sh=" + helper])
+' "$1/bazel-cache.rc" "$1/bazel-cache-helper"
+}
+
+temp="$(scratch "t8 spaced")"
+run_write "$SUBJECT" "$temp" "$WRITE_BODY" >/dev/null
+assert_shape "$temp" || fail "a spaced RUNNER_TEMP did not produce the contracted pair"
+helper_line_is_one_token "$temp" || fail "a spaced RUNNER_TEMP split the helper line into several rc tokens"
+green "RUNNER_TEMP='$temp' -> $(head -n 1 "$temp/bazel-cache.rc")"
+
+mutant="$(scratch m8)"
+mutate "{CACHE_HOST}='{helper}'" '{CACHE_HOST}={helper}' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch "t8r spaced")"
+run_write "$mutant" "$temp" "$WRITE_BODY" >/dev/null
+red "unquoted: $(head -n 1 "$temp/bazel-cache.rc")"
+if helper_line_is_one_token "$temp"; then
+    fail "the unquoted mutant kept the helper path one token - the tokenizer check cannot see the split"
+fi
+red "the tokenizer check refused it"
+
+temp="$(scratch "t8q it's")"
+if output="$(run_write "$SUBJECT" "$temp" "$WRITE_BODY" 2>&1)"; then
+    fail "a RUNNER_TEMP with a single quote was accepted"
+fi
+grep -qF 'single quote' <<<"$output" || fail "the refusal is not the contracted one: $output"
+assert_nothing_written "$temp" || fail "the refusal still wrote: $(ls -A "$temp")"
+green "a RUNNER_TEMP with a single quote -> refused, nothing written"
+
+mutant="$(scratch m8q)"
+mutate '    if re.search(' '    if False and re.search(' <"$SUBJECT/write_rc.py" >"$mutant/write_rc.py"
+temp="$(scratch "t8qr it's")"
+run_write "$mutant" "$temp" "$WRITE_BODY" >/dev/null 2>&1 || true
+if assert_nothing_written "$temp"; then
+    fail "the guard-less mutant wrote nothing - the check cannot see an rc line no tokenizer can carry"
+fi
+red "without the guard the directory holds: $(ls -A "$temp" | tr '\n' ' ')"
+
+# Inside quotes Bazel drops a backslash, so the path it spawns would not be the file written.
+temp="$(scratch 't8b a\b')"
+if output="$(run_write "$SUBJECT" "$temp" "$WRITE_BODY" 2>&1)"; then
+    fail "a RUNNER_TEMP with a backslash was accepted"
+fi
+grep -qF 'backslash' <<<"$output" || fail "the refusal is not the contracted one: $output"
+assert_nothing_written "$temp" || fail "the refusal still wrote: $(ls -A "$temp")"
+green "a RUNNER_TEMP with a backslash -> refused, nothing written"
 
 printf '\nselftest: every property above shown red and green\n'

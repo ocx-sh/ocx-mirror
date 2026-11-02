@@ -1,8 +1,9 @@
-# Ported verbatim from ocx's .github/actions/bazel-cache-rc/ (ocx-sh/ocx@bda3c9d2,
+# Ported verbatim from ocx's .github/actions/bazel-cache-rc/ (ocx-sh/ocx@a1fa4bcc,
 # the external/ocx pin). ADR rulings, DX-/BZL-/C-/WP- ids, `plan`, and
 # quality-core.md sections cited below are ocx's: .claude/artifacts/
 # adr_bazel_build_adoption.md, plan_bazel_build_adoption.md, .claude/rules/.
-# Re-sync by copying; keep this note.
+# Re-sync by copying; keep this note. Intentional divergence: the `read-auth`
+# mode (read vs write credential), which upstream retired; policy decision pending.
 """Write the CI-only Bazel cache rc file and the credential helper it names.
 
 Run by `.github/actions/bazel-cache-rc`, never by hand. **Two credentials, and
@@ -75,8 +76,9 @@ CREDENTIAL_HELPER = re.compile(r"--credential_helper[= ]")
 
 #: `import` / `try-import`. An rc file's own text is an incomplete answer without it:
 #: this repository's `.bazelrc` ends in `try-import %workspace%/.bazelrc.user`, which
-#: is gitignored — exactly the source a scan of *tracked* files cannot see.
-RC_IMPORT = re.compile(r"(?m)^[ \t]*(?:try-)?import[ \t]+(\S+)[ \t]*$")
+#: is gitignored — exactly the source a scan of *tracked* files cannot see. The target
+#: is captured raw and parsed shell-style, since an import may be single-quoted.
+RC_IMPORT = re.compile(r"(?m)^[ \t]*(?:try-)?import[ \t]+(\S.*?)[ \t]*$")
 
 #: An rc comment, to end of line. A flag that survives this is one Bazel is passed.
 RC_COMMENT = re.compile(r"(?m)#.*$")
@@ -113,8 +115,28 @@ def rc_chain(workspace: pathlib.Path, home: pathlib.Path) -> Iterator[tuple[path
             # configure anything, and Bazel skips a `try-import` miss the same way.
             continue
         yield path, text
-        for target in RC_IMPORT.findall(RC_COMMENT.sub("", text)):
+        for raw in RC_IMPORT.findall(RC_COMMENT.sub("", text)):
+            try:
+                target = shlex.split(raw)[0]
+            except ValueError:
+                continue  # unfollowable, so `other_credential_sources` refuses the line itself
             pending.append(path.parent / target.replace("%workspace%", str(workspace)))
+
+
+def unparseable_import(line: str) -> bool:
+    """An `import` whose target no shell-style parse recovers.
+
+    Bazel keeps a `#` inside quotes and accepts a missing end-quote, so the file behind
+    such a line may well be read; a guard that cannot follow it cannot clear it.
+    """
+    match = RC_IMPORT.match(line)
+    if not match:
+        return False
+    try:
+        shlex.split(match.group(1))
+    except ValueError:
+        return True
+    return False
 
 
 def other_credential_sources() -> list[str]:
@@ -130,7 +152,7 @@ def other_credential_sources() -> list[str]:
         f"{path}:{number}"
         for path, text in rc_chain(workspace, home)
         for number, line in enumerate(RC_COMMENT.sub("", text).splitlines(), start=1)
-        if AUTHORIZATION_HEADER.search(line) or CREDENTIAL_HELPER.search(line)
+        if AUTHORIZATION_HEADER.search(line) or CREDENTIAL_HELPER.search(line) or unparseable_import(line)
     ]
 
 
@@ -257,6 +279,12 @@ def main() -> None:
     runner_temp = os.environ.get("RUNNER_TEMP", "")
     if not runner_temp:
         sys.exit("bazel cache: RUNNER_TEMP is unset; this action only runs on a runner")
+    # Inside quotes Bazel drops each backslash and splits lines before tokenizing, so only these change the path.
+    if re.search(r"['\\\n\r]", runner_temp):
+        sys.exit(
+            "bazel cache: RUNNER_TEMP contains a single quote, backslash or line break, "
+            "which a Bazel rc line cannot carry"
+        )
 
     configured = other_credential_sources()
     if configured:
@@ -289,7 +317,8 @@ def main() -> None:
         # past every local fixture (quality-core.md § Don't Own Non-Domain Code).
         response = json.dumps({"headers": {header: [value]}})
         create(helper, helper_program(response), 0o700)
-        lines.append(f"build --credential_helper={CACHE_HOST}={helper}\n")
+        # Single-quoted: Bazel reads an rc line shell-style, so a path with a space would split in two.
+        lines.append(f"build --credential_helper={CACHE_HOST}='{helper}'\n")
         wrote.append(f"{helper} (700)")
 
     create(rc, "".join(lines), 0o600)
