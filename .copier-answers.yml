@@ -1,0 +1,31 @@
+# Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
+_commit: v0.3.2
+_src_path: https://github.com/ocx-sh/conventions.git
+bazel: true
+bazel_cache_write: trusted
+deep_os:
+- ubuntu-latest
+- macos-latest
+- windows-latest
+languages:
+- bazel
+- python
+- rust
+- shell
+maintainers:
+- michael-herwig
+profile: full
+repo_name: ocx-mirror
+repo_owner: ocx-sh
+repo_workflows:
+    secrets:
+    - BAZEL_CACHE_WRITE_AUTH
+    - BAZEL_CACHE_READ_AUTH
+    - OTEL_OTLP_AUTH
+site:
+    deploy: false
+    dir: .
+    dist: site
+submodules: true
+theme_bundle: false
+zizmor_ignore: []

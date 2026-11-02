@@ -15,7 +15,7 @@ on:
         type: string
       channel:
         description: Build channel baked into the binary (`dev`, `release`, or
-          `check` for build-check.yml's never-published builds).
+          `check` for deep-repo.yml's never-published builds).
         required: true
         type: string
     secrets:
@@ -56,13 +56,13 @@ jobs:
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Setup OCX
         # `ocx exec bazel` (ocx.toml's bazel row) runs Bazel; the smoke's
-        # `ocx package create` is this binary too. The same pin as verify.yml
+        # `ocx package create` is this binary too. The same ocx floor as the baseline setup action
         # and oci-publish.yml.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
           version: "0.6.3"
       # Read-only, on every caller: a build here never writes the shared
-      # cache (the upload grant is verify.yml's `main` push alone, C3), and
+      # cache (the upload grant is `verify-basic.yml`'s trusted lane alone, C3), and
       # the one action that reads the workspace status is `no-remote-cache`
       # besides. The read credential only hits third-party and exec-tool
       # compiles; a caller that maps no secret builds cold.
@@ -73,9 +73,9 @@ jobs:
       - name: Bazel cache credential reaches Bazel
         shell: bash
         run: task bazel:cache:rc:check
-      # verify.yml's reason: the host C toolchain (build scripts, proc
+      # basic-repo.yml's reason: the host C toolchain (build scripts, proc
       # macros) autoconfigures `-fuse-ld=` from what it finds, and the same
-      # linker keeps those exec compiles on verify.yml's cache keys.
+      # linker keeps those exec compiles on basic-repo.yml's cache keys.
       - name: Install lld and qemu
         run: sudo apt-get update && sudo apt-get install -y lld qemu-user
       - name: Build
@@ -103,7 +103,7 @@ jobs:
           path: target/bazel/release/ocx-mirror-${{ matrix.target }}
           compression-level: 0
           retention-days: 1
-      # A composite action has no `post:` hook (verify.yml's reason): a failed
+      # A composite action has no `post:` hook (basic-repo.yml's reason): a failed
       # or cancelled job must not leave the credential on the runner.
       - name: Remove the Bazel cache credential
         if: always()

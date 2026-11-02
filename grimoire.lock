@@ -3,75 +3,157 @@ agent = []
 [metadata]
 lock_version = 1
 declaration_hash_version = 1
-declaration_hash = "sha256:15ddf1b49900fbd66bad7241bc0c36163729712b53951b6aaaeb1edc9cea89fe"
-generated_by = "grim 0.14.2"
-generated_at = "2026-09-22T20:21:43Z"
+declaration_hash = "sha256:c6e148490b795a7ef010a15b3ca1069b06d5487bd91dc6a652410f97cd337f93"
+generated_by = "grim 0.14.3"
+generated_at = "2026-11-02T22:29:44Z"
 
 [[skill]]
 name = "bazel-adopt"
-pinned = "ghcr.io/ocx-sh/lore/bazel-adopt@sha256:680625f2d0edc08073da774d6e080ef326ea6abb60dbde7a67a1d80b309f3205"
+pinned = "ghcr.io/ocx-sh/lore/bazel-adopt@sha256:73f16eff8f4a57542fd9ecddb5210801c21a5dcc57ca7bbc594d5ad97059b112"
 bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
 bundle_tag = "latest"
 
 [[skill]]
 name = "bazel-diagnose"
-pinned = "ghcr.io/ocx-sh/lore/bazel-diagnose@sha256:dc164748fdae83cc3dfa9d4f3c85d15149694c4e3220a23cd6bbae91220e0fd7"
+pinned = "ghcr.io/ocx-sh/lore/bazel-diagnose@sha256:5dd87b6bd47e14f2212eb682ba7db2b369151f33c583dbae1bdf43511e0c3cc5"
 bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
 bundle_tag = "latest"
 
 [[skill]]
+name = "code-docs-cleanup"
+pinned = "ghcr.io/ocx-sh/lore/code-docs-cleanup@sha256:4b312606567dab8769e98fcf9770072bc425e6f2e9d1b71a3638e9c60bcaed18"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/rust-essentials"
+tag = "latest"
+
+[[skill.bundles]]
+repo = "ghcr.io/ocx-sh/lore/shell-essentials"
+tag = "latest"
+
+[[skill]]
 name = "docs-instrument"
-pinned = "ghcr.io/ocx-sh/lore/docs-instrument@sha256:e6a5459c18f7d8192ec81efc70bc674809edfbdc305d96bc60bf3cb14b3b790d"
+pinned = "ghcr.io/ocx-sh/lore/docs-instrument@sha256:fb3e1c487517dfacac9761ad95070479faa77a7a089e8fb61219dd813f92213b"
 bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
 bundle_tag = "latest"
 
 [[skill]]
 name = "docs-plan"
-pinned = "ghcr.io/ocx-sh/lore/docs-plan@sha256:cbff12650842b27b1af5513caf447c516bb33b72735121902b48576fa0840778"
+pinned = "ghcr.io/ocx-sh/lore/docs-plan@sha256:09751a25d1535543ac0cae1a52273ec3e1938b9db577b83509de025508757180"
 bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "docs-review"
+pinned = "ghcr.io/ocx-sh/lore/docs-review@sha256:e3a08c62f16489d01c00d702fc780c485d85f0cf3f22948e3d07ba09c7e0a3f4"
+bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "installer-script"
+pinned = "ghcr.io/ocx-sh/lore/installer-script@sha256:916d113c1d8abfae9c2809b47a2a6c55cf82b2b26a80c4a16757a9ab14589e72"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "shell-diagnose"
+pinned = "ghcr.io/ocx-sh/lore/shell-diagnose@sha256:5c36130dceb8ae2bf8ea331d9b4731a9c4c9da5e0bdf822810945ae84f2d29dd"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "shell-integration"
+pinned = "ghcr.io/ocx-sh/lore/shell-integration@sha256:f6955152349af754cf26ddc73a936d0c0e21cb289525eb21b02dd67f028ef994"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[skill]]
+name = "shell-port"
+pinned = "ghcr.io/ocx-sh/lore/shell-port@sha256:b05c189ec9d8681729a882ccfc68dbcd8a50c72744f11a89a03cb58ef41c8550"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "bazel-quality"
-pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:a7d36a1e1f8530fefbeaec94f9593325f13aeab5cf90307fbc8133b7b7d05ea4"
+pinned = "ghcr.io/ocx-sh/lore/bazel-quality@sha256:bc650fb78d735f26353a83b88525ee581a2259a7159cc991b560b9996ff3737a"
 bundle = "ghcr.io/ocx-sh/lore/bazel-essentials"
 bundle_tag = "latest"
 
 [[rule]]
+name = "code-docs"
+pinned = "ghcr.io/ocx-sh/lore/code-docs@sha256:0f0e026af937583e31a597a7d6b98b352ac7fefda15dd2e2c000ec31f857883a"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
+tag = "latest"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/python-essentials"
+tag = "latest"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/rust-essentials"
+tag = "latest"
+
+[[rule.bundles]]
+repo = "ghcr.io/ocx-sh/lore/shell-essentials"
+tag = "latest"
+
+[[rule]]
 name = "docs-quality"
-pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:c31e99d6d45536c089f643dd96d3fe23540fbbd918530bd68497ab029f2d12bf"
+pinned = "ghcr.io/ocx-sh/lore/docs-quality@sha256:065355e0be2ce30d340c71b57bb10c5360a954a166023199535cedee56cee96c"
 bundle = "ghcr.io/ocx-sh/lore/docs-essentials"
 bundle_tag = "latest"
 
 [[rule]]
+name = "powershell-quality"
+pinned = "ghcr.io/ocx-sh/lore/powershell-quality@sha256:d2b1e694db41e39d56d6f1ccd4b87c9046fac5c026e374f594bde494b2aab917"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
+bundle_tag = "latest"
+
+[[rule]]
 name = "python-packaging"
-pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:83b48110ecdfdc874b6714e7c7ba10deb199f4bf0cdc3169631cb884d842c802"
+pinned = "ghcr.io/ocx-sh/lore/python-packaging@sha256:b0fee4f821d8a88df6b5c264df043d5be1ab843d550193d9aad3b66040e4e85c"
 bundle = "ghcr.io/ocx-sh/lore/python-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "python-quality"
-pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:7ad282eaddce2add9f9fd7ef17dc6cbd547908a3d7f5cb1be47f751b8a360797"
+pinned = "ghcr.io/ocx-sh/lore/python-quality@sha256:755c0c3e70ab5f79620feae52522b0cfa97e37bbf126cc1c6d460ea2e2001291"
 bundle = "ghcr.io/ocx-sh/lore/python-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "rust-cargo"
-pinned = "ghcr.io/ocx-sh/lore/rust-cargo@sha256:92d04c3338fa8e7e474eeddf02038c88fa82e44d1ec8fd1095221ae52fddc4ac"
+pinned = "ghcr.io/ocx-sh/lore/rust-cargo@sha256:e6c8fd67a90e1b8e05486545065a6fee0e7af3a859885f6a7ecd29bcf93cb100"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
 bundle_tag = "latest"
 
 [[rule]]
 name = "rust-quality"
-pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:39f5455aadd3ce6dff3b085aab28454b95a7a681ec3de6fadb14a84014a81e65"
+pinned = "ghcr.io/ocx-sh/lore/rust-quality@sha256:8d76f9cffa37bd3a2150a5f2ab23294f4788105660a51927603a970d943a7ada"
 bundle = "ghcr.io/ocx-sh/lore/rust-essentials"
+bundle_tag = "latest"
+
+[[rule]]
+name = "shell-quality"
+pinned = "ghcr.io/ocx-sh/lore/shell-quality@sha256:737adb8dfab155b1569aec93c709fea413c07af612ec0976e1e1d3aada95cef7"
+bundle = "ghcr.io/ocx-sh/lore/shell-essentials"
 bundle_tag = "latest"
 
 [[bundle]]
 name = "bazel-essentials"
 repo = "ghcr.io/ocx-sh/lore/bazel-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/bazel-essentials@sha256:0db259091751f23de88cffcc4efeca9b81325e72139dba1dc54509eafa163b08"
+pinned = "ghcr.io/ocx-sh/lore/bazel-essentials@sha256:031a99bcab08782e2a8caa9d9fcbbb66da7ad251eb0ef1d22a3be6c5e4207b7a"
 
 [[bundle.member]]
 kind = "skill"
@@ -89,10 +171,26 @@ name = "bazel-quality"
 id = "ghcr.io/ocx-sh/lore/bazel-quality:latest"
 
 [[bundle]]
+name = "code-docs-essentials"
+repo = "ghcr.io/ocx-sh/lore/code-docs-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/code-docs-essentials@sha256:183da12123e068eb066bd211bd837e4a8fcd5f2de1f1db222b3c34e0b740039a"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
+
+[[bundle]]
 name = "docs-essentials"
 repo = "ghcr.io/ocx-sh/lore/docs-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:f6ef95d3c3668716d443af0338ca9a38642e9758235cedc1209b4f1feaa3cafc"
+pinned = "ghcr.io/ocx-sh/lore/docs-essentials@sha256:21469c134d44ace8bc6f0d2468aadb972394c29aaf0deb0d52b33636832abb6d"
 
 [[bundle.member]]
 kind = "skill"
@@ -105,6 +203,11 @@ name = "docs-plan"
 id = "ghcr.io/ocx-sh/lore/docs-plan:latest"
 
 [[bundle.member]]
+kind = "skill"
+name = "docs-review"
+id = "ghcr.io/ocx-sh/lore/docs-review:latest"
+
+[[bundle.member]]
 kind = "rule"
 name = "docs-quality"
 id = "ghcr.io/ocx-sh/lore/docs-quality:latest"
@@ -113,7 +216,17 @@ id = "ghcr.io/ocx-sh/lore/docs-quality:latest"
 name = "python-essentials"
 repo = "ghcr.io/ocx-sh/lore/python-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:e187285b34e5e6f10c62b6ddc6fd8daaa7b17858d3a1f4598d72cbd92f8b805e"
+pinned = "ghcr.io/ocx-sh/lore/python-essentials@sha256:a5d599b8a5e890a58bc1fa76b22239321adf63f54a825673a03f6f9e43084603"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 
 [[bundle.member]]
 kind = "rule"
@@ -129,7 +242,17 @@ id = "ghcr.io/ocx-sh/lore/python-quality:latest"
 name = "rust-essentials"
 repo = "ghcr.io/ocx-sh/lore/rust-essentials"
 tag = "latest"
-pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:f7568c69419e77418eac29fd4d6bae9fcaa6ebee2b73df1d84ecfed5b0484722"
+pinned = "ghcr.io/ocx-sh/lore/rust-essentials@sha256:cf23f23d5d652853ddce8d219dc7c9b6949ad0d5b87765dae652f91b52511a5f"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
 
 [[bundle.member]]
 kind = "rule"
@@ -140,3 +263,49 @@ id = "ghcr.io/ocx-sh/lore/rust-cargo:latest"
 kind = "rule"
 name = "rust-quality"
 id = "ghcr.io/ocx-sh/lore/rust-quality:latest"
+
+[[bundle]]
+name = "shell-essentials"
+repo = "ghcr.io/ocx-sh/lore/shell-essentials"
+tag = "latest"
+pinned = "ghcr.io/ocx-sh/lore/shell-essentials@sha256:2883d0c80e1ce01c98bf9bd63cb89bca226b4ba0c8de97c9774f9af728154079"
+
+[[bundle.member]]
+kind = "skill"
+name = "code-docs-cleanup"
+id = "ghcr.io/ocx-sh/lore/code-docs-cleanup:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "installer-script"
+id = "ghcr.io/ocx-sh/lore/installer-script:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "shell-diagnose"
+id = "ghcr.io/ocx-sh/lore/shell-diagnose:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "shell-integration"
+id = "ghcr.io/ocx-sh/lore/shell-integration:latest"
+
+[[bundle.member]]
+kind = "skill"
+name = "shell-port"
+id = "ghcr.io/ocx-sh/lore/shell-port:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "code-docs"
+id = "ghcr.io/ocx-sh/lore/code-docs:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "powershell-quality"
+id = "ghcr.io/ocx-sh/lore/powershell-quality:latest"
+
+[[bundle.member]]
+kind = "rule"
+name = "shell-quality"
+id = "ghcr.io/ocx-sh/lore/shell-quality:latest"

@@ -24,9 +24,24 @@ that trip people are `os.environ` and `time.sleep` — both settled below.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-TEST-01 | Direct `os.environ` mutation is legitimate in exactly one place: the body of a `pytest_configure`, `pytest_sessionstart` or `pytest_load_initial_conftests` hook, carrying a comment naming why no fixture can substitute — a hook runs before `monkeypatch` exists to be requested, and the value has to survive into xdist workers that fork from it. Everywhere else — any fixture, any test body — it is `monkeypatch.setenv`/`delenv`, or the mutation leaks into every test that worker runs afterwards. | `rg -n --glob '*.py' --glob '!conftest.py' -e 'os\.environ\[[^]]*\] *=' -e 'os\.environ\.pop\(' -e 'os\.environ\.update\(' -e 'del os\.environ\[' <test-root>` — every hit is the violation, empty is the pass; the assignment anchor keeps `os.environ.get` reads out. Then `rg -n -B6 --glob 'conftest.py' -e 'os\.environ\[[^]]*\] *=' -e 'del os\.environ\[' <test-root>` — a hit whose enclosing `def` is not `pytest_*` is the violation. | MUST |
-| PY-TEST-02 | A `time.sleep` names, in a comment, what it waits past. A sleep waiting on something observable — a file appearing, a process exiting, a port opening, a request count rising — polls that proxy against a `time.monotonic()` deadline instead. A blanket ban is wrong: two of the three real categories below are not bugs. | `rg -n --glob '*.py' '^[^#]*time\.sleep\([^#]*$' <test-root>` — prints only sleeps with no same-line comment; each hit is either annotated on the line immediately above (re-read it) or is the violation. Empty output is the pass. | SHOULD |
+| PY-TEST-01 | Direct `os.environ` mutation is legitimate in exactly one place: the body of a `pytest_configure`, `pytest_sessionstart` or `pytest_load_initial_conftests` hook, carrying a comment naming why no fixture can substitute — a hook runs before `monkeypatch` exists to be requested, and the value has to survive into xdist workers that fork from it. Everywhere else — any fixture, any test body — it is `monkeypatch.setenv`/`delenv`, or the mutation leaks into every test that worker runs afterwards. | see block PY-TEST-01 (1) — every hit is the violation, empty is the pass; the assignment anchor keeps `os.environ.get` reads out. Then see block PY-TEST-01 (2) — a hit whose enclosing `def` is not `pytest_*` is the violation. | MUST |
+| PY-TEST-02 | A `time.sleep` names, in a comment, what it waits past. A sleep waiting on something observable — a file appearing, a process exiting, a port opening, a request count rising — polls that proxy against a `time.monotonic()` deadline instead. A blanket ban is wrong: two of the three real categories below are not bugs. | see block PY-TEST-02 — prints only sleeps with no same-line comment; each hit is either annotated on the line immediately above (re-read it) or is the violation. Empty output is the pass. | SHOULD |
 | PY-TEST-03 | A fixture scoped wider than `function` that shares an external resource states, in its docstring, which of the four safety arguments below applies. "It is faster" is not one of them, and a shared resource with none of the four belongs behind `@pytest.mark.xdist_group(name=...)` affinity rather than the default distribution. | `pytest -p no:cacheprovider -n 0 <test-root>`, then `pytest -p no:cacheprovider -n 4 --dist load <test-root>` — a test that passes in the first and fails in the second is the violation, and the parallel run names it. Watched red: a session fixture returning a mutable dict passed sequentially and failed under `-n 2`. | SHOULD |
+
+```sh
+# PY-TEST-01 (1)
+TEST_ROOT=tests    # the directory to search
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$TEST_ROOT/**/*.py" ':(exclude,glob)**/conftest.py' | xargs -0 -r grep -H -n -E -e 'os\.environ\[[^]]*\] *=' -e 'os\.environ\.pop\(' -e 'os\.environ\.update\(' -e 'del os\.environ\[' --
+# PY-TEST-01 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$TEST_ROOT/**/conftest.py" | PAT='(os\.environ\[[^]]*\] *=)|(del os\.environ\[)' AFTER=0 BEFORE=6 xargs -0 -r awk -f "$CHECKS/context.awk" --
+```
+
+```sh
+# PY-TEST-02
+TEST_ROOT=tests    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$TEST_ROOT/**/*.py" | xargs -0 -r grep -H -n -E -e '^[^#]*time\.sleep\([^#]*$' --
+```
 
 The three `time.sleep` categories, and which one is the bug:
 
@@ -52,9 +67,21 @@ genuinely unpartitionable and the module is pinned to one worker by
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-TEST-04 | Acceptance-harness assertions on CLI output are substring checks on the fact under test, not whole-blob equality — the harness does not own the exact bytes of a binary it did not build, so a whole-blob assertion also pins a colour code and a trailing newline nobody meant to freeze. The opposite holds for a library or service whose serialized bytes **are** the product: that gets a committed golden fixture plus a documented command that regenerates it from the real code path, never a hand-typed expected string. | `rg -n --glob '*.py' -e '\.stdout == ' -e '\.stderr == ' <test-root>` — every hit that is not comparing against a committed golden file is the violation; empty is the pass. For the golden half: run the documented regeneration command, then `git status --porcelain <golden-dir>` — non-empty output is the violation, the fixture no longer matches what the code produces. | SHOULD |
+| PY-TEST-04 | Acceptance-harness assertions on CLI output are substring checks on the fact under test, not whole-blob equality — the harness does not own the exact bytes of a binary it did not build, so a whole-blob assertion also pins a colour code and a trailing newline nobody meant to freeze. The opposite holds for a library or service whose serialized bytes **are** the product: that gets a committed golden fixture plus a documented command that regenerates it from the real code path, never a hand-typed expected string. | see block PY-TEST-04 — every hit that is not comparing against a committed golden file is the violation; empty is the pass. For the golden half: run the documented regeneration command, then `git status --porcelain <golden-dir>` — non-empty output is the violation, the fixture no longer matches what the code produces. | SHOULD |
 | PY-TEST-05 | `pytest.raises` always carries `match=`. One line of config, not prose: select `PT011` and list the project's own exception bases under `[tool.ruff.lint.flake8-pytest-style] raises-extend-require-match-for`. Those names must be **fully qualified** — a bare class name is accepted and silently matches nothing, so the check reads green while every project-specific bare `raises` sails through. `["*"]` requires `match=` everywhere. | `ruff check --select PT011 <test-root>` — each reported line is the violation. Watched red on a bare `pytest.raises(ValueError)`; watched *silently green* on a bare `pytest.raises(GrimError)` until the config named `module.GrimError` rather than `GrimError`. | SHOULD |
-| PY-TEST-13 | `--strict-markers` is in `addopts`, and every marker used in the tree is registered in `markers`. Without it a mistyped marker emits a warning and nothing else: the test stays in whatever tier the typo put it in, the selection the developer wrote silently does not apply, and the run exits 0. One line of config; there is no prose substitute. | `rg -n --glob 'pyproject.toml' --glob 'pytest.ini' --glob 'tox.ini' 'strict-markers' <project-dir>` — empty output is the finding. Watched red: with a marker misspelled by two letters, `pytest -m "not requires_docker"` reported `2 passed, 1 warning` and exit 0 — the excluded test ran. The same invocation with `--strict-markers` hard-failed at collection with `'requires_dokcer' not found in markers configuration option`. | MUST |
+| PY-TEST-13 | `--strict-markers` is in `addopts`, and every marker used in the tree is registered in `markers`. Without it a mistyped marker emits a warning and nothing else: the test stays in whatever tier the typo put it in, the selection the developer wrote silently does not apply, and the run exits 0. One line of config; there is no prose substitute. | see block PY-TEST-13 — empty output is the finding. Watched red: with a marker misspelled by two letters, `pytest -m "not requires_docker"` reported `2 passed, 1 warning` and exit 0 — the excluded test ran. The same invocation with `--strict-markers` hard-failed at collection with `'requires_dokcer' not found in markers configuration option`. | MUST |
+
+```sh
+# PY-TEST-04
+TEST_ROOT=tests    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$TEST_ROOT/**/*.py" | xargs -0 -r grep -H -n -E -e '\.stdout == ' -e '\.stderr == ' --
+```
+
+```sh
+# PY-TEST-13
+PROJECT_DIR=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$PROJECT_DIR/**/pyproject.toml" ":(glob)$PROJECT_DIR/**/pytest.ini" ":(glob)$PROJECT_DIR/**/tox.ini" | xargs -0 -r grep -H -n -E -e strict-markers --
+```
 
 ## Hangs, Timeouts and Log Signal
 
@@ -70,10 +97,35 @@ one line. Together they make a hang unattributable.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-TEST-06 | Every suite sets a session-level `pytest-timeout` bound and chooses its method deliberately. `signal` fails the one hung test and lets the run finish, so every other test still lands in the JUnit report — but the alarm only fires when the interpreter regains control, so a GIL-holding C call overshoots the bound. `thread` kills the whole process at the bound after dumping every thread's stack, and takes the JUnit report with it. `signal` is POSIX-only; a Windows job gets `thread` whether it chose it or not. Do not add a per-call `subprocess` timeout to compensate — a value guessed to cover a cold binary start plus a registry round-trip creates flakes faster than it catches hangs. | `rg -n --glob 'pyproject.toml' -e '--timeout' <project-dir>` — empty output is the finding, no bound is configured. Then add a `while True: pass` test and run the suite: watched red at 3.01s under `--timeout=3 --timeout-method=signal` (run completed, one named failure) and at 3.17s under `--timeout-method=thread` (process terminated, stack dump, no summary). Same probe against a GIL-holding C call landed at 3.95s under `signal`. | MUST |
-| PY-TEST-07 | Every CI job that runs a Python suite sets `timeout-minutes`. With none, the platform default is six hours, and a hung test burns all of it before anything turns red. | `rg --files-without-match --glob '*.yml' --glob '*.yaml' 'timeout-minutes' .github/workflows` — every listed file is the violation, empty is the pass. This is file-level: a workflow that sets it on one job and not another still needs a per-job read. The explicit path operand is load-bearing — with none, `rg` reads stdin, finds nothing, prints nothing and reads as clean. | MUST |
-| PY-TEST-08 | A CI step running a suite sets `PYTHONUNBUFFERED=1`, and the test-report upload is guarded `if: always()`, never `if: !cancelled()` — a job killed by its own `timeout-minutes` reports as *cancelled*, so a `!cancelled()` guard skips the upload and the one artifact that would say which test hung never leaves the runner. Unbuffered matters for the same reason: the log pipe is not a TTY, so CPython block-buffers, and the last several dozen passing tests can sit unflushed when the process is hard-killed. | `rg -n -B3 --glob '*.yml' --glob '*.yaml' '!cancelled\(\)' .github/workflows` — every hit guarding a report or artifact upload is the violation. Then `rg --files-without-match --glob '*.yml' --glob '*.yaml' 'PYTHONUNBUFFERED' .github/workflows` — a listed file that runs a Python suite is the violation. | SHOULD |
-| PY-TEST-09 | Flags a task file declares for pytest actually reach pytest. A templating default that only substitutes when the argument list is *empty* silently evaporates the moment CI passes anything at all — which CI always does, to name the JUnit path. The suite then runs without the verbosity the task file claims, and a hang prints no test name. | `rg -n --glob 'taskfile.yml' --glob 'Taskfile.yml' 'CLI_ARGS.*default' <project-dir>` — every hit is a flag CI loses; empty is the pass. Confirm live with `task -d <dir> test -- <the exact arguments CI passes>`, which prints the resolved command. Watched red: the same task echoed `pytest -v` bare and `pytest --junit-xml=results/junit.xml` with the argument — `-v` gone. | MUST |
+| PY-TEST-06 | Every suite sets a session-level `pytest-timeout` bound and chooses its method deliberately. `signal` fails the one hung test and lets the run finish, so every other test still lands in the JUnit report — but the alarm only fires when the interpreter regains control, so a GIL-holding C call overshoots the bound. `thread` kills the whole process at the bound after dumping every thread's stack, and takes the JUnit report with it. `signal` is POSIX-only; a Windows job gets `thread` whether it chose it or not. Do not add a per-call `subprocess` timeout to compensate — a value guessed to cover a cold binary start plus a registry round-trip creates flakes faster than it catches hangs. | see block PY-TEST-06 — empty output is the finding, no bound is configured. Then add a `while True: pass` test and run the suite: watched red at 3.01s under `--timeout=3 --timeout-method=signal` (run completed, one named failure) and at 3.17s under `--timeout-method=thread` (process terminated, stack dump, no summary). Same probe against a GIL-holding C call landed at 3.95s under `signal`. | MUST |
+| PY-TEST-07 | Every CI job that runs a Python suite sets `timeout-minutes`. With none, the platform default is six hours, and a hung test burns all of it before anything turns red. | see block PY-TEST-07 — every listed file is the violation, empty is the pass. This is file-level: a workflow that sets it on one job and not another still needs a per-job read. The git-fed file list is the operand and it is load-bearing — a search with no operand reads stdin, finds nothing, prints nothing and reads as clean. | MUST |
+| PY-TEST-08 | A CI step running a suite sets `PYTHONUNBUFFERED=1`, and the test-report upload is guarded `if: always()`, never `if: !cancelled()` — a job killed by its own `timeout-minutes` reports as *cancelled*, so a `!cancelled()` guard skips the upload and the one artifact that would say which test hung never leaves the runner. Unbuffered matters for the same reason: the log pipe is not a TTY, so CPython block-buffers, and the last several dozen passing tests can sit unflushed when the process is hard-killed. | see block PY-TEST-08 (1) — every hit guarding a report or artifact upload is the violation. Then see block PY-TEST-08 (2) — a listed file that runs a Python suite is the violation. | SHOULD |
+| PY-TEST-09 | Flags a task file declares for pytest actually reach pytest. A templating default that only substitutes when the argument list is *empty* silently evaporates the moment CI passes anything at all — which CI always does, to name the JUnit path. The suite then runs without the verbosity the task file claims, and a hang prints no test name. | see block PY-TEST-09 — every hit is a flag CI loses; empty is the pass. Confirm live with `task -d <dir> test -- <the exact arguments CI passes>`, which prints the resolved command. Watched red: the same task echoed `pytest -v` bare and `pytest --junit-xml=results/junit.xml` with the argument — `-v` gone. | MUST |
+
+```sh
+# PY-TEST-06
+PROJECT_DIR=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$PROJECT_DIR/**/pyproject.toml" | xargs -0 -r grep -H -n -E -e --timeout --
+```
+
+```sh
+# PY-TEST-07
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -L -E -e timeout-minutes --
+```
+
+```sh
+# PY-TEST-08 (1)
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | PAT='!cancelled\(\)' AFTER=0 BEFORE=3 xargs -0 -r awk -f "$CHECKS/context.awk" --
+# PY-TEST-08 (2)
+git ls-files -z --cached --others --exclude-standard -- ':(glob).github/workflows/**/*.yml' ':(glob).github/workflows/**/*.yaml' | xargs -0 -r grep -L -E -e PYTHONUNBUFFERED --
+```
+
+```sh
+# PY-TEST-09
+PROJECT_DIR=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$PROJECT_DIR/**/taskfile.yml" ":(glob)$PROJECT_DIR/**/Taskfile.yml" | xargs -0 -r grep -H -n -E -e 'CLI_ARGS.*default' --
+```
 
 A timeout is never a retry. A test that did not finish in its bound is either
 a real product hang or an infrastructure symptom; retrying it silently turns
@@ -85,7 +137,13 @@ lives in that fixture, not folded into the timeout.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-TEST-10 | Where an entry point is `main(argv) -> int` with `sys.exit` confined to the `__main__` guard, a test calls `main([...])` directly and reads `capsys` — a subprocess is reserved for the case where the process boundary itself is the contract (signal handling, a real TTY, the shipped console script). Applies to the library, service and single-file-tool shapes; the acceptance harness drives a compiled binary and has no in-process option. Spawning a fresh interpreter to exercise Python you could have called buys a slower test that reports a returncode instead of a traceback. | `rg -n --glob '*.py' -e 'subprocess\.run\(\[sys\.executable' -e 'subprocess\.Popen\(\[sys\.executable' <tests-dir>` — in those three shapes every hit is the violation unless the process boundary is what is under test; empty is the pass. | SHOULD |
+| PY-TEST-10 | Where an entry point is `main(argv) -> int` with `sys.exit` confined to the `__main__` guard, a test calls `main([...])` directly and reads `capsys` — a subprocess is reserved for the case where the process boundary itself is the contract (signal handling, a real TTY, the shipped console script). Applies to the library, service and single-file-tool shapes; the acceptance harness drives a compiled binary and has no in-process option. Spawning a fresh interpreter to exercise Python you could have called buys a slower test that reports a returncode instead of a traceback. | see block PY-TEST-10 — in those three shapes every hit is the violation unless the process boundary is what is under test; empty is the pass. | SHOULD |
+
+```sh
+# PY-TEST-10
+TESTS_DIR=tests    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$TESTS_DIR/**/*.py" | xargs -0 -r grep -H -n -E -e 'subprocess\.run\(\[sys\.executable' -e 'subprocess\.Popen\(\[sys\.executable' --
+```
 
 The rule is not "never spawn a subprocess" — it is that the subprocess must be
 buying something. It buys the exit code the shell actually observes, the stream
@@ -99,8 +157,26 @@ a number.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-TEST-11 | Coverage runs with branch coverage on, and every `# pragma: no cover` states a reason a reviewer can independently check — a platform gate, a typing-only block. A bare pragma is indistinguishable from someone reaching a `fail_under` number, and a whole module excluded by config is that at scale. Structural exclusions (`if TYPE_CHECKING:`, the `__main__` guard, a bare `...`) belong in `exclude_also`, not repeated as pragmas at every site. | `rg -n --glob '*.py' 'pragma: no cover *$' <src-dir>` — every hit is a bare pragma and the violation; a reasoned one has text after `cover` and is correctly not matched. Then `rg -n --glob 'pyproject.toml' 'branch = true' <project-dir>` — empty output is the finding, coverage is statement-only. | SHOULD |
-| PY-TEST-12 | A `>>>` example in shipped documentation is collected and executed by the suite, or it is a claim nobody checks. An unexecuted example drifts from the code silently, and it drifts in the one direction that matters: the version a reader copies. | `rg -l --glob '*.py' '^\s*>>> ' <src-dir>` lists every module carrying an example. Then `rg -n --glob 'pyproject.toml' --glob 'conftest.py' -e '--doctest-modules' -e 'sybil' -e 'Sybil' <project-dir>` — empty output while the first command listed anything is the violation. Confirm by deleting one character from an expected value and watching the run fail. | SHOULD |
+| PY-TEST-11 | Coverage runs with branch coverage on, and every `# pragma: no cover` states a reason a reviewer can independently check — a platform gate, a typing-only block. A bare pragma is indistinguishable from someone reaching a `fail_under` number, and a whole module excluded by config is that at scale. Structural exclusions (`if TYPE_CHECKING:`, the `__main__` guard, a bare `...`) belong in `exclude_also`, not repeated as pragmas at every site. | see block PY-TEST-11 (1) — every hit is a bare pragma and the violation; a reasoned one has text after `cover` and is correctly not matched. Then see block PY-TEST-11 (2) — empty output is the finding, coverage is statement-only. | SHOULD |
+| PY-TEST-12 | A `>>>` example in shipped documentation is collected and executed by the suite, or it is a claim nobody checks. An unexecuted example drifts from the code silently, and it drifts in the one direction that matters: the version a reader copies. | see block PY-TEST-12 (1) lists every module carrying an example. Then see block PY-TEST-12 (2) — empty output while the first command listed anything is the violation. Confirm by deleting one character from an expected value and watching the run fail. | SHOULD |
+
+```sh
+# PY-TEST-11 (1)
+SRC_DIR=src    # the directory to search
+PROJECT_DIR=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC_DIR/**/*.py" | xargs -0 -r grep -H -n -E -e 'pragma: no cover *$' --
+# PY-TEST-11 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$PROJECT_DIR/**/pyproject.toml" | xargs -0 -r grep -H -n -E -e 'branch = true' --
+```
+
+```sh
+# PY-TEST-12 (1)
+SRC_DIR=src    # the directory to search
+PROJECT_DIR=.    # the directory to search
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$SRC_DIR/**/*.py" | xargs -0 -r grep -l -E -e '^[[:space:]]*>>> ' --
+# PY-TEST-12 (2)
+git ls-files -z --cached --others --exclude-standard -- ":(glob)$PROJECT_DIR/**/pyproject.toml" ":(glob)$PROJECT_DIR/**/conftest.py" | xargs -0 -r grep -H -n -E -e --doctest-modules -e sybil -e Sybil --
+```
 
 Coverage is a floor, not a claim. A test that calls a function expected to
 raise, wrapped in a bare `try`/`except`, executes every line of the raising

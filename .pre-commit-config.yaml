@@ -1,0 +1,26 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
+default_install_hook_types: [pre-commit, commit-msg]
+repos:
+  - repo: local
+    hooks:
+      - id: gitleaks
+        name: gitleaks (staged)
+        entry: ocx exec -g lint -- gitleaks git --staged --redact --no-banner
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+      # Shell-free entries (prek splits `entry` itself): the logic lives in baseline.taskfile.yml so
+      # the hooks run the same on Windows (Q9). prek appends the commit message file to commit-msg entries.
+      - id: conventional-commit
+        name: conventional commit subject
+        entry: ocx exec -- task -x hooks:commit-msg --
+        language: system
+        stages: [commit-msg]
+      - id: repo-pre-commit
+        name: repo pre-commit hooks (optional task hooks:pre-commit)
+        entry: ocx exec -- task hooks:repo-pre-commit
+        language: system
+        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true

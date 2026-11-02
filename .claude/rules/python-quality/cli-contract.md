@@ -60,11 +60,40 @@ not crash" there and "nothing wrong was found" everywhere else. A reader who
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-CLI-01 | Every status a tool chooses comes from the pinned table above. A new integer means the table is updated first, in the same change — a locally invented `3` or `42` is a private convention that breaks a caller already scripting against the shared set, and it breaks it silently, since an unrecognised code still looks like "some kind of failure." | `rg -n --glob '*.py' --glob '!**/.venv/**' -e 'sys\.exit\([0-9]+\)' -e 'raise SystemExit\([0-9]+\)' .` — every hit's integer must be `0`, `1`, `2`, `65` or `75`; any other number is the finding. Then `rg -n -A8 --glob '*.py' --glob '!**/.venv/**' 'class ExitCode' .` — read the discriminants; one outside the set is the finding | MUST |
-| PY-CLI-03 | The entrypoint is `main(argv: Sequence[str] \| None = None) -> int`, returning a plain `int` or an `IntEnum` member. Never `-> bool`: `sys.exit(True)` exits **1**, so a `main` that returns `True` for success inverts pass and fail while still printing its success message. Never `-> None` where a caller consumes the value. Taking `argv` is also what lets a test call `main([...])` and assert on the code with no subprocess. | `rg -n --glob '*.py' --glob '!**/.venv/**' -e 'def main\(.*-> bool' -e 'def main\(.*-> None' -e 'def main\([^)]*\):' .` — any hit is a finding: the first two are the wrong annotation, the third is no annotation at all. Empty output is the pass; a correctly annotated `def main(argv: … ) -> int:` does not match | MUST |
-| PY-CLI-04 | `sys.exit(main(...))` appears exactly once in a module, on the line under `if __name__ == "__main__":`, and `sys.exit` never appears inside `main()`'s own body — an exit buried in the dispatch path is unreachable to a test and invisible to a reader tracing the contract. | `rg -n --glob '*.py' 'sys\.exit\(' <file>` — the pass is exactly one hit, immediately under the `__main__` guard; every other hit is a finding. **Zero hits is also a finding**: a module with a `main()` nobody exits through has no exit-code contract at all, only whatever an exception happens to leave behind | SHOULD |
-| PY-CLI-05 | `argparse`'s `2` for usage errors is kept as-is. Never subclass `ArgumentParser` to override `error()` and remap it, and never emit `64`/`EX_USAGE` from Python. A tool-specific failure category is raised *after* `parse_args()` has succeeded and mapped to its own code there, the way `index/bot` maps `IndexBotError` subclasses. | `rg -n --glob '*.py' --glob '!**/.venv/**' -e 'sys\.exit\(64\)' -e 'EX_USAGE' -e 'def error\(self' .` — any hit is a finding; empty output is the pass, and it is empty across the catalog today | SHOULD |
-| PY-CLI-06 | `os._exit()`, bare `exit()`, `quit()` and `argparse`'s `type=bool` never appear in a shipped script. `os._exit` skips `finally` blocks and the stream flush; `exit`/`quit` are `site` conveniences that do not exist under `python -S`; and `type=bool` is the trap an agent introduces unprompted, because `bool("False")` is `True` — the flag reads as set whatever the user typed. Use `action="store_true"` or an explicit converter. | `rg -n --glob '*.py' --glob '!**/.venv/**' -e 'os\._exit\(' -e '^\s*exit\(' -e '^\s*quit\(' -e 'type=bool' .` — any hit is a finding, empty is the pass. The anchored `^\s*` spellings catch bare `exit(...)` in statement position without matching `sys.exit(`/`parser.exit(` | MUST |
+| PY-CLI-01 | Every status a tool chooses comes from the pinned table above. A new integer means the table is updated first, in the same change — a locally invented `3` or `42` is a private convention that breaks a caller already scripting against the shared set, and it breaks it silently, since an unrecognised code still looks like "some kind of failure." | see block PY-CLI-01 (1) — every hit's integer must be `0`, `1`, `2`, `65` or `75`; any other number is the finding. Then see block PY-CLI-01 (2) — read the discriminants; one outside the set is the finding | MUST |
+| PY-CLI-03 | The entrypoint is `main(argv: Sequence[str] \| None = None) -> int`, returning a plain `int` or an `IntEnum` member. Never `-> bool`: `sys.exit(True)` exits **1**, so a `main` that returns `True` for success inverts pass and fail while still printing its success message. Never `-> None` where a caller consumes the value. Taking `argv` is also what lets a test call `main([...])` and assert on the code with no subprocess. | see block PY-CLI-03 — any hit is a finding: the first two are the wrong annotation, the third is no annotation at all. Empty output is the pass; a correctly annotated `def main(argv: … ) -> int:` does not match | MUST |
+| PY-CLI-04 | `sys.exit(main(...))` appears exactly once in a module, on the line under `if __name__ == "__main__":`, and `sys.exit` never appears inside `main()`'s own body — an exit buried in the dispatch path is unreachable to a test and invisible to a reader tracing the contract. | see block PY-CLI-04 — the pass is exactly one hit, immediately under the `__main__` guard; every other hit is a finding. **Zero hits is also a finding**: a module with a `main()` nobody exits through has no exit-code contract at all, only whatever an exception happens to leave behind | SHOULD |
+| PY-CLI-05 | `argparse`'s `2` for usage errors is kept as-is. Never subclass `ArgumentParser` to override `error()` and remap it, and never emit `64`/`EX_USAGE` from Python. A tool-specific failure category is raised *after* `parse_args()` has succeeded and mapped to its own code there, the way `index/bot` maps `IndexBotError` subclasses. | see block PY-CLI-05 — any hit is a finding; empty output is the pass, and it is empty across the catalog today | SHOULD |
+| PY-CLI-06 | `os._exit()`, bare `exit()`, `quit()` and `argparse`'s `type=bool` never appear in a shipped script. `os._exit` skips `finally` blocks and the stream flush; `exit`/`quit` are `site` conveniences that do not exist under `python -S`; and `type=bool` is the trap an agent introduces unprompted, because `bool("False")` is `True` — the flag reads as set whatever the user typed. Use `action="store_true"` or an explicit converter. | see block PY-CLI-06 — any hit is a finding, empty is the pass. The anchored `^\s*` spellings catch bare `exit(...)` in statement position without matching `sys.exit(`/`parser.exit(` | MUST |
+
+```sh
+# PY-CLI-01 (1)
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e 'sys\.exit\([0-9]+\)' -e 'raise SystemExit\([0-9]+\)' --
+# PY-CLI-01 (2)
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | PAT='class ExitCode' AFTER=8 BEFORE=0 xargs -0 -r awk -f "$CHECKS/context.awk" --
+```
+
+```sh
+# PY-CLI-03
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e 'def main\(.*-> bool' -e 'def main\(.*-> None' -e 'def main\([^)]*\):' --
+```
+
+```sh
+# PY-CLI-04
+FILE=src/app/cli.py    # the file to search
+grep -H -n -E -e 'sys\.exit\(' -- "$FILE"
+```
+
+```sh
+# PY-CLI-05
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e 'sys\.exit\(64\)' -e EX_USAGE -e 'def error\(self' --
+```
+
+```sh
+# PY-CLI-06
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e 'os\._exit\(' -e '^[[:space:]]*exit\(' -e '^[[:space:]]*quit\(' -e type=bool --
+```
 
 ```python
 class ExitCode(IntEnum):
@@ -97,10 +126,30 @@ subcommand. `capsys.readouterr()` covers the streams in the same test.
 
 | ID | Rule | Verification | Severity |
 |---|---|---|---|
-| PY-CLI-02 | stdout carries the tool's result — the thing a caller parses, greps or redirects to a file. Every message *about* the run — status, progress, warnings, prompts and errors — goes to stderr, unconditionally. Under a machine-output flag stdout is the payload and nothing else: no banner, no progress, no trailing "done" line, or the caller's `json.loads` fails on output that was technically correct. `sys.exit("message")` already writes to stderr, which is why it composes; a bare `print()` of an error does not. | `rg -l --glob '*.py' --glob '!**/.venv/**' 'print\(' .` names every file that writes. For each, `rg --files-without-match --glob '*.py' 'file=sys\.stderr' <file>` — a printing file that never names stderr is the finding, since no real tool is all payload. Then classify each remaining `print(` one line at a time: "this is the output" or "this is a message about the run". Per machine-output subcommand, an integration test parses the *whole* captured stdout | MUST |
-| PY-CLI-07 | Where a harness genuinely requires exit `0` on every path — the hook fleet — a top-level `except Exception` is the licensed exception to the core no-catch-all rule, and the module docstring or an adjacent comment names the contract that requires it. `except Exception` is also the right *width* here, for the reason the core exception rule gives; `except BaseException` at that position would be the actual bug. | `rg -n -A3 --glob '*.py' 'except Exception' <file>` finds the swallowing handlers; then `sed -n '1,12p' <file>` — a handler whose module header does not state why a non-zero exit is forbidden is the finding. `post_tool_use_tracker.py`'s "It MUST never exit non-zero" docstring is the reference wording | MUST |
+| PY-CLI-02 | stdout carries the tool's result — the thing a caller parses, greps or redirects to a file. Every message *about* the run — status, progress, warnings, prompts and errors — goes to stderr, unconditionally. Under a machine-output flag stdout is the payload and nothing else: no banner, no progress, no trailing "done" line, or the caller's `json.loads` fails on output that was technically correct. `sys.exit("message")` already writes to stderr, which is why it composes; a bare `print()` of an error does not. | see block PY-CLI-02 (1) names every file that writes. For each, see block PY-CLI-02 (2) — a printing file that never names stderr is the finding, since no real tool is all payload. Then classify each remaining `print(` one line at a time: "this is the output" or "this is a message about the run". Per machine-output subcommand, an integration test parses the *whole* captured stdout | MUST |
+| PY-CLI-07 | Where a harness genuinely requires exit `0` on every path — the hook fleet — a top-level `except Exception` is the licensed exception to the core no-catch-all rule, and the module docstring or an adjacent comment names the contract that requires it. `except Exception` is also the right *width* here, for the reason the core exception rule gives; `except BaseException` at that position would be the actual bug. | see block PY-CLI-07 finds the swallowing handlers; then `sed -n '1,12p' <file>` — a handler whose module header does not state why a non-zero exit is forbidden is the finding. `post_tool_use_tracker.py`'s "It MUST never exit non-zero" docstring is the reference wording | MUST |
 | PY-CLI-08 | A tool whose stdout can exceed one pipe buffer restores the default SIGPIPE disposition and keeps a `BrokenPipeError` guard. Python installs `SIG_IGN` for SIGPIPE, so a `… \| head` failure surfaces at the interpreter's *shutdown flush* — past every handler in `main()` — printing a traceback and exiting `120`. `signal.signal(signal.SIGPIPE, signal.SIG_DFL)` makes the tool die like a normal Unix filter instead; Windows has no SIGPIPE, so the `BrokenPipeError` guard is still needed there and the `hasattr` check is what keeps the module importable on both. | Run `python3 <tool> <args producing >64 KiB> 2>err.log \| head -1`, then read `err.log`. Any `BrokenPipeError` or `Exception ignored while flushing sys.stdout` text is the finding, as is a writer status of `120`. **Empty stderr is the pass — and the writer's status is then `141` (128+SIGPIPE), not `0`.** `check-artifacts.py`'s `__main__` block is the reference recipe | MUST |
-| PY-CLI-09 | A file another process reads — a lock, a session file, a tracker log — is written atomically: `tempfile.mkstemp` in the *target's own directory*, write, `Path.replace()`, and `except BaseException: tmp.unlink(missing_ok=True); raise`. A direct `.write_text()` killed mid-write leaves a torn file, and a reader's `json.loads` guard papers over the state loss rather than preventing it. `BaseException` is deliberate here, unlike PY-CLI-07: cleanup must run for a Ctrl-C too. | `rg -n --glob '*.py' --glob '!**/.venv/**' -e '\.write_text\(' -e '\.write_bytes\(' .` — a hit writing a path another process reads is the finding; a write to a fresh, process-private path is not. `index/bot`'s `local_files.py:_write_atomic` is the reference; `hook_utils.py`'s six direct writes are the open findings | SHOULD |
+| PY-CLI-09 | A file another process reads — a lock, a session file, a tracker log — is written atomically: `tempfile.mkstemp` in the *target's own directory*, write, `Path.replace()`, and `except BaseException: tmp.unlink(missing_ok=True); raise`. A direct `.write_text()` killed mid-write leaves a torn file, and a reader's `json.loads` guard papers over the state loss rather than preventing it. `BaseException` is deliberate here, unlike PY-CLI-07: cleanup must run for a Ctrl-C too. | see block PY-CLI-09 — a hit writing a path another process reads is the finding; a write to a fresh, process-private path is not. `index/bot`'s `local_files.py:_write_atomic` is the reference; `hook_utils.py`'s six direct writes are the open findings | SHOULD |
+
+```sh
+# PY-CLI-02 (1)
+FILE=src/app/cli.py    # the file to search
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -l -E -e 'print\(' --
+# PY-CLI-02 (2)
+grep -L -E -e 'file=sys\.stderr' -- "$FILE"
+```
+
+```sh
+# PY-CLI-07
+FILE=src/app/cli.py    # the file to search
+CHECKS=.claude/rules/python-quality/checks    # where this rule's checks/ directory is installed
+PAT='except Exception' AFTER=3 BEFORE=0 awk -f "$CHECKS/context.awk" -- "$FILE"
+```
+
+```sh
+# PY-CLI-09
+git ls-files -z --cached --others --exclude-standard -- ':(glob)**/*.py' ':(exclude,glob)**/.venv/**' | xargs -0 -r grep -H -n -E -e '\.write_text\(' -e '\.write_bytes\(' --
+```
 
 The SIGPIPE recipe, verified against a planted violation: unguarded, the same
 tool piped into `head -1` prints a traceback plus `Exception ignored while

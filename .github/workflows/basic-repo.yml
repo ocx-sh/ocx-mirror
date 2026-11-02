@@ -1,0 +1,110 @@
+# Seeded once by ocx-sh/conventions; this file belongs to the repo from here on.
+# verify-basic calls it as its `repo` job: the repo-owned jobs that gate a pull request. The template owns
+# lint, test, build and docs (`task ci:lint`, `ci:test`, `ci:build`, `ci:docs`); this file holds what those
+# four cannot: the commit check and the two acceptance lanes. release.yml also calls it as the tag's gate.
+#
+# A called workflow sees only the secrets it declares: BAZEL_CACHE_WRITE_AUTH comes from verify-basic
+# (every event that carries it, i.e. not a fork PR), BAZEL_CACHE_READ_AUTH (not used when the write one is
+# present) and OTEL_OTLP_AUTH from verify-basic too; release.yml passes the read credential alone (the tag
+# run reads the shared cache and never writes it).
+#
+# Everything here runs under `contents: read`; a job asking for more fails the whole run at startup. Test
+# results therefore publish as annotations and a job summary, never as a check run or a PR comment.
+name: basic-repo
+
+on:
+  workflow_call:
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH:
+        required: false
+      BAZEL_CACHE_READ_AUTH:
+        required: false
+      OTEL_OTLP_AUTH:
+        required: false
+
+permissions: {}
+
+jobs:
+  conventional-commits:
+    name: Conventional Commits
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Check conventional commits
+        uses: cocogitto/cocogitto-action@52d0023b4396897f1815648e553db2ab8d782f3a # v4.2.0
+        with:
+          command: check
+          args: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+
+  # `//test:acceptance`: pytest against the Bazel-built ocx-mirror and the ocx.lock-pinned `@tools//:ocx`,
+  # as one remote-cached sh_test (it stays one target: per-module split measured slower, test/BUILD.bazel).
+  # The harness starts its own registries and the Sigstore stack through docker compose.
+  acceptance-bazel:
+    name: Acceptance (Bazel)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Nested: external/ocx carries the fork submodules crate_universe splices from.
+          submodules: recursive
+      - name: Setup
+        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          groups: default,test
+          bazel-cache: ${{ secrets.BAZEL_CACHE_WRITE_AUTH != '' && 'trusted' || 'read' }}
+          cache-read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+          cache-write-auth: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      # Bazel only WARNS on a refused cache and builds on cold, so prove the credential reaches the command.
+      - name: Bazel cache credential reaches Bazel
+        run: task bazel:cache:rc:check
+      - name: Install lld
+        # The host C++ toolchain autoconfigures to lld when present; the linker is part of every link's
+        # action key, and the lanes share one remote cache with ocx.
+        run: sudo apt-get update && sudo apt-get install -y lld
+      - name: Acceptance tests (Bazel)
+        run: task bazel:test:accept JOBS=auto -- --config=ci
+      - name: Publish acceptance results
+        if: ${{ !cancelled() }}
+        uses: mikepenz/action-junit-report@6ef3fdcfcd5f0b5d14df3e659ef19b8c6820f93d # v6.6.1
+        with:
+          report_paths: target/bazel/accept/junit.xml
+          require_tests: false
+          annotate_only: true
+      - name: Push acceptance test timings
+        if: ${{ !cancelled() }}
+        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        with:
+          report: target/bazel/accept/junit.xml
+          suite: acceptance
+          otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}
+      # The helper script holds the credential; a self-hosted runner keeps $RUNNER_TEMP between jobs.
+      - name: Remove the Bazel cache credential
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/bazel-cache-helper" "$RUNNER_TEMP/bazel-cache.rc"
+
+  # The sharded native run: pytest straight against a Bazel-built binary. One shard today; raise
+  # `shard-count` to split the modules across runners.
+  acceptance:
+    name: Acceptance (sharded)
+    permissions:
+      contents: read
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      shard-count: 1
+    secrets:
+      BAZEL_CACHE_WRITE_AUTH: ${{ secrets.BAZEL_CACHE_WRITE_AUTH }}
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}

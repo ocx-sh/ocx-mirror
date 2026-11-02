@@ -1,7 +1,8 @@
+# ocx-baseline: template-owned file — change ocx-sh/conventions, then run task copier:update
 # git-cliff ~ configuration file
 # https://git-cliff.org/docs/configuration
 #
-# Based on the built-in keepachangelog preset, customized for ocx-mirror.
+# Based on the built-in keepachangelog preset, customized for OCX.
 
 [changelog]
 header = """
@@ -70,8 +71,6 @@ tag_pattern = "v[0-9].*"
 sort_commits = "oldest"
 
 [bump]
-# Independent semver, continuing above the last in-monorepo dev-published
-# 0.3.x line so cascade tags (latest / 0 / 0.x) never move backwards.
-initial_tag = "v0.4.0"
+initial_tag = "v0.1.0"
 features_always_bump_minor = true
 breaking_always_bump_major = false # stay pre-1.0 until intentional

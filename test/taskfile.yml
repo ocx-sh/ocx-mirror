@@ -76,3 +76,47 @@ tasks:
       - task: default
         vars:
           CLI_ARGS: '-n auto {{.CLI_ARGS | default "-v"}}'
+
+  accept:native:
+    desc: >-
+      Acceptance suite (or one shard) against the prebuilt test/bin/ binaries, no Bazel call:
+      `task test:accept:native SHARD_COUNT=2 SHARD_INDEX=1`. One JUnit file per run under target/accept/junit/.
+    summary: |
+      The sharded CI lane (`.github/workflows/acceptance.yml`) downloads the Bazel-built
+      `ocx-mirror` into test/bin and runs this once per shard. Modules come from
+      `scripts/accept_shard.py` (`SHARD_INDEX` is 0-based, `0..SHARD_COUNT-1`; one variable
+      without the other is refused). With neither, pytest selects as usual. Floors are not
+      evaluated here (a shard is a subset): run `task test:accept:floor` over the merged
+      `target/accept/junit/`. `KEEP_JUNIT=1` keeps earlier shard files to collect several locally.
+    dir: '{{.TASKFILE_DIR}}'
+    vars:
+      # No pipe: a failing selector must fail the task, not run pytest over the default testpath.
+      SHARD_MODULES:
+        sh: |-
+          {{if or .SHARD_COUNT .SHARD_INDEX}}m=$(python3 {{toSlash .REPO_ROOT}}/scripts/accept_shard.py --format paths {{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}} {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}) || exit 1
+          [ -n "$m" ] || { echo "accept:native: empty module selection" >&2; exit 1; }
+          echo $m{{else}}true{{end}}
+      JUNIT_NAME: '{{if .SHARD_COUNT}}shard-{{.SHARD_INDEX}}-of-{{.SHARD_COUNT}}{{else}}all{{end}}'
+      JUNIT_DIR: '{{toSlash .REPO_ROOT}}/target/accept/junit'
+    cmds:
+      # Stale shard files would be merged by `accept:floor`.
+      - '{{if not .KEEP_JUNIT}}rm -rf -- "{{.JUNIT_DIR}}"{{end}}'
+      - mkdir -p "{{.JUNIT_DIR}}"
+      - >-
+        uv run --locked pytest -n auto --dist loadgroup
+        --junit-xml="{{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml"
+        {{.SHARD_MODULES}} {{.CLI_ARGS | default "-v"}}
+    env:
+      OCX_COMMAND: '{{.OCX_RESOLVED}}'
+      # The toolchain's ocx stands in for the submodule build the `real_ocx_binary` fixture would make.
+      OCX_TEST_BINARY: '{{.OCX_RESOLVED}}'
+      OCX_MIRROR_COMMAND: '{{.OCX_MIRROR_BINARY}}'
+
+  accept:floor:
+    desc: >-
+      SUITE_FLOOR / SKIP_CEILING / XFAIL_CEILING over a directory of acceptance JUnit reports:
+      `task test:accept:floor JUNIT_DIR=<dir> [EXPECT_SHARDS=N] [LIMITS_DIR=<dir>]`
+    requires:
+      vars: [JUNIT_DIR]
+    cmds:
+      - python3 {{toSlash .REPO_ROOT}}/scripts/accept_floor.py --junit {{.JUNIT_DIR}}{{if .EXPECT_SHARDS}} --expect-shards {{.EXPECT_SHARDS}}{{end}}{{if .LIMITS_DIR}} --limits-dir {{.LIMITS_DIR}}{{end}}

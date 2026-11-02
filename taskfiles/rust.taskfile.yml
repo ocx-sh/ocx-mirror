@@ -118,7 +118,7 @@ tasks:
     desc: Run unit tests — `bazel:test:unit` on Linux, `rust:test:nextest` elsewhere
     summary: |
       adr_bazel_crate_split.md § C8: dispatch on OS only. Bazel is the Linux
-      loop, and CI's unit lane (verify.yml `Unit tests (Bazel)` calls
+      loop, and CI's unit lane (`task ci:test` calls
       `bazel:test:unit` by name); macOS and Windows stay on cargo nextest,
       as in ocx. `{{.CLI_ARGS}}` reaches
       whichever arm runs — nextest flags off Linux, Bazel flags on it.

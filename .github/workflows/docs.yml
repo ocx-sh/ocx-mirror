@@ -5,10 +5,10 @@ name: Docs
 # environment protection applies). Repo setting: Pages → Source = "GitHub Actions".
 #
 # The site is the Bazel target `//docs:site` (docs/BUILD.bazel): hermetic and
-# remote-cacheable: when `verify.yml`'s main-push run (started by the same
+# remote-cacheable: when `verify-basic.yml`'s `docs` job (`task ci:docs`, started by the same
 # push) has uploaded it first, this build is a cache hit; otherwise it builds
-# the site itself, a few seconds, with the same bytes. This workflow only READS the shared cache — the one write
-# lane is verify.yml's.
+# the site itself, a few seconds, with the same bytes. This workflow only READS the shared cache — the write
+# lane is `verify-basic.yml`'s.
 
 on:
   push:

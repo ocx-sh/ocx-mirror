@@ -21,12 +21,12 @@ concurrency:
 jobs:
   verify:
     name: Verify
-    uses: ./.github/workflows/verify.yml
+    # The repo-owned half of the basic tier (Bazel acceptance, sharded acceptance); lint, unit tests and
+    # build ran in verify-basic on the commit the tag points at.
+    uses: ./.github/workflows/basic-repo.yml
     permissions:
       contents: read
-      checks: write
-      pull-requests: write
-    # The read credential only (verify.yml `workflow_call.secrets`): the tag
+    # The read credential only (basic-repo.yml `workflow_call.secrets`): the tag
     # run reads the shared cache and never writes it.
     secrets:
       BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
