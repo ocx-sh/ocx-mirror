@@ -408,6 +408,7 @@ def test_a_sign_block_with_no_reachable_identity_fails_before_publishing(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.ocx_contract_site("sign")
 def test_key_mode_signs_with_the_named_key(
     signing_mirror: MirrorRunner,
     signing_spec: Path,

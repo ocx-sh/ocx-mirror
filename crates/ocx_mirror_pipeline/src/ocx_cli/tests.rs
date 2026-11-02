@@ -39,3 +39,58 @@ async fn a_spawned_child_inherits_the_execution_state() {
     let output = cmd.output().await.expect("spawn sh");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "ocx-state-sentinel");
 }
+
+/// A failing sign child's message reaches the operator from whichever stream
+/// carried it.
+///
+/// Under `--format json` ocx reports a failure in its stdout envelope, so a
+/// sweep whose every tag failed arrives with an empty stderr — and logging
+/// stderr alone left `ERROR signing … failed with exit code 79` as the entire
+/// account of what went wrong.
+#[test]
+fn a_failing_sign_child_is_reported_from_whichever_stream_spoke() {
+    let envelope = r#"{"exit_code":79,"data":{"tags":[{"tag":"3.8.0","status":"failed"}]}}"#;
+
+    assert_eq!(
+        failure_detail("", envelope),
+        envelope,
+        "stdout is used when stderr is silent"
+    );
+    assert_eq!(
+        failure_detail("  \n ", envelope),
+        envelope,
+        "whitespace-only stderr is silent"
+    );
+    assert_eq!(
+        failure_detail("no ambient credential provider\n", envelope),
+        "no ambient credential provider",
+        "stderr still wins when it has something to say",
+    );
+    assert_eq!(failure_detail("", ""), "", "both silent is not a panic");
+}
+
+/// An ocx >= 0.6.4 error document in stdout adds its kind and detail slug; with
+/// silent stderr its message stands in for the text.
+#[test]
+fn an_error_document_adds_kind_and_detail() {
+    let doc = r#"{"schema_version":1,"command":"package push","exit_code":80,"error":{"kind":"auth_error","detail":"oidc_token_rejected","message":"Fulcio rejected token","context":{}}}"#;
+
+    assert_eq!(
+        failure_detail("", doc),
+        "Fulcio rejected token [auth_error: oidc_token_rejected]"
+    );
+    assert_eq!(
+        failure_detail("boom\n", doc),
+        "boom [auth_error: oidc_token_rejected]",
+        "stderr text is kept"
+    );
+}
+
+/// A document without `detail` still names its kind; one without a message and
+/// with silent stderr is just the tag.
+#[test]
+fn an_error_document_without_detail_names_the_kind() {
+    let doc = r#"{"error":{"kind":"not_found"}}"#;
+    assert_eq!(failure_detail("", doc), "[not_found]");
+    assert_eq!(failure_detail("gone", doc), "gone [not_found]");
+}

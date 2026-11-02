@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use ocx_exit::ExitCode;
 
-use super::forward_ocx_env;
 use super::sign::{ResolvedSign, ocx_child_env, sign_push_args};
+use super::{failure_detail, forward_ocx_env};
 use ocx_mirror_http::retry::jitter;
 use ocx_mirror_report::run_summary::LayerReuse;
 
@@ -238,8 +238,13 @@ pub async fn push_once(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(PushAttemptError {
-            message: format!("ocx package push exited {}: {}", output.status, stderr.trim()),
+            message: format!(
+                "ocx package push exited {}: {}",
+                output.status,
+                failure_detail(&stderr, &stdout)
+            ),
             transient: push_exit_is_transient(output.status.code()),
         });
     }

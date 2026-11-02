@@ -27,7 +27,7 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-use super::{forward_ocx_env, resolve_ocx_binary};
+use super::{failure_detail, forward_ocx_env, resolve_ocx_binary};
 use ocx_mirror_error::MirrorError;
 use ocx_mirror_spec::{KeyConfig, KeylessConfig, Ref, SignConfig};
 
@@ -608,19 +608,6 @@ async fn run_sign(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned()) // LOSSY-OK: display
-}
-
-/// What to show the operator when a sign child fails: its stderr, or its
-/// stdout when stderr said nothing.
-///
-/// Split out only so the choice is reachable by a test — the branch itself is
-/// three lines, but getting it wrong costs an operator an exit code with no
-/// message at all, which is the failure this exists to prevent.
-fn failure_detail<'a>(stderr: &'a str, stdout: &'a str) -> &'a str {
-    match stderr.trim() {
-        "" => stdout.trim(),
-        text => text,
-    }
 }
 
 /// Log what a sweep did, treating a `skipped` row as the ordinary outcome it is.
