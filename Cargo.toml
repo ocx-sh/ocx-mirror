@@ -83,15 +83,15 @@ ocx_mirror_test_support = { path = "crates/ocx_mirror_test_support" }
 # (external/ocx/Cargo.toml). Keep them in sync when bumping the submodule —
 # widening defaults here (e.g. reqwest native-tls) would drag openssl into the
 # shared dependency graph.
-tokio = { version = "1.52", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 clap = { version = ">=4.5.57, <5", features = ["derive", "color"] }
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 # `bytes` matches ocx's pin. The dist uploader holds one archive body per
 # in-flight PUT and reqwest consumes it per attempt, so the payload is a
 # refcount-cloned `Bytes` rather than a `Vec<u8>` copied on every retry.
-bytes = "1.11.1"
-futures = "0.3.32"
-serde = { version = "1.0.228", features = ["derive"] }
+bytes = "1.12.1"
+futures = "0.3.34"
+serde = { version = "1.0.229", features = ["derive"] }
 # `preserve_order` is necessary, not belt-and-braces:
 # `ocx_index::wire_writer::serialize_root` is a pass-through with no ordering
 # enforcement of its own, so without the feature `serde_json::Map` reverts to
@@ -99,11 +99,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 # `sha256(root bytes)` changes for documents that did not semantically change —
 # with no compile error anywhere. Inherited today only through Cargo feature
 # unification with `ocx_index`; declared here so it survives an upstream change.
-serde_json = { version = "1.0.150", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 serde_yaml_ng = "0.10.0"
-schemars = "1.2.1"
-chrono = "0.4.44"
-regex = "1.12.3"
+schemars = "1.2.3"
+chrono = "0.4.45"
+regex = "1.13.1"
 url = { version = "2.5.8", features = ["serde"] }
 # Used for the typed `Release` model and route building only: the HTTP stack
 # is the mirror's own, injected through `OctocrabBuilder::with_service`
@@ -140,7 +140,7 @@ quick-junit = "0.6"
 # matcher must read the same Windows/macOS system settings the client does.
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "charset", "http2", "system-proxy"] }
 rustls = { version = "0.23.40", default-features = false, features = ["aws-lc-rs", "std"] }
-sha2 = "0.11.0"
+sha2 = "0.11.1"
 # `dist sync` announces four checksums on every upload, because Artifactory's
 # per-artifact "Client Checksum" is recorded per algorithm and an absent header
 # reads as "client did not publish a checksum value". Both are on the same
@@ -171,7 +171,7 @@ tempfile = "3.27.0"
 hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"] }
 # `thiserror` matches ocx's pin; the local error enums of the extracted crates
 # use it (adr_bazel_crate_split.md § C3).
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 # Build-only: the root package's `build.rs` bakes git + build provenance for
 # `ocx-mirror version` and the `generate ci` rev stamp. Row copied EXACTLY from
 # `ocx_cli`'s `[build-dependencies]` (ocx declares it per crate, not in its
@@ -182,7 +182,7 @@ thiserror = "2.0.18"
 vergen-gix = { version = "=9.1.0", default-features = false, features = ["build", "cargo", "rustc"] }
 # Dev-only: `tests/workspace_structure.rs` reads member manifests as TOML.
 # Copied from ocx's [workspace.dependencies].
-toml = "1.1.2"
+toml = "1.1.8"
 
 # Deny warnings for workspace members only. Cargo applies --cap-lints to
 # registry and git deps but NOT path deps; a blanket RUSTFLAGS=-D warnings
