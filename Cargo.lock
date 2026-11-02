@@ -105,9 +105,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arc-swap"
@@ -3474,7 +3474,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_config"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -3502,7 +3502,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_console"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "chrono",
  "clap",
@@ -3522,14 +3522,14 @@ dependencies = [
 
 [[package]]
 name = "ocx_env"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "ocx_exit",
 ]
 
 [[package]]
 name = "ocx_exit"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "ocx_exit_derive",
  "serde",
@@ -3537,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_exit_derive"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3546,7 +3546,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_index"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3764,7 +3764,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_oci"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "async-compression",
  "async-trait",
@@ -3806,7 +3806,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_package"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3836,7 +3836,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_python"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "ocx_oci",
  "ocx_package",
@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_sign"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3890,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_store"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "dunce",
  "hex",
@@ -3911,7 +3911,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_trust"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "log",
  "ocx_env",
@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "ocx_util"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "async-trait",
  "bzip2",
