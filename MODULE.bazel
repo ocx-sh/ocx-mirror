@@ -211,7 +211,7 @@ crate.annotation_select(
 # and fails every Bazel command (measured: an extension exception on a plain
 # query) until this line and the BUILD labels follow; `bazel:pin:check`, which
 # runs no Bazel, names the mismatch first.
-use_repo(crate, "crates", "crates__schemars-1.2.1")
+use_repo(crate, "crates", "crates__schemars-1.2.3")
 
 # `@tools//:<bin>` from the same ocx.toml/ocx.lock pair the shell hook reads.
 ocx = use_extension("@rules_ocx//ocx:extensions.bzl", "ocx")
