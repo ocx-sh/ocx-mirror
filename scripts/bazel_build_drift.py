@@ -439,7 +439,7 @@ SERDE = "@crates//serde-1.0.228:serde-1.0.228"
 TOML = "@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0"
 OCX_OCI = "@crates//ocx_oci-0.6.2:ocx_oci-0.6.2"
 TEMPFILE = "@crates//tempfile-3.27.0:tempfile-3.27.0"
-SCHEMARS = "@crates__schemars-1.2.1//:schemars"
+SCHEMARS = "@crates__schemars-1.2.3//:schemars"
 BUILD_SCRIPT_ONLY = ("cc", "1.2.0")
 MEMBERS = [
     ("", "ocx_mirror"),
