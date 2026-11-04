@@ -47,7 +47,7 @@ rust_library(
         "//crates/ocx_mirror_error:ocx_mirror_error_jsonschema",
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_source:ocx_mirror_source_jsonschema",
-        "@crates__schemars-1.2.1//:schemars",
+        "@crates__schemars-1.2.3//:schemars",
     ],
 )
 
