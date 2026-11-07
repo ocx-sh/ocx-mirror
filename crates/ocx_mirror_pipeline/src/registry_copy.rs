@@ -33,6 +33,11 @@ use ocx_mirror_error::MirrorError;
 use ocx_mirror_spec::filter::pep440_sort_key;
 use ocx_mirror_spec::{RegistrySource, Target};
 
+/// The plain-HTTP registries `OCX_INSECURE_REGISTRIES` names.
+pub fn insecure_registries() -> Vec<String> {
+    ocx_config::insecure::parse_host_list(ocx_env::OCX_INSECURE_REGISTRIES.get().as_deref())
+}
+
 /// Bound on a **manifest** body this mirror republishes or recurses into.
 ///
 /// Applied post-hoc in both walks: `Index::fetch_manifest_raw_bytes` has
@@ -227,7 +232,7 @@ fn client_config() -> native::ClientConfig {
     // Same source `ClientBuilder::plain_http_registries` reads, so the
     // acceptance harness's plain-HTTP loopback registries are reachable
     // through this client too. Left at the `Https` default when unset.
-    let insecure = ocx_config::env::insecure_registries();
+    let insecure = insecure_registries();
     if !insecure.is_empty() {
         config.protocol = native::ClientProtocol::HttpsExcept(insecure);
     }

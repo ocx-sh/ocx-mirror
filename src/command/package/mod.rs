@@ -91,9 +91,9 @@ impl PackageCommand {
 /// would route reads to the firewall-blocked origin, the exact anti-goal
 /// replace semantics exist to prevent.
 pub(crate) fn registry_client() -> Result<ocx_oci::Client, MirrorError> {
-    let insecure = ocx_config::env::insecure_registries();
-    let env_mirrors =
-        ocx_config::env::mirrors().map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
+    let insecure = ocx_mirror_pipeline::registry_copy::insecure_registries();
+    let env_mirrors = ocx_config::mirror::parse_env_mirrors(ocx_env::OCX_MIRRORS.get().as_deref())
+        .map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
     let resolved = ocx_config::mirror::resolve_mirror_map(&ocx_config::Config::default(), env_mirrors, &insecure)
         .map_err(|error| MirrorError::ExecutionFailed(vec![error.to_string()]))?;
     Ok(ocx_oci::ClientBuilder::new()

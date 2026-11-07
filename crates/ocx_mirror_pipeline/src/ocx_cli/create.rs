@@ -49,14 +49,17 @@ pub struct CreateRequest<'a> {
 ///
 /// Each build pins a tag-only dependency to what the tag points at *now*. The
 /// local index is what ocx consults first otherwise, and a tag pointer cached
-/// there months ago would pin every new version to a stale leaf. The operator's
-/// `OCX_OFFLINE` or `OCX_FROZEN` is the exception: both ask for local
-/// resolution, and `--frozen` refuses `--remote` outright. The child inherits
-/// both and applies them itself.
+/// there months ago would pin every new version to a stale leaf. The exception
+/// is an operator who asked for local resolution: the mirror's own
+/// `OCX_OFFLINE` or `OCX_FROZEN`, or an `--offline`/`--frozen` (or credential
+/// helper) narrowing a parent ocx passed down in `__OCX_ENV_STATE`. `--frozen`
+/// refuses `--remote` outright. The child inherits all of it and applies it
+/// itself.
 pub fn resolves_tags_remotely() -> bool {
     // A malformed value reads as unset here; the child `ocx` refuses it with its own error.
     let on = |var: &'static ocx_env::EnvVar| var.bool_or(false).unwrap_or(false);
-    !(on(&ocx_env::OCX_OFFLINE) || on(&ocx_env::OCX_FROZEN))
+    let inherited = ocx_config::exec_state::Inherited::from_process_env().narrowing();
+    !(on(&ocx_env::OCX_OFFLINE) || on(&ocx_env::OCX_FROZEN) || inherited.offline || inherited.frozen)
 }
 
 impl CreateRequest<'_> {
