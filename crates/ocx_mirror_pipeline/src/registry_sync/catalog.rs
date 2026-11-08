@@ -236,7 +236,7 @@ pub async fn validate_root_host(root: &IndexRoot, trusted: &[String], rules: &Pr
     // The verdict only: the registry client's own `GuardedResolver` re-judges
     // and pins at dial time (C-046), so nothing here is discarded.
     guard_destination(
-        DialScheme::for_registry(&ocx_config::env::insecure_registries(), location.registry()),
+        DialScheme::for_registry(&crate::registry_copy::insecure_registries(), location.registry()),
         host,
         port,
         trusted,

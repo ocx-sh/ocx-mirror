@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 The OCX Authors
 
+use ocx_config::exec_state::{ExecState, Narrowing};
+
 use super::*;
 
 fn request(bin_scan: BinScanMode, libc_lint: bool) -> Vec<String> {
@@ -94,6 +96,7 @@ fn create_argv_leads_with_remote_only_when_asked() {
 #[tokio::test]
 async fn tags_resolve_remotely_unless_the_operator_pins_resolution_locally() {
     let (frozen_key, offline_key) = (ocx_env::OCX_FROZEN.name, ocx_env::OCX_OFFLINE.name);
+    let state_key = ocx_env::__OCX_ENV_STATE.name;
 
     let _lock = ocx_mirror_test_support::OCX_ENV_LOCK.lock().await;
     for (offline, frozen, remote) in [
@@ -102,13 +105,127 @@ async fn tags_resolve_remotely_unless_the_operator_pins_resolution_locally() {
         (Some("1"), None, false),
         (None, Some("true"), false),
     ] {
-        let _env = ocx_mirror_test_support::EnvRestore::set(&[(offline_key, offline), (frozen_key, frozen)]);
+        let _env = ocx_mirror_test_support::EnvRestore::set(&[
+            (offline_key, offline),
+            (frozen_key, frozen),
+            (state_key, None),
+        ]);
         assert_eq!(
             resolves_tags_remotely(),
             remote,
             "OCX_OFFLINE={offline:?} OCX_FROZEN={frozen:?}",
         );
     }
+}
+
+fn encoded_state(narrowing: Narrowing) -> String {
+    let state = ExecState {
+        narrowing,
+        ..ExecState::default()
+    };
+    ocx_config::exec_state::encode(&state)
+        .value
+        .expect("a header-only state always encodes")
+}
+
+/// A parent `ocx --offline` or `--frozen` reaches the mirror only as the
+/// narrowing in `__OCX_ENV_STATE`, never as `OCX_OFFLINE`/`OCX_FROZEN`; the
+/// credential-helper marker implies offline. A narrowing that restricts
+/// nothing else leaves resolution remote.
+#[tokio::test]
+async fn an_inherited_narrowing_resolves_tags_locally() {
+    let (frozen_key, offline_key) = (ocx_env::OCX_FROZEN.name, ocx_env::OCX_OFFLINE.name);
+    let state_key = ocx_env::__OCX_ENV_STATE.name;
+
+    let _lock = ocx_mirror_test_support::OCX_ENV_LOCK.lock().await;
+    for (label, narrowing, remote) in [
+        ("none", Narrowing::default(), true),
+        (
+            "offline",
+            Narrowing {
+                offline: true,
+                ..Narrowing::default()
+            },
+            false,
+        ),
+        (
+            "frozen",
+            Narrowing {
+                frozen: true,
+                ..Narrowing::default()
+            },
+            false,
+        ),
+        (
+            "credential_helper",
+            Narrowing {
+                credential_helper: true,
+                ..Narrowing::default()
+            },
+            false,
+        ),
+        (
+            "no_consent",
+            Narrowing {
+                no_consent: true,
+                ..Narrowing::default()
+            },
+            true,
+        ),
+    ] {
+        let value = encoded_state(narrowing);
+        let _env = ocx_mirror_test_support::EnvRestore::set(&[
+            (offline_key, None),
+            (frozen_key, None),
+            (state_key, Some(&value)),
+        ]);
+        assert_eq!(resolves_tags_remotely(), remote, "narrowing: {label}");
+    }
+}
+
+/// A value the decoder cannot read carries no narrowing and resolves remotely,
+/// unless its plaintext header still names one: the header is read first so a
+/// bad payload cannot hide it.
+#[tokio::test]
+async fn an_unreadable_state_resolves_remotely_unless_its_header_narrows() {
+    let (frozen_key, offline_key) = (ocx_env::OCX_FROZEN.name, ocx_env::OCX_OFFLINE.name);
+    let state_key = ocx_env::__OCX_ENV_STATE.name;
+
+    let offline = encoded_state(Narrowing {
+        offline: true,
+        ..Narrowing::default()
+    });
+    let header_end = offline.find('.').expect("header and payload are dot-separated");
+    let broken_payload = format!("{}.!!!not-a-payload", &offline[..header_end]);
+
+    let _lock = ocx_mirror_test_support::OCX_ENV_LOCK.lock().await;
+    for (label, value, remote) in [
+        ("garbage", "not-an-ocx-state".to_string(), true),
+        ("offline header, broken payload", broken_payload, false),
+    ] {
+        let _env = ocx_mirror_test_support::EnvRestore::set(&[
+            (offline_key, None),
+            (frozen_key, None),
+            (state_key, Some(&value)),
+        ]);
+        assert_eq!(resolves_tags_remotely(), remote, "{label}");
+    }
+}
+
+/// The mirror's own `OCX_OFFLINE` still wins when the inherited state narrows nothing.
+#[tokio::test]
+async fn the_mirrors_own_offline_wins_over_an_unnarrowed_state() {
+    let (frozen_key, offline_key) = (ocx_env::OCX_FROZEN.name, ocx_env::OCX_OFFLINE.name);
+    let state_key = ocx_env::__OCX_ENV_STATE.name;
+    let value = encoded_state(Narrowing::default());
+
+    let _lock = ocx_mirror_test_support::OCX_ENV_LOCK.lock().await;
+    let _env = ocx_mirror_test_support::EnvRestore::set(&[
+        (offline_key, Some("1")),
+        (frozen_key, None),
+        (state_key, Some(&value)),
+    ]);
+    assert!(!resolves_tags_remotely());
 }
 
 /// ocx derives the sidecar from the bundle name; the mirror has to read it back

@@ -38,38 +38,39 @@ pub fn resolve_ocx_binary() -> Result<PathBuf, String> {
     Ok(PathBuf::from("ocx"))
 }
 
-/// Forward all `OCX_*` environment variables from the current process into a
-/// child command. This ensures offline mode, remote mode, registry config, and
-/// index paths are inherited by the subprocess.
-pub fn forward_ocx_env(cmd: &mut tokio::process::Command) {
-    const OCX_VARS: &[&str] = &[
-        "OCX_HOME",
-        "OCX_DEFAULT_REGISTRY",
-        "OCX_INSECURE_REGISTRIES",
-        "OCX_OFFLINE",
-        "OCX_REMOTE",
-        "OCX_CONFIG",
-        "OCX_NO_CONFIG",
-        "OCX_PROJECT",
-        "OCX_NO_PROJECT",
-        "OCX_INDEX",
-        "OCX_BINARY_PIN",
-        "OCX_NO_UPDATE_CHECK",
-        "OCX_NO_MODIFY_PATH",
-        // Deliberately NOT `OCX_IDENTITY_TOKEN` / `OCX_KEY_PASSWORD`
-        // (adr_mirror_signing.md, C-054). This list is a *forwarding*
-        // whitelist for names inherited from this process; the two signing
-        // secrets are resolved from `sign:` refs by
-        // [`sign::resolve_sign`] — which may name a variable this process
-        // never had — and applied per child by [`sign::ocx_child_env`].
-        // Adding them here would forward whatever the ambient environment
-        // happens to hold under the ocx-owned names, silently overriding the
-        // spec on a runner that already sets one.
-    ];
+/// The `OCX_*` inputs the mirror re-exports into its ocx children.
+const FORWARDED_OCX_VARS: &[&str] = &[
+    "OCX_HOME",
+    "OCX_DEFAULT_REGISTRY",
+    "OCX_INSECURE_REGISTRIES",
+    "OCX_NO_CONFIG",
+    "OCX_PROJECT",
+    "OCX_NO_PROJECT",
+    "OCX_BINARY_PIN",
+    "OCX_NO_UPDATE_CHECK",
+    "OCX_NO_MODIFY_PATH",
+    // Deliberately NOT `OCX_IDENTITY_TOKEN` / `OCX_KEY_PASSWORD`
+    // (adr_mirror_signing.md, C-054). This list is a *forwarding*
+    // whitelist for names inherited from this process; the two signing
+    // secrets are resolved from `sign:` refs by
+    // [`sign::resolve_sign`] — which may name a variable this process
+    // never had — and applied per child by [`sign::ocx_child_env`].
+    // Adding them here would forward whatever the ambient environment
+    // happens to hold under the ocx-owned names, silently overriding the
+    // spec on a runner that already sets one.
+];
 
-    for var in OCX_VARS {
+/// Forward the [`FORWARDED_OCX_VARS`] set into a child command. Offline, frozen
+/// and the other root-flag narrowings are not in it: they travel in
+/// `__OCX_ENV_STATE`, which the child inherits because the mirror never clears
+/// a child's environment.
+pub fn forward_ocx_env(cmd: &mut tokio::process::Command) {
+    for var in FORWARDED_OCX_VARS {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
