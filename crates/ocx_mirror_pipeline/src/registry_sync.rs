@@ -1011,7 +1011,7 @@ async fn write_package(
 /// address cannot rebind before the socket opens either.
 fn source_read_seam(trusted_hosts: &[String]) -> Index {
     let client = ClientBuilder::new()
-        .plain_http_registries(ocx_config::env::insecure_registries())
+        .plain_http_registries(crate::registry_copy::insecure_registries())
         .ssrf_guard(trusted_hosts.to_vec())
         .extra_roots(ocx_mirror_http::extra_roots().clone())
         .build();
