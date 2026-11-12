@@ -51,6 +51,22 @@ research-axes:
   conftest `REGISTRY` default is `localhost:5001` — no collision surface left.
 - Learned: `task test:quick` is the acceptance loop that skips the rebuild —
   there is no `--no-build` pytest flag.
+- Discussion hand-off 2026-11-08: `.agents/discussions/cargo-native-build.md`
+  → architect (`handed-off → architect`), revises `.claude/artifacts/adr_cargo_source_kind.md`.
+  Decisions: one pipeline, three transform tiers by recipe owner (source kind / generic
+  post-process / operator recipe) × a fetch-leg vs build-leg axis; `plan.json` must fully
+  describe build legs so GitLab etc. render from it alone; env needs stated in spec
+  (`platforms.<p>.runner`), mapped by the renderer; native per target, no cross in v1 (tests
+  need native runners anyway). Research: `research_cargo_native_build_ci_portability.md`,
+  `research_slim_llvm_package_size.md`.
+- ADR revision 2026-11-08: `.claude/artifacts/adr_cargo_source_kind.md` + `system_design_cargo_source_kind.md`
+  (Proposed, revised in place from the cargo-native-build dossier, tier xhigh). Decisions: placement A
+  (builder in `prepare --platform`), plan.json v5 A′ (`versions[].build` marker, `prepare[]` withdrawn),
+  credentials (iv) fetch-with-read-token then `--offline` install, native per target (same-OS cross
+  documented), build kinds never resume. Research: `research_ci_neutral_build_job_contracts.md`.
+  Learned: SOTA researcher + codex both caught `cargo install --path` reading the crate's own
+  `.cargo/config.toml` — the panel's security seat did not. Axis worth a Preferences hint:
+  "CI-neutral pipeline contracts".
 - Discussion hand-off 2026-09-22: `.agents/discussions/bazel-crate-split.md`
   → architect (`handed-off → architect`), consumed by an autonomous `/goal` (prompt in the
   artifact's `## Goal prompt`; run ledger `.agents/goal/bazel-crate-split.md`). Decisions: phases
