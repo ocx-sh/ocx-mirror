@@ -10,10 +10,7 @@ ocx = "ocx.sh/ocx/cli:0.6.3"
 zot = "ocx.sh/project-zot/zot:2.1.21"
 
 # CI installs `default,<role>` per job and ocx rejects an undeclared group, so every role is declared.
-# `ocx exec -g lint -- <tool>` composes only the named group; a pin here equals its pin in [tools],
-# except `[group.release.tools]`: it will carry the `ocx` that publishes (a pin of
-# `ghcr.io/ocx-sh/dev/cli:<tag>`, added by a later commit), which deliberately differs from
-# `[tools]`'s `ocx` and is never selected together with `default`.
+# `ocx exec -g lint -- <tool>` composes only the named group; a pin here equals its pin in [tools].
 [group.lint.tools]
 prek = "ocx.sh/prek/prek:0.5.5"
 gitleaks = "ocx.sh/gitleaks/gitleaks:8.30.1"

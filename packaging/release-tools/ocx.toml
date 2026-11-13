@@ -1,0 +1,6 @@
+# The tools `release.yml` and `backfill.yml` run. A separate project so its v4 lock never
+# touches the root `ocx.lock` (template-owned CI bootstraps an ocx that reads only v3).
+# The `ocx` that publishes is added here as `ocx = "ghcr.io/ocx-sh/dev/cli:<tag>"` by a later
+# commit, then `ocx --project packaging/release-tools lock`.
+[tools]
+cargo-cyclonedx = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
