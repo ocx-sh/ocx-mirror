@@ -16,22 +16,23 @@ rust_library(
         exclude = ["src/**/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_test_support"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True),
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ),
 )
 
 rust_test(
     name = "ocx_mirror_test_support_test",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     crate = ":ocx_mirror_test_support",
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_test_support"},
-    deps = all_crate_deps(normal_dev = True),
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ),
 )
 
 # Every Rust source plus the manifest, for the root's cross-crate scans

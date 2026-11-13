@@ -46,7 +46,7 @@ jobs:
       matrix:
         job:
           - { os: macos-latest, triple: aarch64-apple-darwin, limits: test/limits/macos-release }
-          - { os: windows-latest, triple: x86_64-pc-windows-msvc, limits: test/limits/windows-release }
+          - { os: windows-latest, triple: x86_64-pc-windows-gnullvm, limits: test/limits/windows-release }
     uses: ./.github/workflows/acceptance.yml
     with:
       os: ${{ matrix.job.os }}

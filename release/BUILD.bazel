@@ -14,7 +14,8 @@ load(":provenance.bzl", "release_provenance")
 config_setting(
     name = "stamped",
     define_values = {"ocx_mirror_provenance": "release"},
-    visibility = ["//:__pkg__"],
+    # The select resolves from a rules_rust package (measured: //:__pkg__ is refused here).
+    visibility = ["@rules_rust//rust:__subpackages__"],
 )
 
 # `manual`: it reads the workspace status, so a `bazel build //...` must not

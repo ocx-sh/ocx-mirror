@@ -134,7 +134,7 @@ jobs:
             install -m 0755 "dist/ocx-mirror-${t}" "$d/bin/ocx-mirror"
             tar -cJf "out/${d}.tar.xz" "$d"
           done
-          for t in x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
+          for t in x86_64-pc-windows-gnullvm aarch64-pc-windows-gnullvm; do
             d="ocx-mirror-${t}"
             mkdir -p "$d/bin"
             cp "dist/ocx-mirror-${t}.exe" "$d/bin/ocx-mirror.exe"

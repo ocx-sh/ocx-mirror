@@ -65,8 +65,7 @@ tasks:
   # root and crates/* BUILD files. `bazel:pin:check` and `bazel:build:drift`
   # compare them to Cargo.toml's [workspace.package] version, so they move in
   # the same step as `cargo set-version`. MODULE.bazel.lock is refreshed after,
-  # behind a bootstrap: `cargo set-version` just made Cargo.bazel.lock.json
-  # stale, and `bazel mod deps` evaluates @crates against it.
+  # behind a bootstrap: `bazel mod deps` evaluates @crates against Cargo.lock.
   bump:bazel:
     internal: true
     dir: '{{.ROOT_DIR}}'
@@ -106,7 +105,7 @@ tasks:
   # oci-publish.yml repackages it, into a scratch directory — nothing pushed.
   # An aarch64 Linux binary on an x86_64 host runs under qemu-aarch64, an
   # x86_64 darwin one on an arm64 Mac under Rosetta; an aarch64 windows binary
-  # needs an arm64 Windows host (build-matrix.yml's smoke-windows-arm64).
+  # needs an arm64 Windows host (build-matrix.yml's smoke-native).
   smoke:
     desc: 'Smoke a release binary: BIN=<path> TARGET=<triple> [CHANNEL= VERSION= SHA=] — provenance, static linkage, `ocx package create`'
     dir: '{{.ROOT_DIR}}'
