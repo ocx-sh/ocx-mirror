@@ -1,0 +1,146 @@
+name: Release Readiness
+
+# The GO/NO-GO gate for a release: the full acceptance suite, on the release binaries the publish
+# would ship. Run it on the exact commit about to be tagged (the `release/vX` branch holding the
+# `release: vX` commit), either way:
+#
+#   gh workflow run release-readiness.yml --ref release/vX
+#   apply the `run-readiness` label to the pull request carrying that branch
+#
+# The label route exists because a workflow that is not yet on the default branch cannot be
+# dispatched; a `pull_request` run needs no default-branch copy. `task release:tag` then refuses
+# unless this workflow succeeded for that SHA, and `readiness-gate.yml` asks again on the tagged
+# commit before `build` can start (scripts/release_readiness_gate.py). The gate refuses runs from forks
+# or other workflow files, so a fork PR's label run is never evidence.
+#
+#   build (build-matrix.yml, the six triples, channel `check`) -> acceptance (acceptance.yml on
+#   linux musl with Docker, macOS arm64 and Windows gnullvm without, against test/limits/<os>-release)
+#   -> verdict
+#
+# Nothing here publishes: no release, no tag, no registry push. Artifacts live one day in this run.
+#
+# Inputs: `bypass` skips every test job and the verdict goes green; it needs a `reason`, which lands in
+# the run-name (so the gate script and `gh run list` name it) and in the step summary. Use it for an
+# outage of this workflow, never for a red result.
+#
+# The label trigger fires on every label event of a pull request. Only `run-readiness` runs anything:
+# any other label starts a run named `readiness-ignored <label>` whose jobs are all skipped, in its own
+# concurrency group (so it cannot cancel a real run), and the gate script refuses a run whose name does
+# not start `readiness ` - whatever conclusion GitHub files an all-skipped run under, it is no evidence.
+# A pull_request run checks out, builds and tests the PR head commit: the SHA its run-name carries and the
+# gate matches. A merge-button land mints a new SHA, so the release commit needs its own run.
+
+run-name: "${{ github.event_name == 'pull_request' && github.event.label.name != 'run-readiness' && format('readiness-ignored {0}', github.event.label.name) || format('readiness {0}{1}', github.event.pull_request.head.sha || github.sha, inputs.bypass && format(' BYPASS: {0}', inputs.reason) || '') }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bypass:
+        description: Skip every test job and report GO. Requires a reason; the run-name carries it.
+        type: boolean
+        default: false
+      reason:
+        description: Why the readiness gate is bypassed. Required with bypass.
+        type: string
+        default: ''
+  pull_request:
+    types: [labeled]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.event_name == 'pull_request' && github.event.label.name != 'run-readiness') && github.run_id || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  build:
+    name: Release build matrix
+    if: ${{ !inputs.bypass && (github.event_name != 'pull_request' || github.event.label.name == 'run-readiness') }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/build-matrix.yml
+    with:
+      # A SemVer the smoke can assert on, visibly not a publishable version.
+      version_semver: 0.0.0-readiness+${{ github.run_id }}
+      channel: check
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+    secrets:
+      BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+
+  acceptance:
+    name: Acceptance (${{ matrix.job.name }})
+    needs: build
+    if: ${{ !inputs.bypass && (github.event_name != 'pull_request' || github.event.label.name == 'run-readiness') }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { name: Linux, os: ubuntu-latest, triple: x86_64-unknown-linux-musl, limits: test/limits/linux-release, no-docker: false }
+          - { name: macOS, os: macos-latest, triple: aarch64-apple-darwin, limits: test/limits/macos-release, no-docker: true }
+          - { name: Windows, os: windows-latest, triple: x86_64-pc-windows-gnullvm, limits: test/limits/windows-release, no-docker: true }
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      os: ${{ matrix.job.os }}
+      binary: artifact:ocx-mirror-${{ matrix.job.triple }}
+      release-binary: true
+      no-docker: ${{ matrix.job.no-docker }}
+      limits-dir: ${{ matrix.job.limits }}
+      shard-count: 1
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  verdict:
+    name: Verdict
+    needs: [build, acceptance]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.label.name == 'run-readiness') }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Report GO/NO-GO
+        env:
+          BYPASS: ${{ inputs.bypass }}
+          REASON: ${{ inputs.reason }}
+          ACTOR: ${{ github.actor }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BUILD: ${{ needs.build.result }}
+          ACCEPTANCE: ${{ needs.acceptance.result }}
+        run: |
+          set -uo pipefail
+          summary="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          if [[ "$BYPASS" == "true" ]]; then
+            if [[ -z "${REASON//[[:space:]]/}" ]]; then
+              echo "::error::bypass needs a reason"
+              echo "**Verdict: NO-GO - bypass was set without a reason.**" >> "$summary"
+              exit 1
+            fi
+            {
+              echo "## Release Readiness"
+              echo ""
+              echo "**Verdict: GO by BYPASS - no test ran.** Commit \`${SHA}\`, dispatched by ${ACTOR}."
+              echo ""
+              echo "Reason: ${REASON}"
+            } >> "$summary"
+            exit 0
+          fi
+          failed=()
+          {
+            echo "## Release Readiness"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+          } >> "$summary"
+          row() {
+            echo "| $1 | \`$2\` |" >> "$summary"
+            [[ "$2" == "success" ]] || failed+=("$1=$2")
+          }
+          row "release build matrix, 6 triples" "$BUILD"
+          row "acceptance on the release binaries, 3 platforms" "$ACCEPTANCE"
+          echo "" >> "$summary"
+          if (( ${#failed[@]} == 0 )); then
+            echo "**Verdict: GO - safe to tag \`${SHA}\`.**" >> "$summary"
+          else
+            echo "**Verdict: NO-GO - do not release.**" >> "$summary"
+            echo "::error::Release readiness NO-GO (${failed[*]})"
+            exit 1
+          fi
