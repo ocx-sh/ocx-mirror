@@ -1,8 +1,8 @@
 """Acceptance scenarios for `ocx-mirror registry sync` (WP-16).
 
 The blocking gate for the `registry sync` verb: a two-registry run over the
-harness WP-07 built — `registry` (`:5001`) plays the upstream source,
-`mirror_registry` (`:5002`) the corporate destination, and
+harness WP-07 built — `registry` plays the upstream source,
+`mirror_registry` (both session zot instances) the corporate destination, and
 `published_index_server` serves a hand-authored published-shape index tree.
 
 Every assertion is on **observable state** — bytes in the destination
@@ -84,7 +84,7 @@ ABSENT_DIGEST = f"sha256:{hashlib.sha256(b'never pushed anywhere').hexdigest()}"
 
 
 @pytest.fixture()
-def sync(mirror_binary: Path, registry: str, mirror_registry: str, tmp_path: Path) -> MirrorRunner:
+def sync(mirror_binary: Path, registry: str, tmp_path: Path) -> MirrorRunner:
     """`ocx-mirror` wired for a two-registry run, every durable side effect under `tmp_path`.
 
     `XDG_CACHE_HOME` is redirected because C-037 puts the source-catalog
@@ -96,8 +96,8 @@ def sync(mirror_binary: Path, registry: str, mirror_registry: str, tmp_path: Pat
     work_dir.mkdir()
     runner = MirrorRunner(mirror_binary, registry, work_dir)
     # Source and destination clients are built separately (C-046); both dial
-    # plain HTTP here, so both hosts need the opt-in.
-    runner.env["OCX_INSECURE_REGISTRIES"] = f"{registry},{mirror_registry}"
+    # plain HTTP here. MirrorRunner already opts in every session registry
+    # (the zot instances and legacy_registry), so a test may pick any destination.
     runner.env["XDG_CACHE_HOME"] = str(tmp_path / "cache")
     return runner
 
@@ -2216,7 +2216,7 @@ def test_a_package_carrying_a_referrer_is_copied_and_listed_in_the_fallback_inde
     sync: MirrorRunner,
     ocx_binary: Path,
     registry: str,
-    mirror_registry: str,
+    legacy_registry: str,
     unique_mirror_repo: str,
     published_index_server,
     tmp_path: Path,
@@ -2235,6 +2235,7 @@ def test_a_package_carrying_a_referrer_is_copied_and_listed_in_the_fallback_inde
     one subject prove the mirror *appends* to that index rather than replacing
     it, which is the difference between two carried signatures and one.
     """
+    # legacy_registry: registry:2 has no Referrers API, so only it exercises the fallback index (zot answers the API natively).
     package = f"testns/{unique_mirror_repo}"
     digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
     first_referrer = seed_referrer(registry, package, digest, body, tag="referrer-a", salt="a")
@@ -2247,7 +2248,7 @@ def test_a_package_carrying_a_referrer_is_copied_and_listed_in_the_fallback_inde
     )
 
     output = tmp_path / "public"
-    spec = referrer_carrying_spec(tmp_path, mirror_registry, output, published_index_server.url(), registry)
+    spec = referrer_carrying_spec(tmp_path, legacy_registry, output, published_index_server.url(), registry)
 
     result = run_sync(sync, spec, "--format", "json")
     assert result.returncode == 0, f"a package carrying a referrer must now copy\n{outcome(result)}"
@@ -2258,12 +2259,12 @@ def test_a_package_carrying_a_referrer_is_copied_and_listed_in_the_fallback_inde
 
     destination = destination_repository(package)
     for referrer in (first_referrer, second_referrer):
-        assert fetch_manifest(mirror_registry, destination, referrer)[0] == referrer, (
+        assert fetch_manifest(legacy_registry, destination, referrer)[0] == referrer, (
             "each referrer's own manifest must land at the destination by digest"
         )
 
     fallback_tag = referrer_fallback_tag(digest)
-    listed = json.loads(fetch_manifest(mirror_registry, destination, fallback_tag)[1])
+    listed = json.loads(fetch_manifest(legacy_registry, destination, fallback_tag)[1])
     assert sorted(entry["digest"] for entry in listed["manifests"]) == sorted([first_referrer, second_referrer]), (
         "the fallback index is appended to, never replaced — a replacing write would leave "
         "whichever referrer happened to be carried last and drop the other"
@@ -2278,7 +2279,7 @@ def test_one_referrer_reached_through_two_tags_is_copied_once(
     sync: MirrorRunner,
     ocx_binary: Path,
     registry: str,
-    mirror_registry: str,
+    legacy_registry: str,
     unique_mirror_repo: str,
     published_index_server,
     tmp_path: Path,
@@ -2289,6 +2290,7 @@ def test_one_referrer_reached_through_two_tags_is_copied_once(
     referrer once per tag — harmless at two tags, quadratic on a real cascade
     (`3.31.1`, `3.31`, `3`, `latest` all resolve to one index).
     """
+    # legacy_registry: registry:2 has no Referrers API, so only it exercises the fallback index (zot answers the API natively).
     package = f"testns/{unique_mirror_repo}"
     digest, body = seed_version(ocx_binary, registry, package, "1.0.0", tmp_path / "push")
     referrer_digest = seed_referrer(registry, package, digest, body)
@@ -2299,7 +2301,7 @@ def test_one_referrer_reached_through_two_tags_is_copied_once(
     )
 
     output = tmp_path / "public"
-    spec = referrer_carrying_spec(tmp_path, mirror_registry, output, published_index_server.url(), registry)
+    spec = referrer_carrying_spec(tmp_path, legacy_registry, output, published_index_server.url(), registry)
 
     result = run_sync(sync, spec, "--format", "json")
     assert result.returncode == 0, outcome(result)
@@ -2308,7 +2310,7 @@ def test_one_referrer_reached_through_two_tags_is_copied_once(
     assert row["referrers_copied"] == 1, f"the diamond must be walked once, not once per tag\n{row}"
 
     listed = json.loads(
-        fetch_manifest(mirror_registry, destination_repository(package), referrer_fallback_tag(digest))[1]
+        fetch_manifest(legacy_registry, destination_repository(package), referrer_fallback_tag(digest))[1]
     )
     assert [entry["digest"] for entry in listed["manifests"]] == [referrer_digest], (
         "one referrer, one fallback entry — a re-append would duplicate the descriptor"

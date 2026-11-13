@@ -7,6 +7,7 @@ lychee = "ocx.sh/lychee/lychee:0.24.2"
 prek = "ocx.sh/prek/prek:0.5.5"
 actionlint = "ocx.sh/actionlint/actionlint:1.7.12"
 ocx = "ocx.sh/ocx/cli:0.6.3"
+zot = "ocx.sh/project-zot/zot:2.1.21"
 
 # CI installs `default,<role>` per job and ocx rejects an undeclared group, so every role is declared.
 # `ocx exec -g lint -- <tool>` composes only the named group; a pin here equals its pin in [tools].
@@ -20,6 +21,7 @@ lychee = "ocx.sh/lychee/lychee:0.24.2"
 
 [group.test.tools]
 uv = "ocx.sh/astral-sh/uv:0.13.0"
+zot = "ocx.sh/project-zot/zot:2.1.21"
 
 [group.build.tools]
 bazelisk = "ocx.sh/bazelbuild/bazelisk:1.29.0"

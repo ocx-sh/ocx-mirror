@@ -2,7 +2,7 @@ from src.helpers import (
     COMPOSE_FILE,
     PROJECT_ROOT,
     registry_is_reachable,
-    start_registry,
+    compose_up_service,
 )
 from src.mirror_runner import MirrorRunner
 from src.runner import OcxRunner, PackageInfo, current_platform, registry_dir
@@ -16,5 +16,5 @@ __all__ = [
     "current_platform",
     "registry_dir",
     "registry_is_reachable",
-    "start_registry",
+    "compose_up_service",
 ]
