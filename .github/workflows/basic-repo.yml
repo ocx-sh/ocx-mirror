@@ -60,7 +60,7 @@ jobs:
           # Nested: external/ocx carries the fork submodules crate_universe splices from.
           submodules: recursive
       - name: Setup
-        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        uses: ocx-sh/conventions/.github/actions/setup@3d0df49d6d5771c52321d886e33a20ee36cfe76d # v0.3.4
         with:
           groups: default,test
           bazel-cache: ${{ secrets.BAZEL_CACHE_WRITE_AUTH != '' && 'trusted' || 'read' }}
@@ -85,7 +85,7 @@ jobs:
           annotate_only: true
       - name: Push acceptance test timings
         if: ${{ !cancelled() }}
-        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        uses: ocx-sh/conventions/.github/actions/setup@3d0df49d6d5771c52321d886e33a20ee36cfe76d # v0.3.4
         with:
           report: target/bazel/accept/junit.xml
           suite: acceptance
