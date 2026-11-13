@@ -118,9 +118,9 @@ tasks:
       Every triple cross-builds from one Linux host (llvm toolchain, rules_rs).
       Always `-c opt`: a fastbuild Windows binary overflows its 1 MiB stack.
 
-      Never a cached lane: the provenance action is `no-remote-cache`, and no
-      release caller passes the upload grant. The compiles it does not feed
-      read the shared cache like any other build. Its own output directory
+      Never a cached lane: no remote or disk cache is read or written, so every
+      compile that ends up in the shipped bytes runs in this build, whatever
+      `~/.bazelrc` or `--config=ci` says. Its own output directory
       (`--experimental_platform_in_output_dir`), so a release build does not
       overwrite the host outputs the test lanes read.
 
@@ -134,6 +134,10 @@ tasks:
         --platforms=@rules_rs//rs/platforms:{{.TARGET}}
         --experimental_platform_in_output_dir=yes
         --define=ocx_mirror_provenance=release
+        --remote_cache=
+        --disk_cache=
+        --noremote_accept_cached
+        --noremote_upload_local_results
         '--workspace_status_command=python3 release/workspace_status.py'
       OUT: '{{.ROOT_DIR}}/target/bazel/release/ocx-mirror-{{.TARGET}}{{if contains "windows" .TARGET}}.exe{{end}}'
     cmds:
