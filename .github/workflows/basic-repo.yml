@@ -1,11 +1,11 @@
 # Seeded once by ocx-sh/conventions; this file belongs to the repo from here on.
 # verify-basic calls it as its `repo` job: the repo-owned jobs that gate a pull request. The template owns
 # lint, test, build and docs (`task ci:lint`, `ci:test`, `ci:build`, `ci:docs`); this file holds what those
-# four cannot: the commit check and the two acceptance lanes. release.yml also calls it as the tag's gate.
+# four cannot: the commit check and the two acceptance lanes. release.yml also calls it as `verify`, the gate of a release or a candidate.
 #
 # A called workflow sees only the secrets it declares: BAZEL_CACHE_WRITE_AUTH comes from verify-basic
 # (every event that carries it, i.e. not a fork PR), BAZEL_CACHE_READ_AUTH (not used when the write one is
-# present) and OTEL_OTLP_AUTH from verify-basic too; release.yml passes the read credential alone (the tag
+# present) and OTEL_OTLP_AUTH from verify-basic too; release.yml passes the read credential alone (a release
 # run reads the shared cache and never writes it).
 #
 # Everything here runs under `contents: read`; a job asking for more fails the whole run at startup. Test

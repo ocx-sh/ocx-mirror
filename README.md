@@ -74,7 +74,7 @@ spawns), the pinned `ocx` moves with it, in four places:
   (the `setup-ocx` version every generated workflow bakes in), then regenerate
   the golden fixtures under `tests/golden/`
 - the `setup-ocx` `version:` steps in `.github/workflows/verify.yml`
-  (acceptance tests, Bazel graph) and `.github/workflows/oci-publish.yml`
+  (acceptance tests, Bazel graph) and `.github/actions/release-ocx/action.yml`
 - the floor prose in `.claude/rules/subsystem-mirror.md` and
   `docs/reference/environment.md`
 
@@ -108,19 +108,21 @@ git add -A && git commit -m "release: vX.Y.Z"
 git push origin release/vX.Y.Z
 # prove that exact commit: dispatch Release Readiness, or label its pull request `run-readiness`
 gh workflow run release-readiness.yml --ref release/vX.Y.Z
-task release:tag       # refuses without a green readiness run; tags, pushes main and the tag atomically
+# land the release commit on main, then:
+task release:tag       # refuses without a green readiness run; prints the dispatch command, never runs it
+gh workflow run release.yml -f mode=release -f version=X.Y.Z
 ```
 
 Release Readiness builds all six triples and runs the acceptance suite on three of them.
-`task release:tag` refuses unless that workflow succeeded for the exact commit it tags.
-`release.yml` asks again on the tagged commit, and `build` waits for the answer.
+`task release:tag` refuses unless that workflow succeeded for HEAD.
+`release.yml` asks again on the dispatched commit, and `publish` waits for the answer.
 A merge-button land puts a new SHA on main; run readiness for that SHA before `task release:tag`.
 A new workflow file cannot be dispatched until it is on the default branch; use the label until then.
 A dispatch with `bypass` needs a `reason`; the run-name carries it and the gate prints a warning.
 
-Tag push publishes `ocx.sh/ocx/mirror:<version>_<timestamp>` (+ cascade tags)
-and a GitHub Release. Rolling dev builds publish to `dev.ocx.sh/ocx/mirror`
-via the manually dispatched **Deploy Dev** workflow.
+`release.yml` (mode `release`) signs and publishes `ocx.sh/ocx/mirror:<version>_<timestamp>` (+ cascade
+tags), then creates the tag and a GitHub Release; mode `candidate` ships `X.Y.Z-rcN` as a pre-release, and
+mode `dev` publishes `ghcr.io/ocx-sh/dev/mirror` from the dispatched branch.
 
 ## License
 

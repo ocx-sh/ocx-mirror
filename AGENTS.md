@@ -48,7 +48,7 @@ document the four-line job, let them own the pipeline.
 | `test/` | pytest acceptance harness. `src/zot.py` starts per-session zot registries on free ports (`OCX_TEST_<NAME>_PORT`; binary from `OCX_TEST_ZOT`, `PATH`, or `ocx exec zot --`). Docker is needed only for `legacy_registry` (registry:2) and Sigstore; `OCX_TEST_NO_DOCKER=1` skips both. `OCX_TEST_RELEASE_BINARY=1` marks a release binary (skips `requires_testing_build`); `requires_posix_shell` skips on Windows. `test/limits/<os>-release/` holds that lane's floors and `SKIPS.md`, checked by `scripts/accept_floor.py` |
 | `docs/` + `mkdocs.yml` | mkdocs-material site → GitHub Pages; built by Bazel as `//docs:site` (`docs/BUILD.bazel`, hermetic + remote-cacheable) from the hashed `docs/requirements.lock` |
 | `packaging/metadata.json` | OCX package metadata used by publish workflows |
-| `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package description push` in `oci-publish.yml` (frontmatter = title/description/keywords) |
+| `CATALOG.md` + `assets/logo.svg` | Registry catalog description — pushed via `ocx package description push` in `release.yml`'s `publish` job (frontmatter = title/description/keywords) |
 | `src/command/package/pipeline/generate/templates/` | Workflow templates baked into the binary (Renovate customManager bumps their action pins) |
 
 ## Dependency model (read before touching Cargo.toml)
@@ -155,8 +155,9 @@ otel.ocx.sh is off unless `~/.config/ocx-telemetry/env` names an endpoint
 
 | Channel | Target | Trigger |
 |---------|--------|---------|
-| Dev | `dev.ocx.sh/ocx/mirror:<ver>-dev_<TS>` + cascade | manual `Deploy Dev` workflow |
-| Release | `ocx.sh/ocx/mirror:<ver>_<TS>` + cascade | tag push `vX.Y.Z` |
+| Dev | `ghcr.io/ocx-sh/dev/mirror:<ver>-dev_<TS>` + cascade | `release.yml` dispatched with `mode=dev` |
+| Candidate | `ocx.sh/ocx/mirror:<ver>-rcN_<TS>` + cascade | `release.yml` dispatched with `mode=candidate` |
+| Release | `ocx.sh/ocx/mirror:<ver>_<TS>` + cascade | `release.yml` dispatched with `mode=release` |
 
 ## Workflow
 
@@ -193,7 +194,7 @@ Every task starts with
 Skills in `.claude/skills/` (ported from ocx): `/architect`,
 `/swarm-plan`, `/swarm-execute`, `/swarm-review`, `/commit`, `/finalize`.
 Mirror-native: `/e2e-test` (tiered e2e: acceptance harness → local contrib
-integration → dev.ocx.sh dev channel), `/update-ocx` (bump the `external/ocx`
+integration → dev channel), `/update-ocx` (bump the `external/ocx`
 submodule and adopt what changed: drift gates, semantic review of the nine
 linked crates, consolidation onto new shared API, upstream-issue cross-check),
 `/ocx-upstream-pr` (author an ocx-sh/ocx PR from the `external/ocx` submodule;
@@ -238,7 +239,7 @@ Repo-owned Renovate rules live in `.github/renovate-local.json` (renovate.json o
 | Basic (every PR, `basic-gate` is the one required check) | `verify-basic.yml` | `task ci:lint`, `ci:test`, `ci:build`, `ci:docs` (taskfile.yml), then `basic-repo.yml`: Conventional Commits, `Acceptance (Bazel)` (`//test:acceptance`, one cached sh_test), `Acceptance (sharded)` |
 | Deep (nightly, `run-deep` label) | `verify-deep.yml` | `task ci:deep` on ubuntu (stub), then `deep-repo.yml`: the release build matrix with nothing published, then `acceptance-native` (the suite on macOS and Windows against those release binaries, no Docker) |
 | Readiness (dispatch, or the `run-readiness` PR label) | `release-readiness.yml` | the six-triple build matrix, then the acceptance suite on linux musl (Docker), macOS arm64 and Windows gnullvm against `test/limits/<os>-release`; `verdict` is GO, NO-GO or GO by `bypass` + `reason`; nothing is published. An unrelated label starts a `readiness-ignored` run the gate refuses. `task release:tag` refuses without a green run for HEAD (`scripts/release_readiness_gate.py`) |
-| Release (tag) | `release.yml` | `basic-repo.yml` as the gate and `readiness-gate.yml` (the same gate script on the tagged commit), then the build matrix and publish; `build` needs both |
+| Release (dispatch) | `release.yml` | `basic-repo.yml` as `verify` and `readiness-gate.yml` (the same gate script on the dispatched commit) for a release or candidate, then the build matrix and `publish`, the one job that signs; `publish` needs both |
 
 Sharded acceptance: `acceptance.yml` (reusable; `plan` → `binary` → `shard` matrix → `merge`). `shard-count` is the one knob
 (set in `basic-repo.yml`, currently 1); modules are split by `scripts/accept_shard.py`, the merge job judges

@@ -1,7 +1,7 @@
 name: Release Readiness
 
 # The GO/NO-GO gate for a release: the full acceptance suite, on the release binaries the publish
-# would ship. Run it on the exact commit about to be tagged (the `release/vX` branch holding the
+# would ship. Run it on the exact commit about to be released (the `release/vX` branch holding the
 # `release: vX` commit), either way:
 #
 #   gh workflow run release-readiness.yml --ref release/vX
@@ -9,8 +9,8 @@ name: Release Readiness
 #
 # The label route exists because a workflow that is not yet on the default branch cannot be
 # dispatched; a `pull_request` run needs no default-branch copy. `task release:tag` then refuses
-# unless this workflow succeeded for that SHA, and `readiness-gate.yml` asks again on the tagged
-# commit before `build` can start (scripts/release_readiness_gate.py). The gate refuses runs from forks
+# unless this workflow succeeded for that SHA, and `readiness-gate.yml` asks again on the dispatched
+# commit before `publish` can start (scripts/release_readiness_gate.py). The gate refuses runs from forks
 # or other workflow files, so a fork PR's label run is never evidence.
 #
 #   build (build-matrix.yml, the six triples, channel `check`) -> acceptance (acceptance.yml on

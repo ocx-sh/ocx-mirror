@@ -1,7 +1,7 @@
 name: Build Targets
 
-# Reusable 6-target build matrix shared by deploy-dev.yml (rolling dev
-# publishes) and release.yml (tag-driven releases) — one build path, zero
+# Reusable 6-target build matrix shared by release.yml (every mode)
+# and deep-repo.yml — one build path, zero
 # dev/release drift. Uploads one bare-binary artifact per target named
 # `ocx-mirror-<target>`.
 
@@ -67,7 +67,7 @@ jobs:
       - name: Setup OCX
         # `ocx exec bazel` (ocx.toml's bazel row) runs Bazel; the smoke's
         # `ocx package create` is this binary too. The same ocx floor as the baseline setup action
-        # and oci-publish.yml.
+        # and release.yml's publish.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
           version: "0.6.3"
@@ -95,7 +95,7 @@ jobs:
       - name: Smoke
         # Provenance is the requested channel and version and this commit,
         # clean; the run URL is this run's; the binary is static;
-        # `ocx package create` takes it as oci-publish.yml will. The caller's
+        # `ocx package create` takes it as release.yml's publish will. The caller's
         # inputs arrive through `env`, never spliced into the script.
         if: endsWith(matrix.target, '-linux-musl')
         env:

@@ -102,7 +102,7 @@ tasks:
   # loads only /usr/lib and /System/Library images (`otool -L`), a windows one
   # imports only API sets and DLLs the host's System32 holds (read from the PE
   # import tables, printed either way); and `ocx package create` accepts it as
-  # oci-publish.yml repackages it, into a scratch directory — nothing pushed.
+  # release.yml's publish repackages it, into a scratch directory — nothing pushed.
   # An aarch64 Linux binary on an x86_64 host runs under qemu-aarch64, an
   # x86_64 darwin one on an arm64 Mac under Rosetta; an aarch64 windows binary
   # needs an arm64 Windows host (build-matrix.yml's smoke-native).
@@ -192,7 +192,7 @@ tasks:
       EOF
           ;;
       esac
-      # oci-publish.yml's PLATFORM_MAP. A `case`, not `declare -A`: go-task's
+      # release.yml's PLATFORMS rows. A `case`, not `declare -A`: go-task's
       # shell (mvdan/sh) panics on an associative-array key holding `-`.
       case '{{.TARGET}}' in
         x86_64-*-linux-*) platform=linux/amd64 ;;
@@ -252,28 +252,19 @@ tasks:
     cmds:
       - echo "release:verify - Release Readiness on the release commit is the gate; nothing to run locally"
 
-  # The tag exists only after readiness is green on this exact commit. `release:prepare` cannot ask -
-  # the commit it prepares does not exist while it runs - so the refusal sits on the step that tags.
-  # `readiness-gate.yml` asks again on the tagged commit before `build` can start.
+  # The release is cut by dispatching release.yml, never by pushing a tag; this task prints the command
+  # and never runs it. It refuses first what the dispatch would refuse later: a pointer to an unreleased
+  # ocx, and a HEAD with no green readiness run (`release:prepare` cannot ask - the commit it prepares does
+  # not exist while it runs). The dispatch runs from main, so HEAD is the commit that must be on main.
   tag:
-    desc: 'Tag HEAD (the `release: vX.Y.Z` commit) and push it with main atomically, once a green readiness run exists for it'
+    desc: 'Print the release.yml dispatch command for the version in Cargo.toml, once ocx is released and readiness is green for HEAD (never runs it)'
     dir: '{{.ROOT_DIR}}'
+    silent: true
     cmds:
+      - task: guard:ocx-released
       - |
         set -euo pipefail
-        version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
-        subject=$(git log -1 --format=%s)
-        if [ "$subject" != "release: v$version" ]; then
-          echo "release:tag: HEAD is '$subject', expected 'release: v$version' - tag the commit release:prepare prepared" >&2
-          exit 1
-        fi
         # Every non-zero refuses: 1 no run for this SHA, 69 gh missing or unauthenticated, 74 gh failed.
         python3 scripts/release_readiness_gate.py --sha "$(git rev-parse HEAD)"
-        git tag "v$version"
-        # A rejected push must not leave the tag behind: the next run's `git tag` would refuse it.
-        git push --atomic origin HEAD:main "v$version" || {
-          status=$?
-          git tag -d "v$version" >&2
-          echo "release:tag: push failed ($status); local tag v$version deleted" >&2
-          exit "$status"
-        }
+        version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+        echo "gh workflow run release.yml -f mode=release -f version=$version"

@@ -15,7 +15,7 @@ tier fakes. No tier publishes an OCX release.
 |------|-----------|--------|------|--------|
 | **0 — Acceptance harness** | `task test` (pytest, `test/tests/`) | none (registry :5001, local asset/PyPI/webhook fakes) | minutes | pipeline code paths vs fixtures |
 | **1 — Local integration** | current `main` binary vs real `~/dev/ocx-contrib` specs, pushes to `localhost:5001` | reads only: GitHub API, PyPI, ocx.sh pulls | ~30 min | real specs, real assets, real push/cascade/wheel-mount, runtime of published packages |
-| **2 — Dev channel** | Deploy Dev → `dev.ocx.sh/ocx/mirror:<ver>-dev_<ts>` → pin in a downstream repo branch → dispatch generated CI | full GitHub + registries | hours | the real thing: GHA matrix, `ocx package test` containers, announce |
+| **2 — Dev channel** | `release.yml` dev mode → `ghcr.io/ocx-sh/dev/mirror:<ver>-dev_<ts>` → pin in a downstream repo branch → dispatch generated CI | full GitHub + registries | hours | the real thing: GHA matrix, `ocx package test` containers, announce |
 
 ## Decision guide
 
@@ -41,7 +41,7 @@ docker compose -f test/docker-compose.yml up -d   # registry on :5001
 export OCX_INSECURE_REGISTRIES=localhost:5001
 
 # Tier 2 — read references/dev-channel.md for the runbook
-gh workflow run "Deploy Dev" --repo ocx-sh/ocx-mirror --ref <branch>
+gh workflow run release.yml --repo ocx-sh/ocx-mirror --ref <branch> -f mode=dev
 ```
 
 Tier 2 dispatches real cloud workflows and publishes dev artifacts —
@@ -53,16 +53,16 @@ get explicit user confirmation before dispatching.
 repository under the owner's profile for the signing pipeline specifically,
 created by the owner — not by an agent — at WP 12 of the signing plan after
 explicit confirmation. Once created, it renders keyless in GitHub Actions,
-pushes to `dev.ocx.sh`, and `ocx package verify` checks the pushed index and
+pushes to the dev package, and `ocx package verify` checks the pushed index and
 every platform manifest against the workflow's own OIDC identity. Re-pin it
-to a Deploy Dev build the same way as any other tier-2 precedent repo.
+to a dev build the same way as any other tier-2 precedent repo.
 
 ## References
 
 - `references/local-pipeline.md` — Tier 1 verified recipes: fleet sweep,
   archive/binary pipeline (hexyl/jq), python env pipeline (pipx recreation
   incl. interpreter copy), gotchas, what the tier does/doesn't prove.
-- `references/dev-channel.md` — Tier 2 runbook: Deploy Dev flow, the
+- `references/dev-channel.md` — Tier 2 runbook: dev dispatch flow, the
   one-line downstream `ocx.toml` pin + `ocx lock`, bootstrap assertions,
   precedent repos.
 

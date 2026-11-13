@@ -17,8 +17,7 @@ on:
 permissions: {}
 
 jobs:
-  # The release build matrix with nothing published (the former build-check.yml): every leg release.yml and
-  # deploy-dev.yml run, with the `check` channel baked in so a stray artifact can never pass for a dev or
+  # The release build matrix with nothing published (the former build-check.yml): every leg release.yml runs, with the `check` channel baked in so a stray artifact can never pass for a dev or
   # release binary. Artifacts expire after a day (build-matrix.yml) and no publish job follows. Read-only
   # cache: build-matrix.yml takes the read credential alone.
   build-matrix:
