@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:05082148ed86437a30f5aef92be0d3657626bdb149410fa86f7a956ad1a3b155"
+declaration_hash = "sha256:c5325e4ef8e2da20ae30c6c152bc6a21775f89b10e502b2af904e026e42795d1"
 generated_by = "ocx 0.6.6"
-generated_at = "2026-11-13T22:57:42Z"
+generated_at = "2026-11-13T23:30:12Z"
 
 [[tool]]
 name = "cargo-cyclonedx"
@@ -17,3 +17,17 @@ declared = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
 "linux/amd64" = "sha256:a64eb97856beda4551c4c66fdf569d46970d7949e768bdbc8e2cf2156046baa4"
 "linux/arm64+libc.glibc" = "sha256:56022a684a164ca94319a7b68ab26ee6dcecf5548ea8fe039cf8ce7d9dc3619c"
 "windows/amd64" = "sha256:377e262a27f9318e0eff340ec4ada6dc65727c20387c6ecdcfd16edd199e0b17"
+
+[[tool]]
+name = "git-cliff"
+group = "default"
+repository = "ocx.sh/git-cliff/git-cliff"
+declared = "ocx.sh/git-cliff/git-cliff:2.14.1"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:f9052e9ccf49380317d2960d14f009563232d7460ba667bb1e62db1eac108771"
+"darwin/arm64" = "sha256:ce77585755761bc961dbbbca48e57f668e43a5bd14e423ae9113060e089cb6d6"
+"linux/amd64" = "sha256:5d0c2b652a2201f9b5c6d803a400db7ff28d0b59cb8916ba4cffa7015ce3c6b0"
+"linux/arm64" = "sha256:65eec3eda7db0168296dc1bd0d450d899d3e5570fa97a3122dce0ccca800e6f6"
+"windows/amd64" = "sha256:e94d7e09c040a25786a792971bf8284c8f8f8886bd78ab794688eaa719f76b26"
+"windows/arm64" = "sha256:638241beeb14fea7ccf60a8878a2b37b4a2774b609bbefa2b5ad0053e2693a69"
