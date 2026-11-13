@@ -3,6 +3,7 @@
 ## Metadata
 
 **Status:** Accepted
+**Status note:** Partly superseded 2026-11-13: rules_rs + BCR llvm replace rules_rust/hermetic_cc_toolchain/apple_support, Windows ships gnullvm (owner decision in `.agents/discussions/ocx-ci-parity.md`), release triples cross-build from Linux (plan `.agents/plans/plan_ocx_ci_parity.md`).
 **Date:** 2026-09-23
 **Deciders:** Michael Herwig (owner — goal `.agents/goal/bazel-full-adoption.md`, stated verbatim there)
 **GitHub Issue:** N/A (goal run)

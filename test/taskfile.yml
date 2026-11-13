@@ -127,18 +127,18 @@ tasks:
   windows-local:
     desc: >-
       Run the acceptance suite on the Windows host from WSL: `task -x test:windows-local
-      MODE=accept EXE=<ocx-mirror.exe> -- -k patch`
+      MODE=accept -- -k patch` (EXE=<ocx-mirror.exe> to skip the cross-build)
     summary: |
       `scripts/windows_local.sh`: stages the git working tree (`git ls-files -co --exclude-standard`,
       minus `external/` and `.agents/`) into `%USERPROFILE%\ocx-mirror-wintest\<checkout-name>\` on C:
-      with the Windows `ocx-mirror.exe` named by `EXE` (required, no
-      cross-build default yet), and runs `test:accept:native` through `cmd.exe` under `ocx exec zot`;
+      with the Windows `ocx-mirror.exe` named by `EXE` (default: cross-built
+      from Linux, `bazel:build:release TARGET=x86_64-pc-windows-gnullvm`), and runs `test:accept:native` through `cmd.exe` under `ocx exec zot`;
       pytest starts its own zot registries there. `SHARD_COUNT=N SHARD_INDEX=I` runs one shard; the JUnit
       report comes back to `target/windows-local/junit/`. After `--`: pytest arguments. Set
-      `OCX_TEST_RELEASE_BINARY=1` for release bytes.
+      `OCX_TEST_RELEASE_BINARY=1` for release bytes in an `EXE`; the default build sets it.
 
       The exit status is the child's, but only under `task -x`: without it task reports 201 for any
-      failed command. 66 is no `--exe`, 69 not WSL with a Windows cmd.exe, 2 a shard request the
+      failed command. 66 is an `EXE` that is no file or a cross-build that left none, 69 not WSL with a Windows cmd.exe, 2 a shard request the
       selector refuses, 64 a malformed call.
     cmds:
       - >-

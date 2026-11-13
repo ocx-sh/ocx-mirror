@@ -1,0 +1,171 @@
+diff --git a/rs/private/cargo_workspace_graph.bzl b/rs/private/cargo_workspace_graph.bzl
+--- a/rs/private/cargo_workspace_graph.bzl
++++ b/rs/private/cargo_workspace_graph.bzl
+@@ -334,7 +334,32 @@
+ 
+     return package_dirs
+ 
+-def split_lockfile_packages(hub_name, cargo_metadata, workspace_cargo_toml, all_packages, repo_root = None, workspace_package_dir = ""):
++def _path_package_dirs_by_key(mctx, cargo_path, manifest_dirs):
++    # Members of every workspace that holds an already-resolved path package:
++    # a path package no manifest of ours names is still a member of one of them.
++    dirs = {}
++    seen = {}
++    for manifest_dir in manifest_dirs:
++        # A new member of the workspace must re-run resolution.
++        mctx.watch(manifest_dir + "/Cargo.toml")
++        result = mctx.execute(
++            [cargo_path, "metadata", "--no-deps", "--format-version=1", "--quiet", "--manifest-path", manifest_dir + "/Cargo.toml"],
++            working_directory = manifest_dir,
++        )
++        if result.return_code != 0:
++            fail(result.stdout + "\n" + result.stderr)
++        metadata = json.decode(result.stdout)
++        if metadata["workspace_root"] in seen:
++            continue
++        seen[metadata["workspace_root"]] = True
++        mctx.watch(metadata["workspace_root"] + "/Cargo.toml")
++        for member in metadata["packages"]:
++            mctx.watch(member["manifest_path"])
++            if not member.get("source"):
++                dirs[(member["name"], member["version"])] = normalize_path(paths.dirname(member["manifest_path"]))
++    return dirs
++
++def split_lockfile_packages(hub_name, cargo_metadata, workspace_cargo_toml, all_packages, repo_root = None, workspace_package_dir = "", mctx = None, cargo_path = None):
+     if repo_root == None:
+         repo_root = cargo_metadata["workspace_root"]
+     repo_root = normalize_path(repo_root)
+@@ -347,6 +372,7 @@
+     patch_paths_by_name = _cargo_toml_patch_paths_by_name(workspace_cargo_toml, repo_root, workspace_package_dir)
+     workspace_members = []
+     packages = []
++    unresolved = []
+ 
+     for package in all_packages:
+         pkg = dict(package)
+@@ -366,12 +392,30 @@
+             local_path = paths.join(repo_root, rel_path)
+ 
+         if not local_path:
+-            fail("Found a path dependency on %s %s but could not determine its path from Cargo.toml. Please declare it in [patch] or as a path dependency." % (pkg["name"], pkg["version"]))
++            unresolved.append(pkg)
++            continue
+ 
+         pkg["source"] = "path+" + hub_name + "/" + rel_path
+         pkg["local_path"] = local_path
+         packages.append(pkg)
+ 
++    # Transitive path packages (a path dependency of a path dependency) are named
++    # by no manifest of ours: find them in the workspaces of the resolved ones.
++    if unresolved and mctx and cargo_path:
++        manifest_dirs = [p["local_path"] for p in packages if p.get("local_path")]
++        member_dirs = _path_package_dirs_by_key(mctx, cargo_path, manifest_dirs)
++        for pkg in unresolved:
++            local_path = member_dirs.get((pkg["name"], pkg["version"]))
++            if not local_path:
++                continue
++            rel_path = _relative_to_workspace(local_path, repo_root)
++            pkg["source"] = "path+" + hub_name + "/" + rel_path
++            pkg["local_path"] = local_path
++            packages.append(pkg)
++            unresolved = [u for u in unresolved if u != pkg]
++    for pkg in unresolved:
++        fail("Found a path dependency on %s %s but could not determine its path from Cargo.toml. Please declare it in [patch] or as a path dependency." % (pkg["name"], pkg["version"]))
++
+     return struct(
+         packages = packages,
+         workspace_members = workspace_members,
+diff --git a/rs/extensions.bzl b/rs/extensions.bzl
+--- a/rs/extensions.bzl
++++ b/rs/extensions.bzl
+@@ -107,6 +107,25 @@
+         return "@%s//%s:%s" % (repo_name, package_path, target)
+     return "@%s//:%s" % (repo_name, target)
+ 
++def _enclosing_workspace_toml(mctx, package_dir, module_root):
++    # A path package inherits `workspace = true` fields from the nearest
++    # enclosing manifest with a [workspace] table, which for a package outside
++    # the root workspace is not the root Cargo.toml.
++    # The search stops below the module root: nothing above it is ours.
++    dir = package_dir
++    for _ in range(32):
++        parent = paths.dirname(dir)
++        if parent == dir or parent == module_root:
++            break
++        dir = parent
++        manifest = paths.join(dir, "Cargo.toml")
++        if mctx.path(manifest).exists:
++            mctx.watch(manifest)
++            manifest_json = run_toml2json(mctx, manifest)
++            if manifest_json.get("workspace"):
++                return manifest_json
++    return {}
++
+ def _generate_hub_and_spokes(
+         mctx,
+         hub_name,
+@@ -171,6 +190,8 @@
+         cargo_metadata,
+         workspace_cargo_toml_json,
+         all_packages,
++        mctx = mctx,
++        cargo_path = cargo_path,
+     )
+     packages = split_packages.packages
+     workspace_members = split_packages.workspace_members
+@@ -237,7 +258,7 @@
+             cargo_toml_path = paths.join(package["local_path"], "Cargo.toml")
+             mctx.watch(cargo_toml_path)
+             cargo_toml_json = run_toml2json(mctx, cargo_toml_path)
+-            fact = cargo_toml_fact(cargo_toml_json, {})
++            fact = cargo_toml_fact(cargo_toml_json, _enclosing_workspace_toml(mctx, package["local_path"], str(mctx.path(cargo_toml_label).dirname)))
+ 
+             package["strip_prefix"] = fact.get("strip_prefix", "")
+         elif source.startswith("git+"):
+diff --git a/rs/private/crate_repository.bzl b/rs/private/crate_repository.bzl
+--- a/rs/private/crate_repository.bzl
++++ b/rs/private/crate_repository.bzl
+@@ -2,7 +2,7 @@
+ load("@bazel_tools//tools/build_defs/repo:utils.bzl", "get_auth", "patch")
+ load(":cargo_credentials.bzl", "load_cargo_credentials", "registry_auth_headers")
+ load(":registry_utils.bzl", "registry_download_url_from_template")
+-load(":repository_utils.bzl", "cargo_build_file_values", "common_attrs", "package_version", "render_build_file_content")
++load(":repository_utils.bzl", "cargo_build_file_values", "common_attrs", "inherit_workspace_package_fields", "package_version", "render_build_file_content")
+ load(":toml2json.bzl", "run_toml2json")
+ 
+ def _cargo_purl(package_name, version, qualifiers = {}):
+@@ -80,6 +80,26 @@
+     } | common_attrs,
+ )
+ 
++def _enclosing_workspace_cargo_toml(rctx, package_dir):
++    module_root = rctx.path(Label("@@//:Cargo.toml")).dirname
++    # A path crate outside the root workspace inherits `workspace = true`
++    # package fields (version, edition, license, ..) from the nearest enclosing
++    # manifest with a [workspace] table.
++    dir = package_dir.dirname
++    for _ in range(32):
++        if dir == module_root:
++            break
++        manifest = dir.get_child("Cargo.toml")
++        if manifest.exists:
++            rctx.watch(manifest)
++            manifest_json = run_toml2json(rctx, manifest)
++            if manifest_json.get("workspace"):
++                return manifest_json
++        if dir.dirname == dir:
++            break
++        dir = dir.dirname
++    return {}
++
+ def _local_crate_repository_impl(rctx):
+     if rctx.attr.strip_prefix:
+         fail("strip_prefix not implemented")
+@@ -94,6 +114,7 @@
+     patch(rctx)
+ 
+     cargo_toml = run_toml2json(rctx, "Cargo.toml")
++    cargo_toml = inherit_workspace_package_fields(cargo_toml, _enclosing_workspace_cargo_toml(rctx, root))
+ 
+     rctx.file("BUILD.bazel", _generate_build_file(rctx, cargo_toml))
+ 

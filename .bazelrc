@@ -97,7 +97,7 @@ build:ci --jobs=auto
 # its compile keys (and its analysis cache — adding an aspect discards it).
 #
 # The aspects skip every external target (`@crates`, the vendored ocx crates
-# and forks), which crate_universe also renders with `--cap-lints=allow`.
+# and forks), which rules_rs also renders with `--cap-lints=allow`.
 # Cargo's `[workspace.lints.rust] warnings = "deny"` and `-- -D warnings` are
 # one flag: `-Dwarnings`. It must be spelled out — the aspect adds it on its
 # own only while no clippy flag is set. `--check-cfg` is what cargo passes, so

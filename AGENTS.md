@@ -35,7 +35,7 @@ document the four-line job, let them own the pipeline.
 | `tests/workspace_structure.rs` | Reads `cargo metadata`; fails naming the offender on any crate-map violation (upward edge, unlisted `ocx_*`, missing `[lints] workspace = true`, …) — the enforcement half of `crates/crate_map.toml` |
 | `tests/source_scan.rs` | Cross-crate source scans that need the whole tree at once: the extra-roots self-scan (walks `src/` and every `crates/*/src/`) and the cross-crate `include_str!` factory scan |
 | `tests/fixtures/` | Renderer/spec fixtures for unit tests |
-| `MODULE.bazel` (+ `.lock`), `.bazelrc`, `.bazelversion` | Bazel module (Linux dev loop, CI's `Smoke (Linux)` job, and every release binary — `task bazel:build:release TARGET=<triple>`: musl with zig via `hermetic_cc_toolchain` on Linux, darwin with `apple_support` on macOS, windows-msvc with the runner's MSVC on Windows, real provenance from `release/`, rules_rust patched for the Windows host (`release/*.patch`); only non-Linux dev loops stay cargo). Remote cache `bazel-cache.ocx.sh/v1`, shared with ocx; CI writes on the `main` push only. Third-party crates come from `Cargo.toml`/`Cargo.lock` via `crate.from_cargo`; the generated `Cargo.bazel.lock.json` is gitignored |
+| `MODULE.bazel` (+ `.lock`), `.bazelrc`, `.bazelversion` | Bazel module (Linux dev loop, CI's `Smoke (Linux)` job, and every release binary — `task bazel:build:release TARGET=<triple>`: all six triples (musl, darwin, windows-gnullvm) cross-built from Linux with rules_rs and the hermetic llvm toolchain, real provenance from `release/`; only non-Linux dev loops stay cargo). Remote cache `bazel-cache.ocx.sh/v1`, shared with ocx; CI writes on the `main` push only. Third-party crates come from `Cargo.lock` via rules_rs `crate.from_cargo` (`@crates//:<name>-<version>`); no Bazel-side lock file. `bazel/rules_rs_transitive_path_deps.patch` (3 files, a 171-line patch, applied by `single_version_override`) lets rules_rs resolve the transitive `ocx_*` path crates in `external/ocx` ([hermeticbuild/rules_rs#181](https://github.com/hermeticbuild/rules_rs/issues/181), [#273](https://github.com/hermeticbuild/rules_rs/issues/273)); drop it once #181 lands in a rules_rs release |
 | `BUILD.bazel`, `crates/*/BUILD.bazel`, `test/BUILD.bazel` | Hand-written Bazel packages (root lib/bin + tests, the seven crates, the acceptance suite as one `sh_test`); `bazel:build:drift` keeps their edges equal to Cargo's |
 | `crates/TEST_TARGET_MAP.toml` | Per-target Bazel test counts (rise only); no `[[excluded]]` rows — every nextest case runs under Bazel (`bazel:test:coverage`) |
 | `scripts/` | Gate tooling: `accept_floor.py`, `bazel_test_floor.py`, `bazel_build_drift.py`, `bazel_cache_check.py`, `bep_to_otlp.py`, `bazel_scoped.py`, `bazel_execlog_keys.py`, `bazel_tag_guard.py` (each has `--self-test`; `scripts/BUILD.bazel` runs all eight, `.github/actions/bazel-cache-rc/selftest.sh` and the telemetry pytest as cached `py_test`s — `task bazel:test:scripts`, which `task scripts:self-test` calls on Linux; `scripts/requirements.lock` pins pytest/PyYAML) |
@@ -79,7 +79,7 @@ document the four-line job, let them own the pipeline.
   **nested** submodules (`external/ocx/external/...`). Patches do not travel
   with path deps; dropping the table silently resolves unpatched crates.io
   releases. `task bazel:patch:check` (CI) asserts the fork binding in both
-  graphs: Cargo.toml + Cargo.lock, and `Cargo.bazel.lock.json`.
+  graphs: Cargo.toml + Cargo.lock, and `Cargo.lock` is the only lock Bazel reads.
 - Dependency feature lists for deps shared with ocx are copied
   exactly from ocx's `[workspace.dependencies]` — keep in sync on submodule
   bumps. `octocrab` is mirror-owned outright — no ocx equivalent exists to sync
@@ -136,14 +136,15 @@ cd test && task -- tests/test_mirror.py::<name> -v
 **Bazel loop (Linux).** `task rust:test:unit` and `task rust:verify` run
 `bazel:test:unit` on Linux (nextest elsewhere; CI runs `bazel:test:unit` and `bazel:test:accept`, and no cargo at all). Bazel runs
 via `ocx exec bazel -- bazel`. `task bazel:bootstrap` first in a fresh
-worktree (generates `Cargo.bazel.lock.json`, restores `external/ocx`);
+worktree (fails on a dirty `external/ocx`; nothing to repin);
 `bazel:test:unit`, `bazel:test:accept` (acceptance, remote-cacheable: the
 submodule's Sigstore stack as its own compose project, no knobs from the
 shell), `bazel:tag:guard`, `bazel:test:scoped`
 (rdeps of what changed vs `origin/main`), `bazel:cache:gc` (manual,
-`MAX_GB=30`). A manual repin needs
-`--repo_env=TMPDIR=/var/tmp/ocx-mirror-splice` on hosts with a
-`~/.cargo/config.toml` above `/tmp`. RAM: `.bazelrc` caps the JVM at 2 GB and
+`MAX_GB=30`). Release builds are Linux-host cross-builds with the hermetic
+BCR `llvm` toolchain: `task bazel:build:release TARGET=<triple>` for any of the
+six triples; Windows ships as `x86_64`/`aarch64-pc-windows-gnullvm` (GNU ABI
+via llvm-mingw, not msvc). RAM: `.bazelrc` caps the JVM at 2 GB and
 actions at 30% of host RAM, tasks pass `--jobs=6` (`JOBS=` overrides); keep
 one Bazel server per worktree and `bazel shutdown` when idle. Telemetry to
 otel.ocx.sh is off unless `~/.config/ocx-telemetry/env` names an endpoint

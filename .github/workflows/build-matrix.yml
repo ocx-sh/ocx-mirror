@@ -28,13 +28,14 @@ permissions:
   contents: read
 
 jobs:
-  build-linux:
-    # Bazel (`task bazel:build:release`): //:ocx-mirror for the target's
-    # //platforms triple — rustc + zig's musl through hermetic_cc_toolchain,
-    # static, with build.rs's real provenance read by
+  build:
+    # Every triple cross-builds on one x86_64 Linux runner (`task
+    # bazel:build:release`): rustc through rules_rs and the hermetic llvm
+    # toolchain, with build.rs's real provenance read by
     # release/workspace_status.py from this job's environment (the two
-    # `__OCX_BUILD_*` below, CI, GITHUB_*). Both triples cross-compile on the
-    # x86_64 runner; the aarch64 smoke runs under qemu-aarch64.
+    # `__OCX_BUILD_*` below, CI, GITHUB_*). The Linux triples smoke here (the
+    # aarch64 one under qemu-aarch64); the darwin and windows ones smoke on a
+    # native runner below, from this job's artifact.
     name: Build (${{ matrix.target }})
     runs-on: ubuntu-latest
     env:
@@ -46,6 +47,10 @@ jobs:
         target:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-pc-windows-gnullvm
+          - aarch64-pc-windows-gnullvm
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -87,6 +92,7 @@ jobs:
         # clean; the run URL is this run's; the binary is static;
         # `ocx package create` takes it as oci-publish.yml will. The caller's
         # inputs arrive through `env`, never spliced into the script.
+        if: endsWith(matrix.target, '-linux-musl')
         env:
           TARGET: ${{ matrix.target }}
         run: >-
@@ -100,7 +106,8 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ocx-mirror-${{ matrix.target }}
-          path: target/bazel/release/ocx-mirror-${{ matrix.target }}
+          path: target/bazel/release/ocx-mirror-${{ matrix.target }}${{ contains(matrix.target, 'windows') && '.exe' || '' }}
+          if-no-files-found: error
           compression-level: 0
           retention-days: 1
       # A composite action has no `post:` hook (basic-repo.yml's reason): a failed
@@ -111,176 +118,31 @@ jobs:
         with:
           cleanup: 'true'
 
-  build-darwin:
-    # Bazel on one arm64 macOS runner for both triples, as the cargo leg ran
-    # (`task bazel:build:release`): rustc for the triple and apple_support's
-    # Apple clang toolchain (`-arch x86_64` for the cross triple), linked
-    # against the runner's Xcode SDK — zig cannot link the Apple frameworks
-    # the TLS stack needs. Not an Intel runner: the arm64 host cross-compiles
-    # x86_64 with the same toolchain family, and runs it under Rosetta for
-    # the smoke.
-    name: Build (${{ matrix.target }})
-    runs-on: macos-latest
+  smoke-native:
+    # The darwin and windows artifacts' smoke, each on a host that runs it: no
+    # build here, only the `build` leg's binary. The x86_64 darwin one runs
+    # under Rosetta on the arm64 runner. A red here fails the reusable
+    # workflow, so the publish jobs that need `build` never see the artifact.
+    name: Smoke (${{ matrix.target }})
+    needs: build
+    runs-on: ${{ matrix.os }}
     env:
       __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
       __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          submodules: recursive
-          persist-credentials: false
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Setup OCX
-        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
-        with:
-          version: "0.6.3"
-      # Read-only, as on the Linux legs. No other lane writes darwin keys, so
-      # it reads nothing today; it keeps the three legs one shape.
-      - name: Bazel cache credential
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-      - name: Bazel cache credential reaches Bazel
-        shell: bash
-        run: task bazel:cache:rc:check
-      - name: Install Rosetta
-        # The x86_64 smoke runs the binary; an arm64 runner image may ship
-        # without the translator. Idempotent when it is there.
-        if: matrix.target == 'x86_64-apple-darwin'
-        run: /usr/sbin/softwareupdate --install-rosetta --agree-to-license
-      - name: Build
-        env:
-          TARGET: ${{ matrix.target }}
-        run: task bazel:build:release TARGET="$TARGET" JOBS=auto
-      - name: Smoke
-        env:
-          TARGET: ${{ matrix.target }}
-        run: >-
-          task release:smoke
-          BIN="target/bazel/release/ocx-mirror-$TARGET"
-          TARGET="$TARGET"
-          CHANNEL="$__OCX_BUILD_CHANNEL"
-          VERSION="$__OCX_BUILD_VERSION"
-          SHA="$GITHUB_SHA"
-      - name: Upload Binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocx-mirror-${{ matrix.target }}
-          path: target/bazel/release/ocx-mirror-${{ matrix.target }}
-          compression-level: 0
-          retention-days: 1
-      - name: Remove the Bazel cache credential
-        if: always()
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          cleanup: 'true'
-
-  build-windows:
-    # Bazel on one x86_64 Windows runner for both triples: rustc for the
-    # triple, linked by rules_cc's MSVC toolchain from the runner's Visual
-    # Studio (`x64_arm64` for aarch64). MSVC, as cargo-xwin built them: the
-    # same dynamic CRT (VCRUNTIME140 + the UCRT API sets) for every user.
-    # The aarch64 binary cannot run here; smoke-windows-arm64 smokes it.
-    name: Build (${{ matrix.target }})
-    runs-on: windows-latest
-    env:
-      __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
-      __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
-      # Git Bash's `env` (the tasks' `{{.BAZEL}}` prefix) rewrites arguments
-      # that look like POSIX paths for the native program it starts:
-      # `--platforms=//platforms:…` reached Bazel as `/platforms:…` (run
-      # 35947180548). Every path the tasks hand over is native already.
+      # Git Bash's `env` would rewrite arguments that look like POSIX paths.
       MSYS_NO_PATHCONV: "1"
+      TARGET: ${{ matrix.target }}
     defaults:
       run:
         shell: bash
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
-    steps:
-      # The runner's git converts to CRLF on checkout, and this repository has
-      # no .gitattributes: the templates the binary `include_str!`s would ship
-      # with CRLF, unlike every cargo-built and Linux-built artifact.
-      - name: Keep LF line ends
-        run: git config --global core.autocrlf false
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          submodules: recursive
-          persist-credentials: false
-      # Bazel's default output root sits under the user profile; action
-      # paths below it (external crate trees, bazel-out configs) outgrow
-      # MAX_PATH for MSVC's tools. A home rc, outside the workspace — the
-      # dev host's ~/.bazelrc carries its output root the same way.
-      - name: Short Bazel output root
-        run: echo 'startup --output_user_root=C:/b' >> "$HOME/.bazelrc"
-      - name: Setup Task
-        uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
-      - name: Setup OCX
-        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
-        with:
-          version: "0.6.3"
-      - name: Bazel cache credential
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          read-auth: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
-      - name: Bazel cache credential reaches Bazel
-        shell: bash
-        run: task bazel:cache:rc:check
-      - name: Build
-        env:
-          TARGET: ${{ matrix.target }}
-        run: task bazel:build:release TARGET="$TARGET" JOBS=auto
-      - name: Smoke
-        if: matrix.target == 'x86_64-pc-windows-msvc'
-        env:
-          TARGET: ${{ matrix.target }}
-        run: >-
-          task release:smoke
-          BIN="target/bazel/release/ocx-mirror-$TARGET.exe"
-          TARGET="$TARGET"
-          CHANNEL="$__OCX_BUILD_CHANNEL"
-          VERSION="$__OCX_BUILD_VERSION"
-          SHA="$GITHUB_SHA"
-      - name: Upload Binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ocx-mirror-${{ matrix.target }}
-          path: target/bazel/release/ocx-mirror-${{ matrix.target }}.exe
-          compression-level: 0
-          retention-days: 1
-      - name: Remove the Bazel cache credential
-        if: always()
-        uses: ./.github/actions/bazel-cache-rc
-        with:
-          cleanup: 'true'
-
-  smoke-windows-arm64:
-    # The aarch64 windows artifact's smoke, on an arm64 Windows runner: the
-    # only host that runs it. A red here fails the reusable workflow, so the
-    # publish jobs that need `build` never see the artifact.
-    name: Smoke (aarch64-pc-windows-msvc)
-    needs: build-windows
-    runs-on: windows-11-arm
-    env:
-      __OCX_BUILD_VERSION: ${{ inputs.version_semver }}
-      __OCX_BUILD_CHANNEL: ${{ inputs.channel }}
-      MSYS_NO_PATHCONV: "1"
-      TARGET: aarch64-pc-windows-msvc
-    defaults:
-      run:
-        shell: bash
+        include:
+          - { os: macos-latest, target: x86_64-apple-darwin, ext: '' }
+          - { os: macos-latest, target: aarch64-apple-darwin, ext: '' }
+          - { os: windows-latest, target: x86_64-pc-windows-gnullvm, ext: .exe }
+          - { os: windows-11-arm, target: aarch64-pc-windows-gnullvm, ext: .exe }
     steps:
       - name: Keep LF line ends
         run: git config --global core.autocrlf false
@@ -292,22 +154,31 @@ jobs:
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
       - name: Setup OCX
         # The ocx binary alone: ocx.toml's bazel has no windows/arm64 build,
-        # so the project pull fails here (run 35980500812), and the smoke
+        # so the project pull fails there (run 35980500812), and the smoke
         # runs no project tool.
         uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
         with:
           version: "0.6.3"
           project: ""
+      - name: Install Rosetta
+        # An arm64 runner image may ship without the translator. Idempotent
+        # when it is there.
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: /usr/sbin/softwareupdate --install-rosetta --agree-to-license
       - name: Download Binary
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: ocx-mirror-aarch64-pc-windows-msvc
+          name: ocx-mirror-${{ matrix.target }}
           path: target/bazel/release
       - name: Smoke
-        run: >-
-          task release:smoke
-          BIN="target/bazel/release/ocx-mirror-$TARGET.exe"
-          TARGET="$TARGET"
-          CHANNEL="$__OCX_BUILD_CHANNEL"
-          VERSION="$__OCX_BUILD_VERSION"
-          SHA="$GITHUB_SHA"
+        env:
+          EXT: ${{ matrix.ext }}
+        run: |
+          # An artifact download drops the execute bit.
+          chmod +x "target/bazel/release/ocx-mirror-$TARGET$EXT"
+          task release:smoke \
+            BIN="target/bazel/release/ocx-mirror-$TARGET$EXT" \
+            TARGET="$TARGET" \
+            CHANNEL="$__OCX_BUILD_CHANNEL" \
+            VERSION="$__OCX_BUILD_VERSION" \
+            SHA="$GITHUB_SHA"

@@ -52,14 +52,14 @@ git add external/ocx Cargo.lock && git commit -m "chore(deps): bump external/ocx
 Checklist when bumping:
 
 - keep `rust-toolchain.toml` channel in sync with `external/ocx/rust-toolchain.toml`,
-  and `MODULE.bazel`'s `rust.toolchain(versions = [...])` with that channel
+  and `MODULE.bazel`'s `toolchains.toolchain(version = ...)` with that channel
   (`task bazel:pin:check` reds on a mismatch)
 - keep the dependency feature lists in root `Cargo.toml`'s
   `[workspace.dependencies]` in sync with ocx's `[workspace.dependencies]`
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
-  (`task bazel:patch:check` asserts the same binding in `Cargo.bazel.lock.json`)
-- keep the Bazel pins copied from ocx in sync: `rules_rust`, `rules_shell`,
+  (`task bazel:patch:check` asserts the same binding in `Cargo.lock`)
+- keep the Bazel pins copied from ocx in sync: `rules_shell`,
   `buildifier_prebuilt` and `rules_ocx` `bazel_dep` versions, and
   `.bazelversion` / `ocx.toml`'s bazel tag against `external/ocx/MODULE.bazel`
   and `external/ocx/.bazelversion`

@@ -23,12 +23,12 @@ commands with `ocx exec --`). Tasks run through [Task](https://taskfile.dev):
 
 On Linux the lint lanes and the unit and acceptance tests run under
 [Bazel](https://bazel.build), which caches results per target: an unchanged
-crate is not re-tested or re-linted. CI runs the same Bazel lanes. macOS,
-Windows and the release build stay on cargo.
+crate is not re-tested or re-linted. CI runs the same Bazel lanes. macOS and
+Windows dev loops stay on cargo; release binaries are Bazel cross-builds from Linux.
 
 | Command | What it does |
 |---|---|
-| `task bazel:bootstrap` | Once per fresh worktree: generate `Cargo.bazel.lock.json` |
+| `task bazel:bootstrap` | Once per fresh worktree: fail on a dirty `external/ocx` tree |
 | `task bazel:lint:fmt` | rustfmt check against `rustfmt.toml`; fix with `task rust:format:apply` |
 | `task bazel:lint:clippy` | Clippy over every first-party target, warnings denied |
 | `task bazel:build:jsonschema` | Compile the `jsonschema` feature (the `schema` command and its derives) |

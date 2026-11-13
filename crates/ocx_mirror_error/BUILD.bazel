@@ -16,10 +16,12 @@ rust_library(
         exclude = ["src/**/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_error"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ) + [
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_report",
         "//crates/ocx_mirror_source",
@@ -41,10 +43,12 @@ rust_library(
     ),
     crate_name = "ocx_mirror_error",
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_error"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ) + [
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_report",
         "//crates/ocx_mirror_source:ocx_mirror_source_jsonschema",
@@ -53,16 +57,15 @@ rust_library(
 
 rust_test(
     name = "ocx_mirror_error_test",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # No `--test-threads=1`: no case here mutates the process environment;
     # the first one that does needs it (see //crates/ocx_mirror_spec).
     crate = ":ocx_mirror_error",
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_error"},
-    deps = all_crate_deps(normal_dev = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ) + [
         "//crates/ocx_mirror_test_support",
     ],
 )

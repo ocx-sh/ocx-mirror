@@ -99,7 +99,7 @@ Five checks, none of which `cargo check` catches.
 1. **Toolchain channel** — `rust-toolchain.toml` `channel` must equal
    `external/ocx/rust-toolchain.toml`'s. (Targets legitimately differ: ocx
    cross-builds its Windows shim, the mirror does not.) `MODULE.bazel`'s
-   `rust.toolchain(versions = [...])` must equal that same channel
+   `toolchains.toolchain(version = ...)` must equal that same channel
    (`task bazel:pin:check`).
 2. **Copy-exactly dependency rows** — for every dep shared with ocx, the
    version and feature list in the mirror's root `Cargo.toml` must match
@@ -119,11 +119,11 @@ Five checks, none of which `cargo check` catches.
    cargo tree -i oci-client | head -3     # must name the fork path
    ```
    `task bazel:patch:check` asserts the same fork binding in
-   `Cargo.bazel.lock.json`.
+   `Cargo.lock`.
 4. **No internal-tier crate** — the bump must not add a path row into a crate
    outside the ecosystem/interface tier. ocx's `task satellite:verify` asserts
    this; a row added here fails that job upstream.
-5. **Bazel pins copied from ocx** — the `bazel_dep` versions for `rules_rust`,
+5. **Bazel pins copied from ocx** — the `bazel_dep` versions for
    `rules_shell`, `buildifier_prebuilt`, and the `rules_ocx` `git_override`
    commit must still match `external/ocx/MODULE.bazel`'s; `.bazelversion` and
    `ocx.toml`'s bazel tag must still match `external/ocx/.bazelversion` and
