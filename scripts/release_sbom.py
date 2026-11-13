@@ -6,7 +6,7 @@
     scripts/release_sbom.py --target TRIPLE --output PATH [--manifest-path Cargo.toml]
 
 Runs `cargo cyclonedx --format json --target TRIPLE` on the root package and moves the JSON it
-writes beside the manifest to PATH. `cargo-cyclonedx` comes from the PATH (`ocx exec -g release --`).
+writes beside the manifest to PATH. `cargo-cyclonedx` comes from the PATH (`ocx --project packaging/release-tools exec --`).
 
 Exit codes: 0 written, 1 cargo-cyclonedx failed or wrote no file, 64 a bad argument.
 """
