@@ -1,0 +1,19 @@
+[metadata]
+lock_version = 4
+declaration_hash_version = 1
+declaration_hash = "sha256:05082148ed86437a30f5aef92be0d3657626bdb149410fa86f7a956ad1a3b155"
+generated_by = "ocx 0.6.6"
+generated_at = "2026-11-13T22:57:42Z"
+
+[[tool]]
+name = "cargo-cyclonedx"
+group = "default"
+repository = "ocx.sh/cyclonedx/cargo-cyclonedx"
+declared = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:ad009ae95d2bf3034a2b5f8add3436a375927a60683f6f9a074b38b3ec06e30e"
+"darwin/arm64" = "sha256:eca90d097192cac953bf5cde3b378b0c377aa7c7008f7fa9290c975f850da9c0"
+"linux/amd64" = "sha256:a64eb97856beda4551c4c66fdf569d46970d7949e768bdbc8e2cf2156046baa4"
+"linux/arm64+libc.glibc" = "sha256:56022a684a164ca94319a7b68ab26ee6dcecf5548ea8fe039cf8ce7d9dc3619c"
+"windows/amd64" = "sha256:377e262a27f9318e0eff340ec4ada6dc65727c20387c6ecdcfd16edd199e0b17"

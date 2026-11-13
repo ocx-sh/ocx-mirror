@@ -233,7 +233,13 @@ def test_generate_sbom_runs_release_sbom_from_the_current_checkout_on_the_old_so
     out = bf.generate_sbom(root, "0.6.6", "x86_64-unknown-linux-musl", tmp_path)
     argv, cwd = calls[-1]
     assert cwd == root, "the tool resolves from the current checkout's ocx.toml"
-    assert argv[:5] == ["ocx", "exec", "-g", "release", "--"]
+    assert argv[:5] == [
+        "ocx",
+        "--project",
+        str(root / "packaging" / "release-tools"),
+        "exec",
+        "--",
+    ]
     assert argv[argv.index("--manifest-path") + 1] == str(
         tmp_path / "source-v0.6.6/Cargo.toml"
     )

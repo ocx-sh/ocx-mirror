@@ -158,9 +158,9 @@ def generate_sbom(root: Path, version: str, triple: str, out_dir: Path) -> Path:
     subprocess.run(
         [
             "ocx",
+            "--project",
+            str(root / "packaging" / "release-tools"),
             "exec",
-            "-g",
-            "release",
             "--",
             sys.executable,
             # The current checkout's script and pinned tool: an old tag has neither.
