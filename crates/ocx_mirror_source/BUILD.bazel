@@ -16,10 +16,12 @@ rust_library(
         exclude = ["src/**/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_source"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ) + [
         "//crates/ocx_mirror_http",
     ],
 )
@@ -27,8 +29,6 @@ rust_library(
 # The Cargo `jsonschema` feature (`dep:schemars`): Bazel compiles no feature a
 # rule does not name, so the schemars derives compile only in this variant.
 # Same crate name, its own output. `//:jsonschema` builds the variant graph.
-# schemars is an optional dependency, which crate_universe gives no `@crates`
-# alias; the spoke repository is imported by name in MODULE.bazel.
 rust_library(
     name = "ocx_mirror_source_jsonschema",
     srcs = glob(["src/**/*.rs"]),
@@ -41,21 +41,20 @@ rust_library(
     crate_features = ["jsonschema"],
     crate_name = "ocx_mirror_source",
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_source"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ) + [
         "//crates/ocx_mirror_http",
-        "@crates__schemars-1.2.3//:schemars",
+        "@crates//:schemars",
     ],
 )
 
 rust_test(
     name = "ocx_mirror_source_test",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`: tests here mutate the process environment
     # (`EnvRestore`, `set_var`) under `OCX_ENV_LOCK`, but libtest runs every
     # case as a thread of one process and other cases read the environment
@@ -65,9 +64,11 @@ rust_test(
         "--test-threads=1",
     ],
     crate = ":ocx_mirror_source",
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_source"},
-    deps = all_crate_deps(normal_dev = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ) + [
         "//crates/ocx_mirror_test_support",
     ],
 )

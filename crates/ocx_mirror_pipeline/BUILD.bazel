@@ -16,10 +16,12 @@ rust_library(
         exclude = ["src/**/*.rs"],
     ),
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_pipeline"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ) + [
         "//crates/ocx_mirror_error",
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_report",
@@ -41,10 +43,12 @@ rust_library(
     ),
     crate_name = "ocx_mirror_pipeline",
     edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_pipeline"},
     version = "0.6.4",
-    deps = all_crate_deps(normal = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal = True,
+    ) + [
         "//crates/ocx_mirror_error:ocx_mirror_error_jsonschema",
         "//crates/ocx_mirror_http",
         "//crates/ocx_mirror_report",
@@ -54,10 +58,7 @@ rust_library(
 
 rust_test(
     name = "ocx_mirror_pipeline_test",
-    aliases = aliases(
-        normal_dev = True,
-        proc_macro_dev = True,
-    ),
+    aliases = aliases(),
     # `--test-threads=1`: tests here mutate the process environment
     # (`EnvRestore`, `set_var`) under `OCX_ENV_LOCK`, but libtest runs every
     # case as a thread of one process and other cases read the environment
@@ -71,9 +72,11 @@ rust_test(
     crate = ":ocx_mirror_pipeline",
     # `CARGO_MANIFEST_DIR/../../tests/fixtures`, resolved in the runfiles tree.
     data = ["//:test_fixtures"],
-    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_pipeline"},
-    deps = all_crate_deps(normal_dev = True) + [
+    deps = all_crate_deps(
+        cargo_only = True,
+        normal_dev = True,
+    ) + [
         "//crates/ocx_mirror_test_support",
     ],
 )

@@ -121,10 +121,9 @@ stands.
 
 Two ways this gate lies:
 
-- **Stale Bazel lock.** After moving `external/ocx` to a fresh ocx main, delete
-  its gitignored `Cargo.bazel.lock.json` before `task bazel:bootstrap` —
-  bootstrap repins only when the file is absent, and a stale one reds
-  `scripts:self-test` with "lockfile is out of date for crates".
+- **Stale `Cargo.lock`.** After moving `external/ocx` to a fresh ocx main, let
+  `cargo metadata` refresh `Cargo.lock` and commit it; rules_rs reads it
+  directly, so a stale one reds the drift gate (there is no Bazel-side lock).
 - **Unconsumed `pub` item.** A new `pub` item in `ocx_util` that only the mirror
   uses needs an in-workspace consumer or an `OCX_UTIL_WITHOUT_CONSUMER` entry.
   The Linux/Bazel run passes without one; ocx's macOS/Windows CI reds on

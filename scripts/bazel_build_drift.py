@@ -13,13 +13,12 @@ Two readings, compared per workspace package:
   loaded, after `all_crate_deps()` expanded. The BUILD text holds no
   third-party list at all, so a text parse would agree with itself forever.
 * Cargo: `cargo metadata --locked` resolve graph — feature- and
-  rename-resolved, the same lock crate_universe renders `@crates//` from.
-  Run with the Bazel toolchain's cargo (rules_rust's upstream wrapper), so
-  the gate needs no host Rust install and reads what Bazel builds with.
+  rename-resolved, the same `Cargo.lock` rules_rs renders `@crates//` from.
+  Run with the cargo on PATH (the ocx-provided toolchain, as ocx's gate does).
 
 Differences from ocx, both deliberate:
 
-* No committed label map. `@crates//<name>-<version>:…` resolves against the
+* No committed label map. `@crates//:<name>-<version>` resolves against the
   metadata's `<name>-<version>` stems at run time (never a `rsplit("-")`:
   versions may contain `-`). A label matching no stem is its own finding.
 * Edges compare per kind. Library/binary rules vs Cargo normal edges,
@@ -271,8 +270,8 @@ def read_cargo_metadata(document: dict) -> CargoRead:
 
 def resolve(label: str, cargo: CargoRead) -> str | None:
     """Bazel label -> Cargo package name; None when nothing matches."""
-    if label.startswith("@crates//"):
-        return cargo.stems.get(label[len("@crates//") :].split(":", 1)[0])
+    if label.startswith("@crates//:"):
+        return cargo.stems.get(label[len("@crates//:") :])
     target = label_target(label)
     return target if target in cargo.own_name.values() else None
 
@@ -434,12 +433,12 @@ def report(findings: list[Finding]) -> int:
 # ---------------------------------------------------------------------------
 
 ROOT = "/abs/ws"
-TOKIO = "@crates//tokio-1.52.3:tokio-1.52.3"
-SERDE = "@crates//serde-1.0.228:serde-1.0.228"
-TOML = "@crates//toml-1.1.4+spec-1.1.0:toml-1.1.4+spec-1.1.0"
-OCX_OCI = "@crates//ocx_oci-0.6.2:ocx_oci-0.6.2"
-TEMPFILE = "@crates//tempfile-3.27.0:tempfile-3.27.0"
-SCHEMARS = "@crates__schemars-1.2.3//:schemars"
+TOKIO = "@crates//:tokio-1.52.3"
+SERDE = "@crates//:serde-1.0.228"
+TOML = "@crates//:toml-1.1.4+spec-1.1.0"
+OCX_OCI = "@crates//:ocx_oci-0.6.2"
+TEMPFILE = "@crates//:tempfile-3.27.0"
+SCHEMARS = "@crates//:schemars"
 BUILD_SCRIPT_ONLY = ("cc", "1.2.0")
 MEMBERS = [
     ("", "ocx_mirror"),
@@ -546,7 +545,7 @@ def self_test() -> int:
     expect("" in read.normal and "//crates/ocx_mirror_http:ocx_mirror_http" in read.normal[""], "root package not read")
     run_case("agreeing tree (root + 7 crates, bin self-edge, test self-edge, build-kind dep excluded)", text, metadata, [])
 
-    selected = f'# {ROOT}/BUILD.bazel:1:1\nrust_library(\n  deps = [] + select({{"@rules_rust//rust/platform:x86_64-pc-windows-msvc": ["{TOKIO}"], "//conditions:default": []}}),\n)\n'
+    selected = f'# {ROOT}/BUILD.bazel:1:1\nrust_library(\n  deps = [] + select({{"@platforms//os:windows": ["{TOKIO}"], "//conditions:default": []}}),\n)\n'
     picked = {x for x in read_build_output(selected, ROOT).normal[""] if resolve(x, read_cargo_metadata(metadata))}
     expect(picked == {TOKIO}, f"select() branch labels not read cleanly: {picked}")
     print("GREEN: a select() deps line yields its branch labels; its keys resolve to nothing")
@@ -569,7 +568,7 @@ def self_test() -> int:
     # The test target names tokio too, so both kinds red — each on its own line.
     run_case("edge in BUILD not in Cargo", text, cut, ["drift-dev-set", "drift-set"], "in BUILD not in Cargo: ['tokio']")
 
-    bumped = text.replace(TOKIO, "@crates//tokio-1.99.0:tokio-1.99.0")
+    bumped = text.replace(TOKIO, "@crates//:tokio-1.99.0")
     run_case("label with no <name>-<version> stem (a moved pin)", bumped, metadata, ["drift-set", "drift-unmapped"], "tokio-1.99.0")
 
     run_case("version attr off the workspace version", _in_package(text, "crates/ocx_mirror_report", 'version = "0.6.2"', 'version = "0.6.1"'),
@@ -687,11 +686,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--self-test", action="store_true", help="prove the gate red and green on synthetic readings")
     parser.add_argument("--bazel", default="bazel", help="the Bazel command, shell-quoted (the task passes its `{{.BAZEL}}`)")
-    parser.add_argument(
-        "--run-flags",
-        default="",
-        help="build options for the cargo wrapper's `bazel run`, shell-quoted — CI's main-push lane passes its upload grant, so the wrapper it compiles reaches the shared cache",
-    )
     args = parser.parse_args()
     if args.self_test:
         return self_test()
@@ -699,10 +693,7 @@ def main() -> int:
     findings = check_member_sources(root_build_text=root_build_text, crate_names=crate_names, crate_build_texts=crate_build_texts)
     bazel = shlex.split(args.bazel)
     build_text, build_red = run([*bazel, "query", QUERY, "--output=build"])
-    # The wrapper runs cargo in the client's working directory (REPO_ROOT)
-    # with the toolchain's rustc first on PATH; Bazel's own output is stderr.
-    metadata_text, metadata_red = run([*bazel, "run", *shlex.split(args.run_flags), "@rules_rust//tools/upstream_wrapper:cargo", "--",
-                                       "metadata", "--locked", "--format-version", "1"])
+    metadata_text, metadata_red = run(["cargo", "metadata", "--locked", "--format-version", "1"])
     findings += [finding for finding in (build_red, metadata_red) if finding]
     if build_red or metadata_red:
         return report(findings)

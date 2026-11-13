@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 The OCX Authors
 # Runs the acceptance suite on the Windows host from WSL:
-# `task test:windows-local MODE=accept -- --exe <ocx-mirror.exe>`. `--help` prints the flags and the exit codes.
-# Ported from ocx's scripts/windows_local.sh; the cross-build default and the unit-bundle mode are not ported.
+# `task test:windows-local MODE=accept`. `--help` prints the flags and the exit codes.
+# Ported from ocx's scripts/windows_local.sh; the unit-bundle mode is not ported.
 
 set -euo pipefail
 
@@ -16,12 +16,14 @@ STAGE_DIR=ocx-mirror-wintest
 
 usage() {
     cat <<'EOF2'
-windows_local.sh --mode accept --exe PATH [--shard-count N --shard-index I] [-- ARGS...]
+windows_local.sh --mode accept [--exe PATH] [--shard-count N --shard-index I] [-- ARGS...]
 
 accept: ARGS go to pytest through `task test:accept:native`; --exe is the Windows
-        ocx-mirror.exe under test (required: no cross-build default yet).
+        ocx-mirror.exe under test. Without it the script cross-builds one from Linux
+        (`task bazel:build:release TARGET=x86_64-pc-windows-gnullvm`, release bytes,
+        so OCX_TEST_RELEASE_BINARY=1 is set for the run).
 
-Exit: the child's status; 64 usage; 66 --exe missing or not a file;
+Exit: the child's status; 64 usage; 66 --exe not a file, or the cross-build left no exe;
 69 not WSL with a cmd.exe; 77 a staging directory that is a link or resolves outside ocx-mirror-wintest;
 2 a shard request accept_shard.py refuses; 74 a passing run whose reports could not be copied back.
 EOF2
@@ -87,8 +89,7 @@ if [ -n "$shard_count$shard_index" ]; then
     python3 "$ROOT/scripts/accept_shard.py" --format stems "${select_flags[@]}" >/dev/null || status=$?
     [ "$status" -eq 0 ] || exit "$status"
 fi
-[ -n "$exe" ] || die 66 "--exe PATH is required: there is no cross-build default yet"
-[ -f "$exe" ] || die 66 "--exe '$exe' is not a file"
+[ -z "$exe" ] || [ -f "$exe" ] || die 66 "--exe '$exe' is not a file"
 
 # WINDOWS_LOCAL_CMD_EXE names another cmd.exe (how a test reaches 69) and WINDOWS_LOCAL_DRIVE_ROOT the
 # directory it starts in (default /mnt/c).
@@ -97,6 +98,16 @@ CMD_EXE=${WINDOWS_LOCAL_CMD_EXE:-$(command -v cmd.exe || echo /mnt/c/Windows/Sys
     die 69 "needs WSL with a Windows cmd.exe (looked for $CMD_EXE)"
 
 NAME=$(basename "$ROOT")
+
+# No --exe: the cross-built release binary. Release bytes lack the __testing seams, so the
+# marked tests skip.
+if [ -z "$exe" ]; then
+    TRIPLE=x86_64-pc-windows-gnullvm
+    (cd "$ROOT" && "${TASK_EXE:-task}" bazel:build:release TARGET="$TRIPLE") >&2 || die 1 "the cross-build of $TRIPLE failed"
+    exe=$ROOT/target/bazel/release/ocx-mirror-$TRIPLE.exe
+    [ -f "$exe" ] || die 66 "the cross-build left no $exe"
+    export OCX_TEST_RELEASE_BINARY=1
+fi
 
 # cmd.exe starts in a drive directory: from a \\wsl$ cwd it prints a warning and
 # falls back to the Windows directory.
