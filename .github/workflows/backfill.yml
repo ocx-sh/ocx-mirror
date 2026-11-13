@@ -69,7 +69,7 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
-      # The SBOM of a version is generated from its source with the Rust toolchain.
+      # The SBOM of a version is generated from its source with the Rust toolchain and the release-tools project's cargo-cyclonedx.
       - name: Install the Rust toolchain
         run: rustup toolchain install --no-self-update
       - name: Install the release ocx
@@ -85,7 +85,7 @@ jobs:
           mapfile -t tags < <(printf '%s\n' "$TAGS" | tr -s ' \t\r' '\n' | sed '/^$/d')
           flags=()
           [[ "$DRY_RUN" == true ]] && flags+=(--dry-run)
-          python3 scripts/backfill_release.py \
+          ocx --project packaging/release-tools exec -- python3 scripts/backfill_release.py \
             --package "$PACKAGE" \
             --identity "${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}" \
             --issuer "$OIDC_ISSUER" \
