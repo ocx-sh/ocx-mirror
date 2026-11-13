@@ -131,7 +131,10 @@ py_test(
 [
     py_test(
         name = name,
-        srcs = ["test_" + script + ".py", script + ".py"],
+        srcs = [
+            "test_" + script + ".py",
+            script + ".py",
+        ],
         config_settings = _SCRIPT_BOOTSTRAP,
         # The tests `import <script>` by bare name: put scripts/ on sys.path.
         imports = ["."],
