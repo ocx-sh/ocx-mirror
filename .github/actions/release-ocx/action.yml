@@ -24,10 +24,53 @@ runs:
           echo "::error::packaging/release-tools/ocx.toml has no [tools] ocx pin (a ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx --project packaging/release-tools lock"
           exit 1
         fi
-        # The release-tools project holds only the release tools, so `command -v` answers with the pinned binary.
-        pinned="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
+        # The pin must be locked and signed by the identity stored beside it before any of it runs. The locked
+        # digest is a platform manifest, so verify takes it without `-p` (which rejects a single manifest).
+        id_file=packaging/release-tools/ocx-identity.env
+        if [[ ! -f "$id_file" ]]; then
+          echo "::error::$id_file is missing; it holds OCX_CERTIFICATE_IDENTITY and OCX_CERTIFICATE_OIDC_ISSUER of the workflow that signs the pinned ocx"
+          exit 1
+        fi
+        identity="$(sed -n 's/^OCX_CERTIFICATE_IDENTITY=//p' "$id_file")"
+        issuer="$(sed -n 's/^OCX_CERTIFICATE_OIDC_ISSUER=//p' "$id_file")"
+        if [[ -z "$identity" || -z "$issuer" ]]; then
+          echo "::error::$id_file must set both OCX_CERTIFICATE_IDENTITY and OCX_CERTIFICATE_OIDC_ISSUER"
+          exit 1
+        fi
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64) platform=linux/amd64 ;;
+          Linux-ARM64) platform=linux/arm64 ;;
+          macOS-X64) platform=darwin/amd64 ;;
+          macOS-ARM64) platform=darwin/arm64 ;;
+          Windows-X64) platform=windows/amd64 ;;
+          Windows-ARM64) platform=windows/arm64 ;;
+          *) echo "::error::no ocx platform for runner $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+        esac
+        subject="$(python3 - "$platform" <<'PY'
+        import sys, tomllib
+        platform = sys.argv[1]
+        lock = tomllib.load(open("packaging/release-tools/ocx.lock", "rb"))
+        for tool in lock.get("tool", []):
+            if tool.get("name") != "ocx":
+                continue
+            for key, digest in tool.get("platforms", {}).items():
+                if key == platform or key.startswith(platform + "+"):
+                    print(f"{tool['repository']}@{digest}")
+                    raise SystemExit(0)
+        raise SystemExit(1)
+        PY
+        )" || {
+          echo "::error::packaging/release-tools/ocx.lock has no locked ocx for $platform; run ocx --project packaging/release-tools lock"
+          exit 1
+        }
+        ocx package verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$subject"
+        # Recorded before the pin joins PATH, so the Assert step can tell the two apart.
+        bootstrap="$(command -v ocx)"
         dir="$RUNNER_TEMP/release-ocx/bin"
         mkdir -p "$dir"
+        printf '%s\n' "$bootstrap" > "$RUNNER_TEMP/release-ocx/bootstrap"
+        # The release-tools project holds only the release tools, so `command -v` answers with the pinned binary.
+        pinned="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
         install -m 0755 "$pinned" "$dir/ocx"
         echo "$dir" >> "$GITHUB_PATH"
     - name: Assert the pinned ocx is the one in use
@@ -38,6 +81,18 @@ runs:
         actual="$(command -v ocx)"
         if [[ "$actual" != "$expected" ]]; then
           echo "::error::ocx resolves to $actual, not the pinned release ocx at $expected"
+          exit 1
+        fi
+        # Where ocx sits on PATH proves little: compare the bytes with the locked install, and with the bootstrap.
+        locked="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
+        bootstrap="$(cat "$RUNNER_TEMP/release-ocx/bootstrap")"
+        sum() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"; }
+        if [[ "$(sum "$actual")" != "$(sum "$locked")" ]]; then
+          echo "::error::the ocx on PATH ($actual) is not the locked install ($locked)"
+          exit 1
+        fi
+        if [[ "$actual" == "$bootstrap" || "$(sum "$actual")" == "$(sum "$bootstrap")" ]]; then
+          echo "::error::the ocx in use is the bootstrap ($bootstrap), not the pinned release ocx"
           exit 1
         fi
         ocx version --verbose
