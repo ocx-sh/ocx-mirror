@@ -18,6 +18,10 @@ on:
           `check` for deep-repo.yml's never-published builds).
         required: true
         type: string
+      ref:
+        description: Commit to check out and build; empty means the default for the triggering event (`github.sha`).
+        type: string
+        default: ''
     secrets:
       BAZEL_CACHE_READ_AUTH:
         description: The shared Bazel cache's read credential. Optional —
@@ -55,6 +59,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.ref }}
           submodules: recursive
           persist-credentials: false
       - name: Setup Task
@@ -101,7 +106,7 @@ jobs:
           TARGET="$TARGET"
           CHANNEL="$__OCX_BUILD_CHANNEL"
           VERSION="$__OCX_BUILD_VERSION"
-          SHA="$GITHUB_SHA"
+          SHA="$(git rev-parse HEAD)"
       - name: Upload Binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -149,6 +154,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Setup Task
         uses: go-task/setup-task@01a4adf9db2d14c1de7a560f09170b6e0df736aa # v2.1.0
@@ -181,4 +187,4 @@ jobs:
             TARGET="$TARGET" \
             CHANNEL="$__OCX_BUILD_CHANNEL" \
             VERSION="$__OCX_BUILD_VERSION" \
-            SHA="$GITHUB_SHA"
+            SHA="$(git rev-parse HEAD)"

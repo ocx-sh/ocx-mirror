@@ -59,6 +59,8 @@ py_library(
         ("bazel_scoped", []),
         # Its self-test reads no .bazelrc — the gate mode does.
         ("bazel_tag_guard", []),
+        # Fakes `gh`: reads no file, spawns no process.
+        ("release_readiness_gate", []),
         # The live map is the fixture every floor case is built from.
         (
             "bazel_test_floor",
