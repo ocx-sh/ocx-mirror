@@ -8,6 +8,7 @@
 #
 # argv: <rlocationpath //:ocx-mirror> <rlocationpath @tools//:ocx>
 #       <rlocationpath @tools//:uv> <rlocationpath @ocx_test//:docker-compose.yml>
+#       <rlocationpath @tools//:zot>
 set -euo pipefail
 
 fail() {
@@ -15,7 +16,7 @@ fail() {
     exit 1
 }
 
-[ "$#" -eq 4 ] || fail "usage: <ocx-mirror> <ocx> <uv> <sigstore compose> rlocationpaths, got $# argument(s)"
+[ "$#" -eq 5 ] || fail "usage: <ocx-mirror> <ocx> <uv> <sigstore compose> <zot> rlocationpaths, got $# argument(s)"
 for v in TEST_SRCDIR TEST_WORKSPACE TEST_TMPDIR XML_OUTPUT_FILE HOME; do
     [ -n "${!v:-}" ] || fail "$v is unset - run this through \`bazel test //test:acceptance\`"
 done
@@ -55,7 +56,14 @@ case "$suite" in
 esac
 [ -f "$suite/pyproject.toml" ] || fail "$suite carries no pyproject.toml - wrong tree"
 
-export OCX_MIRROR_COMMAND="$mirror" OCX_COMMAND="$ocx" OCX_TEST_BINARY="$ocx"
+# The pinned zot, same launcher shape as ocx: the suite starts its own per-session
+# registries from the binary the launcher execs (test/src/zot.py reads OCX_TEST_ZOT).
+zot_launcher=$(runfile "$5")
+zot=$(sed -n "s/^exec '\\([^']*\\)' \"\\\$@\"\$/\\1/p" "$zot_launcher")
+[ "$(printf '%s\n' "$zot" | grep -c .)" = 1 ] && [ -x "$zot" ] ||
+    fail "cannot read the pinned zot binary off the @tools//:zot launcher $zot_launcher (expected one exec '<path>' \"\$@\" line)"
+
+export OCX_MIRROR_COMMAND="$mirror" OCX_COMMAND="$ocx" OCX_TEST_BINARY="$ocx" OCX_TEST_ZOT="$zot"
 
 # The Sigstore stack as its OWN compose project on its own host ports. The
 # harness's default shares the sibling ocx checkout's running stack (project

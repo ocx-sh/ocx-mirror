@@ -14,6 +14,13 @@ vars:
   OCX_RESOLVED:
     sh: printf '%s' "${OCX_COMMAND:-$(command -v ocx || true)}"
 
+  # pytest starts its own zot registries (`test/conftest.py`), so `zot` must be
+  # resolvable: `OCX_TEST_ZOT` or PATH (CI's setup-ocx) wins, else the project
+  # toolchain supplies it via `ocx exec zot --`. A job with no Docker sets
+  # `OCX_TEST_NO_DOCKER=1` in its environment; go-task passes it through.
+  ZOT_EXEC:
+    sh: if [ -n "${OCX_TEST_ZOT:-}" ] || command -v zot >/dev/null 2>&1; then :; else printf 'ocx exec zot --'; fi
+
 tasks:
   build:
     internal: true
@@ -33,7 +40,7 @@ tasks:
       - task: build
         vars:
           SKIP_BUILD: "{{.SKIP_BUILD}}"
-      - uv run pytest {{.CLI_ARGS | default "-v"}}
+      - '{{.ZOT_EXEC}} uv run pytest {{.CLI_ARGS | default "-v"}}'
     env:
       OCX_COMMAND: "{{.OCX_RESOLVED}}"
       OCX_MIRROR_COMMAND: "{{.OCX_MIRROR_BINARY}}"
@@ -49,13 +56,14 @@ tasks:
   signing:
     desc: Run the mirror-signing acceptance tier (keyless, against a local Sigstore stack)
     summary: |
-      Selects the zot / Sigstore / signing-fixture tests.
+      Selects the zot / Sigstore / signing-fixture tests. The three zot registries are
+      per-session on kernel-chosen ports (`OCX_TEST_<NAME>_PORT`, exported by the controller).
 
       The keyless cases need a sibling ocx checkout for the Sigstore compose
       profile; without one they skip with a reason naming the path.
       Overrides, all read at call time:
         OCX_SIGSTORE_COMPOSE  sigstore compose file (default ../ocx/test/docker-compose.yml)
-        ZOT_REGISTRY          zot host address       (default localhost:5011)
+        OCX_TEST_NO_DOCKER=1  skip the Sigstore stack and legacy_registry (no Docker)
         OCX_TEST_DEX_PORT / OCX_TEST_FULCIO_PORT / OCX_TEST_REKOR_PORT
     cmds:
       - task: default
@@ -83,7 +91,10 @@ tasks:
       `task test:accept:native SHARD_COUNT=2 SHARD_INDEX=1`. One JUnit file per run under target/accept/junit/.
     summary: |
       The sharded CI lane (`.github/workflows/acceptance.yml`) downloads the Bazel-built
-      `ocx-mirror` into test/bin and runs this once per shard. Modules come from
+      `ocx-mirror` into test/bin and runs this once per shard. pytest starts its own zot
+      (`OCX_TEST_ZOT`, else `zot` on PATH, else `ocx exec zot --`); a job with no Docker
+      declares `OCX_TEST_NO_DOCKER=1`, which skips the registry:2 `legacy_registry` and the
+      Sigstore stack with a `no docker:` reason. Modules come from
       `scripts/accept_shard.py` (`SHARD_INDEX` is 0-based, `0..SHARD_COUNT-1`; one variable
       without the other is refused). With neither, pytest selects as usual. Floors are not
       evaluated here (a shard is a subset): run `task test:accept:floor` over the merged
@@ -103,7 +114,7 @@ tasks:
       - '{{if not .KEEP_JUNIT}}rm -rf -- "{{.JUNIT_DIR}}"{{end}}'
       - mkdir -p "{{.JUNIT_DIR}}"
       - >-
-        uv run --locked pytest -n auto --dist loadgroup
+        {{.ZOT_EXEC}} uv run --locked pytest -n auto --dist loadgroup
         --junit-xml="{{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml"
         {{.SHARD_MODULES}} {{.CLI_ARGS | default "-v"}}
     env:

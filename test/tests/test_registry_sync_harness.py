@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -38,6 +39,7 @@ from pathlib import Path
 
 import pytest
 
+from src import zot
 from src.helpers import (
     DEFAULT_SIGSTORE_COMPOSE,
     PROJECT_ROOT,
@@ -368,13 +370,14 @@ def test_zot_answers_the_referrers_api(
     assert isinstance(document["manifests"], list), "an OCI index carries a manifests array"
 
 
-def test_registry_two_does_not_answer_the_referrers_api(
+def test_legacy_registry_does_not_answer_the_referrers_api(
     ocx_binary: Path,
-    registry: str,
+    legacy_registry: str,
     unique_mirror_repo: str,
     tmp_path: Path,
 ) -> None:
-    """C-063/C-073: the `registry` leg is distribution v2, which implements no
+    """C-063/C-073: the `legacy_registry` leg is distribution v2 (registry:2, the only
+    leg that is -- `registry`, `mirror` and `zot` are zot, which answers the API), which implements no
     Referrers API -- the fallback-index route exists for exactly this.
 
     The subject is pushed first and read back, so the refusal below cannot be
@@ -383,10 +386,10 @@ def test_registry_two_does_not_answer_the_referrers_api(
     `{"errors": [...]}` envelope, so a probe that tried to parse a
     distribution error body would read Unsupported off a JSONDecodeError."""
     repository = f"testns/{unique_mirror_repo}"
-    push_stub_ocx_package(ocx_binary, registry, f"{repository}:1.0.0", tmp_path / "push-setup")
-    digest, _ = fetch_manifest(registry, repository, "1.0.0")
+    push_stub_ocx_package(ocx_binary, legacy_registry, f"{repository}:1.0.0", tmp_path / "push-setup")
+    digest, _ = fetch_manifest(legacy_registry, repository, "1.0.0")
 
-    status, content_type, _ = _referrers_response(registry, repository, digest)
+    status, content_type, _ = _referrers_response(legacy_registry, repository, digest)
 
     assert status in (404, 405), (
         f"an unsupported Referrers API must surface as 404 or 405 (C-063); got {status}"
@@ -404,7 +407,7 @@ def test_untagged_manifest_survives_on_zot(
     tmp_path: Path,
 ) -> None:
     """C-073: zot garbage-collects untagged manifests, and a referrer is untagged,
-    so the harness ships `test/zot-config.json` with GC disabled.
+    so the harness generates its zot config (`zot.zot_config()`) with GC disabled.
 
     Two halves, because there is no bounded behavioural seam for the whole
     clause: zot exposes no GC trigger and its `gcDelay` default is an hour,
@@ -436,7 +439,7 @@ def test_untagged_manifest_survives_on_zot(
     assert read_digest == orphan_digest
     assert read_body == orphan_body, "the untagged manifest must survive verbatim"
 
-    config = json.loads((PROJECT_ROOT / "test" / "zot-config.json").read_text())
+    config = zot.zot_config(tmp_path / "store")
     assert config["storage"]["gc"] is False, (
         "zot must run with GC disabled or referrer-copy assertions go flaky in a way "
         "that reads as a copy bug (C-073)"
@@ -570,7 +573,7 @@ def test_mirror_runner_marks_both_registries_insecure(tmp_path: Path) -> None:
     addresses = env["OCX_INSECURE_REGISTRIES"].split(",")
 
     assert "localhost:5001" in addresses
-    assert os.environ.get("ZOT_REGISTRY", "localhost:5011") in addresses
+    assert f"localhost:{os.environ['OCX_TEST_ZOT_PORT']}" in addresses
 
 
 def test_mirror_runner_follows_a_zot_registry_override(
@@ -580,12 +583,12 @@ def test_mirror_runner_follows_a_zot_registry_override(
     `ZOT_REGISTRY` from one place. Two independent reads mean a machine that moves
     zot off 5011 gets a runner still declaring 5011 insecure, and the push fails on
     TLS against an address nothing serves."""
-    monkeypatch.setenv("ZOT_REGISTRY", "localhost:5999")
+    monkeypatch.setenv("OCX_TEST_ZOT_PORT", "5999")
 
     addresses = _runner(tmp_path).env["OCX_INSECURE_REGISTRIES"].split(",")
 
     assert "localhost:5999" in addresses, (
-        "the runner must resolve the zot address from ZOT_REGISTRY, not hardcode it"
+        "the runner must resolve the zot address from OCX_TEST_ZOT_PORT, not hardcode it"
     )
 
 
@@ -667,3 +670,45 @@ def test_mint_identity_token_writes_a_private_jwt(sigstore_stack: SigstoreStack,
     assert written == target
     assert target.read_text().strip().count(".") == 2, "a dex identity token is a three-segment JWT"
     assert stat.S_IMODE(target.stat().st_mode) == 0o600, "the token file must be readable only by its owner"
+
+
+def _listening_pids(port: int) -> set[int]:
+    """Pids holding a listening TCP socket on `port` (Linux: /proc, no psutil)."""
+    inodes = set()
+    for table in ("/proc/net/tcp", "/proc/net/tcp6"):
+        with open(table, encoding="ascii") as handle:
+            next(handle)
+            for line in handle:
+                fields = line.split()
+                # fields[3] == "0A" is TCP_LISTEN
+                if fields[3] == "0A" and int(fields[1].rsplit(":", 1)[1], 16) == port:
+                    inodes.add(fields[9])
+    sockets = {f"socket:[{inode}]" for inode in inodes}
+    owners = set()
+    for entry in os.scandir("/proc"):
+        if not entry.name.isdigit():
+            continue
+        try:
+            for fd in os.scandir(f"/proc/{entry.name}/fd"):
+                if os.readlink(fd.path) in sockets:
+                    owners.add(int(entry.name))
+        except OSError:
+            continue  # the process exited or is not ours to inspect
+    return owners
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="resolves the listener through /proc")
+def test_registry_port_belongs_to_the_session_zot() -> None:
+    """A foreign listener on the `registry` port would pass every other test for the
+    wrong server (the sibling-compose-on-5001 failure); the owning pid must be one
+    of the zot processes this session's controller started."""
+    pids = os.environ.get("OCX_TEST_ZOT_PIDS")
+    port = os.environ.get("OCX_TEST_REGISTRY_PORT")
+    if not pids or not port:
+        pytest.skip("no session zot (OCX_TESTS_NO_REGISTRY=1 or the controller started none)")
+    session_pids = {int(pid) for pid in pids.split(",")}
+
+    owners = _listening_pids(int(port))
+
+    assert owners, f"nothing listens on OCX_TEST_REGISTRY_PORT={port}"
+    assert owners <= session_pids, f"port {port} is held by {sorted(owners)}, not the session zot {sorted(session_pids)}"

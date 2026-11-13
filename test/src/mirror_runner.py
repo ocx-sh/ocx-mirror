@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from src.helpers import PROJECT_ROOT, zot_registry_address
+from src.helpers import PROJECT_ROOT, session_registries
 
 
 class MirrorRunner:
@@ -17,14 +17,10 @@ class MirrorRunner:
         self.registry = registry
         self.temp_dir = temp_dir
         self.env: dict[str, str] = {
-            # Zot (WP 5, C-073): the signing harness's third registry, so a
-            # push into it never needs the corresponding `zot_registry`
-            # fixture's caller to also thread it onto every mirror
-            # invocation's `--insecure-registries` by hand. The address comes
-            # from the same helper the `zot_registry` fixture calls -- two
-            # independent reads of ZOT_REGISTRY leave a relocated zot
-            # declared insecure at an address nothing serves.
-            "OCX_INSECURE_REGISTRIES": ",".join((registry, zot_registry_address())),
+            # Every registry the session started (zot instances from the
+            # controller's OCX_TEST_<NAME>_PORT, plus the registry:2 address),
+            # so a push into any of them needs no per-invocation flag.
+            "OCX_INSECURE_REGISTRIES": ",".join(dict.fromkeys((registry, *session_registries()))),
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", str(Path.home())),
         }

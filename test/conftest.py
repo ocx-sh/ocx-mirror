@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import NamedTuple
 from uuid import uuid4
@@ -26,10 +27,14 @@ from src.helpers import (
     sigstore_compose_path,
     sigstore_skip_reason,
     sigstore_trusted_root,
-    start_registry,
+    compose_up_service,
+    docker_wanted,
+    legacy_registry_address,
+    registry_is_reachable,
+    skip_without_docker,
     wait_for_sigstore,
-    zot_registry_address,
 )
+from src import zot
 from src.mirror_runner import MirrorRunner
 from src.runner import OcxRunner
 
@@ -40,34 +45,71 @@ SHFMT_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "mirror-shfmt
 # ---------------------------------------------------------------------------
 
 
-def pytest_sessionstart(session: pytest.Session) -> None:
-    """Start the registries and the Sigstore stack once, before xdist workers spawn.
+_ZOT = pytest.StashKey[zot.Stack]()
 
-    Everything a worker would otherwise bring up itself is started here, on
-    the controller: under ``-n auto`` N workers racing one
-    ``docker compose up -d`` is a container-creation race, and for the
-    Sigstore stack it was worse than a race -- the first worker to finish
-    stopped services the others were still signing against. Nothing started
-    here is ever stopped, which is the same contract the two registries have
-    always had.
 
-    The first run on a machine pays the image pull and the stack's start-up;
-    every later run finds the services up and ``up -d`` is a no-op.
+def _wants_zot(config: pytest.Config) -> bool:
+    """Whether this process starts the session's zot registries.
 
-    Registry-independent opt-out (``OCX_TESTS_NO_REGISTRY=1``): selecting only
-    tests that never touch a registry on a runner without Docker sets this
-    flag so ``pytest_sessionstart`` does not hard-fail trying to
-    ``docker compose up`` a registry no collected test needs.
+    Not the xdist workers (they read the controller's ports from the
+    environment), not a run that executes no test (`--collect-only`, `--help`,
+    `--version`, `--fixtures`, `--markers`), and not a run that opted out.
     """
-    if os.environ.get("PYTEST_XDIST_WORKER") is not None:
+    if hasattr(config, "workerinput") or os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        return False
+    return not (
+        config.getoption("collectonly")
+        or config.getoption("help")
+        or config.getoption("version")
+        or config.getoption("showfixtures")
+        or config.getoption("markers")
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Start the session's registries once, on the xdist controller, before workers spawn.
+
+    The controller starts three zot instances (`src/zot.py`) and exports their
+    `OCX_TEST_<NAME>_PORT`s; workers inherit the environment and never start
+    one. The Sigstore stack comes up here too, and only when docker is wanted
+    (`OCX_TEST_NO_DOCKER` unset): N workers racing one `docker compose up -d`
+    is a container-creation race. Neither is stopped by the compose side; zot
+    dies with the controller.
+    """
+    config.addinivalue_line(
+        "markers",
+        "requires_testing_build: asserts `__testing` provenance the release binary lacks; "
+        "skipped when OCX_TEST_RELEASE_BINARY=1",
+    )
+    if not _wants_zot(config):
         return
-    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+    try:
+        stack = zot.start()
+    except zot.ZotError as error:
+        raise pytest.UsageError(str(error)) from None
+    config.stash[_ZOT] = stack
+    os.environ.update(stack.env())
+    # Workers inherit this; test_registry_port_belongs_to_the_session_zot reads it.
+    os.environ["OCX_TEST_ZOT_PIDS"] = ",".join(map(str, stack.pids))
+    if docker_wanted():
+        _start_sigstore_stack()
+
+
+def pytest_unconfigure(config: pytest.Config) -> None:
+    if (stack := config.stash.get(_ZOT, None)) is not None:
+        stack.stop()
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Skips every `requires_testing_build` test when the binary under test is release bytes."""
+    if os.environ.get("OCX_TEST_RELEASE_BINARY") != "1":
         return
-    registry = os.environ.get("REGISTRY", "localhost:5001")
-    start_registry(registry)
-    start_registry(os.environ.get("MIRROR_REGISTRY", "localhost:5002"), "mirror_registry")
-    start_registry(zot_registry_address(), "zot")
-    _start_sigstore_stack()
+    skip = pytest.mark.skip(
+        reason="release bytes: the release binary lacks the `__testing` seams this test drives"
+    )
+    for item in items:
+        if item.get_closest_marker("requires_testing_build"):
+            item.add_marker(skip)
 
 
 def _start_sigstore_stack() -> None:
@@ -100,32 +142,63 @@ def _start_sigstore_stack() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _zot_address(instance: str) -> str:
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip(f"OCX_TESTS_NO_REGISTRY=1: {instance} registry not started")
+    port = os.environ.get(f"OCX_TEST_{instance.upper()}_PORT")
+    assert port, (
+        f"no zot `{instance}` port in the environment: test/conftest.py::pytest_configure did not start one"
+    )
+    return f"localhost:{port}"
+
+
 @pytest.fixture(scope="session")
 def registry() -> str:
-    addr = os.environ.get("REGISTRY", "localhost:5001")
-    start_registry(addr)
-    return addr
+    return _zot_address("registry")
 
 
 @pytest.fixture(scope="session")
 def mirror_registry() -> str:
-    """Destination registry for `registry sync` acceptance tests — `registry` plays the upstream source."""
-    addr = os.environ.get("MIRROR_REGISTRY", "localhost:5002")
-    start_registry(addr, "mirror_registry")
-    return addr
+    """Destination registry for `registry sync` acceptance tests -- `registry` plays the upstream source."""
+    return _zot_address("mirror")
 
 
 @pytest.fixture(scope="session")
 def zot_registry() -> str:
-    """Native-Referrers-API registry (WP 5, C-073) — project-zot on :5011.
+    """Native-Referrers-API registry (OCI Distribution 1.1), the session's third zot.
 
-    The third leg alongside `registry`/`mirror_registry`: OCI Distribution
-    1.1 GET /v2/<name>/referrers/<digest>, which `registry` (distribution
-    v2) does not implement (adr_mirror_signing.md D6, S-058).
+    `GET /v2/<name>/referrers/<digest>`, which `legacy_registry` (registry:2)
+    does not implement (adr_mirror_signing.md D6, S-058).
     """
-    addr = zot_registry_address()
-    start_registry(addr, "zot")
-    return addr
+    return _zot_address("zot")
+
+
+@pytest.fixture(scope="session")
+def legacy_registry() -> str:
+    """registry:2 through compose, the referrers-NEGATIVE and untagged-keeping leg.
+
+    Skips only on a job that declares ``OCX_TEST_NO_DOCKER=1``. Without it a
+    missing ``docker`` CLI, a dead daemon and a service that never answers all
+    fail: a skip there would empty whole suites while the run still exits 0.
+    """
+    if os.environ.get("OCX_TESTS_NO_REGISTRY") == "1":
+        pytest.skip("OCX_TESTS_NO_REGISTRY=1: legacy_registry not started")
+    skip_without_docker("legacy_registry (the compose 'legacy_registry')")
+    address = legacy_registry_address()
+    if registry_is_reachable(address):
+        return address
+    if shutil.which("docker") is None:
+        pytest.fail(
+            f"legacy_registry: no registry:2 at {address} and no `docker` to start the compose "
+            "service; a job without Docker declares OCX_TEST_NO_DOCKER=1",
+            pytrace=False,
+        )
+    compose_up_service("legacy_registry")
+    for _ in range(30):
+        if registry_is_reachable(address):
+            return address
+        time.sleep(0.5)
+    raise RuntimeError(f"legacy_registry at {address} did not become reachable")
 
 
 @pytest.fixture(scope="session")
@@ -190,7 +263,7 @@ def real_ocx_binary() -> Path:
 def sigstore_stack(tmp_path_factory: pytest.TempPathFactory) -> SigstoreStack:
     """The running Sigstore stack, plus a spec and config rendered against it.
 
-    Bring-up belongs to ``pytest_sessionstart`` (controller-only, never torn
+    Bring-up belongs to ``pytest_configure`` (controller-only, never torn
     down); this fixture only refuses to run when there is nothing to bring
     up, waits for readiness, mints the session's identity token and renders
     the fixture spec against both.
@@ -199,6 +272,7 @@ def sigstore_stack(tmp_path_factory: pytest.TempPathFactory) -> SigstoreStack:
     an `OCX_SIGSTORE_COMPOSE` pointed at a missing file, skips with a visible
     reason rather than failing or silently passing.
     """
+    skip_without_docker("the Sigstore stack")
     reason = sigstore_skip_reason()
     if reason is not None:
         pytest.skip(reason)

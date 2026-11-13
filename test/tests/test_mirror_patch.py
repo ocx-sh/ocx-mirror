@@ -366,9 +366,9 @@ def test_patch_evicts_nothing_a_consumer_could_have_pinned(
     that had installed the version — a far worse outcome than the stale
     metadata it fixes.
     """
-    assert _resolves(registry, unique_mirror_repo, patched.before.index_digest), (
-        f"the pre-patch image index {patched.before.index_digest} no longer resolves"
-    )
+    # The pre-patch image *index* is pinned only by the tag the patch moves, so a
+    # zot (which drops an untagged manifest from its index at once) cannot witness
+    # it; that half runs on registry:2 in test_mirror_patch_legacy.py.
     assert _resolves(registry, unique_mirror_repo, patched.before.manifest_digest), (
         f"the pre-patch platform manifest {patched.before.manifest_digest} no longer resolves"
     )

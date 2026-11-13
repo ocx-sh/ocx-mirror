@@ -1,43 +1,12 @@
 # Dedicated project name and host port: sibling repos' compose projects
-# default to `test` with a registry on :5000, and the harness would silently
-# reuse whatever answers there (zot GCs untagged manifests; registry:2 keeps
-# them — the eviction tests depend on the latter).
+# default to `test`, and the harness would silently reuse whatever answers
+# there. The session's zot registries are not here -- `src/zot.py` starts
+# them; this file holds only registry:2, which keeps untagged manifests and
+# answers 404 on the Referrers API (the `legacy_registry` fixture).
 name: ocx-mirror-test
 
 services:
-  registry:
+  legacy_registry:
     image: registry:2
     ports:
-      - "5001:5000"
-
-  # Destination registry for `registry sync` acceptance tests — `registry`
-  # above plays the upstream source. Session-scoped via the `mirror_registry`
-  # fixture in test/conftest.py.
-  mirror_registry:
-    image: registry:2
-    ports:
-      - "5002:5000"
-
-  # Native-Referrers-API registry (WP 5, C-073) — CNCF project-zot, OCI
-  # Distribution 1.1: GET /v2/<name>/referrers/<digest> plus OCI-Subject on a
-  # manifest push naming a subject. `registry` above (distribution v2) has
-  # neither, which is the point: it stays the permanent fallback-index leg
-  # (registry copy v2's fallback-index route, ADR mirror-signing D3), this is
-  # the native-Referrers-API leg (D6, S-058).
-  #
-  # zot garbage-collects untagged manifests, and a referrer IS untagged --
-  # ./zot-config.json ships with `storage.gc: false`, or referrer-copy
-  # assertions go flaky on a timer, in a way that reads as a copy bug.
-  #
-  # Host port 5011: clear of ocx's own registry ports (5000-5004) and this
-  # harness's own 5001/5002, so the two projects' compose stacks never
-  # contend when both run on one machine (adr_mirror_signing.md D6a).
-  #
-  # Pinned by digest, not a tag: resolved from ghcr.io/project-zot/zot:v2.1.18
-  # (multi-arch index) via `docker buildx imagetools inspect` on 2026-09-02.
-  zot:
-    image: ghcr.io/project-zot/zot@sha256:6f7bf2b8e43437c7c3a121bc80214845c85f27321e66f2ff4be6bf4220775fd7
-    ports:
-      - "5011:5000"
-    volumes:
-      - ./zot-config.json:/etc/zot/config.json:ro
+      - "${OCX_TEST_LEGACY_PORT:-5001}:5000"

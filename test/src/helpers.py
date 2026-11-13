@@ -17,6 +17,8 @@ import urllib.request
 from pathlib import Path
 from typing import NamedTuple
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -55,21 +57,43 @@ def main_checkout_root() -> Path:
 # ---------------------------------------------------------------------------
 
 
-#: Host address the `zot` compose service publishes (test/docker-compose.yml).
-DEFAULT_ZOT_REGISTRY = "localhost:5011"
+#: A job with no Docker declares it with this variable, and the fixtures that need Docker
+#: skip with a `no docker:` reason. Never inferred: a missing CLI or a dead daemon is a red.
+NO_DOCKER_ENV = "OCX_TEST_NO_DOCKER"
+
+#: Host port the compose `legacy_registry` (registry:2) publishes.
+LEGACY_PORT_ENV = "OCX_TEST_LEGACY_PORT"
+DEFAULT_LEGACY_PORT = "5001"
 
 
-def zot_registry_address() -> str:
-    """The zot registry's host address, read from ``ZOT_REGISTRY`` at call time.
+def skip_without_docker(what: str) -> None:
+    """Skips the calling test or fixture when the job declares ``OCX_TEST_NO_DOCKER=1``."""
+    if os.environ.get(NO_DOCKER_ENV) == "1":
+        pytest.skip(f"no docker: {NO_DOCKER_ENV}=1, {what} is not started")
 
-    One seat, deliberately (C-073, amended 2026-09-02): both the
-    ``zot_registry`` fixture and ``MirrorRunner.env``'s
-    ``OCX_INSECURE_REGISTRIES`` need this address, and two independent reads
-    let a machine that moves zot off 5011 get a runner still declaring 5011
-    insecure -- the push then fails on TLS against an address nothing serves.
-    Read per call rather than bound at import so a test can override it.
+
+def docker_wanted() -> bool:
+    """Whether the session brings up docker-backed services (the job did not opt out)."""
+    return os.environ.get(NO_DOCKER_ENV) != "1"
+
+
+def legacy_registry_address() -> str:
+    return f"localhost:{os.environ.get(LEGACY_PORT_ENV, DEFAULT_LEGACY_PORT)}"
+
+
+def session_registries() -> list[str]:
+    """Every registry address the session started, for ``OCX_INSECURE_REGISTRIES``.
+
+    The zot ports come from the controller's exported ``OCX_TEST_<NAME>_PORT``;
+    the legacy registry:2 address is always listed (declaring an address nothing
+    serves insecure is harmless).
     """
-    return os.environ.get("ZOT_REGISTRY", DEFAULT_ZOT_REGISTRY)
+    addresses = [
+        f"localhost:{os.environ[var]}"
+        for var in ("OCX_TEST_REGISTRY_PORT", "OCX_TEST_MIRROR_PORT", "OCX_TEST_ZOT_PORT")
+        if os.environ.get(var)
+    ]
+    return [*addresses, legacy_registry_address()]
 
 
 def registry_is_reachable(registry: str) -> bool:
@@ -81,21 +105,8 @@ def registry_is_reachable(registry: str) -> bool:
         return False
 
 
-def start_registry(registry: str, service: str = "registry") -> None:
-    """Start one compose service if the registry it serves is not already up.
-
-    ``service`` is named rather than defaulted to the whole project because
-    the two registries can be up independently. GitHub Actions supplies the
-    source registry as a job *service container* bound to host 5001, so a
-    bare ``docker compose up -d`` — which starts every service — fails to
-    bind that port and exits 1, taking the whole session down before a test
-    runs. Bringing up only the service that owns the address asked for works
-    whether the other one is already bound, bound by something else, or not
-    running at all.
-    """
-    if registry_is_reachable(registry):
-        return
-
+def compose_up_service(service: str) -> None:
+    """Start one named compose service (never the whole project)."""
     result = subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_FILE), "up", "-d", service],
         capture_output=True,
@@ -109,14 +120,6 @@ def start_registry(registry: str, service: str = "registry") -> None:
             f"docker compose up -d {service} failed with exit {result.returncode}\n"
             f"stdout: {result.stdout.strip()}\nstderr: {result.stderr.strip()}"
         )
-
-    # Wait for the registry to become reachable (up to 15 s).
-    for _ in range(30):
-        if registry_is_reachable(registry):
-            return
-        time.sleep(0.5)
-
-    raise RuntimeError(f"Registry at {registry} did not become reachable")
 
 
 # ---------------------------------------------------------------------------
