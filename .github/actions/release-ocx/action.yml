@@ -1,0 +1,43 @@
+name: Release ocx
+description: >-
+  Put the `ocx` this repository pins for releasing (`[tools].ocx` in packaging/release-tools/ocx.toml, a
+  ghcr.io/ocx-sh/dev/cli build tag) first on PATH. A published ocx is installed only to bootstrap that
+  pin and is never the one that publishes. The caller has checked out the repository.
+
+runs:
+  using: composite
+  steps:
+    # Bootstrap only: no project install, no cache. It resolves the pin and is shadowed by it below.
+    - name: Setup OCX (bootstrap)
+      uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+      with:
+        version: '0.6.6'
+        project: ''
+        cache: false
+    - name: Install the pinned release ocx
+      shell: bash
+      # The PATH entry is a directory this step created under RUNNER_TEMP; nothing from the repository or an input.
+      run: | # zizmor: ignore[github-env]
+        set -euo pipefail
+        pin="$(python3 -c 'import tomllib; print(tomllib.load(open("packaging/release-tools/ocx.toml", "rb")).get("tools", {}).get("ocx", ""))')"
+        if [[ -z "$pin" ]]; then
+          echo "::error::packaging/release-tools/ocx.toml has no [tools] ocx pin (a ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx --project packaging/release-tools lock"
+          exit 1
+        fi
+        # The release-tools project holds only the release tools, so `command -v` answers with the pinned binary.
+        pinned="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
+        dir="$RUNNER_TEMP/release-ocx/bin"
+        mkdir -p "$dir"
+        install -m 0755 "$pinned" "$dir/ocx"
+        echo "$dir" >> "$GITHUB_PATH"
+    - name: Assert the pinned ocx is the one in use
+      shell: bash
+      run: |
+        set -euo pipefail
+        expected="$RUNNER_TEMP/release-ocx/bin/ocx"
+        actual="$(command -v ocx)"
+        if [[ "$actual" != "$expected" ]]; then
+          echo "::error::ocx resolves to $actual, not the pinned release ocx at $expected"
+          exit 1
+        fi
+        ocx version --verbose

@@ -10,34 +10,34 @@ Contents: [Flow](#flow) · [Step by step](#step-by-step) ·
 ## Flow
 
 ```
-ocx-mirror branch ──Deploy Dev──▶ dev.ocx.sh/ocx/mirror:<ver>-dev_<ts>
-                                        │ anonymous pull
+ocx-mirror branch ──release.yml (dev)──▶ ghcr.io/ocx-sh/dev/mirror:<ver>-dev_<ts>
+                                              │ pull
 downstream repo branch: ocx.toml pin ◀──┘
         └─▶ ocx lock → commit → dispatch generated workflow → assert
 ```
 
-No OCX release is published; `dev.ocx.sh` is a separate registry with
-anonymous read. Only the Deploy Dev workflow needs credentials (repo
-environment `dev.ocx.sh`, already configured).
+No OCX release is published; the dev package is separate from the release
+package. Only the dev dispatch of `release.yml` writes to it, with the
+workflow's own token.
 
 ## Step by step
 
 1. **Publish the dev build** (needs the branch pushed to GitHub):
 
    ```sh
-   gh workflow run "Deploy Dev" --repo ocx-sh/ocx-mirror --ref <branch>
+   gh workflow run release.yml --repo ocx-sh/ocx-mirror --ref <branch> -f mode=dev
    gh run watch --repo ocx-sh/ocx-mirror   # ~build matrix + serial publish
    ```
 
-   The `compute-version` job output yields the tag, shape
+   The `plan` job output yields the tag, shape
    `<next-semver>-dev_<UTC ts>` (e.g. `0.6.0-dev_20260804050813`). Full
-   coordinate: `dev.ocx.sh/ocx/mirror:<tag>`.
+   coordinate: `ghcr.io/ocx-sh/dev/mirror:<tag>`.
 
 2. **Pin it downstream** — one line in the mirror repo's `ocx.toml`, on a branch:
 
    ```toml
    [tools]
-   mirror = "dev.ocx.sh/ocx/mirror:0.6.0-dev_20260804050813"  # was ocx.sh/ocx/mirror:0.5
+   mirror = "ghcr.io/ocx-sh/dev/mirror:0.6.0-dev_20260804050813"  # was ocx.sh/ocx/mirror:0.5
    ```
 
    Then `ocx lock` (or `direnv reload`) to regenerate `ocx.lock`, commit
@@ -60,7 +60,7 @@ environment `dev.ocx.sh`, already configured).
 
 - **Cheapest smoke**: a bootstrap-style job — `ocx version` +
   `ocx-mirror --help` exits 0 (proves the dev pin resolved from
-  dev.ocx.sh; there is no `--version` flag). Template:
+  the dev package; there is no `--version` flag). Template:
   `mirror-pypi:.github/workflows/bootstrap.yml`.
 - **Pipeline smoke**: the `discover` job succeeds and its `plan.json`
   output is sane (`has_new`, `versions[]`).
@@ -76,12 +76,11 @@ environment `dev.ocx.sh`, already configured).
   for a dev test.
 - `ocx pull`/`setup-ocx` exits 78 without a committed `ocx.lock` matching
   `ocx.toml` — always commit the lock with the pin.
-- `dev.ocx.sh` pulls are anonymous; no downstream secrets needed for
+- Pulling the dev package needs no downstream secret for
   bootstrap. Pushes to the repo's real target still need its own secrets.
-- Deploy Dev is `workflow_dispatch`-only, serialized
-  (`cancel-in-progress: false`) so timestamps stay monotonic.
-- Dev tags are never announced (`announce: false`) — the index only
-  observes the prod registry.
+- The dev dispatch of `release.yml` is serialized (`cancel-in-progress:
+  false`) so timestamps stay monotonic.
+- Dev tags are never announced — the index only observes the release package.
 
 ## Precedent
 
