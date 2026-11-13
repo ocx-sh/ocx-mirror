@@ -31,13 +31,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+      - uses: ocx-sh/conventions/.github/actions/setup@3d0df49d6d5771c52321d886e33a20ee36cfe76d # v0.3.4
         with:
           groups: default,test,build
           bazel-cache: trusted
@@ -46,7 +46,7 @@ jobs:
       - run: task ci:deep
       - name: Push JUnit telemetry
         if: always()
-        uses: ocx-sh/conventions/.github/actions/setup@723b544119d0a57045bd9c796d570848f73cf3bb # v0.3.2
+        uses: ocx-sh/conventions/.github/actions/setup@3d0df49d6d5771c52321d886e33a20ee36cfe76d # v0.3.4
         with:
           report: target/reports/junit/*.xml
           otel-auth: ${{ secrets.OTEL_OTLP_AUTH }}

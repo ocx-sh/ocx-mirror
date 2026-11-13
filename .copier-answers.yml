@@ -1,12 +1,10 @@
 # Changes here will be overwritten by Copier; NEVER EDIT MANUALLY
-_commit: v0.3.2
+_commit: v0.3.4
 _src_path: https://github.com/ocx-sh/conventions.git
 bazel: true
 bazel_cache_write: trusted
 deep_os:
 - ubuntu-latest
-- macos-latest
-- windows-latest
 languages:
 - bazel
 - python
