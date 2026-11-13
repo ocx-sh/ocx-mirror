@@ -124,3 +124,32 @@ py_test(
     main = "test_telemetry_names.py",
     deps = ["@scripts_pip//pytest"],
 )
+
+# The release scripts' pytests (publish, prune-select, SBOM, backfill). Each runs
+# the script under test as a subprocess or imports it, with `python3`/`bash` and
+# a stub on a scratch PATH; none reaches a network or a registry.
+[
+    py_test(
+        name = name,
+        srcs = ["test_" + script + ".py", script + ".py"],
+        config_settings = _SCRIPT_BOOTSTRAP,
+        legacy_create_init = 0,
+        main = "test_" + script + ".py",
+        deps = ["@scripts_pip//pytest"],
+    )
+    for name, script in [
+        ("release_prune_select_test", "release_prune_select"),
+        ("release_sbom_test", "release_sbom"),
+        ("backfill_release_test", "backfill_release"),
+    ]
+]
+
+py_test(
+    name = "publish_mirror_package_test",
+    srcs = ["test_publish_mirror_package.py"],
+    config_settings = _SCRIPT_BOOTSTRAP,
+    data = ["publish_mirror_package.sh"],
+    legacy_create_init = 0,
+    main = "test_publish_mirror_package.py",
+    deps = ["@scripts_pip//pytest"],
+)
