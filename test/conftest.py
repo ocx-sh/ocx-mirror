@@ -81,6 +81,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "requires_testing_build: asserts `__testing` provenance the release binary lacks; "
         "skipped when OCX_TEST_RELEASE_BINARY=1",
     )
+    config.addinivalue_line(
+        "markers",
+        "requires_posix_shell: puts a `#!/bin/sh` stub on PATH for the mirror to spawn; "
+        "skipped on Windows, where only .exe files spawn by name",
+    )
     if not _wants_zot(config):
         return
     try:
@@ -101,15 +106,17 @@ def pytest_unconfigure(config: pytest.Config) -> None:
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    """Skips every `requires_testing_build` test when the binary under test is release bytes."""
-    if os.environ.get("OCX_TEST_RELEASE_BINARY") != "1":
-        return
-    skip = pytest.mark.skip(
+    """Skips `requires_testing_build` tests on release bytes and `requires_posix_shell` tests on Windows."""
+    release = os.environ.get("OCX_TEST_RELEASE_BINARY") == "1"
+    skip_release = pytest.mark.skip(
         reason="release bytes: the release binary lacks the `__testing` seams this test drives"
     )
+    skip_windows = pytest.mark.skip(reason="windows: a `#!/bin/sh` stub on PATH cannot be spawned by name")
     for item in items:
-        if item.get_closest_marker("requires_testing_build"):
-            item.add_marker(skip)
+        if release and item.get_closest_marker("requires_testing_build"):
+            item.add_marker(skip_release)
+        if sys.platform == "win32" and item.get_closest_marker("requires_posix_shell"):
+            item.add_marker(skip_windows)
 
 
 def _start_sigstore_stack() -> None:

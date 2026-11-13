@@ -49,6 +49,7 @@ py_library(
         deps = [":gate"],
     )
     for script, data in [
+        ("accept_floor", []),
         ("bazel_build_drift", []),
         (
             "bazel_cache_check",

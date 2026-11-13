@@ -48,7 +48,7 @@ from src.helpers import (
 )
 from src.mirror_runner import MirrorRunner
 from src.registry_spec import SourceSpec, write_registry_spec
-from src.runner import OcxRunner
+from src.runner import OcxRunner, current_platform
 from src.static_index import (
     TreePackage,
     TreeTag,
@@ -134,8 +134,12 @@ def seed_version(
     work_dir: Path,
     content: bytes = b"stub",
 ) -> tuple[str, bytes]:
-    """Pushes one real OCX package version and returns `(image-index digest, verbatim bytes)`."""
-    push_stub_ocx_package(ocx_binary, registry, f"{repository}:{tag}", work_dir, content=content)
+    """Pushes one real OCX package version and returns `(image-index digest, verbatim bytes)`.
+
+    Published for the host platform: a consumer `ocx install` selects the package for the host."""
+    push_stub_ocx_package(
+        ocx_binary, registry, f"{repository}:{tag}", work_dir, content=content, platform=current_platform()
+    )
     return fetch_manifest(registry, repository, tag)
 
 

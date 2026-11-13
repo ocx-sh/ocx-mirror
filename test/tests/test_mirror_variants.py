@@ -134,7 +134,7 @@ def _write_variant_spec(
                 f'  registry: "{registry}"',
                 f'  repository: "{repo}"',
                 "metadata:",
-                f'  default: "{metadata_path}"',
+                f"  default: {json.dumps(str(metadata_path))}",
                 f"cascade: {str(cascade).lower()}",
                 "build_timestamp: none",
             ]

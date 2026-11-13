@@ -341,13 +341,17 @@ def test_the_emitted_manifest_is_readable_by_the_posix_installer_parse(dist_mirr
 
     dist_mirror.run("dist", "sync", str(spec))
 
+    # `sh -c`, not `shell=True`: cmd.exe on Windows would take the single quotes literally.
     resolved = subprocess.run(
-        "grep -o '{[^{}]*}' "
-        "| grep '\"channel\"[[:space:]]*:[[:space:]]*\"stable\"' "
-        "| head -1 "
-        "| sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
-        "| head -1",
-        shell=True,
+        [
+            "sh",
+            "-c",
+            "grep -o '{[^{}]*}' "
+            "| grep '\"channel\"[[:space:]]*:[[:space:]]*\"stable\"' "
+            "| head -1 "
+            "| sed -n 's/.*\"version\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+            "| head -1",
+        ],
         input=(output / "dist.json").read_text(),
         capture_output=True,
         text=True,
@@ -366,11 +370,14 @@ def test_the_installer_parse_finds_the_row_for_a_version_and_target(dist_mirror,
     dist_mirror.run("dist", "sync", str(spec))
 
     row = subprocess.run(
-        "grep -o '{[^{}]*}' "
-        '| grep \'"version"[[:space:]]*:[[:space:]]*"0.5.8"\' '
-        '| grep \'"target"[[:space:]]*:[[:space:]]*"x86_64-unknown-linux-gnu"\' '
-        "| head -1",
-        shell=True,
+        [
+            "sh",
+            "-c",
+            "grep -o '{[^{}]*}' "
+            '| grep \'"version"[[:space:]]*:[[:space:]]*"0.5.8"\' '
+            '| grep \'"target"[[:space:]]*:[[:space:]]*"x86_64-unknown-linux-gnu"\' '
+            "| head -1",
+        ],
         input=(output / "dist.json").read_text(),
         capture_output=True,
         text=True,

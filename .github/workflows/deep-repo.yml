@@ -32,3 +32,26 @@ jobs:
       channel: check
     secrets:
       BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
+
+  # The full acceptance suite on native macOS and Windows against the release binaries `build-matrix`
+  # built (`ocx-mirror-<triple>[.exe]`). Neither runner has Docker, so `no-docker` declares it and the
+  # registry:2 and Sigstore fixtures skip with a `no docker:` reason; the Linux basic tier runs them.
+  acceptance-native:
+    name: Acceptance (${{ matrix.job.os }})
+    needs: build-matrix
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { os: macos-latest, triple: aarch64-apple-darwin, limits: test/limits/macos-release }
+          - { os: windows-latest, triple: x86_64-pc-windows-msvc, limits: test/limits/windows-release }
+    uses: ./.github/workflows/acceptance.yml
+    with:
+      os: ${{ matrix.job.os }}
+      binary: artifact:ocx-mirror-${{ matrix.job.triple }}
+      release-binary: true
+      no-docker: true
+      limits-dir: ${{ matrix.job.limits }}
+      shard-count: 1

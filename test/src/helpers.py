@@ -27,6 +27,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 COMPOSE_FILE = Path(__file__).resolve().parent.parent / "docker-compose.yml"
 
 
+def os_spawn_env() -> dict[str, str]:
+    """Variables a child spawned with an otherwise empty environment needs on Windows.
+
+    Without SYSTEMROOT, Winsock cannot resolve any name (`localhost` included: os error 11003).
+    """
+    return {k: os.environ[k] for k in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT") if k in os.environ}
+
+
 def main_checkout_root() -> Path:
     """Resolve the main repo checkout, even when running inside a worktree.
 
@@ -177,6 +185,7 @@ def push_stub_ocx_package(
         "PATH": os.environ.get("PATH", ""),
         "OCX_INSECURE_REGISTRIES": registry,
         "OCX_HOME": str(work_dir / "ocx-home"),
+        **os_spawn_env(),
     }
     result = subprocess.run(
         [
@@ -222,6 +231,7 @@ def push_ocx_description(
         "PATH": os.environ.get("PATH", ""),
         "OCX_INSECURE_REGISTRIES": registry,
         "OCX_HOME": str(work_dir / "ocx-home"),
+        **os_spawn_env(),
     }
     result = subprocess.run(
         [

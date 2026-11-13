@@ -12,8 +12,7 @@ starts Docker) is never requested.
 """
 from __future__ import annotations
 
-import errno
-import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -65,4 +64,6 @@ def test_a_bundle_path_that_does_not_exist_exits_74_with_the_reason(gated_mirror
     assert "OCX_EXTRA_CA_CERTS" in result.stderr, result.stderr
     # The source chain: `cannot read OCX_EXTRA_CA_CERTS=<path>` alone says
     # nothing about *why*; the OS reason rides on the chain `{err:#}` renders.
-    assert os.strerror(errno.ENOENT) in result.stderr, result.stderr
+    # The OS's own wording for ENOENT: POSIX `strerror`, Windows' `FormatMessage`.
+    reason = "The system cannot find the file specified" if sys.platform == "win32" else "No such file or directory"
+    assert reason and reason in result.stderr, result.stderr

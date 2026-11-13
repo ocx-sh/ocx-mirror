@@ -49,6 +49,7 @@ research-axes:
   fails on a manifest zot drops. Fixed 2026-08-03: `test/docker-compose.yml` now
   pins `name: ocx-mirror-test` and maps the registry to host port 5001, and the
   conftest `REGISTRY` default is `localhost:5001` — no collision surface left.
+- Learned: 2026-11 the harness moved to per-session zot on free ports (`test/src/zot.py`); the `localhost:5001` collision above survives only for the docker-only `legacy_registry`.
 - Learned: `task test:quick` is the acceptance loop that skips the rebuild —
   there is no `--no-build` pytest flag.
 - Discussion hand-off 2026-11-08: `.agents/discussions/cargo-native-build.md`
