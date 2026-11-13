@@ -1,6 +1,6 @@
 name: Release ocx
 description: >-
-  Put the `ocx` this repository pins for releasing (`[group.release.tools].ocx` in ocx.toml, a
+  Put the `ocx` this repository pins for releasing (`[tools].ocx` in packaging/release-tools/ocx.toml, a
   ghcr.io/ocx-sh/dev/cli build tag) first on PATH. A published ocx is installed only to bootstrap that
   pin and is never the one that publishes. The caller has checked out the repository.
 
@@ -19,13 +19,13 @@ runs:
       # The PATH entry is a directory this step created under RUNNER_TEMP; nothing from the repository or an input.
       run: | # zizmor: ignore[github-env]
         set -euo pipefail
-        pin="$(python3 -c 'import tomllib; print(tomllib.load(open("ocx.toml", "rb")).get("group", {}).get("release", {}).get("tools", {}).get("ocx", ""))')"
+        pin="$(python3 -c 'import tomllib; print(tomllib.load(open("packaging/release-tools/ocx.toml", "rb")).get("tools", {}).get("ocx", ""))')"
         if [[ -z "$pin" ]]; then
-          echo "::error::ocx.toml has no [group.release.tools] ocx pin (a ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx lock"
+          echo "::error::packaging/release-tools/ocx.toml has no [tools] ocx pin (a ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx --project packaging/release-tools lock"
           exit 1
         fi
-        # `ocx exec` composes only the release group, so `command -v` answers with the pinned binary.
-        pinned="$(ocx exec -g release -- sh -c 'command -v ocx')"
+        # The release-tools project holds only the release tools, so `command -v` answers with the pinned binary.
+        pinned="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
         dir="$RUNNER_TEMP/release-ocx/bin"
         mkdir -p "$dir"
         install -m 0755 "$pinned" "$dir/ocx"
