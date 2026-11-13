@@ -101,12 +101,22 @@ first; then bump the submodule here to the landed commit.
 ```sh
 task release:prepare   # refuse an unreleased ocx pointer, compute version (git-cliff),
                        # bump Cargo.toml + the MODULE.bazel/BUILD version twins,
-                       # refresh MODULE.bazel.lock, update CHANGELOG, verify
-# review, then:
+                       # refresh MODULE.bazel.lock, update CHANGELOG
+# review, then commit on a release branch and push it:
+git switch -c release/vX.Y.Z
 git add -A && git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
-git push --atomic origin main vX.Y.Z
+git push origin release/vX.Y.Z
+# prove that exact commit: dispatch Release Readiness, or label its pull request `run-readiness`
+gh workflow run release-readiness.yml --ref release/vX.Y.Z
+task release:tag       # refuses without a green readiness run; tags, pushes main and the tag atomically
 ```
+
+Release Readiness builds all six triples and runs the acceptance suite on three of them.
+`task release:tag` refuses unless that workflow succeeded for the exact commit it tags.
+`release.yml` asks again on the tagged commit, and `build` waits for the answer.
+A merge-button land puts a new SHA on main; run readiness for that SHA before `task release:tag`.
+A new workflow file cannot be dispatched until it is on the default branch; use the label until then.
+A dispatch with `bypass` needs a `reason`; the run-name carries it and the gate prints a warning.
 
 Tag push publishes `ocx.sh/ocx/mirror:<version>_<timestamp>` (+ cascade tags)
 and a GitHub Release. Rolling dev builds publish to `dev.ocx.sh/ocx/mirror`

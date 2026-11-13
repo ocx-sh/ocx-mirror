@@ -17,6 +17,10 @@ name: Acceptance
 on:
   workflow_call:
     inputs:
+      ref:
+        description: Commit to check out and build; empty means the default for the triggering event (`github.sha`).
+        type: string
+        default: ''
       shard-count:
         description: Number of shards the suite is split into.
         type: number
@@ -92,6 +96,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
           submodules: recursive
       - name: Setup
@@ -137,6 +142,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
           # One level is enough: the Sigstore compose file lives in external/ocx/test, and the shard
           # builds nothing (the nested forks are for the Bazel build).
@@ -224,6 +230,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Download shard reports
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

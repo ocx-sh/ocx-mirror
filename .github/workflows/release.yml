@@ -31,6 +31,15 @@ jobs:
     secrets:
       BAZEL_CACHE_READ_AUTH: ${{ secrets.BAZEL_CACHE_READ_AUTH }}
 
+  # The exact tagged commit must hold a green release-readiness.yml run (scripts/release_readiness_gate.py).
+  # No `if:` - a skipped gate would let `build` start, so the job always runs and `build` needs it.
+  readiness:
+    name: Readiness
+    uses: ./.github/workflows/readiness-gate.yml
+    permissions:
+      contents: read
+      actions: read
+
   verify-version:
     name: Verify tag matches Cargo.toml
     runs-on: ubuntu-latest
@@ -71,7 +80,7 @@ jobs:
 
   build:
     name: Build
-    needs: [verify, verify-version]
+    needs: [verify, verify-version, readiness]
     uses: ./.github/workflows/build-matrix.yml
     with:
       version_semver: ${{ github.ref_name }}
