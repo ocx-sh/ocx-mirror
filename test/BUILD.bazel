@@ -17,7 +17,7 @@
 # suite reads, so every read outside test/ is declared here — including the
 # ocx submodule files, through @ocx_test — and nothing host-side is left to
 # pick a verdict (see `env_inherit`). Residuals the key cannot see: the
-# running containers' state and mutable image tags (`registry:2`).
+# running containers' state and mutable image tags (`registry:2`, the Sigstore images).
 
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
@@ -30,8 +30,9 @@ sh_test(
         "$(rlocationpath @tools//:ocx)",
         "$(rlocationpath @tools//:uv)",
         "$(rlocationpath @ocx_test//:docker-compose.yml)",
+        "$(rlocationpath @tools//:zot)",
     ],
-    # `@tools//:ocx` / `@tools//:uv` are rules_ocx launchers whose text bakes
+    # `@tools//:ocx` / `@tools//:uv` / `@tools//:zot` are rules_ocx launchers whose text bakes
     # this host's absolute `$OCX_HOME` store paths, so the key is per host
     # path: every CI runner (/home/runner) shares entries, a developer host
     # re-runs once and then hits its own. Over-keyed, never under-keyed — the
@@ -55,6 +56,7 @@ sh_test(
         "@ocx_test//:sigstore",
         "@tools//:ocx",
         "@tools//:uv",
+        "@tools//:zot",
     ] + glob(
         # All of test/, so a new top-level module (a conftest plugin, a
         # helper) is an input the day it lands, not a cached green after.
@@ -83,8 +85,9 @@ sh_test(
     # environment), so a differing value over-keys — a re-run, never a stale
     # verdict; CI runners agree on every one. The list still holds only what
     # cannot pick a verdict — what the runner itself needs, and how to reach the Docker
-    # daemon; the suite gets none of its knobs from here (the runner pins the
-    # registries' defaults, the Sigstore compose file, project and ports):
+    # daemon (the legacy registry:2 and the Sigstore stack are the only compose
+    # services); the suite gets none of its knobs from here (the runner pins the
+    # pinned zot, the Sigstore compose file, project and ports):
     #   HOME            the runner's own roots (uv cache, TMPDIR, lock); the
     #                   suite and every binary it spawns get a fresh per-run
     #                   HOME, so no ~/.netrc, ~/.config/ocx or warm ~/.ocx of
@@ -95,9 +98,9 @@ sh_test(
     #                   compose` uses; the images and ports it runs are the
     #                   declared compose files.
     # Dropped on purpose: `CI` (no reader — the harness never reads it, and
-    # neither binary reads it at run time), `REGISTRY`/`MIRROR_REGISTRY`/
-    # `ZOT_REGISTRY` and `OCX_SIGSTORE_COMPOSE`/`OCX_TEST_*_PORT` (each moved a
-    # verdict's stack without moving the key).
+    # neither binary reads it at run time), `OCX_TEST_ZOT` and
+    # `OCX_SIGSTORE_COMPOSE`/`OCX_TEST_*_PORT` (each moved a verdict's stack
+    # without moving the key; the harness picks its registry ports per session).
     env_inherit = [
         "DOCKER_CONFIG",
         "DOCKER_HOST",
