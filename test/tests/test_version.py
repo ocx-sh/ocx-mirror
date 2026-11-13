@@ -36,6 +36,7 @@ def test_plain_prints_the_bare_version_token(runner: MirrorRunner) -> None:
     assert result.stdout.count("\n") == 1, repr(result.stdout)
 
 
+@pytest.mark.requires_testing_build
 @pytest.mark.parametrize("flags", [("--format", "json"), ("--json",)], ids=["format-json", "json"])
 def test_json_carries_the_placeholder_provenance(runner: MirrorRunner, flags: tuple[str, ...]) -> None:
     result = runner.run(*flags, "version", check=False)
@@ -71,6 +72,7 @@ def test_verbose_json_is_the_same_document(runner: MirrorRunner) -> None:
     assert json.loads(verbose.stdout) == json.loads(plain.stdout)
 
 
+@pytest.mark.requires_testing_build
 def test_verbose_plain_names_the_placeholder_commit_and_channel(runner: MirrorRunner) -> None:
     result = runner.run("version", "--verbose", "--color", "never", check=False)
     assert result.returncode == 0, result.stderr

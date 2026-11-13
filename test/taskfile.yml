@@ -116,12 +116,36 @@ tasks:
       - >-
         {{.ZOT_EXEC}} uv run --locked pytest -n auto --dist loadgroup
         --junit-xml="{{.JUNIT_DIR}}/{{.JUNIT_NAME}}.xml"
+        {{if .TEST_BASETEMP}}--basetemp="{{.TEST_BASETEMP}}"{{end}}
         {{.SHARD_MODULES}} {{.CLI_ARGS | default "-v"}}
     env:
       OCX_COMMAND: '{{.OCX_RESOLVED}}'
       # The toolchain's ocx stands in for the submodule build the `real_ocx_binary` fixture would make.
       OCX_TEST_BINARY: '{{.OCX_RESOLVED}}'
       OCX_MIRROR_COMMAND: '{{.OCX_MIRROR_BINARY}}'
+
+  windows-local:
+    desc: >-
+      Run the acceptance suite on the Windows host from WSL: `task -x test:windows-local
+      MODE=accept EXE=<ocx-mirror.exe> -- -k patch`
+    summary: |
+      `scripts/windows_local.sh`: stages the git working tree (`git ls-files -co --exclude-standard`,
+      minus `external/` and `.agents/`) into `%USERPROFILE%\ocx-mirror-wintest\<checkout-name>\` on C:
+      with the Windows `ocx-mirror.exe` named by `EXE` (required, no
+      cross-build default yet), and runs `test:accept:native` through `cmd.exe` under `ocx exec zot`;
+      pytest starts its own zot registries there. `SHARD_COUNT=N SHARD_INDEX=I` runs one shard; the JUnit
+      report comes back to `target/windows-local/junit/`. After `--`: pytest arguments. Set
+      `OCX_TEST_RELEASE_BINARY=1` for release bytes.
+
+      The exit status is the child's, but only under `task -x`: without it task reports 201 for any
+      failed command. 66 is no `--exe`, 69 not WSL with a Windows cmd.exe, 2 a shard request the
+      selector refuses, 64 a malformed call.
+    cmds:
+      - >-
+        bash {{toSlash .REPO_ROOT}}/scripts/windows_local.sh --mode '{{.MODE | default "accept"}}'
+        {{if .SHARD_COUNT}}--shard-count '{{.SHARD_COUNT}}'{{end}}
+        {{if .SHARD_INDEX}}--shard-index '{{.SHARD_INDEX}}'{{end}}
+        {{if .EXE}}--exe '{{.EXE}}'{{end}} -- {{.CLI_ARGS}}
 
   accept:floor:
     desc: >-

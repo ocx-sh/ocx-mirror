@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from src.helpers import PROJECT_ROOT, push_stub_ocx_package
+from src.runner import current_platform
 
 FIXTURE_WHEEL = PROJECT_ROOT / "tests" / "fixtures" / "wheels" / "console_pkg-1.0.0-py3-none-any.whl"
 
@@ -330,6 +331,7 @@ def test_plan_maps_unreachable_index_to_unavailable(mirror_binary: Path, stub_re
     assert result.returncode == 69, f"expected exit 69 (Unavailable) for unreachable index, got {result.returncode}\nstderr: {result.stderr}"
 
 
+@pytest.mark.requires_posix_shell
 def test_plan_authenticates_to_a_private_index(mirror_binary: Path, stub_registry: str, tmp_path: Path) -> None:
     """A credential-gated index is reachable through either auth rung, and unreachable without one.
 
@@ -412,6 +414,7 @@ def test_plan_authenticates_to_a_private_index(mirror_binary: Path, stub_registr
     assert "s3cr3t" not in env_auth.stderr and "s3cr3t" not in netrc_auth.stderr, "no credential may reach stderr"
 
 
+@pytest.mark.requires_posix_shell
 def test_plan_maps_uv_nonzero_exit_to_data_error(mirror_binary: Path, stub_registry: str, tmp_path: Path) -> None:
     """A `uv pip compile` resolution failure is malformed lock content: PylockError, exit 65."""
     releases = {"1.0.0": [{"filename": "acme_app-1.0.0-py3-none-any.whl", "yanked": False}]}
@@ -487,6 +490,7 @@ def test_plan_maps_missing_uv_binary_to_execution_failed(mirror_binary: Path, st
 
 
 @pytest.mark.ocx_contract_site("lock_derive")
+@pytest.mark.requires_posix_shell
 def test_plan_resolves_against_the_interpreter_a_real_ocx_pull_materialised(
     mirror_binary: Path,
     ocx_binary: Path,
@@ -504,8 +508,10 @@ def test_plan_resolves_against_the_interpreter_a_real_ocx_pull_materialised(
     unique = uuid.uuid4().hex[:8]
     package = "console-pkg"
     interpreter_ref = f"python/cpython-lockderive-{unique}:3.13.1"
+    # The pull below selects the host platform, so the stub must carry it (a `linux/amd64` default
+    # is "package not found" on the macOS leg).
     push_stub_ocx_package(
-        ocx_binary, registry, interpreter_ref, tmp_path / "push-setup", member="bin/python3"
+        ocx_binary, registry, interpreter_ref, tmp_path / "push-setup", member="bin/python3", platform=current_platform()
     )
     interpreter_package = f"{registry}/{interpreter_ref}"
 
@@ -569,6 +575,7 @@ def test_plan_resolves_against_the_interpreter_a_real_ocx_pull_materialised(
     assert ocx_home in interpreter.parents, f"the interpreter must come from this run's pull: {interpreter}"
 
 
+@pytest.mark.requires_posix_shell
 def test_plan_then_prepare_produces_env_bundle(
     mirror_binary: Path,
     real_ocx_binary: Path,

@@ -93,7 +93,7 @@ def _write_spec(path: Path, *, registry: str, repo: str, url: str, url_rewrite: 
         f'  registry: "{registry}"',
         f'  repository: "{repo}"',
         "metadata:",
-        f'  default: "{FIXTURES_DIR / "metadata.json"}"',
+        f"  default: {json.dumps(str(FIXTURES_DIR / 'metadata.json'))}",
         "cascade: false",
         "build_timestamp: none",
     ]
