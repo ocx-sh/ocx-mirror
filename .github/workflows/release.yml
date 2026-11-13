@@ -242,7 +242,7 @@ jobs:
           fi
           while read -r triple _ <&3; do
             [[ -n "$triple" ]] || continue
-            ocx exec -g release -- python3 scripts/release_sbom.py \
+            ocx --project packaging/release-tools exec -- python3 scripts/release_sbom.py \
               --target "$triple" --output "dist/ocx-mirror-${triple}.cdx.json"
           done 3<<< "$PLATFORMS"
       - name: Upload the SBOMs
