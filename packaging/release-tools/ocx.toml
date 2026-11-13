@@ -4,3 +4,4 @@
 # commit, then `ocx --project packaging/release-tools lock`.
 [tools]
 cargo-cyclonedx = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
+git-cliff = "ocx.sh/git-cliff/git-cliff:2.14.1"
