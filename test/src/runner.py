@@ -12,6 +12,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from src.helpers import os_spawn_env
+
 
 # ---------------------------------------------------------------------------
 # Platform helpers
@@ -102,10 +104,7 @@ class OcxRunner:
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", str(Path.home())),
         }
-        # Windows needs these for subprocess spawning and executable resolution
-        for key in ("SYSTEMROOT", "TEMP", "TMP", "PATHEXT"):
-            if key in os.environ:
-                self.env[key] = os.environ[key]
+        self.env.update(os_spawn_env())
 
     def run(
         self,

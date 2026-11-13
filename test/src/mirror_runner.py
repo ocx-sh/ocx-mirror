@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from src.helpers import PROJECT_ROOT, session_registries
+from src.helpers import PROJECT_ROOT, os_spawn_env, session_registries
 
 
 class MirrorRunner:
@@ -23,6 +23,7 @@ class MirrorRunner:
             "OCX_INSECURE_REGISTRIES": ",".join(dict.fromkeys((registry, *session_registries()))),
             "PATH": os.environ.get("PATH", ""),
             "HOME": os.environ.get("HOME", str(Path.home())),
+            **os_spawn_env(),
         }
         # The `ocx` the mirror spawns is the `ocx` the harness drives: the
         # mirror resolves `OCX_BINARY_PIN` before PATH, so whatever

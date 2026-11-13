@@ -1,6 +1,7 @@
 """Acceptance tests for ocx-mirror."""
 from __future__ import annotations
 
+import json
 import shutil
 import stat
 import sys
@@ -96,7 +97,7 @@ def _write_spec_yaml(
         f"  registry: \"{registry}\"",
         f"  repository: \"{repo}\"",
         "metadata:",
-        f"  default: \"{metadata_path}\"",
+        f"  default: {json.dumps(str(metadata_path))}",
         f"cascade: {str(cascade).lower()}",
         "build_timestamp: none",
     ]
@@ -283,7 +284,7 @@ def test_pipeline_prepare_drops_excluded_platform(
                 f'  registry: "{registry}"',
                 f'  repository: "{unique_mirror_repo}"',
                 "metadata:",
-                f'  default: "{metadata_path}"',
+                f"  default: {json.dumps(str(metadata_path))}",
                 "build_timestamp: none",
                 "platforms:",
                 f"  {host}:",
