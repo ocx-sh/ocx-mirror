@@ -120,3 +120,15 @@ research-axes:
   (`bazel_gate_proofs.py` counts, `bazel_label_map.toml`, `scoped_gate.py` ECOSYSTEM,
   `NOT_ON_THE_BOUNDARY`, crate README tier line, LICENSE-THIRD-PARTY) — grep ocx for an
   existing ecosystem crate's name before trusting a registration list.
+- Discussion hand-off 2026-11-13: `.agents/discussions/ocx-ci-parity.md` → loop
+  (`handed-off → loop`). Four PRs in order: conventions bump → per-session zot harness
+  (all OS; mac/win deep + readiness only) → rules_rs + llvm + windows-gnullvm (supersedes
+  `build/hermetic-llvm`) → ocx-style release readiness + gate. Research:
+  `.claude/artifacts/research_ocx_ci_parity_gap.md`, `research_rules_rs_and_native_registry.md`.
+- Plan 2026-11-13 (done → PR #110; goal and plan files kept out of tree) (tier high, 4 serial pipelines
+  P1 conventions v0.3.4 → P2 zot → P3 rules_rs → P4 readiness, one branch `hex/ocx-ci-parity`).
+  Learned: rules_rs (0.2.2 through 0.4.3) fails on transitive path deps (rules_rs#181); the mirror has
+  three (`ocx_store`, `ocx_trust`, `ocx_exit_derive`), and a `[patch]` row is barred because ocx's
+  `satellite:verify` refuses any mirror manifest naming `ocx_store` → a small rules_rs patch. A
+  `workflow_dispatch` workflow cannot be dispatched before it exists on main → readiness gets a
+  `run-readiness` label trigger for the pre-merge green.
