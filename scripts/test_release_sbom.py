@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -26,7 +27,8 @@ while (($#)); do
     esac
     shift
 done
-echo '{"bomFormat":"CycloneDX"}' > "$dir/$stem.cdx.json"
+# cargo-cyclonedx 0.5.9 appends the format extension to --override-filename.
+echo '{"bomFormat":"CycloneDX"}' > "$dir/$stem.json"
 """
 
 
@@ -89,6 +91,49 @@ def test_no_produced_file_is_a_failure(run) -> None:
     assert result.returncode == 1
     assert "wrote no" in result.stderr
     assert not out.exists()
+
+
+def test_the_real_locked_cargo_cyclonedx_writes_the_name_the_script_expects(
+    tmp_path: Path,
+) -> None:
+    """The stubs encode an assumption; this drives the pinned tool itself."""
+    project = SCRIPT.parent.parent / "packaging" / "release-tools"
+    ocx, cargo = shutil.which("ocx"), shutil.which("cargo")
+    if ocx is None or cargo is None:
+        pytest.skip(f"probed PATH for ocx={ocx} cargo={cargo}; both are needed")
+    tool = [ocx, "--project", str(project), "exec", "--"]
+    probe = subprocess.run(
+        [*tool, "cargo", "cyclonedx", "--version"], capture_output=True, check=False
+    )
+    if probe.returncode != 0:
+        pytest.skip(
+            f"probed `ocx --project {project} exec -- cargo cyclonedx --version`: exit {probe.returncode}"
+        )
+    crate = tmp_path / "crate"
+    (crate / "src").mkdir(parents=True)
+    (crate / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n', encoding="utf-8"
+    )
+    out = tmp_path / "out" / "sbom.json"
+    result = subprocess.run(
+        [
+            *tool,
+            sys.executable,
+            str(SCRIPT),
+            "--target",
+            TARGET,
+            "--output",
+            str(out),
+            "--manifest-path",
+            str(crate / "Cargo.toml"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert '"bomFormat": "CycloneDX"' in out.read_text(encoding="utf-8")
 
 
 if __name__ == "__main__":

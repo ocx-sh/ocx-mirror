@@ -38,8 +38,9 @@ def main(argv: list[str] | None = None) -> int:
         args.target,
         "--manifest-path",
         str(args.manifest_path),
+        # The tool appends `.json`; the published name is `<stem>.cdx.json`.
         "--override-filename",
-        stem,
+        f"{stem}.cdx",
     ]
     try:
         done = subprocess.run(cmd, check=False)
