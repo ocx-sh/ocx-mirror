@@ -128,3 +128,27 @@ fn a_merge_then_rewrite_round_trip_is_byte_stable() {
     assert_eq!(reparsed["repository"], json!(POINTER));
     assert_eq!(once, twice, "a second run over the same inputs changed the bytes");
 }
+
+#[test]
+fn rewrite_root_preserves_publishers_byte_for_byte() {
+    // `publishers` is an operator-governed trust declaration whose entries a
+    // client may not recognise: it must ride through as raw JSON, key order and
+    // unknown entry shapes included, or a mirror run silently widens trust.
+    let source = br#"{
+  "repository": "oci://ghcr.io/ocx-sh/cmake",
+  "publishers": [{"identity": {"issuer": "https://i", "subject": "s"}, "future_kind": {"z": 1, "a": [null]}}, "unrecognised"],
+  "tags": {}
+}
+"#;
+    let before: Value = serde_json::from_slice(source).expect("parse");
+
+    let rewritten = rewrite_root(source, POINTER).expect("rewrite");
+
+    let after: Value = serde_json::from_slice(&rewritten).expect("parse");
+    assert_eq!(after["publishers"], before["publishers"]);
+    assert_eq!(
+        serde_json::to_string(&after["publishers"]).expect("emit"),
+        serde_json::to_string(&before["publishers"]).expect("emit"),
+        "entry key order changed"
+    );
+}
