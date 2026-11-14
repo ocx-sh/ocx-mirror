@@ -159,3 +159,20 @@ py_test(
     main = "test_publish_mirror_package.py",
     deps = ["@scripts_pip//pytest"],
 )
+
+# Structural guards of release.yml and backfill.yml (parsed YAML, in memory).
+py_test(
+    name = "release_workflows_test",
+    srcs = ["test_release_workflows.py"],
+    config_settings = _SCRIPT_BOOTSTRAP,
+    data = [
+        "//:.github/workflows/backfill.yml",
+        "//:.github/workflows/release.yml",
+    ],
+    legacy_create_init = 0,
+    main = "test_release_workflows.py",
+    deps = [
+        "@scripts_pip//pytest",
+        "@scripts_pip//pyyaml",
+    ],
+)
