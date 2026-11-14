@@ -21,6 +21,8 @@ import yaml
 
 REPO_ROOT = Path(__file__).absolute().parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+BAZEL_TASKFILE = REPO_ROOT / "taskfiles" / "bazel.taskfile.yml"
+RELEASE_OCX = REPO_ROOT / ".github" / "actions" / "release-ocx" / "action.yml"
 
 Docs = dict[str, dict[str, Any]]
 
@@ -275,6 +277,43 @@ CHECKS: dict[str, Callable[[Docs], list[str]]] = {
 }
 
 
+def cache_findings(task: dict[str, Any]) -> list[str]:
+    """The stamped release build reads and writes no cache, whatever `~/.bazelrc` or `--config=ci` says."""
+    flags = str(task["vars"]["FLAGS"]).split()
+    found = [
+        f"build:release FLAGS lacks {flag}"
+        for flag in ("--remote_cache=", "--disk_cache=", "--noremote_accept_cached", "--noremote_upload_local_results")
+        if flag not in flags
+    ]
+    cmds = [c if isinstance(c, str) else str(c.get("cmd", "")) for c in task["cmds"]]
+    for verb in ("build", "cquery"):
+        lines = [c for c in cmds if f"{{{{.BAZEL}}}} {verb} " in c or f"$({{{{.BAZEL}}}} {verb} " in c]
+        if len(lines) != 1 or "{{.FLAGS}}" not in lines[0]:
+            found.append(f"the `bazel {verb}` line does not use {{{{.FLAGS}}}}")
+    return found
+
+
+def pin_findings(action: dict[str, Any], docs: Docs) -> list[str]:
+    """`release-ocx` verifies its pin: identity per mode, signature on the locked subject, and the locked bytes."""
+    run = "\n".join(str(s.get("run", "")) for s in action["runs"]["steps"])
+    needles = {
+        "the identity gate": 'python3 scripts/release_ocx_identity.py "$MODE" "$identity"',
+        "the signature check": 'ocx package verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$subject"',
+        "the locked subject": "packaging/release-tools/ocx.lock",
+        "the locked-install checksum": '"$(sum "$actual")" != "$(sum "$locked")"',
+    }
+    found = [f"release-ocx lost {name}" for name, needle in needles.items() if needle not in run]
+    for where, job in _jobs(docs):
+        for step in job.get("steps") or []:
+            if step.get("uses") == "./.github/actions/release-ocx" and not (step.get("with") or {}).get("mode"):
+                found.append(f"{where}: release-ocx called without mode:")
+    return found
+
+
+def _task() -> dict[str, Any]:
+    return _load(BAZEL_TASKFILE)["tasks"]["build:release"]
+
+
 @pytest.mark.parametrize("family", CHECKS)
 def test_the_live_workflows_hold_the_guard(family: str) -> None:
     assert CHECKS[family](_documents()) == []
@@ -332,6 +371,40 @@ def test_the_control_reds_the_guard(family: str) -> None:
     CONTROLS[family](mutated)
     assert mutated != docs, "the mutation changed nothing"
     assert CHECKS[family](mutated), f"{family}: the check stayed green on the mutation"
+
+
+def test_the_stamped_release_build_carries_no_cache() -> None:
+    assert cache_findings(_task()) == []
+
+
+def test_the_release_ocx_action_verifies_its_pin() -> None:
+    assert pin_findings(_load(RELEASE_OCX), _documents()) == []
+
+
+def test_the_cache_control_reds_a_dropped_flag_and_an_unshared_flag_list() -> None:
+    task = _task()
+    dropped = copy.deepcopy(task)
+    dropped["vars"]["FLAGS"] = dropped["vars"]["FLAGS"].replace("--remote_cache=", "")
+    assert cache_findings(dropped)
+    unshared = copy.deepcopy(task)
+    unshared["cmds"] = [
+        c.replace("cquery {{.FLAGS}}", "cquery") if isinstance(c, str) else {**c, "cmd": c.get("cmd", "").replace("cquery {{.FLAGS}}", "cquery")}
+        for c in unshared["cmds"]
+    ]
+    assert unshared["cmds"] != task["cmds"] and cache_findings(unshared)
+
+
+def test_the_pin_control_reds_a_dropped_verify_and_a_call_site_without_mode() -> None:
+    action, docs = _load(RELEASE_OCX), _documents()
+    dropped = copy.deepcopy(action)
+    for step in dropped["runs"]["steps"]:
+        step["run"] = str(step.get("run", "")).replace("ocx package verify --certificate-identity", "true --certificate-identity")
+    assert pin_findings(dropped, docs)
+    modeless = copy.deepcopy(docs)
+    for step in _job(modeless, "release.yml:publish")["steps"]:
+        if step.get("uses") == "./.github/actions/release-ocx":
+            step["with"] = {}
+    assert pin_findings(action, modeless)
 
 
 if __name__ == "__main__":
