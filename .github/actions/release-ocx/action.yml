@@ -4,6 +4,13 @@ description: >-
   ghcr.io/ocx-sh/dev/cli build tag) first on PATH. A published ocx is installed only to bootstrap that
   pin and is never the one that publishes. The caller has checked out the repository.
 
+inputs:
+  mode:
+    description: >-
+      What the calling workflow ships: release, candidate, backfill or dev. Only dev may run an ocx signed from a
+      branch build; every other mode requires the identity of ocx's main-branch release workflow.
+    required: true
+
 runs:
   using: composite
   steps:
@@ -16,6 +23,8 @@ runs:
         cache: false
     - name: Install the pinned release ocx
       shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
       # The PATH entry is a directory this step created under RUNNER_TEMP; nothing from the repository or an input.
       run: | # zizmor: ignore[github-env]
         set -euo pipefail
@@ -37,6 +46,7 @@ runs:
           echo "::error::$id_file must set both OCX_CERTIFICATE_IDENTITY and OCX_CERTIFICATE_OIDC_ISSUER"
           exit 1
         fi
+        python3 scripts/release_ocx_identity.py "$MODE" "$identity"
         case "$RUNNER_OS-$RUNNER_ARCH" in
           Linux-X64) platform=linux/amd64 ;;
           Linux-ARM64) platform=linux/arm64 ;;

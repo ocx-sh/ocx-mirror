@@ -234,6 +234,8 @@ jobs:
         run: rustup toolchain install --no-self-update
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
+        with:
+          mode: ${{ inputs.mode }}
       - name: Generate the SBOMs
         run: |
           set -euo pipefail
@@ -281,6 +283,8 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
+        with:
+          mode: ${{ inputs.mode }}
       - name: Download the binaries
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -475,6 +479,8 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
+        with:
+          mode: ${{ inputs.mode }}
       - name: Download the published tags
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -517,6 +523,8 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
+        with:
+          mode: ${{ inputs.mode }}
       - name: Prune dev builds past their age
         env:
           PACKAGE: ${{ env.PACKAGE_DEV }}
@@ -552,6 +560,8 @@ jobs:
           persist-credentials: false
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
+        with:
+          mode: ${{ inputs.mode }}
       - name: Prune candidates of old releases
         id: prune
         env:

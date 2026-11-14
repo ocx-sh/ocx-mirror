@@ -145,6 +145,7 @@ py_test(
     for name, script in [
         ("release_prune_select_test", "release_prune_select"),
         ("release_sbom_test", "release_sbom"),
+        ("release_ocx_identity_test", "release_ocx_identity"),
         ("backfill_release_test", "backfill_release"),
     ]
 ]
