@@ -510,7 +510,8 @@ jobs:
   # ephemeral and its tags are all disposable.
   prune-dev:
     name: Prune old dev builds
-    if: ${{ inputs.mode == 'dev' }}
+    # A status function, or the skipped `readiness` (dev mode) behind `publish` skips this job too.
+    if: ${{ !cancelled() && inputs.mode == 'dev' && needs.publish.result == 'success' }}
     needs: [plan, publish]
     runs-on: ubuntu-latest
     permissions:
