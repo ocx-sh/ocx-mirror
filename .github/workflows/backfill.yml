@@ -74,6 +74,8 @@ jobs:
         run: rustup toolchain install --no-self-update
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
+        with:
+          mode: backfill
       - name: Backfill every platform of every requested version
         env:
           TAGS: ${{ inputs.tags }}
