@@ -393,6 +393,7 @@ jobs:
         run: |
           set -euo pipefail
           ocx package description push "$PACKAGE" --readme CATALOG.md --logo assets/logo.svg
+      # 7 days, not 1: `announce` waits behind the ocx.sh environment, and a late approval or rerun must still find this file.
       - name: Upload the published tags
         if: ${{ inputs.mode != 'dev' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -400,7 +401,7 @@ jobs:
           name: published-tags
           path: published-tags.txt
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           overwrite: true
 
   github-release:
