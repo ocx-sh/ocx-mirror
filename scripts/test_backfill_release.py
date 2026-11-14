@@ -258,9 +258,18 @@ def test_generate_sbom_runs_release_sbom_from_the_current_checkout_on_the_old_so
     assert argv[argv.index("--target") + 1] == "x86_64-unknown-linux-musl"
 
 
-def test_the_windows_triples_are_the_gnullvm_ones() -> None:
-    assert bf.triple_of("windows/amd64") == "x86_64-pc-windows-gnullvm"
-    assert bf.triple_of("windows/arm64") == "aarch64-pc-windows-gnullvm"
+def test_a_tag_up_to_the_last_msvc_build_gets_the_msvc_windows_triples() -> None:
+    assert bf.triple_of("windows/amd64", "0.6.4") == "x86_64-pc-windows-msvc"
+    assert bf.triple_of("windows/arm64", "0.5.0") == "aarch64-pc-windows-msvc"
+
+
+def test_a_later_tag_gets_the_gnullvm_windows_triples() -> None:
+    assert bf.triple_of("windows/amd64", "0.6.5") == "x86_64-pc-windows-gnullvm"
+    assert bf.triple_of("windows/arm64", "0.7.0-rc1") == "aarch64-pc-windows-gnullvm"
+
+
+def test_non_windows_triples_do_not_depend_on_the_tag() -> None:
+    assert bf.triple_of("linux/amd64", "0.1.0") == "x86_64-unknown-linux-musl"
 
 
 if __name__ == "__main__":
