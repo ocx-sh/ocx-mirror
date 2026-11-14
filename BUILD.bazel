@@ -353,6 +353,7 @@ exports_files(
         ".github/actions/bazel-cache-rc/action.yml",
         ".github/actions/bazel-cache-rc/selftest.sh",
         ".github/actions/bazel-cache-rc/write_rc.py",
+        ".github/actions/release-ocx/action.yml",
         ".github/actions/test-telemetry/action.yml",
         ".github/workflows/backfill.yml",
         ".github/workflows/basic-repo.yml",
