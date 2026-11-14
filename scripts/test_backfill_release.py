@@ -161,6 +161,16 @@ def test_main_refuses_a_ref_that_is_not_a_version_tag() -> None:
     )
 
 
+def test_main_fails_a_requested_version_that_has_no_package(capsys: pytest.CaptureFixture[str]) -> None:
+    """An explicit tag that names nothing is a typo or a lost package; only discovery may skip it."""
+    code = bf.main(
+        ["--package", PACKAGE, "--identity", IDENTITY, "--issuer", ISSUER, "v9.9.9"],
+        run=FakeOcx({}),
+    )
+    assert code == 1
+    assert "no package" in capsys.readouterr().out
+
+
 def test_main_exits_1_when_a_row_fails_and_still_prints_the_table(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
