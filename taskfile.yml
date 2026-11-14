@@ -59,7 +59,7 @@ tasks:
       - cargo install --locked {{.CRATE | default .TOOL}}
 
   scripts:self-test:
-    desc: Prove every gate script red and green — the `--self-test` of accept_floor, bazel_test_floor, bazel_build_drift, bazel_cache_check, bazel_scoped, bazel_execlog_keys, bazel_tag_guard, bep_to_otlp, release_readiness_gate, and the bazel-cache-rc action's selftest.sh
+    desc: Prove every gate script red and green — on Linux all 17 `scripts/BUILD.bazel` tests (the nine `--self-test`s, the bazel-cache-rc selftest.sh, the telemetry pytest, and the release pytests for prune-select, SBOM, ocx identity, backfill, mirror publish and the workflow guards); darwin and windows run the `--self-test` gates only
     cmds:
       # Linux: as cached Bazel tests (scripts/BUILD.bazel, with the telemetry
       # pytest); elsewhere the plain python list below. Each is a no-op off
