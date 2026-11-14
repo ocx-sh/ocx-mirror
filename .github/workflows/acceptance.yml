@@ -100,7 +100,7 @@ jobs:
           persist-credentials: false
           submodules: recursive
       - name: Setup
-        uses: ocx-sh/conventions/.github/actions/setup@3d0df49d6d5771c52321d886e33a20ee36cfe76d # v0.3.4
+        uses: ocx-sh/conventions/.github/actions/setup@fe887c6c8af73e8f5ce3f80f7bd807e06f846371 # v0.3.5
         with:
           groups: default,build
           bazel-cache: ${{ secrets.BAZEL_CACHE_WRITE_AUTH != '' && 'trusted' || 'read' }}
@@ -165,7 +165,7 @@ jobs:
       # Puts `ocx` and `uv` (the project toolchain) on PATH; zot comes from `ocx exec zot --` (test/taskfile.yml).
       # No cache credential reaches this job.
       - name: Setup
-        uses: ocx-sh/conventions/.github/actions/setup@3d0df49d6d5771c52321d886e33a20ee36cfe76d # v0.3.4
+        uses: ocx-sh/conventions/.github/actions/setup@fe887c6c8af73e8f5ce3f80f7bd807e06f846371 # v0.3.5
         with:
           groups: default,test
       - name: Download binary
