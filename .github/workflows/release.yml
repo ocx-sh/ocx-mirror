@@ -579,10 +579,10 @@ jobs:
             exit 0
           fi
           ocx package prune --forge github --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE_LOGICAL" "${selected[@]}"
-          echo "pruned=true" >> "$GITHUB_OUTPUT"
-      # Only the announce carries the index token; prune does not need it.
+      # Only the announce carries the index token; prune does not need it. It runs after a failed prune too: roots
+      # deleted before the failure must lose their rows. The failed prune step still fails the job.
       - name: Announce the pruned candidates
-        if: ${{ steps.prune.outputs.pruned == 'true' }}
+        if: ${{ !cancelled() && steps.prune.conclusion != 'skipped' }}
         env:
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
         run: ocx package announce --refresh --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"
