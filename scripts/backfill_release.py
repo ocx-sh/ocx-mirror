@@ -50,6 +50,15 @@ TRIPLE = {
     "windows/arm64": "aarch64-pc-windows-gnullvm",
 }
 
+# v0.6.4 is the last tag built for `*-pc-windows-msvc`; later tags are gnullvm builds, and TRIPLE names those.
+LAST_MSVC_BUILD = (0, 6, 4)
+
+
+def numeric(version: str) -> tuple[int, ...]:
+    """`X.Y.Z[-suffix]` -> (X, Y, Z); a suffix never moves a version past its own X.Y.Z."""
+    return tuple(int(n) for n in version.split("-")[0].split("."))
+
+
 Run = Callable[[list[str]], tuple[int, str, str]]
 
 
@@ -124,13 +133,17 @@ def has(run: Run, subject: str, identity: str, issuer: str, attestation: bool) -
     raise BackfillError(f"verifying {subject} exited {code}: {err.strip()[:200]}")
 
 
-def triple_of(platform: str) -> str:
+def triple_of(platform: str, version: str) -> str:
+    """The Rust triple `version` (no leading `v`) shipped for `platform`."""
     try:
-        return TRIPLE[platform]
+        triple = TRIPLE[platform]
     except KeyError:
         raise BackfillError(
             f"no build triple for platform {platform}; add it to TRIPLE"
         ) from None
+    if triple.endswith("-windows-gnullvm") and numeric(version) <= LAST_MSVC_BUILD:
+        return triple.removesuffix("gnullvm") + "msvc"
+    return triple
 
 
 def generate_sbom(root: Path, version: str, triple: str, out_dir: Path) -> Path:
@@ -295,7 +308,7 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
                     args.issuer,
                     args.dry_run,
                     lambda version, platform: generate_sbom(
-                        root, version, triple_of(platform), Path(scratch)
+                        root, version, triple_of(platform, version), Path(scratch)
                     ),
                 )
             except (BackfillError, subprocess.CalledProcessError) as error:
