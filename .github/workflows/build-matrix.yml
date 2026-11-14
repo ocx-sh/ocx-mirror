@@ -68,9 +68,9 @@ jobs:
         # `ocx exec bazel` (ocx.toml's bazel row) runs Bazel; the smoke's
         # `ocx package create` is this binary too. The same ocx floor as the baseline setup action
         # and release.yml's publish.
-        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: "0.6.3"
+          version: "0.6.6"
       # Read-only, on every caller: a build here never writes the shared
       # cache (the upload grant is `verify-basic.yml`'s trusted lane alone, C3), and
       # the one action that reads the workspace status is `no-remote-cache`
@@ -162,9 +162,9 @@ jobs:
         # The ocx binary alone: ocx.toml's bazel has no windows/arm64 build,
         # so the project pull fails there (run 35980500812), and the smoke
         # runs no project tool.
-        uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b # v1.3.0
+        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: "0.6.3"
+          version: "0.6.6"
           project: ""
       - name: Install Rosetta
         # An arm64 runner image may ship without the translator. Idempotent
