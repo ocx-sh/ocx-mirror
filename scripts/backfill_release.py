@@ -18,7 +18,7 @@ The SBOM of a version is generated from the source at its git tag by `generate_s
 function a repository with another build overrides; it returns the path of the CycloneDX JSON.
 
 Exit codes: 0 every row done or skipped, 1 a row failed (a platform with no build triple fails its
-row and the others continue), 64 a bad argument.
+row and the others continue, or a version named on the command line has no package), 64 a bad argument.
 """
 
 from __future__ import annotations
@@ -303,6 +303,8 @@ def main(argv: list[str] | None = None, run: Run = run_ocx) -> int:
                 rows.append(Row(tag, "-", "FAILED", "FAILED"))
                 failed = True
     failed = failed or any("FAILED" in (r.signature, r.sbom) for r in rows)
+    # A version named on the command line that has no package fails the run; discovery meets git tags that never had one.
+    failed = failed or (bool(args.tags) and any(r.signature == "no package" for r in rows))
     report = table(rows)
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
