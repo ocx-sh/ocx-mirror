@@ -585,4 +585,4 @@ jobs:
         if: ${{ steps.prune.outputs.pruned == 'true' }}
         env:
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
-        run: ocx package announce --tags-from-registry --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"
+        run: ocx package announce --refresh --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"
