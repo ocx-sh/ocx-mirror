@@ -216,55 +216,61 @@ tasks:
       echo "release:smoke: ocx package create accepted it ($(du -h "$work/ocx-mirror.tar.xz" | cut -f1) archive)"
 
   # `release:prepare` itself is the baseline's (taskfiles/baseline.taskfile.yml): it computes the
-  # next version with git-cliff, calls this hook, writes CHANGELOG.md, then runs `task verify`.
+  # next version with git-cliff, calls this hook, writes CHANGELOG.md, then calls `release:verify`.
   #   task release:prepare                 # interactive menu: auto | patch | minor | major
   #   task release:prepare BUMP=minor      # skip the menu, force a bump level
   #   task release:prepare BUMP=auto VERSION=1.4.0   # pin an exact version
   bump-files:
-    desc: Release hook — guard that ocx is released, then set the Cargo.toml and MODULE.bazel versions (VERSION=x.y.z)
+    desc: Release hook — set the Cargo.toml and MODULE.bazel versions (VERSION=x.y.z)
     deps:
       - install:cargo-edit
     requires:
       vars: [VERSION]
     cmds:
-      - task: guard:ocx-released
       - cargo set-version "{{.VERSION}}"
       - task: bump:bazel
         vars: {VERSION: '{{.VERSION}}'}
 
-  # The hooks the conventions baseline's `release:prepare` calls: gate -> bump-files -> git-cliff ->
-  # validate -> verify. It never tags or pushes.
+  # The hooks the conventions baseline's `release:prepare` calls: gate (ocx is released) -> bump-files ->
+  # git-cliff -> validate -> verify. It never tags or pushes.
   gate:
-    desc: 'Release gate: a green Release Readiness run for HEAD (release_readiness_gate.py); `task --force` skips it'
+    desc: 'Release gate: the external/ocx pointer is a released ocx, before any file is touched'
     dir: '{{.ROOT_DIR}}'
     cmds:
-      # `task --force release:prepare` (forwarded here as --force) skips it here only; release:tag and
-      # readiness-gate.yml still ask.
-      - cmd: python3 "{{.ROOT_DIR}}/scripts/release_readiness_gate.py" --sha "$(git rev-parse HEAD)"
-        if: '{{if .CLI_FORCE}}false{{else}}true{{end}}'
-      - cmd: 'echo "release:gate: --force, readiness check skipped" >&2'
-        if: '{{if .CLI_FORCE}}true{{else}}false{{end}}'
+      # No readiness check here: the release's test gate is the Release Readiness run on the release
+      # commit, which release.yml's `readiness` job (readiness-gate.yml) demands on that exact SHA.
+      # Defined at all because the baseline falls back to its verify-deep gate when this hook is absent.
+      - task: guard:ocx-released
 
   # Defined only because the baseline's `release:prepare` falls back to a full `task verify` when this
-  # hook is absent; the readiness run on the release commit (`release:gate`) is the gate.
+  # hook is absent; the readiness run on the release commit (`release.yml`'s `readiness` job) is the gate.
   verify:
-    desc: 'No local verify: the Release Readiness run checked in release:gate is the release test gate'
+    desc: 'No local verify (Release Readiness on the release commit is the test gate); prints the steps from the prepared tree to a release'
+    dir: '{{.ROOT_DIR}}'
+    silent: true
     cmds:
-      - echo "release:verify - Release Readiness on the release commit is the gate; nothing to run locally"
+      # The baseline closes with "commit, tag and push yourself"; here release.yml tags, so the real steps print first.
+      - |
+        echo "release:verify - nothing to run locally; Release Readiness on the release commit is the test gate"
+        version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+        echo ""
+        echo "Next steps for $version (never tag by hand: release.yml creates v$version after it has signed):"
+        echo "  1. git commit -am 'release: v$version'"
+        echo "  2. git push origin main"
+        echo "  3. gh workflow run release-readiness.yml --ref main    # wait for green on that exact commit"
+        echo "  4. gh workflow run release.yml -f mode=release -f version=$version"
+        echo "     (optional dry run first: -f mode=candidate -f version=$version-rc1)"
 
   # The release is cut by dispatching release.yml, never by pushing a tag; this task prints the command
-  # and never runs it. It refuses first what the dispatch would refuse later: a pointer to an unreleased
-  # ocx, and a HEAD with no green readiness run (`release:prepare` cannot ask - the commit it prepares does
-  # not exist while it runs). The dispatch runs from main, so HEAD is the commit that must be on main.
+  # and never runs it. It asks for no readiness run: release.yml's `readiness` job does, on the dispatched
+  # commit. It still refuses a pointer to an unreleased ocx, which the dispatch would not.
   tag:
-    desc: 'Print the release.yml dispatch command for the version in Cargo.toml, once ocx is released and readiness is green for HEAD (never runs it)'
+    desc: 'Print the release.yml dispatch command for the version in Cargo.toml, once ocx is released (never runs it)'
     dir: '{{.ROOT_DIR}}'
     silent: true
     cmds:
       - task: guard:ocx-released
       - |
         set -euo pipefail
-        # Every non-zero refuses: 1 no run for this SHA, 69 gh missing or unauthenticated, 74 gh failed.
-        python3 scripts/release_readiness_gate.py --sha "$(git rev-parse HEAD)"
         version=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
         echo "gh workflow run release.yml -f mode=release -f version=$version"

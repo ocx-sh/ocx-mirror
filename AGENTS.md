@@ -166,8 +166,9 @@ Commits: [Conventional Commits](https://www.conventionalcommits.org/)
 Work on branches, never `main`. **Never push** — human decides.
 `task checkpoint` amends a rolling "Checkpoint" commit during work.
 
-Releases: `task release:prepare` → human reviews → commit + tag + push
-(see README.md).
+Releases: `task release:prepare` (needs no readiness run; prints the next
+steps) → human reviews → commit + push → Release Readiness on that commit →
+dispatch `release.yml`, which tags (see README.md).
 
 Rules in `.claude/rules/` auto-load by path (`quality-core`, `quality-rust`,
 `quality-rust-errors`, `quality-rust-exit_codes`, `quality-python`,
@@ -238,7 +239,7 @@ Repo-owned Renovate rules live in `.github/renovate-local.json` (renovate.json o
 |---|---|---|
 | Basic (every PR, `basic-gate` is the one required check) | `verify-basic.yml` | `task ci:lint`, `ci:test`, `ci:build`, `ci:docs` (taskfile.yml), then `basic-repo.yml`: Conventional Commits, `Acceptance (Bazel)` (`//test:acceptance`, one cached sh_test), `Acceptance (sharded)` |
 | Deep (nightly, `run-deep` label) | `verify-deep.yml` | `task ci:deep` on ubuntu (stub), then `deep-repo.yml`: the release build matrix with nothing published, then `acceptance-native` (the suite on macOS and Windows against those release binaries, no Docker) |
-| Readiness (dispatch, or the `run-readiness` PR label) | `release-readiness.yml` | the six-triple build matrix, then the acceptance suite on linux musl (Docker), macOS arm64 and Windows gnullvm against `test/limits/<os>-release`; `verdict` is GO, NO-GO or GO by `bypass` + `reason`; nothing is published. An unrelated label starts a `readiness-ignored` run the gate refuses. `task release:tag` refuses without a green run for HEAD (`scripts/release_readiness_gate.py`) |
+| Readiness (dispatch, or the `run-readiness` PR label) | `release-readiness.yml` | the six-triple build matrix, then the acceptance suite on linux musl (Docker), macOS arm64 and Windows gnullvm against `test/limits/<os>-release`; `verdict` is GO, NO-GO or GO by `bypass` + `reason`; nothing is published. An unrelated label starts a `readiness-ignored` run the gate refuses. Neither `task release:prepare` nor `task release:tag` asks for a run; `release.yml` does (`scripts/release_readiness_gate.py`) |
 | Release (dispatch) | `release.yml` | `basic-repo.yml` as `verify` and `readiness-gate.yml` (the same gate script on the dispatched commit) for a release or candidate, then the build matrix and `publish`, the one job that signs; `publish` needs both |
 
 Sharded acceptance: `acceptance.yml` (reusable; `plan` → `binary` → `shard` matrix → `merge`). `shard-count` is the one knob

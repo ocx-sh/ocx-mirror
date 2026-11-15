@@ -124,21 +124,20 @@ first; then bump the submodule here to the landed commit.
 task release:prepare   # refuse an unreleased ocx pointer, compute version (git-cliff),
                        # bump Cargo.toml + the MODULE.bazel/BUILD version twins,
                        # refresh MODULE.bazel.lock, update CHANGELOG
-# review, then commit on a release branch and push it:
-git switch -c release/vX.Y.Z
-git add -A && git commit -m "release: vX.Y.Z"
-git push origin release/vX.Y.Z
-# prove that exact commit: dispatch Release Readiness, or label its pull request `run-readiness`
-gh workflow run release-readiness.yml --ref release/vX.Y.Z
-# land the release commit on main, then:
-task release:tag       # refuses without a green readiness run; prints the dispatch command, never runs it
+                       # then print the steps below with the version filled in
+# review, then commit and push the release commit:
+git commit -am "release: vX.Y.Z"
+git push origin main
+# prove that exact commit: dispatch Release Readiness and wait for green
+gh workflow run release-readiness.yml --ref main
+task release:tag       # prints the dispatch command, never runs it
 gh workflow run release.yml -f mode=release -f version=X.Y.Z
 ```
 
+`task release:prepare` needs no readiness run: the commit it prepares does not exist yet.
 Release Readiness builds all six triples and runs the acceptance suite on three of them.
-`task release:tag` refuses unless that workflow succeeded for HEAD.
-`release.yml` asks again on the dispatched commit, and `publish` waits for the answer.
-A merge-button land puts a new SHA on main; run readiness for that SHA before `task release:tag`.
+`release.yml` demands a green run on the dispatched commit, and `publish` waits for the answer.
+A release commit that lands through a pull request gets a new SHA on main; run readiness for that SHA.
 A new workflow file cannot be dispatched until it is on the default branch; use the label until then.
 A dispatch with `bypass` needs a `reason`; the run-name carries it and the gate prints a warning.
 

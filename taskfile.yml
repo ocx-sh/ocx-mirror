@@ -93,17 +93,18 @@ tasks:
   # and `JOBS=auto`. The Bazel acceptance suite and the sharded native run are
   # repo-owned jobs in basic-repo.yml, not a tier.
   # The baseline's commit-msg gate, widened by the rolling `Checkpoint` commit (`task checkpoint`,
-  # /commit's working phase) that /finalize rewrites into conventional commits before landing.
+  # /commit's working phase) that /finalize rewrites into conventional commits before landing, and
+  # by the release commit `release: vX.Y.Z` that `task release:prepare` tells the owner to write.
   hooks:repo-commit-msg:
-    desc: "commit-msg gate: a conventional subject, or the rolling Checkpoint (arg: the message file)"
+    desc: "commit-msg gate: a conventional subject, the rolling Checkpoint, or 'release: vX.Y.Z' (arg: the message file)"
     silent: true
     cmds:
       - cmd: |
           read -r msg < {{.CLI_ARGS}} || true
           case "$msg" in Merge\ *|Revert\ \"*|Checkpoint) exit 0 ;; esac
-          re='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+'
+          re='^((feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?: .+|release: v[0-9]+\.[0-9]+\.[0-9]+)$'
           if [[ $msg =~ $re ]]; then exit 0; fi
-          echo "commit subject must be '<type>[(scope)][!]: <subject>' (type: feat fix docs style refactor perf test build ci chore revert) or 'Checkpoint'" >&2
+          echo "commit subject must be '<type>[(scope)][!]: <subject>' (type: feat fix docs style refactor perf test build ci chore revert), 'release: vX.Y.Z' or 'Checkpoint'" >&2
           exit 1
 
   # Ahead of the first Bazel command of a CI job: the C++ toolchain is autoconfigured once per output

@@ -8,9 +8,9 @@ name: Release Readiness
 #   apply the `run-readiness` label to the pull request carrying that branch
 #
 # The label route exists because a workflow that is not yet on the default branch cannot be
-# dispatched; a `pull_request` run needs no default-branch copy. `task release:tag` then refuses
-# unless this workflow succeeded for that SHA, and `readiness-gate.yml` asks again on the dispatched
-# commit before `publish` can start (scripts/release_readiness_gate.py). The gate refuses runs from forks
+# dispatched; a `pull_request` run needs no default-branch copy. `release.yml`'s `readiness-gate.yml`
+# job then refuses unless this workflow succeeded for the dispatched commit, before `publish` can
+# start (scripts/release_readiness_gate.py). The gate refuses runs from forks
 # or other workflow files, so a fork PR's label run is never evidence.
 #
 #   build (build-matrix.yml, the six triples, channel `check`) -> acceptance (acceptance.yml on
