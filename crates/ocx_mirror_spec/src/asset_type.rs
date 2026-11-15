@@ -37,7 +37,8 @@ use serde::Deserialize;
 /// ```
 ///
 /// Archive subset — publish only some members (patterns match after
-/// `strip_components`; a pattern matching nothing fails the version):
+/// `strip_components`; an `include` matching nothing fails the version, an
+/// `exclude` is a veto and may match nothing):
 /// ```yaml
 /// asset_type:
 ///   default: { type: archive, strip_components: 1 }
@@ -46,6 +47,7 @@ use serde::Deserialize;
 ///       type: archive
 ///       strip_components: 1
 ///       include: ["coreutils.exe", "LICENSE", "README*"]
+///       exclude: ["README.win"]
 /// ```
 ///
 /// Per-platform mix — e.g. archive on Linux/macOS, raw binary on Windows:
@@ -111,11 +113,9 @@ impl<'de> serde::Deserialize<'de> for AssetTypeConfig {
         };
 
         if mapping.contains_key("type") {
-            // `UniformAssetType` is `#[serde(tag = "type")]`, and a tagged enum
-            // has no `deny_unknown_fields` to give it — so a `default:` or
-            // `platforms:` sitting beside `type:` was dropped in silence, the
-            // same defect as the flat form below and just as invisible. The
-            // two forms are mutually exclusive by construction; say so.
+            // `UniformAssetType` would refuse a `default:` or `platforms:`
+            // beside `type:` as an unknown field; this check runs first so the
+            // message says why — the two forms are mutually exclusive.
             if let Some(stray) = ["default", "platforms"]
                 .into_iter()
                 .find(|key| mapping.contains_key(*key))
@@ -154,7 +154,7 @@ impl<'de> serde::Deserialize<'de> for AssetTypeConfig {
 /// A single asset type definition, used either on its own or as the default /
 /// per-platform value inside [`AssetTypeConfig::PerPlatform`].
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum UniformAssetType {
     /// The asset is an archive (tar, zip, etc.) to be extracted.
     Archive {
@@ -166,6 +166,11 @@ pub enum UniformAssetType {
         /// bundling. Empty keeps every member.
         #[serde(default)]
         include: Vec<String>,
+        /// Veto list of member globs, same grammar and matching as `include`:
+        /// a member matching any entry is dropped even if an `include` matched
+        /// it. An entry matching nothing is ignored.
+        #[serde(default)]
+        exclude: Vec<String>,
     },
     /// The asset is a standalone executable binary.
     Binary {
@@ -181,11 +186,13 @@ impl UniformAssetType {
             Self::Archive {
                 strip_components,
                 include,
+                exclude,
             } => {
                 let strip = strip_components.as_ref().and_then(|sc| sc.resolve(platform));
                 AssetType::Archive {
                     strip_components: strip,
                     include: include.clone(),
+                    exclude: exclude.clone(),
                 }
             }
             Self::Binary { name } => AssetType::Binary { name: name.clone() },
@@ -235,21 +242,29 @@ impl AssetTypeConfig {
         }
     }
 
-    /// Every `include:` pattern of every archive entry, for validation.
-    pub fn include_patterns(&self) -> Vec<&String> {
-        fn of(uniform: &UniformAssetType) -> &[String] {
-            match uniform {
-                UniformAssetType::Archive { include, .. } => include,
-                UniformAssetType::Binary { .. } => &[],
+    /// Every `include:`/`exclude:` pattern of every archive entry, each with
+    /// its position in the spec (`default.exclude[1]`), for validation.
+    pub fn filter_patterns(&self) -> Vec<(String, &String)> {
+        fn of<'a>(prefix: &str, uniform: &'a UniformAssetType, out: &mut Vec<(String, &'a String)>) {
+            if let UniformAssetType::Archive { include, exclude, .. } = uniform {
+                for (list, patterns) in [("include", include), ("exclude", exclude)] {
+                    for (index, pattern) in patterns.iter().enumerate() {
+                        out.push((format!("{prefix}{list}[{index}]"), pattern));
+                    }
+                }
             }
         }
+        let mut out = Vec::new();
         match self {
-            Self::Uniform(uniform) => of(uniform).iter().collect(),
-            Self::PerPlatform(pp) => of(&pp.default)
-                .iter()
-                .chain(pp.platforms.values().flat_map(|u| of(u)))
-                .collect(),
+            Self::Uniform(uniform) => of("", uniform, &mut out),
+            Self::PerPlatform(per_platform) => {
+                of("default.", &per_platform.default, &mut out);
+                for (key, uniform) in &per_platform.platforms {
+                    of(&format!("platforms.{key}."), uniform, &mut out);
+                }
+            }
         }
+        out
     }
 
     /// Resolve to a concrete [`AssetType`] for a specific platform.
@@ -271,6 +286,7 @@ pub enum AssetType {
     Archive {
         strip_components: Option<u8>,
         include: Vec<String>,
+        exclude: Vec<String>,
     },
     Binary {
         name: String,
@@ -290,17 +306,62 @@ platforms:
     type: archive
     strip_components: 1
     include: ["coreutils.exe", "README*"]
+    exclude: ["README.win"]
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert_eq!(config.include_patterns().len(), 2);
-        let AssetType::Archive { include, .. } = config.resolve("windows/amd64") else {
+        let labels: Vec<String> = config.filter_patterns().into_iter().map(|(label, _)| label).collect();
+        assert_eq!(
+            labels,
+            [
+                "platforms.windows/amd64.include[0]",
+                "platforms.windows/amd64.include[1]",
+                "platforms.windows/amd64.exclude[0]",
+            ]
+        );
+        let AssetType::Archive { include, exclude, .. } = config.resolve("windows/amd64") else {
             panic!("archive")
         };
         assert_eq!(include, ["coreutils.exe", "README*"]);
-        let AssetType::Archive { include, .. } = config.resolve("linux/amd64") else {
+        assert_eq!(exclude, ["README.win"]);
+        let AssetType::Archive { include, exclude, .. } = config.resolve("linux/amd64") else {
             panic!("archive")
         };
-        assert!(include.is_empty());
+        assert!(include.is_empty() && exclude.is_empty());
+    }
+
+    #[test]
+    fn filter_labels_name_the_position() {
+        let uniform: AssetTypeConfig = serde_yaml_ng::from_str("type: archive\ninclude: [a]\nexclude: [b, c]").unwrap();
+        let labels: Vec<_> = uniform.filter_patterns().into_iter().map(|(label, _)| label).collect();
+        assert_eq!(labels, ["include[0]", "exclude[0]", "exclude[1]"]);
+        let default: AssetTypeConfig = serde_yaml_ng::from_str("default: { type: archive, exclude: [x, y] }").unwrap();
+        let labels: Vec<_> = default.filter_patterns().into_iter().map(|(label, _)| label).collect();
+        assert_eq!(labels, ["default.exclude[0]", "default.exclude[1]"]);
+    }
+
+    #[test]
+    fn a_misspelled_filter_key_is_refused() {
+        let cases = [
+            ("type: archive\nexcludes: [a]", "excludes"),
+            ("type: archive\ninlcude: [a]", "inlcude"),
+            ("default: { type: archive, excludes: [a] }", "excludes"),
+            ("default: { type: archive, inlcude: [a] }", "inlcude"),
+            (
+                "default: { type: archive }\nplatforms:\n  linux/amd64: { type: archive, excludes: [a] }",
+                "excludes",
+            ),
+            (
+                "default: { type: archive }\nplatforms:\n  linux/amd64: { type: archive, inlcude: [a] }",
+                "inlcude",
+            ),
+            ("type: binary\nname: tool\ninclude: [a]", "include"),
+        ];
+        for (yaml, key) in cases {
+            let error = serde_yaml_ng::from_str::<AssetTypeConfig>(yaml)
+                .expect_err(&format!("must be refused: {yaml}"))
+                .to_string();
+            assert!(error.contains(key), "message must name `{key}`: {error}");
+        }
     }
 
     // ── issue #86: the flat form is a typo, not a spelling ──────────────
@@ -329,11 +390,9 @@ windows/amd64:
 
     #[test]
     fn a_uniform_type_carrying_per_platform_keys_is_refused() {
-        // The flat form's mirror image, and the shape the first fix missed:
-        // `type:` wins the dispatch, `UniformAssetType` is `#[serde(tag =
-        // "type")]` with no `deny_unknown_fields` to give it, and the sibling
-        // `platforms:` map was swallowed exactly like the flat form's stray
-        // key — same silent drop, same wrong bundle, one key different.
+        // The flat form's mirror image: `type:` wins the dispatch, and the
+        // sibling `platforms:` map must be refused with the friendly message
+        // rather than serde's bare unknown-field one.
         for yaml in [
             r#"
 type: archive
