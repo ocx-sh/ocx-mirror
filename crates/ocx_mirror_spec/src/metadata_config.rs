@@ -84,13 +84,13 @@ impl MetadataConfig {
 
     /// Rejects a `bin_scan` whose metadata gives the scan nowhere to look.
     ///
-    /// The scan reads directories *below* `${installPath}`, so a metadata file
-    /// whose interface-visible `Path` vars are all bare `${installPath}` — the
-    /// usual `asset_type: binary` shape, one executable at the content root —
-    /// yields zero scan targets, and `auto` then bakes `binaries: []`: a
-    /// positive published claim that the package exposes no executables. That
-    /// is wrong metadata reaching a real registry silently, so it fails the
-    /// spec load instead.
+    /// The scan reads `${installPath}` itself (its immediate files) or a
+    /// directory below it, so a metadata file with no interface-visible `Path`
+    /// var of that shape — none at all, or only modifier-bearing ones such as
+    /// `${installPath:native}` — yields zero scan targets, and `auto` then
+    /// bakes `binaries: []`: a positive published claim that the package
+    /// exposes no executables. That is wrong metadata reaching a real registry
+    /// silently, so it fails the spec load instead.
     ///
     /// Every file the config can select is checked, not just `default`: a
     /// per-platform override with no scan target publishes the empty claim on
@@ -126,8 +126,8 @@ impl MetadataConfig {
                 };
                 errors.push(format!(
                     "{label}: bin_scan is enabled but {} declares no interface-visible \
-                     ${{installPath}}/<dir> PATH entry — {consequence}. \
-                     Point a PATH entry at a subdirectory, or set bin_scan: off and list binaries by hand.",
+                     PATH entry of the form ${{installPath}} or ${{installPath}}/<dir> — {consequence}. \
+                     Point a PATH entry at the package root or a subdirectory, or set bin_scan: off and list binaries by hand.",
                     path.display()
                 ));
             }
@@ -138,7 +138,8 @@ impl MetadataConfig {
 /// Whether a bin-scan of this metadata would have any directory to read.
 ///
 /// ponytail: mirrors the scan-scope rule in ocx's `bin_scan::collect_candidates`
-/// (interface visibility + an `${installPath}/<dir>`-shaped `Path` var) rather
+/// (interface visibility + an `${installPath}` or `${installPath}/<dir>`-shaped
+/// `Path` var, the bare token being the content root itself) rather
 /// than calling it, because that function needs an extracted tree and this runs
 /// at spec load. Six lines against a stable ADR-pinned rule; if the rule grows a
 /// third condition, ocx should export the predicate and this should call it.
@@ -253,16 +254,25 @@ platforms:
         }
     }
 
-    /// The footgun this gate exists for: the scan reads directories *below*
-    /// `${installPath}`, so a bare `${installPath}` PATH entry — an
-    /// `asset_type: binary` mirror's usual shape — gives it nothing to read and
-    /// `auto` bakes `binaries: []`, a positive claim that the package exposes
-    /// no executables. Measured against ocx before this gate existed; it must
-    /// fail the load, not reach a registry.
+    /// A bare `${installPath}` PATH entry — an `asset_type: binary` mirror's
+    /// usual shape — is the content root itself, which the scan reads
+    /// (non-recursively) since ocx 9cccb570. It must load.
     #[test]
-    fn a_bare_install_path_var_is_rejected_when_the_scan_is_on() {
+    fn a_bare_install_path_var_is_accepted_when_the_scan_is_on() {
         let dir = tempfile::TempDir::new().unwrap();
         write_metadata(dir.path(), "metadata.json", "${installPath}");
+
+        assert!(scan_errors(dir.path(), &config("metadata.json", &[])).is_empty());
+    }
+
+    /// The footgun this gate exists for: a modifier-bearing `${installPath:native}`
+    /// is not the raw shape the scan classifies, so it gives the scan nothing to
+    /// read and `auto` bakes `binaries: []`, a positive claim that the package
+    /// exposes no executables. It must fail the load, not reach a registry.
+    #[test]
+    fn a_modifier_bearing_install_path_var_is_rejected_when_the_scan_is_on() {
+        let dir = tempfile::TempDir::new().unwrap();
+        write_metadata(dir.path(), "metadata.json", "${installPath:native}");
 
         let errors = scan_errors(dir.path(), &config("metadata.json", &[]));
         assert_eq!(errors.len(), 1, "got: {errors:?}");
@@ -271,6 +281,21 @@ platforms:
             "the error must name the file and the claim it would publish: {}",
             errors[0],
         );
+    }
+
+    /// A spec with no PATH entry at all has no scan target either.
+    #[test]
+    fn metadata_without_a_path_entry_is_rejected_when_the_scan_is_on() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            r#"{"type":"bundle","version":1,"env":[]}"#,
+        )
+        .unwrap();
+
+        let errors = scan_errors(dir.path(), &config("metadata.json", &[]));
+        assert_eq!(errors.len(), 1, "got: {errors:?}");
+        assert!(errors[0].contains("metadata.json"), "got: {}", errors[0]);
     }
 
     /// The sibling that must keep loading — `${installPath}/bin` is the shape
@@ -290,7 +315,7 @@ platforms:
     fn a_per_platform_override_without_a_scan_target_is_rejected() {
         let dir = tempfile::TempDir::new().unwrap();
         write_metadata(dir.path(), "metadata.json", "${installPath}/bin");
-        write_metadata(dir.path(), "metadata-windows.json", "${installPath}");
+        write_metadata(dir.path(), "metadata-windows.json", "${installPath:native}");
 
         let errors = scan_errors(
             dir.path(),
@@ -313,7 +338,7 @@ platforms:
     #[test]
     fn the_declared_list_carve_out_is_auto_only() {
         let dir = tempfile::TempDir::new().unwrap();
-        write_declared_metadata(dir.path(), "metadata.json", "${installPath}");
+        write_declared_metadata(dir.path(), "metadata.json", "${installPath:native}");
         let config = config("metadata.json", &[]);
 
         assert!(

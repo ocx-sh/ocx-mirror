@@ -316,6 +316,10 @@ async fn a_scan_target_missing_from_the_archive_fails_instead_of_claiming_nothin
             "{label}: the failure must say the scan came up empty: {rendered}",
         );
         assert!(
+            rendered.contains("newer than 0.6.6"),
+            "{label}: and must name the ocx version a bare ${{installPath}} scan needs: {rendered}",
+        );
+        assert!(
             !task_dir.join("metadata.json").exists(),
             "{label}: and must not leave the sidecar under the name CI and resume read",
         );
