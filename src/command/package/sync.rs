@@ -193,6 +193,7 @@ impl Sync {
                     .unwrap_or(crate::spec::AssetType::Archive {
                         strip_components: None,
                         include: Vec::new(),
+                        exclude: Vec::new(),
                     });
 
                 tasks.push(MirrorTask {

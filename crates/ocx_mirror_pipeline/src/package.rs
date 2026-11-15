@@ -28,15 +28,16 @@ pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetTy
         AssetType::Archive {
             strip_components,
             include,
+            exclude,
         } => {
             let options = strip_components.map(|sc| ExtractOptions {
                 strip_components: sc as usize,
                 ..Default::default()
             });
             Archive::extract_with_options(asset_path, content_dir, options).await?;
-            if !include.is_empty() {
-                let (dir, include) = (content_dir.to_path_buf(), include.clone());
-                tokio::task::spawn_blocking(move || filter_members(&dir, &include)).await??;
+            if !include.is_empty() || !exclude.is_empty() {
+                let (dir, include, exclude) = (content_dir.to_path_buf(), include.clone(), exclude.clone());
+                tokio::task::spawn_blocking(move || filter_members(&dir, &include, &exclude)).await??;
             }
         }
         AssetType::Binary { name } => {
@@ -46,65 +47,98 @@ pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetTy
     Ok(())
 }
 
-/// Keep only the files of `dir` matching an `include` glob; drop the rest.
+/// Keep the files of `dir` that `include`/`exclude` select; drop the rest.
 ///
 /// Runs after extraction, so patterns see paths already stripped by
-/// `strip_components`, relative to `dir` with `/` separators. A pattern that
-/// matches no file is an error: an upstream rename must red the version rather
-/// than publish an empty or partial bundle. Directories left empty are pruned;
-/// those holding a kept file stay.
+/// `strip_components`, relative to `dir` with `/` separators. A file is kept
+/// iff `package_selected`: some include matches (or none is given) and no
+/// exclude does. An `include` matching no file is an error, so an upstream
+/// rename reds the version instead of publishing a partial bundle; an unmatched
+/// `exclude` is silent. A filter leaving no file at all is an error. Directories
+/// left empty are pruned.
 ///
-/// ponytail: allow-list only, no `exclude:`; add it when a real mirror needs it.
-fn filter_members(dir: &Path, include: &[String]) -> Result<()> {
-    let globs = include
-        .iter()
-        .map(|p| ocx_mirror_spec::glob::Glob::compile(p).map_err(anyhow::Error::from))
-        .collect::<Result<Vec<_>>>()?;
-    let mut used = vec![false; globs.len()];
+/// ponytail: files only. A symlink is matched as a file by its own path and
+/// never followed. Globs cross `/` and match files, so a directory is `bin/*`.
+fn filter_members(dir: &Path, include: &[String], exclude: &[String]) -> Result<()> {
+    use ocx_mirror_spec::glob::{Glob, package_selected};
+
+    let compile = |patterns: &[String]| {
+        patterns
+            .iter()
+            .map(|pattern| Glob::compile(pattern).map_err(anyhow::Error::from))
+            .collect::<Result<Vec<_>>>()
+    };
+    let (include_globs, exclude_globs) = (compile(include)?, compile(exclude)?);
+    let mut used = vec![false; include_globs.len()];
+
+    struct Filter<'a> {
+        include: &'a [Glob],
+        exclude: &'a [Glob],
+    }
 
     // Returns whether `current` still holds anything after filtering.
-    fn walk(root: &Path, current: &Path, globs: &[ocx_mirror_spec::glob::Glob], used: &mut [bool]) -> Result<bool> {
+    fn walk(root: &Path, current: &Path, filter: &Filter<'_>, used: &mut [bool]) -> Result<bool> {
         let mut kept = false;
-        for entry in std::fs::read_dir(current)? {
-            let entry = entry?;
+        let entries = std::fs::read_dir(current)
+            .with_context(|| format!("failed to list {} while filtering archive members", current.display()))?;
+        for entry in entries {
+            let entry =
+                entry.with_context(|| format!("failed to read an entry of {} while filtering", current.display()))?;
             let path = entry.path();
-            if entry.file_type()?.is_dir() {
-                if walk(root, &path, globs, used)? {
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed to stat {} while filtering", path.display()))?;
+            if file_type.is_dir() {
+                if walk(root, &path, filter, used)? {
                     kept = true;
                 } else {
-                    std::fs::remove_dir(&path)?;
+                    std::fs::remove_dir(&path)
+                        .with_context(|| format!("failed to prune empty directory {}", path.display()))?;
                 }
                 continue;
             }
-            let rel = path.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
-            let mut matched = false;
-            for (i, glob) in globs.iter().enumerate() {
-                if glob.matches(&rel) {
-                    used[i] = true;
-                    matched = true;
-                }
+            let rel = path
+                .strip_prefix(root)
+                .with_context(|| format!("{} is not under {}", path.display(), root.display()))?
+                .to_string_lossy()
+                .replace('\\', "/");
+            for (glob, used) in filter.include.iter().zip(used.iter_mut()) {
+                *used |= glob.matches(&rel);
             }
-            if matched {
+            if package_selected(&rel, filter.include, filter.exclude) {
                 kept = true;
             } else {
-                std::fs::remove_file(&path)?;
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("failed to drop filtered-out member {}", path.display()))?;
             }
         }
         Ok(kept)
     }
 
-    walk(dir, dir, &globs, &mut used)?;
+    let kept = walk(
+        dir,
+        dir,
+        &Filter {
+            include: &include_globs,
+            exclude: &exclude_globs,
+        },
+        &mut used,
+    )?;
     let unmatched: Vec<&str> = include
         .iter()
         .zip(&used)
         .filter(|(_, used)| !**used)
-        .map(|(p, _)| p.as_str())
+        .map(|(pattern, _)| pattern.as_str())
         .collect();
     if !unmatched.is_empty() {
         anyhow::bail!(
-            "asset_type include: pattern(s) matched no archive member (after strip_components): {}",
+            "asset_type include: pattern(s) matched no archive member (after strip_components): {}; \
+             `*` crosses `/` and patterns match files only, so a directory is written `bin/*`, not `bin` or `bin/`",
             unmatched.join(", ")
         );
+    }
+    if !kept {
+        anyhow::bail!("asset_type include/exclude left no file in the archive (after strip_components)");
     }
     Ok(())
 }
@@ -675,6 +709,10 @@ mod tests {
         out
     }
 
+    fn strings(patterns: &[&str]) -> Vec<String> {
+        patterns.iter().map(|pattern| (*pattern).to_string()).collect()
+    }
+
     #[test]
     fn filter_keeps_matches_and_prunes_empty_dirs() {
         let dir = tree(&[
@@ -687,12 +725,8 @@ mod tests {
         ]);
         filter_members(
             dir.path(),
-            &[
-                "coreutils.exe".into(),
-                "LICENSE".into(),
-                "README*".into(),
-                "sub/*/LICENSE".into(),
-            ],
+            &strings(&["coreutils.exe", "LICENSE", "README*", "sub/*/LICENSE"]),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -705,8 +739,54 @@ mod tests {
     #[test]
     fn filter_errors_on_a_pattern_matching_nothing() {
         let dir = tree(&["ls.exe"]);
-        let error = filter_members(dir.path(), &["coreutils.exe".into()]).unwrap_err();
-        assert!(error.to_string().contains("coreutils.exe"), "{error}");
+        let error = filter_members(dir.path(), &strings(&["coreutils.exe"]), &[]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("coreutils.exe"), "{message}");
+        assert!(
+            message.contains("bin/*"),
+            "the message must carry the directory hint: {message}"
+        );
+    }
+
+    #[test]
+    fn filter_exclude_vetoes_include() {
+        let dir = tree(&["bin/tool", "bin/dbg", "LICENSE"]);
+        filter_members(dir.path(), &strings(&["bin/*", "LICENSE"]), &strings(&["bin/dbg"])).unwrap();
+        assert_eq!(listing(dir.path()), ["LICENSE", "bin/tool"]);
+    }
+
+    #[test]
+    fn filter_exclude_only_keeps_the_rest() {
+        let dir = tree(&["bin/tool", "share/doc/README", "LICENSE"]);
+        filter_members(dir.path(), &[], &strings(&["share/*"])).unwrap();
+        assert_eq!(listing(dir.path()), ["LICENSE", "bin/tool"]);
+        assert!(!dir.path().join("share").exists(), "an emptied directory is pruned");
+    }
+
+    #[test]
+    fn filter_unmatched_exclude_is_not_an_error() {
+        let dir = tree(&["a", "b"]);
+        filter_members(dir.path(), &[], &strings(&["nothing/*"])).unwrap();
+        assert_eq!(listing(dir.path()), ["a", "b"]);
+    }
+
+    #[test]
+    fn filter_include_vetoed_everywhere_reports_no_file_left() {
+        let dir = tree(&["a", "b"]);
+        let error = filter_members(dir.path(), &strings(&["a"]), &strings(&["a"])).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("left no file"), "{message}");
+        assert!(
+            !message.contains("matched no archive member"),
+            "a vetoed include did match; it must not be reported as unmatched: {message}"
+        );
+    }
+
+    #[test]
+    fn filter_errors_when_nothing_is_left() {
+        let dir = tree(&["a", "b"]);
+        let error = filter_members(dir.path(), &[], &strings(&["*"])).unwrap_err();
+        assert!(error.to_string().contains("left no file"), "{error}");
     }
 
     /// Patterns see the post-strip layout: the archive's top directory is gone.
@@ -717,23 +797,19 @@ mod tests {
         std::fs::create_dir_all(src.join("top")).unwrap();
         std::fs::write(src.join("top/coreutils.exe"), b"x").unwrap();
         std::fs::write(src.join("top/ls.exe"), b"x").unwrap();
-        let tar = dir.path().join("a.tar");
-        let status = std::process::Command::new("tar")
-            .args(["-cf"])
-            .arg(&tar)
-            .arg("-C")
-            .arg(&src)
-            .arg("top")
-            .status()
+        let archive = dir.path().join("a.tar.xz");
+        ocx_package::bundle::BundleBuilder::from_path(&src)
+            .create(&archive)
+            .await
             .unwrap();
-        assert!(status.success());
         let content = dir.path().join("content");
         std::fs::create_dir(&content).unwrap();
         let asset_type = AssetType::Archive {
             strip_components: Some(1),
-            include: vec!["coreutils.exe".into()],
+            include: strings(&["coreutils.exe"]),
+            exclude: Vec::new(),
         };
-        extract(&tar, &content, &asset_type, "a.tar").await.unwrap();
+        extract(&archive, &content, &asset_type, "a.tar.xz").await.unwrap();
         assert_eq!(listing(&content), ["coreutils.exe"]);
     }
 

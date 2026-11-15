@@ -694,10 +694,23 @@ fn a_real_platform_key_in_the_nested_strip_components_map_is_accepted() {
 }
 
 #[test]
-fn asset_type_include_rejects_unsupported_glob() {
-    let asset_type: AssetTypeConfig =
-        serde_yaml_ng::from_str("type: archive\ninclude: [\"a?\", \"\", \"ok*\"]").unwrap();
+fn asset_type_filters_reject_unsupported_glob() {
+    let asset_type: AssetTypeConfig = serde_yaml_ng::from_str(
+        "default: { type: archive, include: [\"a?\", \"ok*\"], exclude: [\"fine\", \"b?\"] }\n\
+         platforms:\n  windows/amd64: { type: archive, include: [\"\"] }",
+    )
+    .unwrap();
     let mut errors = Vec::new();
-    validate::validate_include_patterns("asset_type", asset_type.include_patterns(), &mut errors);
-    assert_eq!(errors.len(), 2, "{errors:?}");
+    validate::validate_member_filters("asset_type", asset_type.filter_patterns(), &mut errors);
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    for label in [
+        "asset_type.default.include[0]: ",
+        "asset_type.default.exclude[1]: ",
+        "asset_type.platforms.windows/amd64.include[0]: pattern must not be blank",
+    ] {
+        assert!(
+            errors.iter().any(|error| error.contains(label)),
+            "{label} missing: {errors:?}"
+        );
+    }
 }
