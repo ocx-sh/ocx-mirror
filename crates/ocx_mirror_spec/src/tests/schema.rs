@@ -335,7 +335,7 @@ asset_type:
 
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
     match spec.asset_type.as_ref().unwrap().resolve("linux/amd64") {
-        asset_type::AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+        asset_type::AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(1)),
         _ => panic!("expected Archive"),
     }
 }
@@ -366,11 +366,11 @@ asset_type:
     let spec: MirrorSpec = serde_yaml_ng::from_str(yaml).unwrap();
     let at = spec.asset_type.as_ref().unwrap();
     match at.resolve("linux/amd64") {
-        asset_type::AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+        asset_type::AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(1)),
         _ => panic!("expected Archive"),
     }
     match at.resolve("windows/amd64") {
-        asset_type::AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(0)),
+        asset_type::AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(0)),
         _ => panic!("expected Archive"),
     }
 }
@@ -691,4 +691,13 @@ fn a_real_platform_key_in_the_nested_strip_components_map_is_accepted() {
         !errors.iter().any(|error| error.contains("strip_components")),
         "a platform key must pass: {errors:?}"
     );
+}
+
+#[test]
+fn asset_type_include_rejects_unsupported_glob() {
+    let asset_type: AssetTypeConfig =
+        serde_yaml_ng::from_str("type: archive\ninclude: [\"a?\", \"\", \"ok*\"]").unwrap();
+    let mut errors = Vec::new();
+    validate::validate_include_patterns("asset_type", asset_type.include_patterns(), &mut errors);
+    assert_eq!(errors.len(), 2, "{errors:?}");
 }

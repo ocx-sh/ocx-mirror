@@ -562,12 +562,31 @@ asset_type:
       name: lychee
 ```
 
+**Subset of an archive** — `include:` is an allow-list of member globs for an `archive` entry, so a mirror can publish part of what upstream ships. It composes with the per-platform form; the case it exists for is `uutils/coreutils`, whose Windows zip carries `coreutils.exe` plus ~90 standalone per-utility `.exe` builds:
+
+```yaml
+asset_type:
+  default:
+    type: archive
+    strip_components: 1
+  platforms:
+    windows/amd64:
+      type: archive
+      strip_components: 1
+      include: ["coreutils.exe", "LICENSE", "README*"]
+```
+
+Patterns match member paths **after** `strip_components`, relative to the package root, in full. Grammar is the registry-glob one: literal characters and `*`, where `*` also crosses `/` (`**`, `?`, `{` are rejected). Files that match nothing are dropped before `ocx package create`; directories left empty are removed, directories holding a kept file stay. A pattern that matches no file in a version **fails that version** (an upstream rename reds instead of publishing an empty or partial bundle). There is no `exclude:`.
+
+`pipeline patch` cannot see `include:` — it re-references published layers without downloading them and the published metadata does not record it — so a changed `include:` is not refused the way a `strip_components` change is. Re-mirror the affected versions (delete their tags) after changing it.
+
 **Fields:**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | Yes* | `archive` or `binary`. *Required in the uniform form and inside `default:`/each `platforms:` entry. |
 | `strip_components` | integer or object | No | `archive` only. Leading path components to strip. Takes its own per-platform form: `strip_components: 1`, or `{default: 1, platforms: {windows/amd64: 0}}`. |
+| `include` | list of strings | No | `archive` only. Allow-list of member globs matched after `strip_components`; empty or absent keeps every member. Every pattern must match at least one file. |
 | `name` | string | Yes | `binary` only. The filename the executable takes in the package. |
 | `default` | object | Yes* | The fallback asset type. *Required in the per-platform form. |
 | `platforms` | object | No | Per-platform overrides, keyed exactly as [`assets`](#assets) is. |
@@ -576,6 +595,7 @@ asset_type:
 
 - `deny_unknown_fields` on the per-platform form, and on `strip_components`'s. The override map goes **under `platforms:`** — writing the platform keys as siblings of `default:` is a spec-load failure (exit 65), not a silently-ignored block. It used to be the latter, and the mirror published the `default:` entry on every platform without a word.
 - `platforms:` keys must parse as platform keys, by the same grammar [`assets`](#assets) uses. A key that is not a platform matches nothing and would fall through to `default:`, so it is rejected (exit 65) rather than left to be discovered in a tarball.
+- `include:` entries must be non-blank and use only literal characters and `*` (exit 65 otherwise).
 - The `type:` value is checked in every position, `default:` and each `platforms:` entry included.
 
 ## `bin_scan` {#bin-scan}

@@ -787,7 +787,10 @@ fn build_tasks_from_plan(
             .asset_type
             .as_ref()
             .map(|at| at.resolve(&asset.platform))
-            .unwrap_or(spec::AssetType::Archive { strip_components: None });
+            .unwrap_or(spec::AssetType::Archive {
+                strip_components: None,
+                include: Vec::new(),
+            });
 
         tasks.push(MirrorTask {
             version: entry.source_version.clone(),
@@ -873,7 +876,10 @@ async fn build_tasks_for_version(
                             .asset_type
                             .as_ref()
                             .map(|at| at.resolve(&platform_str))
-                            .unwrap_or(spec::AssetType::Archive { strip_components: None });
+                            .unwrap_or(spec::AssetType::Archive {
+                                strip_components: None,
+                                include: Vec::new(),
+                            });
 
                         tasks.push(MirrorTask {
                             version: version_info.version.clone(),
