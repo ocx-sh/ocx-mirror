@@ -70,7 +70,7 @@ jobs:
         # and release.yml's publish.
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: "0.6.6"
+          version: "0.6.8"
       # Read-only, on every caller: a build here never writes the shared
       # cache (the upload grant is `verify-basic.yml`'s trusted lane alone, C3), and
       # the one action that reads the workspace status is `no-remote-cache`
@@ -164,7 +164,7 @@ jobs:
         # runs no project tool.
         uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
         with:
-          version: "0.6.6"
+          version: "0.6.8"
           project: ""
       - name: Install Rosetta
         # An arm64 runner image may ship without the translator. Idempotent
