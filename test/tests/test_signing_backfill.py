@@ -40,6 +40,7 @@ from test_signing import (
     SIGSTORE_ISSUER,
     _manifest,
     _publish,
+    _sign_with_the_key,
     _signature_referrers,
     _verify,
     # Re-exported, not merely referenced: pytest resolves a fixture by name in
@@ -176,9 +177,9 @@ def test_a_second_run_signs_nothing(
 ) -> None:
     """Convergence: the re-run skips every subject and exits 0 (S-056).
 
-    ``ocx package sign`` appends by design, so nothing downstream would stop a
-    second referrer landing — the skip is this command's own, and the referrer
-    count is the only thing that can prove it happened.
+    An ocx that appends on a re-sign would land a second referrer, so the skip
+    has to be this command's own: the ``already_signed`` reason proves it was,
+    and the referrer count is what it protects.
     """
     _, index_digest, platform_digest = published_unsigned
     _backfill(signing_mirror, signing_spec)
@@ -209,11 +210,14 @@ def test_force_signs_an_already_signed_subject(
     """``--force`` is how a second identity joins an existing signature (S-056).
 
     Paired with ``test_a_second_run_signs_nothing`` on purpose: together they
-    show the skip is a decision and not an inability to sign twice.
+    show the skip is a decision and not an inability to sign twice. The forced
+    pass signs with the key, because a re-sign by the identity already on the
+    subject adds a referrer under some ocx releases and none under others.
     """
     _, index_digest, platform_digest = published_unsigned
     _backfill(signing_mirror, signing_spec)
 
+    _sign_with_the_key(signing_mirror, signing_spec)
     forced = _backfill(signing_mirror, signing_spec, "--force")
 
     assert forced["summary"]["succeeded"] == 2, forced["items"]
@@ -247,7 +251,8 @@ def test_identity_narrowing_reads_the_signer_off_the_live_signature(
     The three verdicts, in order: the pair that signed it skips, one wrong half
     does not, and a foreign identity re-signs. The two dry runs are free —
     ``--dry-run`` reports the verdict and issues no child — so only the last
-    pass costs a Fulcio and Rekor round trip.
+    pass signs, and it signs with the key: the flag only narrows the filter,
+    so the rotated signer has to be a real second one.
     """
     _, index_digest, platform_digest = published_unsigned
     _backfill(signing_mirror, signing_spec)
@@ -280,6 +285,7 @@ def test_identity_narrowing_reads_the_signer_off_the_live_signature(
     # The rotation case, for real: somebody else's signature does not count as
     # this signer's, so every subject is signed again and the existing
     # signature survives beside the new one.
+    _sign_with_the_key(signing_mirror, signing_spec)
     rotated = _backfill(signing_mirror, signing_spec, "--identity", "rotated@example.com")
     assert rotated["summary"]["succeeded"] == rotated["summary"]["total"] == 2, rotated["items"]
     assert rotated["summary"]["skipped"] == 0
@@ -301,17 +307,18 @@ def test_repeated_runs_stay_within_the_candidate_budget(
     zot_registry: str,
     unique_mirror_repo: str,
 ) -> None:
-    """Three backfills and one ``--force`` leave two candidates, and verify passes.
+    """Three backfills and one forced second signer leave two candidates, and verify passes.
 
     ocx's verifier caps signature candidates at eight, so an implementation
     that re-signed on every pass would cross the ceiling on a repository swept
     nightly and start dropping candidates silently. Two is the count a
-    deliberate second signing produces; anything above it is the skip failing.
+    deliberate second signer produces; anything above it is the skip failing.
     """
     version, index_digest, platform_digest = published_unsigned
 
     for _ in range(3):
         _backfill(signing_mirror, signing_spec)
+    _sign_with_the_key(signing_mirror, signing_spec)
     _backfill(signing_mirror, signing_spec, "--force")
 
     for digest in (index_digest, platform_digest):
