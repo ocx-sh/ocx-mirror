@@ -136,6 +136,24 @@ def _signature_referrers(registry: str, repository: str, digest: str) -> list[di
     return [m for m in index.get("manifests", []) if m.get("artifactType") == SIGSTORE_BUNDLE_V03]
 
 
+def _sign_with_the_key(mirror: MirrorRunner, spec: Path) -> None:
+    """Rewrite ``spec``'s ``sign:`` block to key mode: a signer other than the keyless one.
+
+    The passphrase is an ``env://`` reference, so it reaches ``ocx`` through
+    ``OCX_KEY_PASSWORD`` and never through argv.
+    """
+    head, marker, _ = spec.read_text().partition("sign:")
+    assert marker, "the signing fixture no longer carries a `sign:` block to rewrite"
+    spec.write_text(
+        head
+        + "sign:\n"
+        + "  key:\n"
+        + f"    ref: file://{COSIGN_KEY}\n"
+        + "    passphrase: env://MIRROR_KEY_PASSPHRASE\n"
+    )
+    mirror.env["MIRROR_KEY_PASSPHRASE"] = KEY_PASSWORD
+
+
 def _registry_tags(registry: str, repository: str) -> set[str]:
     """Tags the registry actually carries for ``repository``."""
     try:
@@ -429,16 +447,7 @@ def test_key_mode_signs_with_the_named_key(
     matchers, so a key-mode signature that had silently fallen through to
     keyless would fail here rather than pass under a looser check.
     """
-    spec_text = signing_spec.read_text()
-    head, _, _ = spec_text.partition("sign:")
-    signing_spec.write_text(
-        head
-        + "sign:\n"
-        + "  key:\n"
-        + f"    ref: file://{COSIGN_KEY}\n"
-        + "    passphrase: env://MIRROR_KEY_PASSPHRASE\n"
-    )
-    signing_mirror.env["MIRROR_KEY_PASSPHRASE"] = KEY_PASSWORD
+    _sign_with_the_key(signing_mirror, signing_spec)
 
     version, _ = _publish(signing_mirror, signing_spec, tmp_path / "work")
 
@@ -570,20 +579,14 @@ def test_a_second_push_adds_one_signature_not_one_per_tag(
     unique_mirror_repo: str,
     tmp_path: Path,
 ) -> None:
-    """A second push files one more referrer, not one per cascade tag.
+    """A second signer's push files one more referrer, not one per cascade tag.
 
-    The guarantee is one referrer per distinct index *per run*. `sign --tags-file`
-    resolves tags to digests and signs each subject once, so the five cascade
-    tags of a version — all resolving to this one index digest — cost one
-    referrer, not five.
-
-    Two, not one, and that is deliberate: `sign` appends. `ocx_sign`'s
-    `pipeline.rs` asserts verbatim that a pre-existing signature survives a
-    second run, because multi-signature — a second identity joining the first —
-    depends on it. Skipping an already-signed subject would break that tested
-    behaviour, so idempotence is not the contract and must not be asserted here.
-    What the fix bought is the slope: against ocx's cap of 8 candidates, the
-    ceiling moves from the second republish to the ninth.
+    `sign --tags-file` resolves tags to digests and signs each subject once, so
+    a version's cascade tags, all at this one index digest, cost one referrer
+    per signer. The second push signs with the key: whether a re-sign by the
+    *same* identity appends or is skipped is ocx's decision and differs between
+    ocx releases, while a second signer joining the first is two referrers
+    under every one of them.
 
     The count is the assertion, not non-emptiness: non-emptiness is what let
     the five-per-run behaviour go unnoticed in the first place.
@@ -595,6 +598,7 @@ def test_a_second_push_adds_one_signature_not_one_per_tag(
     first = len(_signature_referrers(zot_registry, unique_mirror_repo, index_digest))
 
     # Only the push leg again — same bundles, same JUnit, same index.
+    _sign_with_the_key(signing_mirror, signing_spec)
     signing_mirror.run(
         "package", "pipeline", "push",
         "--spec", str(signing_spec),
@@ -605,7 +609,7 @@ def test_a_second_push_adds_one_signature_not_one_per_tag(
 
     second = len(_signature_referrers(zot_registry, unique_mirror_repo, index_digest))
     assert (first, second) == (1, 2), (
-        f"the index carries {first} signature(s) after one run and {second} after two —"
+        f"the index carries {first} signature(s) after one signer and {second} after two —"
         " the sweep is signing once per cascade tag instead of once per subject digest"
     )
 
