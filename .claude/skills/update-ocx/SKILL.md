@@ -22,7 +22,8 @@ A bump moves one of them. Never assume it moved both.
 | **Spawned CLI** — `ocx package push/announce/description` | the `ocx.sh/ocx/cli` pin in `ocx.lock` moves, and `OCX_CONTAINER_CLI_TAG` | what the child process does, and what generated CI bakes in |
 
 Upstream `feat(...)!:` commits are almost always surface 2. They change nothing
-for the mirror until the CLI pin moves. Say which surface each finding is on.
+for the mirror until the CLI pin moves — which Phase 7 does on every bump, as
+its own commit. Say which surface, and so which commit, each finding is on.
 
 **And a third position the table hides: the mirror is also a *child*.** It runs
 under `ocx exec` / `ocx run`, so a change to what the *parent* ocx puts in a
@@ -200,14 +201,45 @@ for the same defect, and can it now be closed?** Two outcomes worth reporting:
 
 Every reference is a full link — `[ocx-sh/ocx#488](https://github.com/ocx-sh/ocx/issues/488)`.
 
-## Phase 7 — floor decision
+## Phase 7 — raise the CLI pin (every bump)
 
-Does the bump raise the **spawned-CLI** floor (the mirror's argv needs a
-subcommand or flag only the new ocx has)? If yes, README.md § "Bumping ocx"
-lists the four places the pin moves together, plus the golden-fixture
-regeneration. If no, leave `ocx.lock` alone — a linked-crate bump does not
-require a CLI bump, and coupling them for no reason strands the mirror on an
-unreleased ocx.
+Not a decision: every bump moves the **spawned-CLI** pin to the newest ocx
+*release*, whether or not the mirror's argv needs it. Left alone, the pin
+drifts — it sat five releases behind while the pointer tracked `main`, so
+generated workflows ran an `ocx` without fixes the linked crates already had.
+
+Run the command block in README.md § "Bumping ocx" (it resolves the newest
+release with `gh release view`, rewrites `ocx.toml`, `OCX_CONTAINER_CLI_TAG`
+and every `setup-ocx` `version:` step, re-locks, and regenerates the goldens).
+Then check three things:
+
+- the golden test went **red before** `UPDATE_GOLDEN=1` and green after — a
+  regeneration that was never red proves the pin did not move;
+- `git diff --stat -- tests/golden` is one `version:` line per `setup-ocx`
+  step, nothing else;
+- `git diff -- ocx.lock` moved the `ocx.sh/ocx/cli` digests only (plus
+  `declaration_hash` and `generated_at`). Use `ocx lock`, not `ocx update`: a
+  bare update re-resolves every moving tag in the default group, and a scoped
+  `ocx update ocx` refuses the edited `ocx.toml` with exit 65;
+- **`lock_version` did not change.** The README block re-locks with the ocx in
+  the lock's own `generated_by`, not the host's. Bazel reads `ocx.lock` through
+  the ocx that `rules_ocx` bootstraps (`DEFAULT_OCX_VERSION`, 0.6.2 at rules_ocx
+  0.5.0); an ocx from 0.6.6 on writes `lock_version = 4`, which that bootstrap
+  rejects with `unsupported ocx.lock version 4` and every Bazel lane goes red —
+  `cargo` and the goldens stay green, so only `task verify:scoped` shows it.
+  Upstream ocx holds its own lock at v3 the same way. Drop this once a
+  rules_ocx release bootstraps ocx ≥ 0.6.6.
+
+The pin goes to a **release**, never to the pointer: with a provisional
+pointer the newest release is older than the linked crates, and that is the
+correct pin. Already on the newest release → no-op, say so.
+
+Now re-read the surface-2 commits from Phase 1 (`feat(...)!:`, anything under
+`crates/ocx_cli`): they take effect with this commit. A changed argv, exit
+code or report shape the mirror reads is a break here, not in the pointer
+commit. The *floor prose* (`subsystem-mirror.md`, `docs/reference/environment.md`)
+names the minimum ocx, not the pin — touch it only when the mirror starts
+spawning something an older ocx rejects.
 
 **Provisional pointers**: pointing `external/ocx` at an unreleased commit
 breaks downstream CI checkout and must be re-pointed at a release tag before
@@ -231,14 +263,21 @@ Commit the pointer and the lock together:
 chore(deps): bump external/ocx to <short-sha> (<n> commits)
 ```
 
-Consolidation edits and issue closures are **separate commits** — a bump commit
-that also refactors cannot be reverted cleanly.
+The Phase 7 pin is its own commit, after the pointer:
+
+```
+build(deps): pin the spawned ocx CLI to <version>
+```
+
+Consolidation edits and issue closures are **separate commits** too — a bump
+commit that also refactors cannot be reverted cleanly.
 
 ## Report to the owner
 
 Conclusion first, then `## Actions`. The owner needs five lines, not the diff:
 
-- range and size (`<old>..<new>`, n commits, m files);
+- range and size (`<old>..<new>`, n commits, m files), and the CLI pin
+  (`<old> → <new>`, or "already newest");
 - compile verdict and any breaking API the mirror had to absorb;
 - silent behaviour changes that reach the mirror's output;
 - consolidation opportunities found, as file:line;
@@ -260,8 +299,9 @@ Everything else is working notes.
   item the moment its last cross-crate caller goes away — and deletes it
   outright just as readily, which the `^-\s*pub` grep reports identically.
   `cargo check --all-targets` is the only reliable detector.
-- **A `feat(...)!:` in the log is usually not your break.** It is a CLI
-  contract change (surface 2). Read the two-surfaces table before escalating.
+- **A `feat(...)!:` in the log is usually not the pointer commit's break.** It
+  is a CLI contract change (surface 2) and lands with the Phase 7 pin commit.
+  Read the two-surfaces table before escalating.
 - **The bash CWD persists into the submodule.** Every git command targeting
   it is spelled `git -C "$(git rev-parse --show-toplevel)/external/ocx" …` in
   full, never a `cd` into it followed by a bare `git …` — the repo's

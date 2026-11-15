@@ -65,18 +65,40 @@ Checklist when bumping:
   and `external/ocx/.bazelversion`
   (`git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..HEAD -- MODULE.bazel .bazelversion ocx.toml`)
 
-When the bump raises the `ocx` floor (a new subcommand or flag the mirror
-spawns), the pinned `ocx` moves with it, in four places:
+Every bump also moves the pinned `ocx` CLI to the newest ocx **release**, as
+its own commit. The linked crates and the spawned CLI are separate pins: a
+pointer bump alone leaves `task verify` and every generated workflow on the old
+binary.
 
-- `ocx.toml` / `ocx.lock` — `ocx update`, so `task verify` runs the child the
-  code expects
+```sh
+V=$(gh release view --repo ocx-sh/ocx --json tagName --jq .tagName); V=${V#v}
+sed -i -E "s|(ocx\.sh/ocx/cli:)[0-9]+\.[0-9]+\.[0-9]+|\1$V|" ocx.toml
+sed -i -E "s|(OCX_CONTAINER_CLI_TAG: &str = \"v)[0-9]+\.[0-9]+\.[0-9]+|\1$V|" \
+  src/command/package/pipeline/generate/ci/matrix.rs
+sed -i -E "/uses: ocx-sh\/setup-ocx@/,+3 s|(version: ['\"])[0-9]+\.[0-9]+\.[0-9]+|\1$V|" \
+  $(git grep -l 'ocx-sh/setup-ocx@' -- .github)
+G=$(sed -nE 's/^generated_by = "ocx (.*)"/\1/p' ocx.lock)   # the ocx that wrote the lock
+ocx package install "ocx.sh/ocx/cli:$G"
+ocx package exec "ocx.sh/ocx/cli:$G" -- ocx lock   # re-resolves only the changed binding
+cargo test -p ocx_mirror golden                    # must FAIL: the goldens assert the pin
+UPDATE_GOLDEN=1 cargo test -p ocx_mirror golden    # regenerate, then rerun without the variable
+```
+
+- `ocx.toml` / `ocx.lock` — the child `task verify` and the acceptance suite run.
+  Re-lock with the `ocx` named in the lock's own `generated_by`, never the newest:
+  Bazel reads `ocx.lock` through the `ocx` that `rules_ocx` bootstraps (0.6.2 at
+  rules_ocx 0.5.0), which refuses the `lock_version = 4` an `ocx` from 0.6.6 on
+  writes. The `lock_version` line must not appear in the diff
 - `OCX_CONTAINER_CLI_TAG` in `src/command/package/pipeline/generate/ci/matrix.rs`
-  (the `setup-ocx` version every generated workflow bakes in), then regenerate
-  the golden fixtures under `tests/golden/`
-- the `setup-ocx` `version:` steps in `.github/workflows/verify.yml`
-  (acceptance tests, Bazel graph) and `.github/actions/release-ocx/action.yml`
-- the floor prose in `.claude/rules/subsystem-mirror.md` and
-  `docs/reference/environment.md`
+  — the `ocx` every generated workflow's test legs install; the `tests/golden/`
+  diff must be that one `version:` line per `setup-ocx` step and nothing else
+- every `ocx-sh/setup-ocx` `version:` step under `.github/`
+- not reachable from here: `ocx-sh/conventions`' `setup` action carries its own
+  `ocx` version and moves with a conventions release (`task copier:update`)
+
+The floor prose in `.claude/rules/subsystem-mirror.md` and
+`docs/reference/environment.md` names the *minimum* `ocx`, not the pin: it moves
+only when the mirror starts spawning a subcommand or flag an older `ocx` rejects.
 
 To build ahead of an ocx release, point the submodule at the unreleased commit
 (a provisional pointer) and re-point it at the release tag before this
