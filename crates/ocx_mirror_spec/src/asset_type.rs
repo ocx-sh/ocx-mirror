@@ -36,6 +36,18 @@ use serde::Deserialize;
 ///   name: shfmt
 /// ```
 ///
+/// Archive subset — publish only some members (patterns match after
+/// `strip_components`; a pattern matching nothing fails the version):
+/// ```yaml
+/// asset_type:
+///   default: { type: archive, strip_components: 1 }
+///   platforms:
+///     windows/amd64:
+///       type: archive
+///       strip_components: 1
+///       include: ["coreutils.exe", "LICENSE", "README*"]
+/// ```
+///
 /// Per-platform mix — e.g. archive on Linux/macOS, raw binary on Windows:
 /// ```yaml
 /// asset_type:
@@ -149,6 +161,11 @@ pub enum UniformAssetType {
         /// Leading path components to strip from the archive before rebundling.
         #[serde(default)]
         strip_components: Option<super::StripComponentsConfig>,
+        /// Allow-list of member globs (`*` only, crossing `/`), matched against
+        /// paths after `strip_components`; everything else is dropped before
+        /// bundling. Empty keeps every member.
+        #[serde(default)]
+        include: Vec<String>,
     },
     /// The asset is a standalone executable binary.
     Binary {
@@ -161,10 +178,14 @@ pub enum UniformAssetType {
 impl UniformAssetType {
     fn resolve(&self, platform: &str) -> AssetType {
         match self {
-            Self::Archive { strip_components } => {
+            Self::Archive {
+                strip_components,
+                include,
+            } => {
                 let strip = strip_components.as_ref().and_then(|sc| sc.resolve(platform));
                 AssetType::Archive {
                     strip_components: strip,
+                    include: include.clone(),
                 }
             }
             Self::Binary { name } => AssetType::Binary { name: name.clone() },
@@ -199,6 +220,7 @@ impl AssetTypeConfig {
             match uniform {
                 UniformAssetType::Archive {
                     strip_components: Some(super::StripComponentsConfig::PerPlatform(per_platform)),
+                    ..
                 } => per_platform.platforms.keys().collect(),
                 _ => Vec::new(),
             }
@@ -209,6 +231,23 @@ impl AssetTypeConfig {
             Self::PerPlatform(per_platform) => keys_of(&per_platform.default)
                 .into_iter()
                 .chain(per_platform.platforms.values().flat_map(keys_of))
+                .collect(),
+        }
+    }
+
+    /// Every `include:` pattern of every archive entry, for validation.
+    pub fn include_patterns(&self) -> Vec<&String> {
+        fn of(uniform: &UniformAssetType) -> &[String] {
+            match uniform {
+                UniformAssetType::Archive { include, .. } => include,
+                UniformAssetType::Binary { .. } => &[],
+            }
+        }
+        match self {
+            Self::Uniform(uniform) => of(uniform).iter().collect(),
+            Self::PerPlatform(pp) => of(&pp.default)
+                .iter()
+                .chain(pp.platforms.values().flat_map(|u| of(u)))
                 .collect(),
         }
     }
@@ -229,13 +268,40 @@ impl AssetTypeConfig {
 /// Resolved asset type for a specific platform, ready for the pipeline.
 #[derive(Debug, Clone)]
 pub enum AssetType {
-    Archive { strip_components: Option<u8> },
-    Binary { name: String },
+    Archive {
+        strip_components: Option<u8>,
+        include: Vec<String>,
+    },
+    Binary {
+        name: String,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn include_parses_per_platform_and_resolves() {
+        let yaml = r#"
+default: { type: archive, strip_components: 1 }
+platforms:
+  windows/amd64:
+    type: archive
+    strip_components: 1
+    include: ["coreutils.exe", "README*"]
+"#;
+        let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(config.include_patterns().len(), 2);
+        let AssetType::Archive { include, .. } = config.resolve("windows/amd64") else {
+            panic!("archive")
+        };
+        assert_eq!(include, ["coreutils.exe", "README*"]);
+        let AssetType::Archive { include, .. } = config.resolve("linux/amd64") else {
+            panic!("archive")
+        };
+        assert!(include.is_empty());
+    }
 
     // ── issue #86: the flat form is a typo, not a spelling ──────────────
 
@@ -332,7 +398,7 @@ strip_components: 1
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
         match config.resolve("linux/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(1)),
             _ => panic!("expected Archive"),
         }
     }
@@ -348,11 +414,11 @@ strip_components:
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
         match config.resolve("linux/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(1)),
             _ => panic!("expected Archive"),
         }
         match config.resolve("windows/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(0)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(0)),
             _ => panic!("expected Archive"),
         }
     }
@@ -364,7 +430,7 @@ type: archive
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
         match config.resolve("linux/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, None),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, None),
             _ => panic!("expected Archive"),
         }
     }
@@ -395,11 +461,11 @@ platforms:
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
         match config.resolve("linux/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(0)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(0)),
             _ => panic!("expected Archive for linux/amd64"),
         }
         match config.resolve("darwin/arm64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(0)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(0)),
             _ => panic!("expected Archive for darwin/arm64"),
         }
         match config.resolve("windows/amd64") {
@@ -421,7 +487,7 @@ platforms:
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
         match config.resolve("linux/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(1)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(1)),
             _ => panic!("expected Archive for linux/amd64"),
         }
         match config.resolve("darwin/arm64") {
@@ -439,7 +505,7 @@ default:
 "#;
         let config: AssetTypeConfig = serde_yaml_ng::from_str(yaml).unwrap();
         match config.resolve("linux/amd64") {
-            AssetType::Archive { strip_components } => assert_eq!(strip_components, Some(2)),
+            AssetType::Archive { strip_components, .. } => assert_eq!(strip_components, Some(2)),
             _ => panic!("expected Archive"),
         }
     }

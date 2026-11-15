@@ -25,16 +25,86 @@ use ocx_mirror_spec::{AssetType, MetadataConfig};
 /// bare compressed binary.
 pub async fn extract(asset_path: &Path, content_dir: &Path, asset_type: &AssetType, asset_name: &str) -> Result<()> {
     match asset_type {
-        AssetType::Archive { strip_components } => {
+        AssetType::Archive {
+            strip_components,
+            include,
+        } => {
             let options = strip_components.map(|sc| ExtractOptions {
                 strip_components: sc as usize,
                 ..Default::default()
             });
             Archive::extract_with_options(asset_path, content_dir, options).await?;
+            if !include.is_empty() {
+                let (dir, include) = (content_dir.to_path_buf(), include.clone());
+                tokio::task::spawn_blocking(move || filter_members(&dir, &include)).await??;
+            }
         }
         AssetType::Binary { name } => {
             place_binary(asset_path, content_dir, name, asset_name).await?;
         }
+    }
+    Ok(())
+}
+
+/// Keep only the files of `dir` matching an `include` glob; drop the rest.
+///
+/// Runs after extraction, so patterns see paths already stripped by
+/// `strip_components`, relative to `dir` with `/` separators. A pattern that
+/// matches no file is an error: an upstream rename must red the version rather
+/// than publish an empty or partial bundle. Directories left empty are pruned;
+/// those holding a kept file stay.
+///
+/// ponytail: allow-list only, no `exclude:`; add it when a real mirror needs it.
+fn filter_members(dir: &Path, include: &[String]) -> Result<()> {
+    let globs = include
+        .iter()
+        .map(|p| ocx_mirror_spec::glob::Glob::compile(p).map_err(anyhow::Error::from))
+        .collect::<Result<Vec<_>>>()?;
+    let mut used = vec![false; globs.len()];
+
+    // Returns whether `current` still holds anything after filtering.
+    fn walk(root: &Path, current: &Path, globs: &[ocx_mirror_spec::glob::Glob], used: &mut [bool]) -> Result<bool> {
+        let mut kept = false;
+        for entry in std::fs::read_dir(current)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                if walk(root, &path, globs, used)? {
+                    kept = true;
+                } else {
+                    std::fs::remove_dir(&path)?;
+                }
+                continue;
+            }
+            let rel = path.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
+            let mut matched = false;
+            for (i, glob) in globs.iter().enumerate() {
+                if glob.matches(&rel) {
+                    used[i] = true;
+                    matched = true;
+                }
+            }
+            if matched {
+                kept = true;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+        }
+        Ok(kept)
+    }
+
+    walk(dir, dir, &globs, &mut used)?;
+    let unmatched: Vec<&str> = include
+        .iter()
+        .zip(&used)
+        .filter(|(_, used)| !**used)
+        .map(|(p, _)| p.as_str())
+        .collect();
+    if !unmatched.is_empty() {
+        anyhow::bail!(
+            "asset_type include: pattern(s) matched no archive member (after strip_components): {}",
+            unmatched.join(", ")
+        );
     }
     Ok(())
 }
@@ -576,6 +646,95 @@ mod tests {
             0o600,
             "the walk must not descend through a symlinked directory into files outside the content root",
         );
+    }
+
+    fn tree(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        for f in files {
+            let p = dir.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        dir
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        fn rec(root: &Path, d: &Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    rec(root, &p, out);
+                } else {
+                    out.push(p.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        rec(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn filter_keeps_matches_and_prunes_empty_dirs() {
+        let dir = tree(&[
+            "coreutils.exe",
+            "LICENSE",
+            "README.md",
+            "ls.exe",
+            "sub/cat.exe",
+            "sub/keep/LICENSE",
+        ]);
+        filter_members(
+            dir.path(),
+            &[
+                "coreutils.exe".into(),
+                "LICENSE".into(),
+                "README*".into(),
+                "sub/*/LICENSE".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            listing(dir.path()),
+            ["LICENSE", "README.md", "coreutils.exe", "sub/keep/LICENSE"]
+        );
+        assert!(!dir.path().join("sub/cat.exe").exists());
+    }
+
+    #[test]
+    fn filter_errors_on_a_pattern_matching_nothing() {
+        let dir = tree(&["ls.exe"]);
+        let error = filter_members(dir.path(), &["coreutils.exe".into()]).unwrap_err();
+        assert!(error.to_string().contains("coreutils.exe"), "{error}");
+    }
+
+    /// Patterns see the post-strip layout: the archive's top directory is gone.
+    #[tokio::test]
+    async fn include_applies_after_strip_components() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("top")).unwrap();
+        std::fs::write(src.join("top/coreutils.exe"), b"x").unwrap();
+        std::fs::write(src.join("top/ls.exe"), b"x").unwrap();
+        let tar = dir.path().join("a.tar");
+        let status = std::process::Command::new("tar")
+            .args(["-cf"])
+            .arg(&tar)
+            .arg("-C")
+            .arg(&src)
+            .arg("top")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let content = dir.path().join("content");
+        std::fs::create_dir(&content).unwrap();
+        let asset_type = AssetType::Archive {
+            strip_components: Some(1),
+            include: vec!["coreutils.exe".into()],
+        };
+        extract(&tar, &content, &asset_type, "a.tar").await.unwrap();
+        assert_eq!(listing(&content), ["coreutils.exe"]);
     }
 
     /// `content_dir` is exactly the tree `ocx package create` bundles, so it
