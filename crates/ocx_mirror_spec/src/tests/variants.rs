@@ -268,12 +268,15 @@ variants:
 /// is `off` — checking only `self.bin_scan` lets exactly the interesting
 /// case through, and the slim variant then publishes `binaries: []`.
 ///
-/// The default variant in the same spec keeps a bare `${installPath}` and
-/// must stay silent, or the gate is just rejecting the file globally.
+/// The default variant in the same spec carries the same unscannable metadata
+/// and must stay silent, or the gate is just rejecting the file globally.
 #[test]
 fn a_scanning_variant_is_gated_even_when_the_spec_level_mode_is_off() {
     let dir = tempfile::TempDir::new().unwrap();
-    for (file, value) in [("metadata.json", "${installPath}"), ("slim.json", "${installPath}")] {
+    for (file, value) in [
+        ("metadata.json", "${installPath:native}"),
+        ("slim.json", "${installPath:native}"),
+    ] {
         std::fs::write(
             dir.path().join(file),
             format!(
@@ -327,12 +330,12 @@ variants:
 /// perfectly good spec and must keep loading. Without this the gate could
 /// be rejecting on the metadata shape alone and nobody would notice.
 #[test]
-fn a_bare_install_path_var_loads_fine_when_the_scan_is_off() {
+fn an_unscannable_install_path_var_loads_fine_when_the_scan_is_off() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(
         dir.path().join("metadata.json"),
         r#"{"type":"bundle","version":1,"env":[
-               {"key":"PATH","type":"path","required":true,"value":"${installPath}","visibility":"public"}]}"#,
+               {"key":"PATH","type":"path","required":true,"value":"${installPath:native}","visibility":"public"}]}"#,
     )
     .unwrap();
 

@@ -983,7 +983,9 @@ fn reject_empty_scan(metadata: &Metadata, task: &MirrorTask) -> Result<()> {
             "bin_scan for {} {} found no executables — the metadata's ${{installPath}} PATH \
              directories are missing from the extracted archive, or hold nothing executable. \
              Publishing would claim this package exposes no commands. Check the PATH entries \
-             against the archive layout, or set bin_scan: off and list binaries by hand.",
+             against the archive layout, or set bin_scan: off and list binaries by hand. \
+             A bare ${{installPath}} entry (the package root) is scanned only by an `ocx` newer \
+             than 0.6.6.",
             task.normalized_version,
             task.platform,
         );
