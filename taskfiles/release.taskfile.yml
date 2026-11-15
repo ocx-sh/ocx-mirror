@@ -60,6 +60,27 @@ tasks:
       fi
       echo "release: external/ocx pointer $ptr is released in: $(echo "$tags" | cut -d' ' -f1-3)"
 
+  # git-cliff bumps from the newest tag HEAD can reach. A release cut from a release branch leaves its
+  # tag off main, so main recomputes that version: the bump rewrites nothing and the changelog replaces
+  # the shipped section. Runs before any file is touched; a failed lookup refuses too.
+  guard:version-unreleased:
+    desc: The version about to be prepared has no tag on origin (VERSION=x.y.z)
+    silent: true
+    dir: '{{.ROOT_DIR}}'
+    requires:
+      vars: [VERSION]
+    cmd: |
+      set -euo pipefail
+      tag="v{{.VERSION}}"
+      if ! found=$(git ls-remote --tags origin "refs/tags/$tag"); then
+        echo "release: cannot ask origin whether $tag exists - not preparing an unverified version" >&2
+        exit 1
+      fi
+      if [ -n "$found" ]; then
+        echo "release: $tag is already tagged on origin, so $tag is released. The newest tag HEAD reaches is $(git describe --tags --abbrev=0 2>/dev/null || echo none): merge $tag into this branch (git merge -s ours $tag when its content is already here) so git-cliff counts from it, or pass VERSION=x.y.z" >&2
+        exit 1
+      fi
+
   # Bazel twins of the workspace version (adr_bazel_crate_split.md § C8):
   # MODULE.bazel's module() version and every rust rule's `version` attr in the
   # root and crates/* BUILD files. `bazel:pin:check` and `bazel:build:drift`
@@ -227,6 +248,8 @@ tasks:
     requires:
       vars: [VERSION]
     cmds:
+      - task: guard:version-unreleased
+        vars: {VERSION: '{{.VERSION}}'}
       - cargo set-version "{{.VERSION}}"
       - task: bump:bazel
         vars: {VERSION: '{{.VERSION}}'}
