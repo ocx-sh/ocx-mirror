@@ -190,7 +190,10 @@ impl Sync {
                     .asset_type
                     .as_ref()
                     .map(|at| at.resolve(&platform_str))
-                    .unwrap_or(crate::spec::AssetType::Archive { strip_components: None });
+                    .unwrap_or(crate::spec::AssetType::Archive {
+                        strip_components: None,
+                        include: Vec::new(),
+                    });
 
                 tasks.push(MirrorTask {
                     version: rv.version.clone(),

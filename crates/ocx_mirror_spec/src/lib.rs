@@ -442,6 +442,7 @@ impl MirrorSpec {
         // reported once per variant that did not override it.
         if let Some(asset_type) = &self.asset_type {
             validate_platform_keys("asset_type", asset_type.platform_keys(), &mut errors);
+            validate_include_patterns("asset_type", asset_type.include_patterns(), &mut errors);
             validate_platform_keys(
                 "asset_type.strip_components",
                 asset_type.strip_components_platform_keys(),
@@ -458,6 +459,7 @@ impl MirrorSpec {
             };
             if let Some(asset_type) = &variant.asset_type {
                 validate_platform_keys(&label("asset_type"), asset_type.platform_keys(), &mut errors);
+                validate_include_patterns(&label("asset_type"), asset_type.include_patterns(), &mut errors);
                 validate_platform_keys(
                     &label("asset_type.strip_components"),
                     asset_type.strip_components_platform_keys(),
