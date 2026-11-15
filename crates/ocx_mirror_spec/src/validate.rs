@@ -295,18 +295,19 @@ pub fn validate_platform_keys<'a>(field: &str, keys: impl IntoIterator<Item = &'
     }
 }
 
-/// Check that every `asset_type` archive `include:` entry compiles as a glob
-/// (`*` only) and is not blank.
-pub fn validate_include_patterns<'a>(
+/// Check that every `asset_type` archive `include:`/`exclude:` entry compiles
+/// as a glob (`*` only) and is not blank. Each entry arrives with its label
+/// (`platforms.windows/amd64.include[0]`).
+pub fn validate_member_filters<'a>(
     field: &str,
-    patterns: impl IntoIterator<Item = &'a String>,
+    patterns: impl IntoIterator<Item = (String, &'a String)>,
     errors: &mut Vec<String>,
 ) {
-    for pattern in patterns {
+    for (label, pattern) in patterns {
         if pattern.trim().is_empty() {
-            errors.push(format!("{field}.include: patterns must not be blank"));
+            errors.push(format!("{field}.{label}: pattern must not be blank"));
         } else if let Err(error) = crate::glob::Glob::compile(pattern) {
-            errors.push(format!("{field}.include: {error}"));
+            errors.push(format!("{field}.{label}: {error}"));
         }
     }
 }

@@ -51,6 +51,7 @@ pub fn offline_task(spec_dir: &Path, bin_scan: BinScanMode, libc_lint: bool) -> 
         asset_type: ocx_mirror_spec::AssetType::Archive {
             strip_components: None,
             include: Vec::new(),
+            exclude: Vec::new(),
         },
         variant: None,
     }

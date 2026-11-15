@@ -790,6 +790,7 @@ fn build_tasks_from_plan(
             .unwrap_or(spec::AssetType::Archive {
                 strip_components: None,
                 include: Vec::new(),
+                exclude: Vec::new(),
             });
 
         tasks.push(MirrorTask {
@@ -879,6 +880,7 @@ async fn build_tasks_for_version(
                             .unwrap_or(spec::AssetType::Archive {
                                 strip_components: None,
                                 include: Vec::new(),
+                                exclude: Vec::new(),
                             });
 
                         tasks.push(MirrorTask {
