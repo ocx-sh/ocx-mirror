@@ -17,7 +17,7 @@ rust_library(
     ),
     edition = "2024",
     rustc_env = {"CARGO_MANIFEST_DIR": "crates/ocx_mirror_report"},
-    version = "0.6.4",
+    version = "0.6.5",
     deps = all_crate_deps(
         cargo_only = True,
         normal = True,

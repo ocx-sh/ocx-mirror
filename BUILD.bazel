@@ -62,7 +62,7 @@ rust_library(
         "//release:stamped": ["//release:provenance"],
         "//conditions:default": ["testing_provenance.env"],
     }),
-    version = "0.6.4",
+    version = "0.6.5",
     deps = all_crate_deps(
         cargo_only = True,
         normal = True,
@@ -98,7 +98,7 @@ rust_library(
     crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env_files = ["testing_provenance.env"],
-    version = "0.6.4",
+    version = "0.6.5",
     deps = all_crate_deps(
         cargo_only = True,
         normal = True,
@@ -138,7 +138,7 @@ rust_library(
     crate_root = "build.rs",
     edition = "2024",
     tags = ["manual"],
-    version = "0.6.4",
+    version = "0.6.5",
 )
 
 rust_binary(
@@ -150,7 +150,7 @@ rust_binary(
     aliases = aliases(),
     crate_root = "src/main.rs",
     edition = "2024",
-    version = "0.6.4",
+    version = "0.6.5",
     visibility = ["//visibility:public"],
     deps = all_crate_deps(
         cargo_only = True,

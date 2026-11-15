@@ -5,11 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-11-15
+
+### Added
+
+- Follow the exec-env model of ocx (lockstep) (#106)
+- Report the cause from ocx's error document and announce report *(ocx_cli)*
+- Gate releases on a green release readiness run *(release)*
+- Backfill signatures and SBOMs of published versions *(release)*
+- Dispatch releases, candidates and signed dev builds from release.yml *(release)* **BREAKING**
+- Read the release ocx pin from packaging/release-tools *(release)*
+- Asset_type archive include: allow-list of members to publish *(spec)*
+- Asset_type archive exclude: veto list beside include: *(spec)*
+
+### Changed
+
+- Read the environment through ocx_env
+- Follow the ocx exit-code collapse — 83–87 retired, 82 is Unsupported **BREAKING**
+
+### Documentation
+
+- Re-sync quality-core.md with ocx and adopt the agent verification policy *(claude)*
+- Cargo-native-build discussion and research *(artifacts)*
+- An ocx bump always raises the CLI pin to the newest release
+
+### Fixed
+
+- Non-universal pypi mirrors read the package roots from ocx's JSON pull report in either shape *(plan)*
+- Pypi env no longer exports a python entrypoint (#104) *(test)*
+- Re-port ocx's credential-helper quoting and acceptance host platform *(ci)*
+- The per-target SBOM is found under the name cargo-cyclonedx really writes *(release)*
+- The stamped release build reads and writes no build cache *(release)*
+- Backfilling a version that has no package now fails the run *(release)*
+- Index reconciliation after a candidate prune no longer makes abandoned candidates durable *(release)*
+- The index reconciliation runs even when the candidate prune fails part-way *(release)*
+- The published-tags handoff stays downloadable for a week so a late announce still finds it *(release)*
+- The SBOM of an old tag is generated for the Windows target that tag shipped *(backfill)*
+- A bare ${installPath} PATH entry is a bin_scan target *(spec)*
+- Release:prepare refuses a version already tagged on origin *(release)*
+
 ## [0.6.4] - 2026-10-23
 
 ### Fixed
 
 - Keep the mirror's project toolchain off test legs (#100) *(ci)*
+
+### Release
+
+- V0.6.4
 
 ## [0.6.3] - 2026-09-27
 
@@ -45,6 +88,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Build release nextest with __testing so it keeps the test binary *(ci)*
 - Decompress bare single-file compressed binary assets *(pipeline)*
+
+### Release
+
+- V0.6.3
 
 ## [0.6.2] - 2026-09-22
 
@@ -420,6 +467,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Release
 
 - V0.4.0
+[0.6.5]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.4..v0.6.5
 [0.6.4]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.3..v0.6.4
 [0.6.3]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.2..v0.6.3
 [0.6.2]: https://github.com/ocx-sh/ocx-mirror/compare/v0.6.1..v0.6.2
