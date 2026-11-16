@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:b089004da57735062b0db89b2c2ed7868ae713cfe7a61015b2880937514617d2"
-generated_by = "ocx 0.6.6"
-generated_at = "2026-11-14T04:27:12Z"
+declaration_hash = "sha256:351b45b61f83465c845b90876936c5d25138eb0013e7ddb1ccec5eb50c7b4230"
+generated_by = "ocx 0.6.8"
+generated_at = "2026-11-16T00:39:58Z"
 
 [[tool]]
 name = "cargo-cyclonedx"
@@ -35,13 +35,13 @@ declared = "ocx.sh/git-cliff/git-cliff:2.14.1"
 [[tool]]
 name = "ocx"
 group = "default"
-repository = "ghcr.io/ocx-sh/dev/cli"
-declared = "ghcr.io/ocx-sh/dev/cli:0.7.0-dev_20261114035747"
+repository = "ocx.sh/ocx/cli"
+declared = "ocx.sh/ocx/cli:0.6.8_20261115222333"
 
 [tool.platforms]
-"darwin/amd64" = "sha256:eb593b6ee631210cea1c058c92a643e7be706cc6cf9f328d1377485a9bbd6da1"
-"darwin/arm64" = "sha256:59d2a96726a8eb1b4c34bd01cccce0d84a2f699d823115e9577fb097399fd855"
-"linux/amd64" = "sha256:125c58b39a10eed58535f9648c244feef887044051eb680986d49341eb74698b"
-"linux/arm64" = "sha256:41a435ea1317ef8769596bcc57c0fa11da215cce45c907fda8eadae23ebfce6b"
-"windows/amd64" = "sha256:8eaefe39d6e84594ad17a8c83cd8208479db34354a497a5c51d2f35ff0e68843"
-"windows/arm64" = "sha256:b8d278be1c50e3fa59f668fd7322a3157763c9efa4de209b965082701ca30584"
+"darwin/amd64" = "sha256:f1274ea8dadc4f7eee690ecfa0ea9535f7ee0b5129ad072b89a51db494f7337a"
+"darwin/arm64" = "sha256:3b9332bb29d001fa092a2d7931ffc4e944073050ab97ae78048e4e34079c3f58"
+"linux/amd64" = "sha256:06f825a29e1c899ca75139af2b6622d21748c569bf023f4445017a61ce6148ff"
+"linux/arm64" = "sha256:058f110b4e3abdf503efa94168b601b662d981d5131e08a31b93c9c90fd2e96a"
+"windows/amd64" = "sha256:59dfb86e7e8e504a0eadad2a450910ac61d2ab92074c4bd12e9782983f54583c"
+"windows/arm64" = "sha256:e02631668c2f14683900fd5a8cb6e144ce28a95a96833c78c826671252a4c50c"

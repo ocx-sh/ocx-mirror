@@ -1,7 +1,7 @@
 name: Release ocx
 description: >-
   Put the `ocx` this repository pins for releasing (`[tools].ocx` in packaging/release-tools/ocx.toml, a
-  ghcr.io/ocx-sh/dev/cli build tag) first on PATH. A published ocx is installed only to bootstrap that
+  released ocx.sh/ocx/cli build tag, or a ghcr.io/ocx-sh/dev/cli one for dev mode) first on PATH. A published ocx is installed only to bootstrap that
   pin and is never the one that publishes. The caller has checked out the repository.
 
 inputs:
@@ -30,7 +30,7 @@ runs:
         set -euo pipefail
         pin="$(python3 -c 'import tomllib; print(tomllib.load(open("packaging/release-tools/ocx.toml", "rb")).get("tools", {}).get("ocx", ""))')"
         if [[ -z "$pin" ]]; then
-          echo "::error::packaging/release-tools/ocx.toml has no [tools] ocx pin (a ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx --project packaging/release-tools lock"
+          echo "::error::packaging/release-tools/ocx.toml has no [tools] ocx pin (an ocx.sh/ocx/cli or ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx --project packaging/release-tools lock"
           exit 1
         fi
         # The pin must be locked and signed by the identity stored beside it before any of it runs. The locked
