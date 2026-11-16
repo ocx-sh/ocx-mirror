@@ -211,7 +211,16 @@ generated workflows ran an `ocx` without fixes the linked crates already had.
 Run the command block in README.md § "Bumping ocx" (it resolves the newest
 release with `gh release view`, rewrites `ocx.toml`, `OCX_CONTAINER_CLI_TAG`
 and every `setup-ocx` `version:` step, re-locks, and regenerates the goldens).
-Then check three things:
+Then check these:
+
+- the block's `comm` of release archive names printed **nothing**. `setup-ocx`
+  fetches an archive by name, so a rename is a 404 on that OS only. The local
+  gates run on Linux and stay green; the Windows legs of the mirror's own
+  release matrix and of every generated workflow fail. ocx 0.6.7 renamed
+  `-pc-windows-msvc` to `-pc-windows-gnullvm` and the 0.6.8 pin shipped a red
+  Release Readiness run that way. Output means: move the `setup-ocx` action pin
+  (`.github/` **and** the renderer templates, then goldens) to a release that
+  reads the new name, before the version;
 
 - the golden test went **red before** `UPDATE_GOLDEN=1` and green after — a
   regeneration that was never red proves the pin did not move;

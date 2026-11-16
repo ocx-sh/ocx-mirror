@@ -24,7 +24,7 @@ jobs:
       target: ${{ steps.plan.outputs.target }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
+      - uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369  # v1.4.1
         with:
           version: "{OCX_CLI_VERSION}"
           groups: default
@@ -70,7 +70,7 @@ jobs:
         version: ${{ fromJson(needs.discover.outputs.versions) }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
+      - uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369  # v1.4.1
         with:
           version: "{OCX_CLI_VERSION}"
           groups: default
@@ -104,7 +104,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
+      - uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369  # v1.4.1
         with:
           version: "{OCX_CLI_VERSION}"
           # Absent matrix keys evaluate empty: no project is loaded unless the platform declares `toolchain`.
@@ -179,7 +179,7 @@ jobs:
       announce: ${{ steps.summarise.outputs.announce }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
+      - uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369  # v1.4.1
         with:
           version: "{OCX_CLI_VERSION}"
           groups: default
@@ -276,7 +276,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - uses: ocx-sh/setup-ocx@de8e3366f812941423985eaccae28663ef192e8b  # v1.3.0
+      - uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369  # v1.4.1
         with:
           version: "{OCX_CLI_VERSION}"
           groups: default

@@ -68,7 +68,7 @@ jobs:
         # `ocx exec bazel` (ocx.toml's bazel row) runs Bazel; the smoke's
         # `ocx package create` is this binary too. The same ocx floor as the baseline setup action
         # and release.yml's publish.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.8"
       # Read-only, on every caller: a build here never writes the shared
@@ -162,7 +162,7 @@ jobs:
         # The ocx binary alone: ocx.toml's bazel has no windows/arm64 build,
         # so the project pull fails there (run 35980500812), and the smoke
         # runs no project tool.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.8"
           project: ""

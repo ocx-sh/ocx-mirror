@@ -47,7 +47,7 @@ jobs:
           submodules: recursive
       - name: Setup OCX
         # `ocx exec bazel` (ocx.toml's bazel row) runs every Bazel command.
-        uses: ocx-sh/setup-ocx@25fa771f8572572dc64528db89560de68a163a0e # v1.4.0
+        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
         with:
           version: "0.6.8"
       - name: Setup Task

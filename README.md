@@ -72,6 +72,9 @@ binary.
 
 ```sh
 V=$(gh release view --repo ocx-sh/ocx --json tagName --jq .tagName); V=${V#v}
+OLD=$(grep -oE 'ocx\.sh/ocx/cli:[0-9.]+' ocx.toml | cut -d: -f2)
+names() { gh release view "v$1" --repo ocx-sh/ocx --json assets --jq '.assets[].name' | sort; }
+comm -3 <(names "$OLD") <(names "$V")              # must print nothing, see below
 sed -i -E "s|(ocx\.sh/ocx/cli:)[0-9]+\.[0-9]+\.[0-9]+|\1$V|" ocx.toml
 sed -i -E "s|(OCX_CONTAINER_CLI_TAG: &str = \"v)[0-9]+\.[0-9]+\.[0-9]+|\1$V|" \
   src/command/package/pipeline/generate/ci/matrix.rs
@@ -93,6 +96,11 @@ UPDATE_GOLDEN=1 cargo test -p ocx_mirror golden    # regenerate, then rerun with
   — the `ocx` every generated workflow's test legs install; the `tests/golden/`
   diff must be that one `version:` line per `setup-ocx` step and nothing else
 - every `ocx-sh/setup-ocx` `version:` step under `.github/`
+- the `comm` of release archive names: `setup-ocx` downloads an archive by name, so
+  a renamed one is a 404 on that OS. ocx 0.6.7 renamed the Windows archives from
+  `-msvc` to `-gnullvm`, which `setup-ocx` reads from v1.4.1 on. When the `comm`
+  prints anything, move the `setup-ocx` action pin first, in `.github/` and in
+  `src/command/package/pipeline/generate/templates/`
 - not reachable from here: `ocx-sh/conventions`' `setup` action carries its own
   `ocx` version and moves with a conventions release (`task copier:update`)
 
