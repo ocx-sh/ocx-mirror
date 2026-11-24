@@ -243,3 +243,61 @@ fn a_bearer_token_becomes_a_token_password_pair() {
         ("__token__".to_string(), "t0ken".to_string())
     );
 }
+
+/// An unresolvable reference ends the ladder: the netrc entry for the same host
+/// must not stand in for the identity the operator configured.
+#[test]
+fn an_unresolvable_token_reference_never_falls_back_to_netrc() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let netrc = dir.path().join("netrc");
+    std::fs::write(&netrc, "machine ref.example login ci password netrc-secret\n").expect("write netrc");
+    let missing = dir.path().join("missing-token");
+
+    // SAFETY: serialised by the crate-wide env lock held above.
+    unsafe {
+        std::env::set_var("NETRC", &netrc);
+        std::env::set_var("OCX_AUTH_ref_example_TOKEN", format!("file://{}", missing.display()));
+    }
+
+    let resolved = resolve(&url("https://ref.example/pkg.whl"));
+
+    // SAFETY: same lock.
+    unsafe {
+        std::env::remove_var("NETRC");
+        std::env::remove_var("OCX_AUTH_ref_example_TOKEN");
+    }
+
+    assert!(
+        matches!(resolved, Err(AuthError::Reference(_))),
+        "expected the reference error, got {resolved:?}"
+    );
+}
+
+/// A token file resolves to the bearer credential, without its trailing newline.
+#[test]
+fn a_token_file_reference_resolves_to_a_bearer_credential() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let token = dir.path().join("token");
+    std::fs::write(&token, "filetoken\n").expect("write token");
+
+    // SAFETY: serialised by the crate-wide env lock held above.
+    unsafe {
+        std::env::set_var("OCX_AUTH_file_example_TOKEN", format!("file://{}", token.display()));
+    }
+
+    let resolved = from_env("file.example");
+
+    // SAFETY: same lock.
+    unsafe {
+        std::env::remove_var("OCX_AUTH_file_example_TOKEN");
+    }
+
+    assert_eq!(
+        resolved.expect("resolves"),
+        Some(Credential::Bearer("filetoken".to_string()))
+    );
+}

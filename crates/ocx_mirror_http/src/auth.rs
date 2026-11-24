@@ -47,16 +47,22 @@ use ocx_oci::auth::AuthType;
 use ocx_util::string_ext::StringExt as _;
 use url::Url;
 
-/// What [`resolve`] raises: a half-configured or unknown `OCX_AUTH_<slug>_TYPE`.
+/// What [`resolve`] raises: a half-configured or unknown `OCX_AUTH_<slug>_TYPE`,
+/// or an `OCX_AUTH_<slug>_{USER,TOKEN}` reference that cannot be resolved.
 ///
-/// Renders byte-identically to the `MirrorError::SpecUsageError` (exit 64) it
-/// replaced (adr_bazel_crate_split.md § C3, E3); `From<AuthError> for
+/// `Usage` renders byte-identically to the `MirrorError::SpecUsageError` (exit
+/// 64) it replaced (adr_bazel_crate_split.md § C3, E3); `From<AuthError> for
 /// MirrorError` maps it back to that variant.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum AuthError {
     /// `MirrorError::SpecUsageError`.
     #[error("mirror spec usage error: {0}")]
     Usage(String),
+    /// `MirrorError::AuthReference`: the operator pointed the variable at a
+    /// file or variable that cannot be read, so falling back to netrc or
+    /// anonymous would send a different identity than the one they configured.
+    #[error(transparent)]
+    Reference(#[from] ocx_env::ReferenceError),
 }
 
 /// A resolved credential for one host.
@@ -116,6 +122,10 @@ impl Credential {
 /// them to be used, so a half-configured identity fails loudly here rather than
 /// silently degrading to anonymous and surfacing as a 401 much later.
 ///
+/// [`AuthError::Reference`] when an `OCX_AUTH_<slug>_{USER,TOKEN}` value is a
+/// reference (`file://`, `env://`) that cannot be resolved. It ends the ladder:
+/// the netrc rung and anonymous access are never tried.
+///
 /// A malformed `netrc` never fails the run: it is a file the mirror does not
 /// own, shared with every other tool on the machine.
 pub fn resolve(url: &Url) -> Result<Option<Credential>, AuthError> {
@@ -139,9 +149,9 @@ fn from_env(host: &str) -> Result<Option<Credential>, AuthError> {
     let user_env = format!("OCX_AUTH_{slug}_USER");
     let token_env = format!("OCX_AUTH_{slug}_TOKEN");
 
-    let user = ocx_env::OCX_AUTH_USER.get_slot(&slug);
+    let user = ocx_env::OCX_AUTH_USER.get_slot(&slug)?;
     let token = ocx_env::OCX_AUTH_TOKEN
-        .get_slot(&slug)
+        .get_slot(&slug)?
         .map(ocx_env::Sensitive::into_inner);
 
     let Some(declared) = ocx_env::OCX_AUTH_TYPE.get_slot(&slug) else {

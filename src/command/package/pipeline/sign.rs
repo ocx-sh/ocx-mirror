@@ -117,7 +117,7 @@ impl Sign {
         // inherits the credential ladder and the plain-HTTP policy the copy
         // engine already resolves rather than picking its own.
         let transport = ocx_oci::client::native_transport(
-            crate::pipeline::registry_copy::build_destination_client(&spec.target).await,
+            crate::pipeline::registry_copy::build_destination_client(&spec.target).await?,
             ocx_oci::auth::Auth::new(),
         );
 

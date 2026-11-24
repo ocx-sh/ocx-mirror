@@ -745,7 +745,7 @@ fn the_source_client_is_seeded_for_the_host_the_pointer_names() {
     // call the public index was uncopyable from the first referrer query on.
     let body = function_body("sync_package");
     assert!(
-        body.contains("registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await;"),
+        body.contains("registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await?;"),
         "the physical host's credential is seeded"
     );
     // The host seeded must be the one `OciIdentifier::parse_repository_pointer`

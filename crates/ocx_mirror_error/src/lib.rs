@@ -11,7 +11,7 @@ pub mod pylock;
 pub mod pypi;
 
 use ocx_config::tls::TlsError;
-use ocx_exit::ExitCode;
+use ocx_exit::{ClassifyExitCode as _, ExitCode};
 
 #[derive(Debug)]
 #[non_exhaustive]
@@ -123,6 +123,13 @@ pub enum MirrorError {
     /// what the jq-free installers parse positionally, so the run writes
     /// nothing rather than guessing.
     DistSchemaUnsupported(u64),
+
+    /// An `OCX_AUTH_<slug>_{USER,TOKEN}` reference (`file://`, `env://`) could
+    /// not be resolved; exit code is the reference error's own classification.
+    AuthReference(ocx_env::ReferenceError),
+    /// The registry credential ladder (`OCX_AUTH_<slug>_*`, Docker credential
+    /// store) failed; exit code is `ocx`'s own classification of the cause.
+    RegistryAuth(ocx_oci::auth::AuthError),
 }
 
 impl MirrorError {
@@ -160,6 +167,8 @@ impl MirrorError {
             Self::SignMaterialMissing { .. } => ExitCode::ConfigError,
             // `dist sync` variants
             Self::DistSchemaUnsupported(_) => ExitCode::DataError,
+            Self::AuthReference(error) => error.classify().unwrap_or(ExitCode::ConfigError),
+            Self::RegistryAuth(error) => error.classify().unwrap_or(ExitCode::AuthError),
         }
     }
 }
@@ -279,6 +288,8 @@ impl std::fmt::Display for MirrorError {
             Self::DistSchemaUnsupported(schema) => {
                 write!(f, "unsupported dist.json schema: {schema}")
             }
+            Self::AuthReference(error) => write!(f, "{error}"),
+            Self::RegistryAuth(error) => write!(f, "{error}"),
         }
     }
 }
@@ -300,10 +311,17 @@ impl From<ocx_mirror_http::HttpError> for MirrorError {
     }
 }
 
+impl From<ocx_oci::auth::AuthError> for MirrorError {
+    fn from(error: ocx_oci::auth::AuthError) -> Self {
+        Self::RegistryAuth(error)
+    }
+}
+
 impl From<ocx_mirror_http::auth::AuthError> for MirrorError {
     fn from(error: ocx_mirror_http::auth::AuthError) -> Self {
         match error {
             ocx_mirror_http::auth::AuthError::Usage(message) => Self::SpecUsageError(message),
+            ocx_mirror_http::auth::AuthError::Reference(error) => Self::AuthReference(error),
         }
     }
 }
