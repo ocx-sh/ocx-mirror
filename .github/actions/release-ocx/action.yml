@@ -7,8 +7,8 @@ description: >-
 inputs:
   mode:
     description: >-
-      What the calling workflow ships: release, candidate, backfill or dev. Only dev may run an ocx signed from a
-      branch build; every other mode requires the identity of ocx's main-branch release workflow.
+      What the calling workflow ships or does: release, candidate, canary, prune, backfill or dev. Only dev may run
+      an ocx signed from a branch build; every other mode requires the identity of ocx's main-branch release workflow.
     required: true
 
 runs:
