@@ -362,7 +362,7 @@ runs the drift gates and the adoption review, and makes the pointer commit.
 `/update-ocx` has `disable-model-invocation: true` — an autonomous run cannot
 invoke it directly. Fall back to the mechanical bump in README.md's "Bumping
 ocx" procedure (pointer move, drift gates, `task verify`), and record
-`/update-ocx`'s semantic review of the nine linked crates as an owner action
+`/update-ocx`'s semantic review of the ten linked crates as an owner action
 in the report below. Adjust its preflight for this hand-off:
 
 - Its Phase-0 clean check will show `external/ocx` modified — the gitlink moved

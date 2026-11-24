@@ -54,7 +54,7 @@ document the four-line job, let them own the pipeline.
 
 ## Dependency model (read before touching Cargo.toml)
 
-- Nine `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
+- Ten `ocx_*` path rows into `external/ocx/crates/` — NOT published crates.
   They live in root `[workspace.dependencies]` once, and every member that
   needs one takes it `.workspace = true`. `ocx_python` (PEP 751 lock → OCX
   package translation) is one of them; its git-pinned `uv-*` rows live in
@@ -199,7 +199,7 @@ Skills in `.claude/skills/` (ported from ocx): `/architect`,
 `/swarm-plan`, `/swarm-execute`, `/swarm-review`, `/commit`, `/finalize`.
 Mirror-native: `/e2e-test` (tiered e2e: acceptance harness → local contrib
 integration → dev channel), `/update-ocx` (bump the `external/ocx`
-submodule and adopt what changed: drift gates, semantic review of the nine
+submodule and adopt what changed: drift gates, semantic review of the ten
 linked crates, consolidation onto new shared API, upstream-issue cross-check),
 `/ocx-upstream-pr` (author an ocx-sh/ocx PR from the `external/ocx` submodule;
 landing is an owner action). Worker agents the swarm skills spawn live in
