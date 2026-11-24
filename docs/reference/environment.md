@@ -65,6 +65,10 @@ It does **not** apply to `source.type: pylock` or `pypi` — an env source downl
 
 **Scope:** every command that crawls a source — `sync`, `check`, `pipeline plan`, and `pipeline prepare` without `--plan`. With `--plan`, the URLs in `plan.json` were already rewritten by the `discover` job that wrote it, so the variable is not consulted — set it on `discover`, not on the prepare matrix.
 
+### `OCX_AUTH_<slug>_{TYPE,USER,TOKEN}` {#ocx-auth}
+
+Host-keyed registry and download credentials. `USER` and `TOKEN` accept `file://`, `env://` and `plain://` references, and an unresolvable reference fails the request instead of falling back to anonymous access. See [Secret references](./registry-yml.md#authentication).
+
 ### CI annotation variables {#annotation-env}
 
 The [OCI annotations][oci-annotations] recorded on every published image index. Every push the mirror makes carries `ocx package push --ci-annotations=<provider>`, so a mirror push and a hand push stamp the same keys from the same names — one implementation, not two. The provider is named from `GITHUB_ACTIONS` / `GITLAB_CI` (each must read exactly `true`); both providers set every variable below as a default in every job, so the generated workflows pass nothing explicitly:
