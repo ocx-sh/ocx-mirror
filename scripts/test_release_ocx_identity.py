@@ -24,7 +24,7 @@ def check(mode: str, identity: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.mark.parametrize(
     ("mode", "identity"),
-    [("dev", BRANCH), ("dev", MAIN), ("release", MAIN), ("candidate", MAIN), ("backfill", MAIN)],
+    [("dev", BRANCH), ("dev", MAIN), ("release", MAIN), ("candidate", MAIN), ("canary", MAIN), ("prune", MAIN), ("backfill", MAIN)],
 )
 def test_accepted(mode: str, identity: str) -> None:
     assert check(mode, identity).returncode == 0
@@ -35,7 +35,11 @@ def test_accepted(mode: str, identity: str) -> None:
     [
         ("release", BRANCH),
         ("candidate", BRANCH),
+        ("canary", BRANCH),
+        ("prune", BRANCH),
         ("backfill", BRANCH),
+        ("canary", MAIN + "-evil"),
+        ("prune", MAIN + "/x"),
         ("backfill", MAIN + "-evil"),
         ("release", MAIN + "-evil"),
         ("release", MAIN + "/x"),

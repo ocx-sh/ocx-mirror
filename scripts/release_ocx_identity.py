@@ -6,7 +6,9 @@
 Usage: release_ocx_identity.py MODE IDENTITY
 
 Only `dev` (published to the dev package alone) may run an ocx signed from a branch build. Every other mode,
-an unknown one included, needs the exact identity of ocx's main-branch release workflow.
+an unknown one included, needs the exact identity of ocx's main-branch release workflow. `canary` (a build of main
+published into the release package and announced) and `prune` (which deletes from it) are among the strict modes:
+a branch-built ocx must never drive either.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from __future__ import annotations
 import sys
 
 MAIN_IDENTITY = "https://github.com/ocx-sh/ocx/.github/workflows/release.yml@refs/heads/main"
-MAIN_ONLY_MODES = {"release", "candidate", "backfill"}
+MAIN_ONLY_MODES = {"release", "candidate", "canary", "prune", "backfill"}
 
 
 def main(argv: list[str]) -> int:

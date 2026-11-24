@@ -160,16 +160,28 @@ py_test(
     deps = ["@scripts_pip//pytest"],
 )
 
-# Structural guards of release.yml and backfill.yml, the release-ocx action and
-# the cache-free release build (parsed YAML, in memory).
+# Structural guards of release.yml, prune.yml, canary.yml and backfill.yml, the release-ocx action and
+# the cache-free release build (parsed YAML, in memory), plus the release steps run as written against stub
+# `ocx`/`gh`: the called workflows and the four scripts those steps and flags name are `data`; the steps also need
+# `bash`, `git` and `jq` on the test's PATH.
 py_test(
     name = "release_workflows_test",
     srcs = ["test_release_workflows.py"],
     config_settings = _SCRIPT_BOOTSTRAP,
     data = [
+        "backfill_release.py",
+        "publish_mirror_package.sh",
+        "release_prune_select.py",
+        "release_sbom.py",
         "//:.github/actions/release-ocx/action.yml",
         "//:.github/workflows/backfill.yml",
+        "//:.github/workflows/basic-repo.yml",
+        "//:.github/workflows/build-matrix.yml",
+        "//:.github/workflows/canary.yml",
+        "//:.github/workflows/prune.yml",
+        "//:.github/workflows/readiness-gate.yml",
         "//:.github/workflows/release.yml",
+        "//:.github/workflows/verify-version.yml",
         "//:taskfiles/bazel.taskfile.yml",
     ],
     legacy_create_init = 0,

@@ -7,16 +7,23 @@ name: Release
 #              prune of old candidates.
 #   candidate  `X.Y.Z-rcN` of the same Cargo.toml version, from refs/heads/main. As a release, but a
 #              GitHub pre-release and an ephemeral index row.
-#   dev        a build of the dispatched branch to the dev package: nothing but that package changes
-#              (no git tag, no GitHub release, no announce). Old dev builds are pruned.
+#   dev        a build of the dispatched branch, versioned from Cargo.toml, with no git tag and no GitHub release.
+#              The pre-release track follows the ref:
+#              `X.Y.Z-canary` from main (canary.yml dispatches it after every green verify-basic): published to the
+#              release package, announced as an ephemeral index row;
+#              `X.Y.Z-pr<N>` from a branch with an open pull request: dev package, unannounced, with a sticky pull
+#              request comment carrying its address;
+#              `X.Y.Z-dev` from any other branch: dev package, unannounced.
+#              None of the dev tracks is pruned here: `prune.yml` (daily, and by dispatch) prunes the dev, pull
+#              request and canary builds, so cleanup never waits on a later build succeeding.
 #
-#   verify-version -> plan -> build -> publish -> github-release -> announce -> prune
-#                       |-> verify, readiness (release, candidate) -^    \-> prune-dev (dev)
+#   verify-version -> plan -> build -> publish -> github-release -> announce -> prune (release)
+#                       |-> verify, readiness (release, candidate) -^    \-> comment (pr<N>)
 #                       \-> sbom ------------------------------------^
 #
 # Signing identity. Every signature and attestation of the package is made by the `publish` job of this
 # file (never by a called workflow, whose certificate would name the called file), so the certificate
-# says `<repo>/.github/workflows/release.yml@<ref>`: `refs/heads/main` for a release or a candidate.
+# says `<repo>/.github/workflows/release.yml@<ref>`: `refs/heads/main` for a release, a candidate or a canary.
 # `publish` verifies each platform against that identity before anything else runs. `backfill.yml` is the
 # second identity, for versions published before this workflow signed.
 #
@@ -49,7 +56,7 @@ on:
         default: ''
       prune_after_days:
         description: >-
-          Age in days before a dev build (dev mode) or a candidate of a released version (release mode) is pruned.
+          Age in days before a candidate of a released version (release mode) is pruned.
         required: false
         type: number
         default: 30
@@ -73,14 +80,15 @@ env:
     x86_64-pc-windows-gnullvm windows/amd64
     aarch64-pc-windows-gnullvm windows/arm64
   OIDC_ISSUER: https://token.actions.githubusercontent.com
-  # The identity a release or a candidate is verified against, pinned here rather than derived from the run: a
-  # run from any other ref cannot pass its own self-verify. A dev build runs from any branch and verifies
-  # against its own workflow ref instead.
+  # The identity a release, a candidate or a canary is verified against, pinned here rather than derived from the
+  # run: a run from any other ref cannot pass its own self-verify. A build of the dev package runs from any branch
+  # and verifies against its own workflow ref instead.
   RELEASE_IDENTITY: ${{ github.server_url }}/ocx-sh/ocx-mirror/.github/workflows/release.yml@refs/heads/main
 
 concurrency:
-  # A release and a candidate share a group (they write the same package's version tags); a dev build has its own.
-  group: release-${{ inputs.mode == 'dev' && 'dev' || 'release' }}
+  # A release and a candidate share a group (they write the same package's version tags). A dev run, canary
+  # included, queues per ref: in the release group an automatic canary could evict a waiting release.
+  group: release-${{ inputs.mode == 'dev' && format('dev-{0}', github.ref) || 'release' }}
   # Only one run waits per group: a newer dispatch replaces a run still waiting. A half-published release is worse
   # than a queued one.
   cancel-in-progress: false
@@ -101,30 +109,27 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pull-requests: read
     outputs:
       semver: ${{ steps.plan.outputs.semver }}
       tag: ${{ steps.plan.outputs.tag }}
       package: ${{ steps.plan.outputs.package }}
       git_tag: ${{ steps.plan.outputs.git_tag }}
+      track: ${{ steps.plan.outputs.track }}
+      pull_request: ${{ steps.plan.outputs.pull_request }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Setup OCX (runs the locked git-cliff)
-        if: ${{ inputs.mode == 'dev' }}
-        uses: ocx-sh/setup-ocx@eaeb6788da6191868a1310cc2bba93233b586369 # v1.4.1
-        with:
-          version: '0.6.8'
-          project: ''
-          cache: false
       - name: Plan the build
         id: plan
         env:
           MODE: ${{ inputs.mode }}
           VERSION: ${{ inputs.version }}
           REPOSITORY_ID_ACTUAL: ${{ github.repository_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "$REPOSITORY_ID_ACTUAL" != "$REPOSITORY_ID" ]]; then
@@ -133,6 +138,8 @@ jobs:
           fi
           # Freeze the UTC build stamp once: every platform push below lands on one tag.
           ts="$(date -u +%Y%m%d%H%M%S)"
+          track=""
+          pull_request=""
           case "$MODE" in
             release | candidate)
               if [[ "$MODE" == candidate ]]; then
@@ -158,17 +165,36 @@ jobs:
               git_tag="v${VERSION}"
               ;;
             dev)
-              raw="$(ocx exec -g release -- git-cliff --bumped-version)"
-              core="${raw#v}"
-              if [[ -z "$core" ]]; then
-                echo "::error::git-cliff --bumped-version returned empty output; no commits since the last tag"
+              core="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+              if ! [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "::error::the Cargo.toml workspace version '$core' is not X.Y.Z"
                 exit 1
               fi
+              # The track follows the ref. A failed PR lookup fails the run: it never falls back to `dev`.
+              pr=""
+              if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+                track=canary
+              else
+                pr="$(gh api -X GET "repos/$GITHUB_REPOSITORY/pulls" -f state=open -f head="$GITHUB_REPOSITORY_OWNER:$GITHUB_REF_NAME" --jq '.[0].number // empty')"
+                if [[ -z "$pr" ]]; then
+                  track=dev
+                elif [[ "$pr" =~ ^[1-9][0-9]*$ ]]; then
+                  track="pr$pr"
+                  pull_request="$pr"
+                else
+                  echo "::error::pull request number '$pr' is not a number"
+                  exit 1
+                fi
+              fi
               # `+` is not an OCI reference character; the binary embeds the semver form, the package carries `_`.
-              semver="${core}-dev+${ts}"
-              tag="${core}-dev_${ts}"
+              semver="${core}-${track}+${ts}"
+              tag="${core}-${track}_${ts}"
               package="$PACKAGE_DEV"
               git_tag=""
+              # Only a canary reaches the release package: it alone runs from main, the ref the release identity names.
+              if [[ "$track" == canary ]]; then
+                package="$PACKAGE_RELEASE"
+              fi
               ;;
             *)
               echo "::error::mode '$MODE' is not release, candidate or dev"
@@ -180,6 +206,8 @@ jobs:
             echo "tag=$tag"
             echo "package=$package"
             echo "git_tag=$git_tag"
+            echo "track=$track"
+            echo "pull_request=$pull_request"
           } >> "$GITHUB_OUTPUT"
 
   # The repo-owned half of the basic tier (Bazel acceptance, sharded acceptance) on the dispatched commit. It
@@ -235,7 +263,7 @@ jobs:
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
         with:
-          mode: ${{ inputs.mode }}
+          mode: ${{ inputs.mode == 'dev' && needs.plan.outputs.track == 'canary' && 'canary' || inputs.mode }}
       - name: Generate the SBOMs
         run: |
           set -euo pipefail
@@ -284,7 +312,7 @@ jobs:
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
         with:
-          mode: ${{ inputs.mode }}
+          mode: ${{ inputs.mode == 'dev' && needs.plan.outputs.track == 'canary' && 'canary' || inputs.mode }}
       - name: Download the binaries
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -337,14 +365,14 @@ jobs:
           fi
       - name: Verify every platform against this workflow's identity
         env:
-          MODE: ${{ inputs.mode }}
           PACKAGE: ${{ needs.plan.outputs.package }}
           TAG: ${{ needs.plan.outputs.tag }}
           OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
           OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if [[ "$MODE" == dev ]]; then
+          # Whatever lands in the release package is verified against the pinned identity, a canary included.
+          if [[ "$PACKAGE" == "$PACKAGE_DEV" ]]; then
             identity="${GITHUB_SERVER_URL}/${GITHUB_WORKFLOW_REF}"
           else
             identity="$RELEASE_IDENTITY"
@@ -369,6 +397,18 @@ jobs:
             echo "::error::verified $verified of $expected platforms"
             exit 1
           fi
+      # Repository-level catalog description (the `__ocx.desc` tag), refreshed on every publish. CATALOG.md, not
+      # README.md: the README carries CI badges and repo-relative links that resolve nowhere in a catalog
+      # renderer, and CATALOG.md's frontmatter supplies the title, description and keywords. It runs before the floating
+      # tags move so that a failure here strands nothing: no floating tag, tag or release exists yet, and a rerun is clean.
+      - name: Push the catalog description
+        env:
+          PACKAGE: ${{ needs.plan.outputs.package }}
+          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
+          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          ocx package description push "$PACKAGE" --readme CATALOG.md --logo assets/logo.svg
       # The one place a floating tag is written. Every platform above is pushed under the build tag, signed,
       # attested and verified before this step runs, so no floating tag moves before then; `cascade repair` only
       # re-points tags at content the registry already serves (it uploads nothing) and is scoped to this build tag.
@@ -383,19 +423,9 @@ jobs:
           set -euo pipefail
           tags_file="$GITHUB_WORKSPACE/published-tags.txt"
           ocx package cascade repair --tags-file "$tags_file" "${PACKAGE}:${TAG}"
-      # Repository-level catalog description (the `__ocx.desc` tag), refreshed on every publish; CATALOG.md's
-      # frontmatter supplies the title, description and keywords.
-      - name: Push the catalog description
-        env:
-          PACKAGE: ${{ needs.plan.outputs.package }}
-          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
-          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          ocx package description push "$PACKAGE" --readme CATALOG.md --logo assets/logo.svg
       # 7 days, not 1: `announce` waits behind the ocx.sh environment, and a late approval or rerun must still find this file.
       - name: Upload the published tags
-        if: ${{ inputs.mode != 'dev' }}
+        if: ${{ inputs.mode != 'dev' || needs.plan.outputs.track == 'canary' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: published-tags
@@ -465,9 +495,14 @@ jobs:
           fi
           gh release create "$GIT_TAG" "${args[@]}" out/*
 
+  # A skipped `github-release` passes only for the canary track; a release or a candidate needs it green.
   announce:
     name: Announce
-    if: ${{ inputs.mode != 'dev' }}
+    if: >-
+      ${{ !cancelled()
+      && needs.publish.result == 'success'
+      && (needs.github-release.result == 'success'
+      || (needs.plan.outputs.track == 'canary' && needs.github-release.result == 'skipped')) }}
     needs: [plan, publish, github-release]
     runs-on: ubuntu-latest
     environment: ocx.sh
@@ -481,7 +516,7 @@ jobs:
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
         with:
-          mode: ${{ inputs.mode }}
+          mode: ${{ inputs.mode == 'dev' && needs.plan.outputs.track == 'canary' && 'canary' || inputs.mode }}
       - name: Download the published tags
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -503,46 +538,9 @@ jobs:
             exit 1
           fi
           flags=(--tags-file "$TAGS_FILE" --index-repo "$INDEX_REPO")
-          # A candidate's row is removable without review; prune frees it later.
-          [[ "$MODE" == candidate ]] && flags+=(--ephemeral)
+          # Every row but a release's is removable without review; prune frees it later.
+          [[ "$MODE" == release ]] || flags+=(--ephemeral)
           ocx package announce "${flags[@]}" "$INDEX_PACKAGE"
-
-  # Dev builds only: the one place `--force` is allowed, because the dev package has no index to mark a tag
-  # ephemeral and its tags are all disposable.
-  prune-dev:
-    name: Prune old dev builds
-    # A status function, or the skipped `readiness` (dev mode) behind `publish` skips this job too.
-    if: ${{ !cancelled() && inputs.mode == 'dev' && needs.publish.result == 'success' }}
-    needs: [plan, publish]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install the release ocx
-        uses: ./.github/actions/release-ocx
-        with:
-          mode: ${{ inputs.mode }}
-      - name: Prune dev builds past their age
-        env:
-          PACKAGE: ${{ env.PACKAGE_DEV }}
-          DAYS: ${{ inputs.prune_after_days }}
-          OCX_AUTH_ghcr_io_USER: ${{ github.actor }}
-          OCX_AUTH_ghcr_io_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          ocx --remote --format json index list "$PACKAGE" | jq -r '.items[].tags[]?' > "$RUNNER_TEMP/tags.txt"
-          python3 scripts/release_prune_select.py dev --days "$DAYS" < "$RUNNER_TEMP/tags.txt" > "$RUNNER_TEMP/selected.txt"
-          mapfile -t selected < <(grep . "$RUNNER_TEMP/selected.txt" || true)
-          if ((${#selected[@]} == 0)); then
-            echo "No dev build of $PACKAGE is older than $DAYS days."
-            exit 0
-          fi
-          ocx package prune --forge github --force --tags-file "$RUNNER_TEMP/pruned.txt" "$PACKAGE" "${selected[@]}"
 
   # Release mode only: the candidates of a version that has shipped, once it is old enough. Their index rows
   # are ephemeral, so prune needs no `--force`; the announce then drops the rows of the tags that are gone.
@@ -563,7 +561,7 @@ jobs:
       - name: Install the release ocx
         uses: ./.github/actions/release-ocx
         with:
-          mode: ${{ inputs.mode }}
+          mode: ${{ inputs.mode == 'dev' && needs.plan.outputs.track == 'canary' && 'canary' || inputs.mode }}
       - name: Prune candidates of old releases
         id: prune
         env:
@@ -587,3 +585,43 @@ jobs:
         env:
           OCX_ANNOUNCE_TOKEN: ${{ secrets.OCX_ANNOUNCE_TOKEN }}
         run: ocx package announce --refresh --index-repo "$INDEX_REPO" "$INDEX_PACKAGE"
+
+  # The one comment of a pull request build, edited in place: its address is what another repository or an e2e run
+  # copies. The marker plus the bot author find it; a marker comment by anyone else is never edited, and a failed
+  # listing fails the job rather than posting a second comment.
+  comment:
+    name: Comment the pull request build
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.pull_request != '' }}
+    needs: [plan, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post or update the build address
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ needs.plan.outputs.package }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          PULL_REQUEST: ${{ needs.plan.outputs.pull_request }}
+        run: |
+          set -euo pipefail
+          marker='<!-- ocx-pr-build -->'
+          rolling="${PACKAGE}:${TAG%%_*}"
+          body="$RUNNER_TEMP/comment.md"
+          # shellcheck disable=SC2016 # the backticks are Markdown code spans, not command substitutions
+          {
+            printf '%s\n## Pull request build\n\n' "$marker"
+            printf 'Rolling: `%s`\nExact: `%s`\nCommit: `%s`\n\n' "$rolling" "${PACKAGE}:${TAG}" "$GITHUB_SHA"
+            printf '```sh\nocx --remote package exec %s -- ocx-mirror version\n```\n\n' "$rolling"
+            printf 'The rolling tag follows the newest build of this pull request; both are removed once the pull request is closed.\n'
+          } > "$body"
+          # A listing that fails aborts here: it never falls through to a second comment.
+          found="$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST/comments" \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | startswith("<!-- ocx-pr-build -->"))) | .id')"
+          id="$(sed -n 1p <<< "$found")"
+          if [[ -n "$id" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$body"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PULL_REQUEST/comments" -F body=@"$body"
+          fi
