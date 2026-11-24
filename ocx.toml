@@ -28,5 +28,12 @@ bazelisk = "ocx.sh/bazelbuild/bazelisk:1.29.0"
 
 [group.docs.tools]
 
+# What `release.yml` and `backfill.yml` run (`ocx exec -g release -- <cmd>`). The `ocx` here is the one that
+# publishes, pinned by build tag: a released `ocx.sh/ocx/cli:<version>_<timestamp>`, or a
+# `ghcr.io/ocx-sh/dev/cli:<tag>` dev build that only `mode=dev` accepts. It differs on purpose from
+# `[tools].ocx`, the test/dev CLI. When it changes, swap `.github/actions/release-ocx/ocx-identity.env`
+# with it and run `ocx lock`.
 [group.release.tools]
+cargo-cyclonedx = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
 git-cliff = "ocx.sh/git-cliff/git-cliff:2.14.2"
+ocx = "ocx.sh/ocx/cli:0.6.8_20261115222333"

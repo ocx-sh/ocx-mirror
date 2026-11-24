@@ -245,9 +245,9 @@ def test_generate_sbom_runs_release_sbom_from_the_current_checkout_on_the_old_so
     assert cwd == root, "the tool resolves from the current checkout's ocx.toml"
     assert argv[:5] == [
         "ocx",
-        "--project",
-        str(root / "packaging" / "release-tools"),
         "exec",
+        "-g",
+        "release",
         "--",
     ]
     assert argv[argv.index("--manifest-path") + 1] == str(

@@ -299,7 +299,8 @@ def pin_findings(action: dict[str, Any], docs: Docs) -> list[str]:
     needles = {
         "the identity gate": 'python3 scripts/release_ocx_identity.py "$MODE" "$identity"',
         "the signature check": 'ocx package verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$subject"',
-        "the locked subject": "packaging/release-tools/ocx.lock",
+        "the locked subject": 'tomllib.load(open("ocx.lock", "rb"))',
+        "the release-group row filter": 'tool.get("group") != "release"',
         "the locked-install checksum": '"$(sum "$actual")" != "$(sum "$locked")"',
     }
     found = [f"release-ocx lost {name}" for name, needle in needles.items() if needle not in run]
@@ -400,6 +401,10 @@ def test_the_pin_control_reds_a_dropped_verify_and_a_call_site_without_mode() ->
     for step in dropped["runs"]["steps"]:
         step["run"] = str(step.get("run", "")).replace("ocx package verify --certificate-identity", "true --certificate-identity")
     assert pin_findings(dropped, docs)
+    ungrouped = copy.deepcopy(action)
+    for step in ungrouped["runs"]["steps"]:
+        step["run"] = str(step.get("run", "")).replace(' or tool.get("group") != "release"', "")
+    assert ungrouped != action and pin_findings(ungrouped, docs)
     modeless = copy.deepcopy(docs)
     for step in _job(modeless, "release.yml:publish")["steps"]:
         if step.get("uses") == "./.github/actions/release-ocx":

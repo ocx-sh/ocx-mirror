@@ -26,7 +26,7 @@ def main(argv: list[str]) -> int:
         return 0
     print(
         f"::error::mode '{mode}' needs an ocx signed from ocx main ({MAIN_IDENTITY}), not '{identity}'; "
-        "pin a released ocx built from ocx main and swap ocx-identity.env with it"
+        "pin a released ocx built from ocx main and swap .github/actions/release-ocx/ocx-identity.env with it"
     )
     return 1
 
