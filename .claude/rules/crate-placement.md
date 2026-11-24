@@ -47,7 +47,7 @@ Three tiers, defined in ocx's own `CLAUDE.md` and `adr_crate_split_workspace.md`
 - **Ecosystem** — a crate a lockstep submodule consumer (this mirror) links.
   Breaking changes are allowed when justified; ocx's own `task
   satellite:verify` obligates it to upgrade the mirror in the same change
-  series. `ocx_util`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`,
+  series. `ocx_util`, `ocx_env`, `ocx_console`, `ocx_oci`, `ocx_trust`, `ocx_sign`,
   `ocx_config`, `ocx_index`, `ocx_package`, `ocx_python`.
 - **Interface** — the CLI surface, every wire/persisted format, the shim wire
   ABI, and `ocx_exit` (an exit code is a CLI contract).
@@ -61,13 +61,13 @@ A satellite (this mirror) may take a **direct** dependency on any
 ocx crate. It must not name an internal-tier crate or `ocx_cli` in its
 manifest or its source.
 
-**The nine linked today:** `ocx_config`, `ocx_console`, `ocx_exit`,
+**The ten linked today:** `ocx_config`, `ocx_console`, `ocx_env`, `ocx_exit`,
 `ocx_index`, `ocx_oci`, `ocx_package`, `ocx_python`, `ocx_sign`, `ocx_util`.
 `ocx_python` joined in phase 2 of `adr_bazel_crate_split.md` (an
-owner-directed exception — see Promotion below). CLAUDE.md's "Dependency
+owner-directed exception — see Promotion below). AGENTS.md's "Dependency
 model" section is the authoritative row list; this rule states the boundary,
 not the count. Linking another ecosystem-tier crate (e.g. `ocx_trust`) means
-adding it to `crates/crate_map.toml`'s `[ocx].allowed` and a CLAUDE.md
+adding it to `crates/crate_map.toml`'s `[ocx].allowed` and an AGENTS.md
 Dependency-model row in the same commit — `tests/workspace_structure.rs`
 enforces the list.
 
@@ -139,6 +139,6 @@ crate (ecosystem tier), linked like the other ocx rows.
 - `.claude/artifacts/adr_bazel_crate_split.md` — § C1 (crate map, full
   contract), § C3 (error boundary), § Q3 (the `ocx_python` promotion
   decision), § C9(a) (this rule's own design record).
-- `CLAUDE.md` § "Dependency model" — the authoritative nine-row list and why
+- `AGENTS.md` § "Dependency model" — the authoritative ten-row list and why
   `ocx_cli` never gets a row.
 - `.claude/rules/subsystem-mirror.md` — the module map, keyed to the crate layout.

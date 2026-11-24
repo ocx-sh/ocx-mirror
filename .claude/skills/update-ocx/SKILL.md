@@ -1,6 +1,6 @@
 ---
 name: update-ocx
-description: Bump the external/ocx submodule and adopt what changed upstream. Use when asked to update, bump, or advance ocx, to move the mirror onto a new ocx release or onto upstream main, or to review what an ocx bump brings. Covers the mechanical pointer move, the drift gates (toolchain, copy-exactly dependency rows, patch table), a semantic review of the nine linked crates, consolidation of mirror code onto newly shared ocx API, and the upstream-issue cross-check.
+description: Bump the external/ocx submodule and adopt what changed upstream. Use when asked to update, bump, or advance ocx, to move the mirror onto a new ocx release or onto upstream main, or to review what an ocx bump brings. Covers the mechanical pointer move, the drift gates (toolchain, copy-exactly dependency rows, patch table), a semantic review of the ten linked crates, consolidation of mirror code onto newly shared ocx API, and the upstream-issue cross-check.
 user-invocable: true
 disable-model-invocation: true
 ---
@@ -18,7 +18,7 @@ A bump moves one of them. Never assume it moved both.
 
 | Surface | Moves when | Governs |
 |---------|-----------|---------|
-| **Linked crates** — the nine `ocx_*` path deps | the `external/ocx` pointer moves | the mirror's own compiled behaviour |
+| **Linked crates** — the ten `ocx_*` path deps | the `external/ocx` pointer moves | the mirror's own compiled behaviour |
 | **Spawned CLI** — `ocx package push/announce/description` | the `ocx.sh/ocx/cli` pin in `ocx.lock` moves, and `OCX_CONTAINER_CLI_TAG` | what the child process does, and what generated CI bakes in |
 
 Upstream `feat(...)!:` commits are almost always surface 2. They change nothing
@@ -138,13 +138,13 @@ Five checks, none of which `cargo check` catches.
 
 ## Phase 4 — semantic review (delegate)
 
-Split the nine crates into two groups and give each an `opus` subagent
+Split the ten crates into two groups and give each an `opus` subagent
 (CLAUDE.md model routing — this is correctness- and security-adjacent):
 
 - **config + index + python** — env-key surface, config/project resolution,
   index regeneration and object retention, PEP 751 lock parsing, wheel
   selection/repack, env composition (and the uv rev it pins).
-- **oci + util** — registry auth store, OCI client builder and transport, TLS
+- **oci + util + env** — secret-reference and env-variable registry, registry auth store, OCI client builder and transport, TLS
   roots, file locking, atomic writes.
 
 Ask each for exactly four things, with `file:line` cites:
