@@ -125,8 +125,9 @@ Five checks, none of which `cargo check` catches.
    outside the ecosystem/interface tier. ocx's `task satellite:verify` asserts
    this; a row added here fails that job upstream.
 5. **Bazel pins copied from ocx** — the `bazel_dep` versions for
-   `rules_shell`, `buildifier_prebuilt`, and the `rules_ocx` `git_override`
-   commit must still match `external/ocx/MODULE.bazel`'s; `.bazelversion` and
+   `rules_shell` and `buildifier_prebuilt` must still match
+   `external/ocx/MODULE.bazel`'s (`rules_ocx` is mirror-owned: it is pinned to
+   the one whose bootstrap `ocx` reads the root `ocx.lock`); `.bazelversion` and
    `ocx.toml`'s bazel tag must still match `external/ocx/.bazelversion` and
    its own `ocx.toml`:
    ```sh
@@ -230,14 +231,13 @@ Then check these:
   `declaration_hash` and `generated_at`). Use `ocx lock`, not `ocx update`: a
   bare update re-resolves every moving tag in the default group, and a scoped
   `ocx update ocx` refuses the edited `ocx.toml` with exit 65;
-- **`lock_version` did not change.** The README block re-locks with the ocx in
-  the lock's own `generated_by`, not the host's. Bazel reads `ocx.lock` through
-  the ocx that `rules_ocx` bootstraps (`DEFAULT_OCX_VERSION`, 0.6.2 at rules_ocx
-  0.5.0); an ocx from 0.6.6 on writes `lock_version = 4`, which that bootstrap
-  rejects with `unsupported ocx.lock version 4` and every Bazel lane goes red —
-  `cargo` and the goldens stay green, so only `task verify:scoped` shows it.
-  Upstream ocx holds its own lock at v3 the same way. Drop this once a
-  rules_ocx release bootstraps ocx ≥ 0.6.6.
+- **`lock_version` did not change, or the bootstrap reads the new one.** Bazel
+  reads `ocx.lock` through the ocx that `rules_ocx` bootstraps
+  (`DEFAULT_OCX_VERSION` of the pinned rules_ocx, read at that tag or commit,
+  not on its default branch; 0.6.6 today, which reads versions 3 and 4). A
+  bootstrap older than the lock rejects it with `unsupported ocx.lock version N`
+  and every Bazel lane goes red — `cargo` and the goldens stay green, so only
+  `task verify:scoped` shows it.
 
 The pin goes to a **release**, never to the pointer: with a provisional
 pointer the newest release is older than the linked crates, and that is the

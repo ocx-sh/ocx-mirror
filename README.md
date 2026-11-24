@@ -59,11 +59,13 @@ Checklist when bumping:
 - the `[patch.crates-io]` table must keep pointing at the nested fork
   submodules (`external/ocx/external/...`) — see the comment in `Cargo.toml`
   (`task bazel:patch:check` asserts the same binding in `Cargo.lock`)
-- keep the Bazel pins copied from ocx in sync: `rules_shell`,
-  `buildifier_prebuilt` and `rules_ocx` `bazel_dep` versions, and
+- keep the Bazel pins copied from ocx in sync: `rules_shell` and
+  `buildifier_prebuilt` `bazel_dep` versions, and
   `.bazelversion` / `ocx.toml`'s bazel tag against `external/ocx/MODULE.bazel`
   and `external/ocx/.bazelversion`
-  (`git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..HEAD -- MODULE.bazel .bazelversion ocx.toml`)
+  (`git -C "$(git rev-parse --show-toplevel)/external/ocx" diff $OLD..HEAD -- MODULE.bazel .bazelversion ocx.toml`).
+  `rules_ocx` is not copied: this repository pins the one whose bootstrap `ocx`
+  reads the root `ocx.lock` (see the comment at its `git_override` in `MODULE.bazel`)
 
 Every bump also moves the pinned `ocx` CLI to the newest ocx **release**, as
 its own commit. The linked crates and the spawned CLI are separate pins: a
@@ -72,26 +74,26 @@ binary.
 
 ```sh
 V=$(gh release view --repo ocx-sh/ocx --json tagName --jq .tagName); V=${V#v}
-OLD=$(grep -oE 'ocx\.sh/ocx/cli:[0-9.]+' ocx.toml | cut -d: -f2)
+OLD=$(grep -oE 'ocx\.sh/ocx/cli:[0-9.]+"' ocx.toml | tr -d '"' | cut -d: -f2)   # the [tools] pin; the release one ends in _<timestamp>
 names() { gh release view "v$1" --repo ocx-sh/ocx --json assets --jq '.assets[].name' | sort; }
 comm -3 <(names "$OLD") <(names "$V")              # must print nothing, see below
-sed -i -E "s|(ocx\.sh/ocx/cli:)[0-9]+\.[0-9]+\.[0-9]+|\1$V|" ocx.toml
+sed -i -E "s|(ocx\.sh/ocx/cli:)[0-9]+\.[0-9]+\.[0-9]+\"|\1$V\"|" ocx.toml
 sed -i -E "s|(OCX_CONTAINER_CLI_TAG: &str = \"v)[0-9]+\.[0-9]+\.[0-9]+|\1$V|" \
   src/command/package/pipeline/generate/ci/matrix.rs
 sed -i -E "/uses: ocx-sh\/setup-ocx@/,+3 s|(version: ['\"])[0-9]+\.[0-9]+\.[0-9]+|\1$V|" \
   $(git grep -l 'ocx-sh/setup-ocx@' -- .github)
-G=$(sed -nE 's/^generated_by = "ocx (.*)"/\1/p' ocx.lock)   # the ocx that wrote the lock
-ocx package install "ocx.sh/ocx/cli:$G"
-ocx package exec "ocx.sh/ocx/cli:$G" -- ocx lock   # re-resolves only the changed binding
+ocx lock                                           # re-resolves only the changed binding
 cargo test -p ocx_mirror golden                    # must FAIL: the goldens assert the pin
 UPDATE_GOLDEN=1 cargo test -p ocx_mirror golden    # regenerate, then rerun without the variable
 ```
 
 - `ocx.toml` / `ocx.lock` — the child `task verify` and the acceptance suite run.
-  Re-lock with the `ocx` named in the lock's own `generated_by`, never the newest:
-  Bazel reads `ocx.lock` through the `ocx` that `rules_ocx` bootstraps (0.6.2 at
-  rules_ocx 0.5.0), which refuses the `lock_version = 4` an `ocx` from 0.6.6 on
-  writes. The `lock_version` line must not appear in the diff
+  The `[group.release.tools]` `ocx` is a different pin, the build that publishes;
+  it moves with `.github/actions/release-ocx/ocx-identity.env`, not here.
+  Bazel reads `ocx.lock` through the `ocx` that `rules_ocx` bootstraps (0.6.6),
+  which reads lock versions 3 and 4. A `lock_version` line in the diff means the
+  bootstrap must read the new version too: `task verify:scoped` shows it, `cargo`
+  and the goldens do not
 - `OCX_CONTAINER_CLI_TAG` in `src/command/package/pipeline/generate/ci/matrix.rs`
   — the `ocx` every generated workflow's test legs install; the `tests/golden/`
   diff must be that one `version:` line per `setup-ocx` step and nothing else
