@@ -15,7 +15,7 @@ tier fakes. No tier publishes an OCX release.
 |------|-----------|--------|------|--------|
 | **0 — Acceptance harness** | `task test` (pytest, `test/tests/`) | none (registry :5001, local asset/PyPI/webhook fakes) | minutes | pipeline code paths vs fixtures |
 | **1 — Local integration** | current `main` binary vs real `~/dev/ocx-contrib` specs, pushes to `localhost:5001` | reads only: GitHub API, PyPI, ocx.sh pulls | ~30 min | real specs, real assets, real push/cascade/wheel-mount, runtime of published packages |
-| **2 — Dev channel** | `release.yml` dev mode → `ghcr.io/ocx-sh/dev/mirror:<ver>-dev_<ts>` → pin in a downstream repo branch → dispatch generated CI | full GitHub + registries | hours | the real thing: GHA matrix, `ocx package test` containers, announce |
+| **2 — Dev channel** | `release.yml` dev mode from a branch → `ghcr.io/ocx-sh/dev/mirror:<ver>-pr<N>_<ts>` (or `-dev_<ts>` without a pull request) → pin in a downstream repo branch → dispatch generated CI | full GitHub + registries | hours | the real thing: GHA matrix, `ocx package test` containers, announce |
 
 ## Decision guide
 
@@ -46,6 +46,10 @@ gh workflow run release.yml --repo ocx-sh/ocx-mirror --ref <branch> -f mode=dev
 
 Tier 2 dispatches real cloud workflows and publishes dev artifacts —
 get explicit user confirmation before dispatching.
+
+**Never dispatch tier 2 with `--ref main`.** The `dev` mode on `main` is the
+canary track: it publishes `ocx.sh/ocx/mirror:<ver>-canary_<ts>` into the
+release package and announces it to the index. Dispatch from a branch only.
 
 ## Signing canary (tier 2)
 

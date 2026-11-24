@@ -22,7 +22,7 @@ stay clean diffs. A small set of files are **mirror-native** and owned here. Loa
 |------|-------|
 | Skills | `architect/`, `swarm-plan/`, `swarm-execute/`, `swarm-review/`, `commit/`, `finalize/` |
 | Agents | all `worker-*.md` (architect, architecture-explorer, builder, doc-reviewer, explorer, researcher, reviewer, tester) |
-| Rules | `quality-core`, `quality-python`, `quality-rust`, `quality-rust-errors`, `quality-rust-exit_codes`, `workflow-intent`, `workflow-feature`, `workflow-bugfix`, `workflow-refactor`, `workflow-git`, `workflow-swarm` |
+| Rules | `quality-core`, `quality-python`, `quality-rust`, `quality-rust-errors`, `quality-rust-exit_codes`, `workflow-intent`, `workflow-feature`, `workflow-bugfix`, `workflow-refactor`, `workflow-git`, `workflow-swarm`, `workflow-release` |
 | Templates | `templates/artifacts/*.template.md` |
 | Scripts | `scripts/review_surface.py` + `scripts/review_surface_page.html` (task `claude:review-surface` in `.claude/taskfile.yml`, included from the root taskfile; tier-map path regexes adapted per list item 2) |
 
@@ -76,6 +76,11 @@ is also not ported — the mirror has no doc-authoring swarm role.)
    nextest") in a ported file's prose; name only the `task <target>` the mirror runs.
    Since `adr_bazel_crate_split.md` § C8, `task rust:test:unit` dispatches to Bazel on
    Linux and nextest elsewhere — a hardcoded runner name goes stale on half the matrix.
+
+8. **Release facts** — in `workflow-release.md` the package names, repository, binary
+   name, build path (`build-matrix.yml`), jobs and tasks are the mirror's own. A section
+   about something the mirror lacks (installers, env-var plumbing, the glibc floor,
+   `scan-binaries.yml`, `post-*` jobs) is deleted, never reworded.
 
 Anything beyond this list is divergence. If a change is genuinely mirror-specific, put it
 in a mirror-native file — never bolt it onto a port.
