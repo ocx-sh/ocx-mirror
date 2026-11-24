@@ -10,7 +10,7 @@ Contents: [Flow](#flow) · [Step by step](#step-by-step) ·
 ## Flow
 
 ```
-ocx-mirror branch ──release.yml (dev)──▶ ghcr.io/ocx-sh/dev/mirror:<ver>-dev_<ts>
+ocx-mirror branch ──release.yml (dev)──▶ ghcr.io/ocx-sh/dev/mirror:<ver>-pr<N>_<ts>
                                               │ pull
 downstream repo branch: ocx.toml pin ◀──┘
         └─▶ ocx lock → commit → dispatch generated workflow → assert
@@ -18,7 +18,19 @@ downstream repo branch: ocx.toml pin ◀──┘
 
 No OCX release is published; the dev package is separate from the release
 package. Only the dev dispatch of `release.yml` writes to it, with the
-workflow's own token.
+workflow's own token. `<ver>` is the `Cargo.toml` workspace version, not a
+computed next version.
+
+The track follows the dispatched ref:
+
+| Dispatched from | Tag | Package |
+|-----------------|-----|---------|
+| branch with an open pull request | `<ver>-pr<N>_<ts>`, rolling `<ver>-pr<N>` | `ghcr.io/ocx-sh/dev/mirror` |
+| branch without a pull request | `<ver>-dev_<ts>`, rolling `<ver>-dev` | `ghcr.io/ocx-sh/dev/mirror` |
+| `main` | `<ver>-canary_<ts>`, rolling `<ver>-canary` | `ocx.sh/ocx/mirror` (the release package) |
+
+**Never dispatch this tier on `main`.** A dev dispatch there publishes a
+canary into the release package and announces it to the index. Use a branch.
 
 ## Step by step
 
@@ -29,15 +41,26 @@ workflow's own token.
    gh run watch --repo ocx-sh/ocx-mirror   # ~build matrix + serial publish
    ```
 
-   The `plan` job output yields the tag, shape
-   `<next-semver>-dev_<UTC ts>` (e.g. `0.6.0-dev_20260804050813`). Full
-   coordinate: `ghcr.io/ocx-sh/dev/mirror:<tag>`.
+   With an open pull request for the branch, the `comment` job posts one
+   sticky pull request comment carrying `Rolling:` and `Exact:` addresses
+   (`ghcr.io/ocx-sh/dev/mirror:<ver>-pr<N>_<UTC ts>`, e.g.
+   `0.6.5-pr12_20260804050813`). Copy the exact address.
+
+   Without a pull request there is no comment. List the tags and take the
+   newest `<ver>-dev_<UTC ts>`:
+
+   ```sh
+   ocx --remote --format json index list ghcr.io/ocx-sh/dev/mirror
+   ```
+
+   Every branch without a pull request shares the rolling `<ver>-dev` tag,
+   so pin the exact `…_<UTC ts>` tag.
 
 2. **Pin it downstream** — one line in the mirror repo's `ocx.toml`, on a branch:
 
    ```toml
    [tools]
-   mirror = "ghcr.io/ocx-sh/dev/mirror:0.6.0-dev_20260804050813"  # was ocx.sh/ocx/mirror:0.5
+   mirror = "ghcr.io/ocx-sh/dev/mirror:0.6.5-pr12_20260804050813"  # was ocx.sh/ocx/mirror:0.5
    ```
 
    Then `ocx lock` (or `direnv reload`) to regenerate `ocx.lock`, commit
@@ -78,9 +101,15 @@ workflow's own token.
   `ocx.toml` — always commit the lock with the pin.
 - Pulling the dev package needs no downstream secret for
   bootstrap. Pushes to the repo's real target still need its own secrets.
-- The dev dispatch of `release.yml` is serialized (`cancel-in-progress:
-  false`) so timestamps stay monotonic.
-- Dev tags are never announced — the index only observes the release package.
+- The dev dispatch of `release.yml` is serialized per ref (concurrency group
+  `release-dev-<ref>`, `cancel-in-progress: false`), so timestamps stay
+  monotonic within one ref. Two branches run concurrently and can race on
+  the rolling `<ver>-dev` tag; the canary (main) and pull request tracks have
+  their own rolling tags and the same per-ref queue.
+- Pull request and `-dev` tags are never announced — the index only observes
+  the release package. `prune.yml` removes a pull request build once the
+  pull request is closed or the build is 30 days old, and a `-dev` build once
+  it is 30 days old unless it is the newest of its version.
 
 ## Precedent
 

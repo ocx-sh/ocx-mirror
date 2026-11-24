@@ -152,8 +152,27 @@ A new workflow file cannot be dispatched until it is on the default branch; use 
 A dispatch with `bypass` needs a `reason`; the run-name carries it and the gate prints a warning.
 
 `release.yml` (mode `release`) signs and publishes `ocx.sh/ocx/mirror:<version>_<timestamp>` (+ cascade
-tags), then creates the tag and a GitHub Release; mode `candidate` ships `X.Y.Z-rcN` as a pre-release, and
-mode `dev` publishes `ghcr.io/ocx-sh/dev/mirror` from the dispatched branch.
+tags), then creates the tag and a GitHub Release; mode `candidate` ships `X.Y.Z-rcN` as a pre-release.
+Mode `dev` creates no tag and no GitHub Release, and its track follows the dispatched ref. `X.Y.Z` is the
+`Cargo.toml` version.
+
+| Ref | Track | Published as |
+|-----|-------|--------------|
+| `main` | `canary` | `ocx.sh/ocx/mirror:X.Y.Z-canary_<timestamp>` + rolling `X.Y.Z-canary`, announced as an ephemeral index row |
+| branch with an open pull request | `pr<N>` | `ghcr.io/ocx-sh/dev/mirror:X.Y.Z-pr<N>_<timestamp>` + rolling `X.Y.Z-pr<N>`; one sticky pull request comment carries the address |
+| any other branch | `dev` | `ghcr.io/ocx-sh/dev/mirror:X.Y.Z-dev_<timestamp>` + rolling `X.Y.Z-dev` |
+
+`canary.yml` dispatches the canary after every green `verify-basic` run on `main`.
+Do not dispatch `mode=dev` on `main` to test a branch: it publishes a canary into the release package.
+
+`prune.yml` runs daily and by dispatch (`prune_after_days`, default 30).
+It removes dev builds past that age except the newest per version, builds of closed pull requests, and builds of open ones past the age.
+It keeps the 3 newest canary builds and refreshes the index.
+`release.yml` prunes only the candidates of a released version, in release mode.
+
+`backfill.yml` signs and attests versions published before `release.yml` did and never moves a tag.
+Its inputs are `tags`, `dry_run` and `limit`: a dispatch stops after `limit` versions, and the next dispatch continues.
+It skips what `release.yml` already signed.
 
 ## License
 
