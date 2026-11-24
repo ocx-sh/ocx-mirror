@@ -89,7 +89,14 @@ use ocx_mirror_spec::{OnError, RegistrySource, RegistrySpec};
 /// that cannot be expanded and for a destination collision,
 /// [`MirrorError::IndexWriteError`] (74) for a local filesystem failure, and
 /// [`MirrorError::TargetError`] (69) for a destination read with no
-/// authoritative answer.
+/// authoritative answer. An `OCX_AUTH_<slug>_{USER,TOKEN}` reference
+/// (`file://`, `env://`) that cannot be resolved for a source also aborts the
+/// whole run, as [`MirrorError::RegistryAuth`] (the reference error's own exit
+/// code): `build_source_client` raises it per source and `ensure_source_auth`
+/// per package. An unresolvable destination credential reference aborts the
+/// same way: `build_destination_client` raises it before any source is copied.
+/// The copy pass runs source by source, so a source-side abort can land
+/// after earlier sources were copied; their output stays and no report returns.
 pub async fn execute_registry_sync(
     spec: &RegistrySpec,
     options: &RegistrySyncOptions,

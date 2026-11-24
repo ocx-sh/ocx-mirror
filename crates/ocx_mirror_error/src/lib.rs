@@ -516,6 +516,100 @@ mod tests {
         assert_eq!(err.kind_exit_code(), ExitCode::Unavailable);
     }
 
+    fn env_unset() -> ocx_env::ReferenceError {
+        ocx_env::ReferenceError::EnvTargetUnset {
+            variable: "OCX_AUTH_ref_example_TOKEN".into(),
+            target: "MISSING_TARGET".into(),
+        }
+    }
+
+    /// An `env://` target that is unset is `IoError (74)`, not the
+    /// `ConfigError` fallback: the code is the reference error's own.
+    #[test]
+    fn auth_reference_unreadable_maps_to_io_error() {
+        let err = MirrorError::AuthReference(env_unset());
+        assert_eq!(err.kind_exit_code(), ExitCode::IoError);
+        let rendered = err.to_string();
+        assert!(rendered.contains("OCX_AUTH_ref_example_TOKEN"), "got: {rendered}");
+        assert!(rendered.contains("MISSING_TARGET"), "got: {rendered}");
+    }
+
+    /// A reference the grammar refuses is `ConfigError (78)`.
+    #[test]
+    fn auth_reference_invalid_maps_to_config_error() {
+        let inner = ocx_env::ReferenceError::EnvSelfReference {
+            variable: "OCX_AUTH_ref_example_TOKEN".into(),
+        };
+        let err = MirrorError::AuthReference(inner.clone());
+        assert_eq!(err.kind_exit_code(), ExitCode::ConfigError);
+        assert_eq!(err.to_string(), inner.to_string());
+    }
+
+    fn file_too_large() -> ocx_env::ReferenceError {
+        ocx_env::ReferenceError::FileTooLarge {
+            variable: "OCX_AUTH_ref_example_TOKEN".into(),
+            path: "/run/secrets/token".into(),
+            cap: 65536,
+        }
+    }
+
+    /// A file too large for a secret is `DataError (65)`: neither the
+    /// `ConfigError` fallback nor `IoError`, so only delegation yields it.
+    #[test]
+    fn auth_reference_too_large_delegates_to_data_error() {
+        let err = MirrorError::AuthReference(file_too_large());
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    /// Same through the `ocx_oci` auth ladder's `RegistryAuth` arm.
+    #[test]
+    fn registry_auth_reference_too_large_delegates_to_data_error() {
+        let err: MirrorError = ocx_oci::auth::AuthError::Reference(file_too_large()).into();
+        assert!(matches!(err, MirrorError::RegistryAuth(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ExitCode::DataError);
+    }
+
+    #[test]
+    fn registry_auth_maps_to_the_cause_exit_code() {
+        use ocx_oci::auth::AuthError;
+
+        let rejected = MirrorError::RegistryAuth(AuthError::LoginRejected {
+            registry: "ghcr.io".into(),
+        });
+        assert_eq!(rejected.kind_exit_code(), ExitCode::AuthError);
+        assert!(rejected.to_string().contains("ghcr.io"), "got: {rejected}");
+
+        let invalid = MirrorError::RegistryAuth(AuthError::InvalidType("bogus".into()));
+        assert_eq!(invalid.kind_exit_code(), ExitCode::ConfigError);
+        assert!(invalid.to_string().contains("bogus"), "got: {invalid}");
+    }
+
+    #[test]
+    fn registry_auth_reference_delegates_to_the_reference_code() {
+        let err: MirrorError = ocx_oci::auth::AuthError::Reference(env_unset()).into();
+        assert!(matches!(err, MirrorError::RegistryAuth(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ExitCode::IoError);
+    }
+
+    #[test]
+    fn http_auth_reference_converts_to_auth_reference() {
+        let local = ocx_mirror_http::auth::AuthError::Reference(env_unset());
+        let err: MirrorError = local.clone().into();
+        assert!(matches!(err, MirrorError::AuthReference(_)), "got: {err:?}");
+        assert_eq!(err.kind_exit_code(), ExitCode::IoError);
+        assert_eq!(err.to_string(), local.to_string());
+    }
+
+    #[test]
+    fn http_auth_usage_converts_to_spec_usage_error() {
+        let err: MirrorError = ocx_mirror_http::auth::AuthError::Usage("half-configured".into()).into();
+        assert!(
+            matches!(&err, MirrorError::SpecUsageError(m) if m == "half-configured"),
+            "got: {err:?}"
+        );
+        assert_eq!(err.kind_exit_code(), ExitCode::UsageError);
+    }
+
     /// E2/E3 identity table: every local error of an extracted crate converts
     /// to the variant it replaced, renders the same bytes through it, keeps
     /// its exit code, and is a leaf (no `source()` link would change a

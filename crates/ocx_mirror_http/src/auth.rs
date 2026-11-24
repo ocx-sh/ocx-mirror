@@ -149,6 +149,8 @@ fn from_env(host: &str) -> Result<Option<Credential>, AuthError> {
     let user_env = format!("OCX_AUTH_{slug}_USER");
     let token_env = format!("OCX_AUTH_{slug}_TOKEN");
 
+    // Resolved before `TYPE` is parsed, as in `ocx_oci::auth`: a reference that cannot be read fails
+    // the run even under `TYPE=anonymous` or a malformed `TYPE`, instead of going unreported.
     let user = ocx_env::OCX_AUTH_USER.get_slot(&slug)?;
     let token = ocx_env::OCX_AUTH_TOKEN
         .get_slot(&slug)?
