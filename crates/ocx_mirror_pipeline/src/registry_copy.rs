@@ -264,7 +264,7 @@ fn client_config() -> native::ClientConfig {
 ///
 /// Built here rather than through `ocx_oci::Client` because that wrapper
 /// exposes no raw push and its `native_transport` is `pub(crate)`.
-pub async fn build_source_client(source: &RegistrySource) -> native::Client {
+pub async fn build_source_client(source: &RegistrySource) -> Result<native::Client, MirrorError> {
     let mut config = client_config();
     config.dns_resolver = Some(Arc::new(ocx_oci::ssrf::GuardedResolver::new(
         Arc::new(source.trusted_hosts.clone()),
@@ -297,7 +297,7 @@ pub async fn build_source_client(source: &RegistrySource) -> native::Client {
 /// rewriting, which is **correct for the destination**: a corporate mirror
 /// must write to the literal configured registry, never one a client-side
 /// mirror map redirected.
-pub async fn build_destination_client(target: &Target) -> native::Client {
+pub async fn build_destination_client(target: &Target) -> Result<native::Client, MirrorError> {
     authenticated(client_config(), &target.registry).await
 }
 
@@ -309,11 +309,11 @@ pub async fn build_destination_client(target: &Target) -> native::Client {
 /// ladder. `Auth::get_or_fallback` *is* the `OCX_AUTH_<slug>_*` →
 /// docker-credential-store → anonymous chain, which is how ADR decision 10
 /// (zero credentials in the spec) is satisfied.
-async fn authenticated(config: native::ClientConfig, registry: &str) -> native::Client {
+async fn authenticated(config: native::ClientConfig, registry: &str) -> Result<native::Client, MirrorError> {
     let client = native::Client::new(config);
-    let auth = ocx_oci::auth::Auth::new().get_or_fallback(registry).await;
+    let auth = ocx_oci::auth::Auth::new().get_or_fallback(registry).await?;
     client.store_auth_if_needed(registry, &auth).await;
-    client
+    Ok(client)
 }
 
 /// Seed the source client's credential for the **physical** host a root points
@@ -361,13 +361,19 @@ async fn authenticated(config: native::ClientConfig, registry: &str) -> native::
 /// common path makes no env read and no credential-helper subprocess call.
 /// Idempotent — `store_auth_if_needed` skips a host already stored, so the
 /// per-package call costs one read lock after the first.
-pub async fn ensure_source_auth(context: &CopyContext, registry: &str, allowed: &[&str]) {
+///
+/// # Errors
+///
+/// [`MirrorError::RegistryAuth`] when an `OCX_AUTH_<slug>_*` value for a
+/// credentialed host is a reference that cannot be resolved.
+pub async fn ensure_source_auth(context: &CopyContext, registry: &str, allowed: &[&str]) -> Result<(), MirrorError> {
     let auth = if host_is_credentialed(registry, allowed) {
-        context.source_auth.get_or_fallback(registry).await
+        context.source_auth.get_or_fallback(registry).await?
     } else {
         native::Auth::Anonymous
     };
     context.source_client.store_auth_if_needed(registry, &auth).await;
+    Ok(())
 }
 
 /// Whether a physical host may receive a *resolved* credential — the security

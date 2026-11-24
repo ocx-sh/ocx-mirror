@@ -334,7 +334,7 @@ async fn copy_sources(
     // One destination client for the run: `native::Client` clones share the
     // token cache, so per-source clones re-use the destination's bearer token
     // instead of re-running the challenge per source.
-    let destination_client = registry_copy::build_destination_client(&spec.target).await;
+    let destination_client = registry_copy::build_destination_client(&spec.target).await?;
 
     // `--fail-fast` overrides the spec rather than combining with it (C-045),
     // and there is no flag that turns `fail_fast:` back off.
@@ -356,7 +356,7 @@ async fn copy_sources(
 
         let context = CopyContext {
             source_index: source_read_seam(&prepared.source.trusted_hosts),
-            source_client: registry_copy::build_source_client(prepared.source).await,
+            source_client: registry_copy::build_source_client(prepared.source).await?,
             source_auth: source_auth.clone(),
             destination_client: destination_client.clone(),
             blob_semaphore: Arc::clone(&blob_semaphore),
@@ -698,7 +698,7 @@ async fn sync_package(
     let credentialed_hosts: Vec<&str> = std::iter::once(source.registry.as_str())
         .chain(source.trusted_hosts.iter().map(String::as_str))
         .collect();
-    registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await;
+    registry_copy::ensure_source_auth(context, &source_registry, &credentialed_hosts).await?;
 
     // The mirror image of the drift warning above, and mutually exclusive with
     // it: under a rewrite the published pointer is ours and drift is the risk,

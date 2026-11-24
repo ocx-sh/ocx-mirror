@@ -35,8 +35,8 @@ pub const ENV_ANNOUNCE_TOKEN: &str = ocx_env::OCX_ANNOUNCE_TOKEN.declaration().n
 pub fn announce_credential_present(config: &AnnounceConfig) -> bool {
     let job_token = config.transport() == WriteTransport::Git
         && ocx_env::GITLAB_CI.get().is_some()
-        && ocx_env::CI_JOB_TOKEN.get().is_some();
-    ocx_env::OCX_ANNOUNCE_TOKEN.get().is_some() || job_token
+        && ocx_env::CI_JOB_TOKEN.is_set();
+    ocx_env::OCX_ANNOUNCE_TOKEN.is_set() || job_token
 }
 
 /// What the skip notice tells the operator to do about a missing credential.

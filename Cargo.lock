@@ -3482,6 +3482,7 @@ dependencies = [
  "dunce",
  "flate2",
  "futures",
+ "http",
  "libc",
  "log",
  "ocx_env",
@@ -3490,6 +3491,7 @@ dependencies = [
  "ocx_trust",
  "ocx_util",
  "schemars 1.2.3",
+ "secrecy",
  "serde",
  "serde_json",
  "tar",
@@ -3497,6 +3499,7 @@ dependencies = [
  "tokio",
  "toml",
  "toml_edit",
+ "url",
  "which",
 ]
 
@@ -3524,6 +3527,7 @@ dependencies = [
 name = "ocx_env"
 version = "0.6.8"
 dependencies = [
+ "libc",
  "ocx_exit",
 ]
 
@@ -3551,7 +3555,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "libc",
  "log",
  "ocx_config",
  "ocx_env",
@@ -3614,11 +3617,13 @@ version = "0.6.5"
 dependencies = [
  "anyhow",
  "ocx_config",
+ "ocx_env",
  "ocx_exit",
  "ocx_mirror_http",
  "ocx_mirror_report",
  "ocx_mirror_source",
  "ocx_mirror_test_support",
+ "ocx_oci",
  "ocx_python",
  "reqwest",
  "tempfile",
