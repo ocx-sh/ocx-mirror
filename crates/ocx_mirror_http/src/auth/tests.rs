@@ -301,3 +301,144 @@ fn a_token_file_reference_resolves_to_a_bearer_credential() {
         Some(Credential::Bearer("filetoken".to_string()))
     );
 }
+
+// ── USER slot and env:// references ────────────────────────────────────────
+
+/// An unresolvable USER reference ends the ladder like a TOKEN one: the
+/// resolvable TOKEN beside it must not turn into a lone Bearer credential.
+#[test]
+fn an_unresolvable_user_reference_is_a_reference_error() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = format!("file://{}", dir.path().join("missing-user").display());
+    let _restore = ocx_mirror_test_support::EnvRestore::set(&[
+        ("OCX_AUTH_userref_example_USER", Some(&missing)),
+        ("OCX_AUTH_userref_example_TOKEN", Some("plain-token")),
+    ]);
+
+    let resolved = from_env("userref.example");
+
+    assert!(
+        matches!(resolved, Err(AuthError::Reference(_))),
+        "expected the reference error, got {resolved:?}"
+    );
+}
+
+/// A USER file reference resolves, newline stripped, into the Basic pair.
+#[test]
+fn a_user_file_reference_resolves_to_a_basic_credential() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let user = dir.path().join("user");
+    std::fs::write(&user, "fileuser\n").expect("write user");
+    let reference = format!("file://{}", user.display());
+    let _restore = ocx_mirror_test_support::EnvRestore::set(&[
+        ("OCX_AUTH_userfile_example_USER", Some(&reference)),
+        ("OCX_AUTH_userfile_example_TOKEN", Some("s3cr3t")),
+        ("OCX_AUTH_userfile_example_TYPE", None),
+    ]);
+
+    let resolved = from_env("userfile.example").expect("resolves");
+
+    assert_eq!(
+        resolved,
+        Some(Credential::Basic {
+            user: "fileuser".to_string(),
+            secret: "s3cr3t".to_string()
+        })
+    );
+}
+
+/// `env://NAME` reads another variable, for USER and TOKEN alike.
+#[test]
+fn env_references_resolve_for_user_and_token() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+    let _restore = ocx_mirror_test_support::EnvRestore::set(&[
+        ("OCX_AUTH_envref_example_USER", Some("env://MIRROR_TEST_USER_SRC")),
+        ("OCX_AUTH_envref_example_TOKEN", Some("env://MIRROR_TEST_TOKEN_SRC")),
+        ("MIRROR_TEST_USER_SRC", Some("envuser")),
+        ("MIRROR_TEST_TOKEN_SRC", Some("envtoken")),
+        ("OCX_AUTH_envref_example_TYPE", None),
+    ]);
+
+    let resolved = from_env("envref.example").expect("resolves");
+
+    assert_eq!(
+        resolved,
+        Some(Credential::Basic {
+            user: "envuser".to_string(),
+            secret: "envtoken".to_string()
+        })
+    );
+}
+
+/// An `env://` target that is unset is a reference error in either slot.
+#[test]
+fn an_unset_env_reference_target_is_a_reference_error_in_either_slot() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+    let _restore = ocx_mirror_test_support::EnvRestore::set(&[
+        ("OCX_AUTH_envunset_example_USER", Some("env://MIRROR_TEST_UNSET_TARGET")),
+        ("OCX_AUTH_envunset_example_TOKEN", Some("plain-token")),
+        (
+            "OCX_AUTH_envunset2_example_TOKEN",
+            Some("env://MIRROR_TEST_UNSET_TARGET"),
+        ),
+        ("MIRROR_TEST_UNSET_TARGET", None),
+    ]);
+
+    let user_slot = from_env("envunset.example");
+    let token_slot = from_env("envunset2.example");
+
+    assert!(
+        matches!(user_slot, Err(AuthError::Reference(_))),
+        "USER slot: {user_slot:?}"
+    );
+    assert!(
+        matches!(token_slot, Err(AuthError::Reference(_))),
+        "TOKEN slot: {token_slot:?}"
+    );
+}
+
+// ── Reference resolution precedes TYPE ─────────────────────────────────────
+
+/// `TYPE=anonymous` does not excuse a reference that cannot be read: the
+/// reference is resolved first, so the run fails instead of going anonymous.
+#[test]
+fn an_unresolvable_reference_fails_even_under_anonymous_type() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = format!("file://{}", dir.path().join("missing-token").display());
+    let _restore = ocx_mirror_test_support::EnvRestore::set(&[
+        ("OCX_AUTH_anonref_example_TYPE", Some("anonymous")),
+        ("OCX_AUTH_anonref_example_TOKEN", Some(&missing)),
+        ("OCX_AUTH_anonref_example_USER", None),
+    ]);
+
+    let resolved = from_env("anonref.example");
+
+    assert!(
+        matches!(resolved, Err(AuthError::Reference(_))),
+        "expected the reference error, got {resolved:?}"
+    );
+}
+
+/// A malformed `TYPE` does not mask an unresolvable reference: the caller sees
+/// the reference error, not a usage error about `TYPE`.
+#[test]
+fn an_unresolvable_reference_wins_over_a_malformed_type() {
+    let _guard = ocx_mirror_test_support::ocx_env_lock();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = format!("file://{}", dir.path().join("missing-user").display());
+    let _restore = ocx_mirror_test_support::EnvRestore::set(&[
+        ("OCX_AUTH_badtyperef_example_TYPE", Some("bogus")),
+        ("OCX_AUTH_badtyperef_example_USER", Some(&missing)),
+        ("OCX_AUTH_badtyperef_example_TOKEN", Some("plain-token")),
+    ]);
+
+    let resolved = from_env("badtyperef.example");
+
+    assert!(
+        matches!(resolved, Err(AuthError::Reference(_))),
+        "expected the reference error, got {resolved:?}"
+    );
+}
