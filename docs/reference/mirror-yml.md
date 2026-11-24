@@ -277,6 +277,8 @@ The URL is the index base exactly as you would give it to `pip` or `uv` — noth
 2. `netrc` — `$NETRC` if set, else `~/.netrc`, matched on an exact `machine <host>` line. This is the file `uv` already reads, so the mirror's own downloads and the resolver it shells out to agree on the hosts you named. One entry is deliberately ignored: a `default` line answers for *every* host, and every URL this ladder sees was named by an index or a lock — honouring it would send your credential to whatever host a hostile upstream chose. `uv` honours `default`; `ocx-mirror` does not, so an index whose credential came only from `default` now needs a `machine <host>` line or the `OCX_AUTH_<slug>_*` variables above.
 3. Anonymous.
 
+The `OCX_AUTH_<slug>_USER` and `_TOKEN` values accept `file://`, `env://` and `plain://` references. A reference that cannot be resolved fails that request instead of falling back to the `netrc` and anonymous rungs. Index discovery then exits 69, and a wheel download fails per command, as listed under [Secret references](./registry-yml.md#authentication).
+
 One credential covers the whole run for that host: index discovery, `uv pip compile`, and the wheel downloads. Credentials are passed to `uv` through the environment, never on its command line. A lock naming wheels on several hosts resolves each host's credential separately, so a corporate token is never sent to `pypi.org`.
 
 ```sh

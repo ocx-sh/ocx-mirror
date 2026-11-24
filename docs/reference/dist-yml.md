@@ -29,7 +29,7 @@ They are read by the five shell installers on `setup.ocx.sh`, by `rules_ocx` (`o
 
     None of those consumers can send credentials: `curl` in `install.sh` has no auth knob, `file(DOWNLOAD)` has none by default, and `ctx.download` needs netrc. A store that requires a token on `GET` will fail every bootstrap, and the failure looks like a network error.
 
-    This is about the mirror **you publish**. Reading a credential-gated *upstream* is supported: `source:` and the archives it names authenticate from the environment, host-keyed, exactly like [`mirror.yml`'s index credentials](./mirror-yml.md#pypi-authentication) — `OCX_AUTH_<slug>_USER`/`_TOKEN`, else `netrc`. Authenticated **writes** to your own store are [`upload.identity`](#upload).
+    This is about the mirror **you publish**. Reading a credential-gated *upstream* is supported: `source:` and the archives it names authenticate from the environment, host-keyed, exactly like [`mirror.yml`'s index credentials](./mirror-yml.md#pypi-authentication) — `OCX_AUTH_<slug>_USER`/`_TOKEN`, else `netrc`. Those variables accept `file://` and `env://` references, and an unresolvable one never falls back to `netrc` or anonymous access. On the manifest fetch and the upstream installer fetch it stops the run with 78, 74 or 65, and a bad or half-configured `TYPE` there stops it with 64. On an archive download it fails that archive's row: the other archives still run, the command exits 1, and no manifest is published. See [Secret references](./registry-yml.md#authentication). Authenticated **writes** to your own store are [`upload.identity`](#upload).
 
 ## Top-level keys {#top-level}
 

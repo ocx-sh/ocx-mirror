@@ -337,6 +337,21 @@ Credentials come from the environment, resolved in this order:
 
 `<slug>` is derived from the registry host. This is the same mechanism `ocx` itself uses, so a machine already able to pull from a registry can already push to it.
 
+**Secret references.** `OCX_AUTH_<slug>_USER` and `OCX_AUTH_<slug>_TOKEN` take a literal value or a reference: `file://<absolute path>`, `env://<NAME>` or `plain://<text>`. A reference that cannot be resolved fails the request. The mirror never falls back to `netrc` or anonymous access, because that would send a different identity than the one you configured. The reference grammar has three failure codes:
+
+- 78 (config error): the reference grammar is refused. Examples are a relative `file://` path and an `env://` name that points at the variable itself.
+- 74 (I/O error): the source has nothing to read. Examples are an unset or empty `env://` target and a `file://` path that is missing, unreadable, not a regular file, or empty.
+- 65 (data error): the referenced file is larger than 64 KiB or is not UTF-8.
+
+The exit code depends on the command and the ladder that raised the failure.
+
+- **OCI credential ladder** (`registry sync` for source and destination, `package pipeline sign` for the destination): an unresolvable reference aborts the command with its own code, 78, 74 or 65. Every other failure on this ladder is logged as a warning and the pull goes on anonymously. That includes an unknown or half-configured `OCX_AUTH_<slug>_TYPE` and a Docker credential-store failure.
+- **Host-keyed HTTP ladder, `dist sync` manifest and installer fetch**: an unresolvable reference aborts the run with 78, 74 or 65. An unknown or half-configured `TYPE` aborts it with 64 (usage error).
+- **Host-keyed HTTP ladder, `dist sync` archive downloads**: an unresolvable reference fails that archive's row. The other archives still run. The command exits 1 and publishes no manifest.
+- **Other commands** report the failure under their own exit code. A binary download during `package sync` or `package pipeline prepare` exits 1, and so does `package pipeline describe`. `source.type: pypi` index discovery exits 69.
+
+A literal value that begins with `file://`, `env://` or `plain://` must be written as `plain://<value>`. These prefixes match without regard to ASCII case. The content of a referenced file or variable is used as-is and is never parsed as a reference again. For a `file://` reference, the mirror strips one leading UTF-8 BOM and the trailing CR and LF characters.
+
 For a **source pull**, the host whose slug is looked up is the *physical* registry a package's index root points at, not the source's `registry`/`as` name — the bytes live where the pointer says. A credential is resolved only when that physical host is the source's own `registry` or one of its [`trusted_hosts`](#trusted-hosts); any other host is pulled anonymously (see [`trusted_hosts`](#trusted-hosts)).
 
 ## A corporate mirror, end to end {#example}
