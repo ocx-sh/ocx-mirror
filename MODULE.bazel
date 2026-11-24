@@ -14,7 +14,17 @@ bazel_dep(name = "llvm", version = "0.8.25")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1.4")
-bazel_dep(name = "rules_ocx", version = "0.5.0")
+bazel_dep(name = "rules_ocx", version = "0.5.1")
+
+# rules_ocx 0.5.1 bootstraps ocx 0.6.5, which refuses the version 4 `ocx.lock`
+# the root project has since the release tools were folded into it. Main has the
+# two commits that move the bootstrap to ocx 0.6.6 (#33, #34); drop this override
+# for a plain `bazel_dep` once a rules_ocx release carries them.
+git_override(
+    module_name = "rules_ocx",
+    commit = "9648f933ac5b08dd2a8ac21e379c204793619bdb",
+    remote = "https://github.com/ocx-sh/rules_ocx.git",
+)
 
 # rules_rs 0.2.2 fails on a path package no workspace member names (the
 # transitive ocx_* crates in external/ocx); the patch resolves it through

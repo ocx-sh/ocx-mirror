@@ -1,6 +1,6 @@
 name: Release ocx
 description: >-
-  Put the `ocx` this repository pins for releasing (`[tools].ocx` in packaging/release-tools/ocx.toml, a
+  Put the `ocx` this repository pins for releasing (`ocx` in the `release` group of ocx.toml, a
   released ocx.sh/ocx/cli build tag, or a ghcr.io/ocx-sh/dev/cli one for dev mode) first on PATH. A published ocx is installed only to bootstrap that
   pin and is never the one that publishes. The caller has checked out the repository.
 
@@ -28,14 +28,14 @@ runs:
       # The PATH entry is a directory this step created under RUNNER_TEMP; nothing from the repository or an input.
       run: | # zizmor: ignore[github-env]
         set -euo pipefail
-        pin="$(python3 -c 'import tomllib; print(tomllib.load(open("packaging/release-tools/ocx.toml", "rb")).get("tools", {}).get("ocx", ""))')"
+        pin="$(python3 -c 'import tomllib; print(tomllib.load(open("ocx.toml", "rb")).get("group", {}).get("release", {}).get("tools", {}).get("ocx", ""))')"
         if [[ -z "$pin" ]]; then
-          echo "::error::packaging/release-tools/ocx.toml has no [tools] ocx pin (an ocx.sh/ocx/cli or ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx --project packaging/release-tools lock"
+          echo "::error::ocx.toml has no [group.release.tools] ocx pin (an ocx.sh/ocx/cli or ghcr.io/ocx-sh/dev/cli build tag); add it and run ocx lock"
           exit 1
         fi
         # The pin must be locked and signed by the identity stored beside it before any of it runs. The locked
         # digest is a platform manifest, so verify takes it without `-p` (which rejects a single manifest).
-        id_file=packaging/release-tools/ocx-identity.env
+        id_file=.github/actions/release-ocx/ocx-identity.env
         if [[ ! -f "$id_file" ]]; then
           echo "::error::$id_file is missing; it holds OCX_CERTIFICATE_IDENTITY and OCX_CERTIFICATE_OIDC_ISSUER of the workflow that signs the pinned ocx"
           exit 1
@@ -59,9 +59,10 @@ runs:
         subject="$(python3 - "$platform" <<'PY'
         import sys, tomllib
         platform = sys.argv[1]
-        lock = tomllib.load(open("packaging/release-tools/ocx.lock", "rb"))
+        lock = tomllib.load(open("ocx.lock", "rb"))
         for tool in lock.get("tool", []):
-            if tool.get("name") != "ocx":
+            # The root lock also locks the test/dev ocx under group "default"; only the release one is verified.
+            if tool.get("name") != "ocx" or tool.get("group") != "release":
                 continue
             for key, digest in tool.get("platforms", {}).items():
                 if key == platform or key.startswith(platform + "+"):
@@ -70,7 +71,7 @@ runs:
         raise SystemExit(1)
         PY
         )" || {
-          echo "::error::packaging/release-tools/ocx.lock has no locked ocx for $platform; run ocx --project packaging/release-tools lock"
+          echo "::error::ocx.lock has no locked release-group ocx for $platform; run ocx lock"
           exit 1
         }
         ocx package verify --certificate-identity "$identity" --certificate-oidc-issuer "$issuer" "$subject"
@@ -79,8 +80,8 @@ runs:
         dir="$RUNNER_TEMP/release-ocx/bin"
         mkdir -p "$dir"
         printf '%s\n' "$bootstrap" > "$RUNNER_TEMP/release-ocx/bootstrap"
-        # The release-tools project holds only the release tools, so `command -v` answers with the pinned binary.
-        pinned="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
+        # The release group composes only its own tools, so `command -v` answers with the pinned binary.
+        pinned="$(ocx exec -g release -- sh -c 'command -v ocx')"
         install -m 0755 "$pinned" "$dir/ocx"
         echo "$dir" >> "$GITHUB_PATH"
     - name: Assert the pinned ocx is the one in use
@@ -94,7 +95,7 @@ runs:
           exit 1
         fi
         # Where ocx sits on PATH proves little: compare the bytes with the locked install, and with the bootstrap.
-        locked="$(ocx --project packaging/release-tools exec -- sh -c 'command -v ocx')"
+        locked="$(ocx exec -g release -- sh -c 'command -v ocx')"
         bootstrap="$(cat "$RUNNER_TEMP/release-ocx/bootstrap")"
         sum() { python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"; }
         if [[ "$(sum "$actual")" != "$(sum "$locked")" ]]; then

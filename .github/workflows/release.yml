@@ -158,7 +158,7 @@ jobs:
               git_tag="v${VERSION}"
               ;;
             dev)
-              raw="$(ocx --project packaging/release-tools exec -- git-cliff --bumped-version)"
+              raw="$(ocx exec -g release -- git-cliff --bumped-version)"
               core="${raw#v}"
               if [[ -z "$core" ]]; then
                 echo "::error::git-cliff --bumped-version returned empty output; no commits since the last tag"
@@ -246,7 +246,7 @@ jobs:
           fi
           while read -r triple _ <&3; do
             [[ -n "$triple" ]] || continue
-            ocx --project packaging/release-tools exec -- python3 scripts/release_sbom.py \
+            ocx exec -g release -- python3 scripts/release_sbom.py \
               --target "$triple" --output "dist/ocx-mirror-${triple}.cdx.json"
           done 3<<< "$PLATFORMS"
       - name: Upload the SBOMs
@@ -456,7 +456,7 @@ jobs:
           GIT_TAG: ${{ needs.plan.outputs.git_tag }}
         run: |
           set -euo pipefail
-          ocx --project packaging/release-tools exec -- git-cliff --unreleased --tag "$GIT_TAG" --strip header --output "$RUNNER_TEMP/notes.md"
+          ocx exec -g release -- git-cliff --unreleased --tag "$GIT_TAG" --strip header --output "$RUNNER_TEMP/notes.md"
           args=(--target "$GITHUB_SHA" --title "$GIT_TAG" --notes-file "$RUNNER_TEMP/notes.md")
           if [[ "$MODE" == candidate ]]; then
             args+=(--prerelease)

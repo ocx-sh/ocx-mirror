@@ -1,14 +1,15 @@
 [metadata]
-lock_version = 3
+lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:57b860bcf2a520e780d7002a43be6962be1f0ecbe9699dc09abf313948d3047b"
-generated_by = "ocx 0.6.5"
-generated_at = "2026-11-15T23:20:39Z"
+declaration_hash = "sha256:43962d89185bd70edd15d1565215d593dc01bf8ebbc04aad51417b268fd094f2"
+generated_by = "ocx 0.6.8"
+generated_at = "2026-11-23T22:50:41Z"
 
 [[tool]]
 name = "bazelisk"
 group = "build"
 repository = "ocx.sh/bazelbuild/bazelisk"
+declared = "ocx.sh/bazelbuild/bazelisk:1.29.0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:c920f542fa7663d80fbb2d22e9f8b36f1d62761300db19969a30c17f4d9e7ca0"
@@ -21,6 +22,7 @@ repository = "ocx.sh/bazelbuild/bazelisk"
 name = "actionlint"
 group = "default"
 repository = "ocx.sh/actionlint/actionlint"
+declared = "ocx.sh/actionlint/actionlint:1.7.12"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:6f439b6d7556a3824840608eaed7416177ade18d9cfa12eb7c3831caf2f44e3f"
@@ -34,6 +36,7 @@ repository = "ocx.sh/actionlint/actionlint"
 name = "bazel"
 group = "default"
 repository = "ocx.sh/bazelbuild/bazel"
+declared = "ocx.sh/bazelbuild/bazel:9.2.0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:118679b14e27ae5c8017bf20605fd4a983e6c9dfe3b88b3227cd0257832127ff"
@@ -46,6 +49,7 @@ repository = "ocx.sh/bazelbuild/bazel"
 name = "git-cliff"
 group = "default"
 repository = "ocx.sh/git-cliff/git-cliff"
+declared = "ocx.sh/git-cliff/git-cliff:2.14.2"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:a00b3362112420302cc991973b09f3bea506f774ebf56395c63701540b0e1ad7"
@@ -59,6 +63,7 @@ repository = "ocx.sh/git-cliff/git-cliff"
 name = "lychee"
 group = "default"
 repository = "ocx.sh/lychee/lychee"
+declared = "ocx.sh/lychee/lychee:0.24.2"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:69d2e005250872a67fc687cb88423baf25a496d5f2017aaacce7337d8dd4ef41"
@@ -71,6 +76,7 @@ repository = "ocx.sh/lychee/lychee"
 name = "ocx"
 group = "default"
 repository = "ocx.sh/ocx/cli"
+declared = "ocx.sh/ocx/cli:0.6.8"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:f1274ea8dadc4f7eee690ecfa0ea9535f7ee0b5129ad072b89a51db494f7337a"
@@ -84,6 +90,7 @@ repository = "ocx.sh/ocx/cli"
 name = "prek"
 group = "default"
 repository = "ocx.sh/prek/prek"
+declared = "ocx.sh/prek/prek:0.5.5"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:bd306a2ea4bef50c4118941ceafc274c460a77441c02081242f816a2882e7c32"
@@ -97,6 +104,7 @@ repository = "ocx.sh/prek/prek"
 name = "task"
 group = "default"
 repository = "ocx.sh/go-task/task"
+declared = "ocx.sh/go-task/task:3.53.1"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:958d2f88bec42ed62b3ab8e0435bffe5cecdfdad43055c3a8e7ec376564c4886"
@@ -110,6 +118,7 @@ repository = "ocx.sh/go-task/task"
 name = "uv"
 group = "default"
 repository = "ocx.sh/astral-sh/uv"
+declared = "ocx.sh/astral-sh/uv:0.13.0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:3019a84eccc4cd68eda3da6a379ae0b9d4517bce40c17c2a654854c7da84b4cd"
@@ -125,6 +134,7 @@ repository = "ocx.sh/astral-sh/uv"
 name = "zot"
 group = "default"
 repository = "ocx.sh/project-zot/zot"
+declared = "ocx.sh/project-zot/zot:2.1.21"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:af8435fae824ef08bc812e25d27775c022b53e66acecd29ccfdd7837965db717"
@@ -138,6 +148,7 @@ repository = "ocx.sh/project-zot/zot"
 name = "actionlint"
 group = "lint"
 repository = "ocx.sh/actionlint/actionlint"
+declared = "ocx.sh/actionlint/actionlint:1.7.12"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:6f439b6d7556a3824840608eaed7416177ade18d9cfa12eb7c3831caf2f44e3f"
@@ -151,6 +162,7 @@ repository = "ocx.sh/actionlint/actionlint"
 name = "gitleaks"
 group = "lint"
 repository = "ocx.sh/gitleaks/gitleaks"
+declared = "ocx.sh/gitleaks/gitleaks:8.30.1"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:34091f2a708065187d4ecd5173cc0e66aea3c1481df0e5f91e3b32fab9c4adcc"
@@ -163,6 +175,7 @@ repository = "ocx.sh/gitleaks/gitleaks"
 name = "grim"
 group = "lint"
 repository = "ocx.sh/grimoire/cli"
+declared = "ocx.sh/grimoire/cli:0.14.3"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:4500862653390bbebd11ed5f6f70ec6d60b8a14a82b8a144156f36ca6f20f55f"
@@ -176,6 +189,7 @@ repository = "ocx.sh/grimoire/cli"
 name = "lychee"
 group = "lint"
 repository = "ocx.sh/lychee/lychee"
+declared = "ocx.sh/lychee/lychee:0.24.2"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:69d2e005250872a67fc687cb88423baf25a496d5f2017aaacce7337d8dd4ef41"
@@ -188,6 +202,7 @@ repository = "ocx.sh/lychee/lychee"
 name = "prek"
 group = "lint"
 repository = "ocx.sh/prek/prek"
+declared = "ocx.sh/prek/prek:0.5.5"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:bd306a2ea4bef50c4118941ceafc274c460a77441c02081242f816a2882e7c32"
@@ -201,6 +216,7 @@ repository = "ocx.sh/prek/prek"
 name = "uv"
 group = "lint"
 repository = "ocx.sh/astral-sh/uv"
+declared = "ocx.sh/astral-sh/uv:0.13.0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:3019a84eccc4cd68eda3da6a379ae0b9d4517bce40c17c2a654854c7da84b4cd"
@@ -213,9 +229,23 @@ repository = "ocx.sh/astral-sh/uv"
 "windows/arm64" = "sha256:3499f5a32cc688ba437e0f2dcd5f6115faf6065f82af5cc41185767192d9390e"
 
 [[tool]]
+name = "cargo-cyclonedx"
+group = "release"
+repository = "ocx.sh/cyclonedx/cargo-cyclonedx"
+declared = "ocx.sh/cyclonedx/cargo-cyclonedx:0.5.9"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:ad009ae95d2bf3034a2b5f8add3436a375927a60683f6f9a074b38b3ec06e30e"
+"darwin/arm64" = "sha256:eca90d097192cac953bf5cde3b378b0c377aa7c7008f7fa9290c975f850da9c0"
+"linux/amd64" = "sha256:a64eb97856beda4551c4c66fdf569d46970d7949e768bdbc8e2cf2156046baa4"
+"linux/arm64+libc.glibc" = "sha256:56022a684a164ca94319a7b68ab26ee6dcecf5548ea8fe039cf8ce7d9dc3619c"
+"windows/amd64" = "sha256:377e262a27f9318e0eff340ec4ada6dc65727c20387c6ecdcfd16edd199e0b17"
+
+[[tool]]
 name = "git-cliff"
 group = "release"
 repository = "ocx.sh/git-cliff/git-cliff"
+declared = "ocx.sh/git-cliff/git-cliff:2.14.2"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:a00b3362112420302cc991973b09f3bea506f774ebf56395c63701540b0e1ad7"
@@ -226,9 +256,24 @@ repository = "ocx.sh/git-cliff/git-cliff"
 "windows/arm64" = "sha256:2a6cd5be4e38a61f1295871321487f1e2e2fd4d9f3dea2368898625f7a5b1f9a"
 
 [[tool]]
+name = "ocx"
+group = "release"
+repository = "ocx.sh/ocx/cli"
+declared = "ocx.sh/ocx/cli:0.6.8_20261115222333"
+
+[tool.platforms]
+"darwin/amd64" = "sha256:f1274ea8dadc4f7eee690ecfa0ea9535f7ee0b5129ad072b89a51db494f7337a"
+"darwin/arm64" = "sha256:3b9332bb29d001fa092a2d7931ffc4e944073050ab97ae78048e4e34079c3f58"
+"linux/amd64" = "sha256:06f825a29e1c899ca75139af2b6622d21748c569bf023f4445017a61ce6148ff"
+"linux/arm64" = "sha256:058f110b4e3abdf503efa94168b601b662d981d5131e08a31b93c9c90fd2e96a"
+"windows/amd64" = "sha256:59dfb86e7e8e504a0eadad2a450910ac61d2ab92074c4bd12e9782983f54583c"
+"windows/arm64" = "sha256:e02631668c2f14683900fd5a8cb6e144ce28a95a96833c78c826671252a4c50c"
+
+[[tool]]
 name = "uv"
 group = "test"
 repository = "ocx.sh/astral-sh/uv"
+declared = "ocx.sh/astral-sh/uv:0.13.0"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:3019a84eccc4cd68eda3da6a379ae0b9d4517bce40c17c2a654854c7da84b4cd"
@@ -244,6 +289,7 @@ repository = "ocx.sh/astral-sh/uv"
 name = "zot"
 group = "test"
 repository = "ocx.sh/project-zot/zot"
+declared = "ocx.sh/project-zot/zot:2.1.21"
 
 [tool.platforms]
 "darwin/amd64" = "sha256:af8435fae824ef08bc812e25d27775c022b53e66acecd29ccfdd7837965db717"

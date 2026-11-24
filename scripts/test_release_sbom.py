@@ -97,17 +97,20 @@ def test_the_real_locked_cargo_cyclonedx_writes_the_name_the_script_expects(
     tmp_path: Path,
 ) -> None:
     """The stubs encode an assumption; this drives the pinned tool itself."""
-    project = SCRIPT.parent.parent / "packaging" / "release-tools"
+    root = SCRIPT.parent.parent
     ocx, cargo = shutil.which("ocx"), shutil.which("cargo")
     if ocx is None or cargo is None:
         pytest.skip(f"probed PATH for ocx={ocx} cargo={cargo}; both are needed")
-    tool = [ocx, "--project", str(project), "exec", "--"]
+    tool = [ocx, "exec", "-g", "release", "--"]
     probe = subprocess.run(
-        [*tool, "cargo", "cyclonedx", "--version"], capture_output=True, check=False
+        [*tool, "cargo", "cyclonedx", "--version"],
+        capture_output=True,
+        check=False,
+        cwd=root,
     )
     if probe.returncode != 0:
         pytest.skip(
-            f"probed `ocx --project {project} exec -- cargo cyclonedx --version`: exit {probe.returncode}"
+            f"probed `ocx exec -g release -- cargo cyclonedx --version`: exit {probe.returncode}"
         )
     crate = tmp_path / "crate"
     (crate / "src").mkdir(parents=True)
@@ -131,6 +134,7 @@ def test_the_real_locked_cargo_cyclonedx_writes_the_name_the_script_expects(
         capture_output=True,
         text=True,
         check=False,
+        cwd=root,
     )
     assert result.returncode == 0, result.stderr
     assert '"bomFormat": "CycloneDX"' in out.read_text(encoding="utf-8")
