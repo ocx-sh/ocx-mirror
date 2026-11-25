@@ -45,6 +45,7 @@ import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -196,6 +197,8 @@ def signing_spec(
         spec_dir,
         sigstore_trusted_root(sigstore_stack.compose_file),
         sigstore_stack.token_path,
+        sigstore_stack.fulcio_url,
+        sigstore_stack.rekor_url,
     )
 
     (asset_server.dir / "shfmt_v3.7.0_linux_amd64").write_text("#!/bin/sh\necho v3.7.0\n")
@@ -230,8 +233,8 @@ def signing_mirror(
     runner.env["OCX_HOME"] = str(tmp_path / "ocx-home")
     runner.env["OCX_NO_PROJECT"] = "1"
     # The two endpoint variables `fixtures/signing/mirror.yml` names under
-    # `env://`. The mirror resolves them itself and emits them as flags, which
-    # is exactly what the config decoy below is there to prove.
+    # `env://`. The mirror resolves them itself and emits them as flags, so
+    # the publish never consults a configured instance.
     runner.env["SIGSTORE_FULCIO_URL"] = sigstore_stack.fulcio_url
     runner.env["SIGSTORE_REKOR_URL"] = sigstore_stack.rekor_url
     return runner
@@ -292,11 +295,13 @@ def _verify(
 ) -> subprocess.CompletedProcess[str]:
     """Run ``ocx package verify`` against the local stack, without ``check``.
 
-    ``OCX_CONFIG`` names the fixture's own ``config.toml``, which carries the
-    trusted root **and** the ``https://rekor.invalid`` decoy: verify never
-    dials Rekor here, so the decoy is inert here and is what makes the publish-side
-    assertion in ``S-061`` non-vacuous.
+    ``OCX_CONFIG`` names the fixture's own ``config.toml``. A keyless verify
+    (one that names ``--certificate-identity``) is pointed at the stack's
+    ``[sigstore."<authority>"]`` table with ``--sigstore``; left to default it
+    would resolve the public instance, which the config does not carry.
     """
+    if "--certificate-identity" in extra:
+        extra = (*extra, "--sigstore", urlparse(sigstore_stack.fulcio_url).netloc)
     env = dict(mirror.env)
     env["OCX_CONFIG"] = str(sigstore_stack.config_path)
     env["OCX_HOME"] = mirror.env["OCX_HOME"]
@@ -331,10 +336,9 @@ def test_keyless_signs_every_platform_manifest_and_the_index(
     while the platforms were landing.
 
     S-061's second clause rides along here rather than in a test of its own: a
-    publish that fell through to `[sigstore."fulcio.sigstore.dev"]` would dial
-    `https://rekor.invalid` — the decoy `config.toml` carries — and fail with
-    a DNS error, so this run's green *is* the assertion that the endpoints came
-    from the spec's own `env://` refs.
+    publish that dropped the spec's `env://` endpoints would sign against the
+    public Fulcio with the local dex token and fail, so this run's green *is*
+    the assertion that the endpoints came from those refs.
     """
     version, _ = _publish(signing_mirror, signing_spec, tmp_path / "work")
 

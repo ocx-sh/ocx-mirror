@@ -289,10 +289,10 @@ def sigstore_stack(tmp_path_factory: pytest.TempPathFactory) -> SigstoreStack:
 
     work = tmp_path_factory.mktemp("signing")
     token_path = mint_identity_token(work / "identity-token")
-    spec_path = render_signing_fixture(
-        work / "spec", sigstore_trusted_root(compose_file), token_path
-    )
     base = sigstore_base_urls()
+    spec_path = render_signing_fixture(
+        work / "spec", sigstore_trusted_root(compose_file), token_path, base["fulcio"], base["rekor"]
+    )
     return SigstoreStack(
         compose_file=compose_file,
         fulcio_url=base["fulcio"],

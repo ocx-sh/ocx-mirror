@@ -1,10 +1,13 @@
 # Verification-side config for the mirror-signing harness (WP 5, C-073).
 #
-# Deliberately carries ONLY the public-authority table (trusted_root plus an
-# inert decoy Rekor URL) so the harness can assert the mirror's PUBLISH side (the
-# sign.keyless.fulcio/.rekor refs in mirror.yml, resolved by the mirror
-# itself per adr_mirror_signing.md D1) never reads this file's endpoints
-# (S-061). `trusted_root` is a bare path with no scheme
+# One instance table: the local Sigstore stack, which `ocx package verify
+# --sigstore <authority>` reads. There is deliberately no public-instance table
+# and no decoy Rekor URL: ocx resolves the public instance for a key-mode verify
+# too, so a decoy there fails every key verify. The mirror's PUBLISH side (the
+# sign.keyless.fulcio/.rekor refs in mirror.yml, resolved by the mirror itself
+# per adr_mirror_signing.md D1, S-061) needs none: a publish that dropped those
+# flags would sign against the public Fulcio and fail on the local identity
+# token. `trusted_root` is a bare path with no scheme
 # (adr_key_reference_grammar.md), resolved relative to this file's own
 # directory at load time.
 #
@@ -16,14 +19,11 @@
 # CA keys. A relative path baked in at commit time cannot survive both a
 # plain checkout and an agent worktree, where the sibling `../ocx` is two
 # levels further up (`src.helpers.main_checkout_root`).
-[sigstore."fulcio.sigstore.dev"]
+#
+# The other three placeholders below are swapped by `render_signing_fixture` from the
+# stack's own Fulcio URL: the table key is that URL's host[:port], and a table's
+# `fulcio_url` has to match its key.
+[sigstore."__SIGSTORE_AUTHORITY__"]
 trusted_root = "__TRUSTED_ROOT_PATH__"
-
-# Decoy: verify never dials Rekor here, only reads the trusted-root bundle
-# above. An invalid host here is what lets S-061 assert the publish leg
-# ignores this file's endpoints entirely -- a publish that fell through to
-# this config would fail loudly (DNS/connect error) rather than silently
-# succeeding against the real ocx sigstore stack. The table is keyed by the
-# public authority because verify resolves its trust root there; a table's
-# Fulcio URL must match its key, so the decoy is the Rekor URL.
-rekor_url = "https://rekor.invalid"
+fulcio_url = "__FULCIO_URL__"
+rekor_url = "__REKOR_URL__"
