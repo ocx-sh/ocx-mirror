@@ -336,3 +336,48 @@ fn the_root_wheel_fixture_is_a_byte_copy_of_ocx_pythons() {
         "tests/{wheel} differs from external/ocx/crates/ocx_python/tests/{wheel}; re-copy it"
     );
 }
+
+/// C-506: ocx deleted the global `[trust.sigstore]` table for per-instance
+/// `[sigstore."<authority>"]` tables, so no mirror source may still name the
+/// old one — a stale comment sends an operator to a table ocx no longer reads.
+/// The needle proves itself on a synthetic positive control first.
+#[test]
+fn no_source_names_the_deleted_trust_sigstore_table() {
+    const NEEDLE: &str = "[trust.sigstore]";
+    assert!(
+        "see `[trust.sigstore]`".contains(NEEDLE),
+        "the needle matches its own control"
+    );
+
+    fn walk(dir: &Path, hits: &mut Vec<String>, files: &mut usize) {
+        for entry in std::fs::read_dir(dir).expect("source dir is readable") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, hits, files);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                *files += 1;
+                let text = std::fs::read_to_string(&path).expect("source file is readable");
+                for (index, line) in text.lines().enumerate() {
+                    if line.contains(NEEDLE) {
+                        hits.push(format!("{}:{}", path.display(), index + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let (mut hits, mut files) = (Vec::new(), 0);
+    walk(&root.join("src"), &mut hits, &mut files);
+    for member in std::fs::read_dir(root.join("crates")).expect("crates/ is readable") {
+        let src = member.expect("dir entry").path().join("src");
+        if src.is_dir() {
+            walk(&src, &mut hits, &mut files);
+        }
+    }
+    assert!(files > 50, "the walk read only {files} files; the reader stopped");
+    assert!(
+        hits.is_empty(),
+        "[trust.sigstore] no longer exists in ocx; use [sigstore.\"<authority>\"]: {hits:?}"
+    );
+}

@@ -110,7 +110,7 @@ impl From<Ref> for String {
 /// `keyless: {}` means public Sigstore. Every field is resolved and
 /// emitted as `--fulcio-url`/`--rekor-url` (WP 2, C-052) from the
 /// mirror-owned `DEFAULT_FULCIO_URL`/`DEFAULT_REKOR_URL` constants when
-/// omitted here — **never** through ocx's own `[trust.sigstore]`, which
+/// omitted here — **never** through ocx's own `[sigstore."<authority>"]`, which
 /// is per-machine and consumer-side only (ADR D1, the amendment
 /// rationale).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -206,7 +206,7 @@ pub struct KeyFullConfig {
     pub passphrase: Option<Ref>,
     /// Present → renders `--rekor-upload --rekor-url <U>`; absent →
     /// `--no-rekor-upload`. Never inherits a fleet
-    /// `[trust.sigstore].rekor_upload` (ADR D1, sub-decision 5) —
+    /// `[sigstore."<authority>"].rekor_upload` (ADR D1, sub-decision 5) —
     /// silence must not push a private digest to the public log.
     #[serde(default)]
     pub rekor: Option<Ref>,

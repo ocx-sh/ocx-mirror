@@ -209,7 +209,7 @@ pub fn sign_exit_code(code: i32) -> ExitCode {
 ///
 /// C-010: a file the operator named that this process could not use as given
 /// is 74 (`Unreadable`, and `TooLarge` from a file — parity with
-/// `[trust.sigstore]`'s `trust_resolve.rs`); content refused from a file is
+/// `[sigstore."<authority>"]`'s `trust_resolve.rs`); content refused from a file is
 /// the file's data being wrong, 65; the same refusal from inline text (the env
 /// value, `extra_ca_certs_pem`) is the configuration itself being wrong, 78.
 ///

@@ -74,7 +74,7 @@ fn key_full(reference: Ref, passphrase: Option<Ref>, rekor: Option<Ref>) -> Sign
 /// mirror-owned constants.
 ///
 /// This is the whole point of D1's amendment: leaving them off would let a
-/// per-machine `[trust.sigstore]` decide what this mirror publishes against,
+/// per-machine `[sigstore."<authority>"]` decide what this mirror publishes against,
 /// and that table is one global shared with the *consuming* side.
 #[test]
 fn keyless_defaults_name_both_endpoints_explicitly() {
@@ -161,7 +161,7 @@ fn key_mode_with_rekor_uploads_to_the_named_instance() {
 
 /// No `rekor:` means `--no-rekor-upload`, never silence.
 ///
-/// Silence would let a fleet `[trust.sigstore].rekor_upload = true` publish a
+/// Silence would let a fleet `[sigstore."<authority>"].rekor_upload = true` publish a
 /// private digest to the public transparency log — the one Sigstore setting
 /// with a disclosure consequence (S-062).
 #[test]

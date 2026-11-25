@@ -293,8 +293,8 @@ def _verify(
     """Run ``ocx package verify`` against the local stack, without ``check``.
 
     ``OCX_CONFIG`` names the fixture's own ``config.toml``, which carries the
-    trusted root **and** the ``https://fulcio.invalid`` decoy: verify never
-    dials Fulcio, so the decoy is inert here and is what makes the publish-side
+    trusted root **and** the ``https://rekor.invalid`` decoy: verify never
+    dials Rekor here, so the decoy is inert here and is what makes the publish-side
     assertion in ``S-061`` non-vacuous.
     """
     env = dict(mirror.env)
@@ -331,8 +331,8 @@ def test_keyless_signs_every_platform_manifest_and_the_index(
     while the platforms were landing.
 
     S-061's second clause rides along here rather than in a test of its own: a
-    publish that fell through to `[trust.sigstore]` would dial
-    `https://fulcio.invalid` — the decoy `config.toml` carries — and fail with
+    publish that fell through to `[sigstore."fulcio.sigstore.dev"]` would dial
+    `https://rekor.invalid` — the decoy `config.toml` carries — and fail with
     a DNS error, so this run's green *is* the assertion that the endpoints came
     from the spec's own `env://` refs.
     """

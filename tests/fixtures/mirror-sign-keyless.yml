@@ -1,7 +1,7 @@
 # Mirror spec: `sign:` in its smallest keyless form — public Sigstore (S-050).
 # `keyless: {}` names no endpoint, so WP 2 emits the mirror-owned
 # DEFAULT_FULCIO_URL / DEFAULT_REKOR_URL rather than falling through to the
-# machine's consumer-side `[trust.sigstore]` (ADR D1).
+# machine's consumer-side `[sigstore."<authority>"]` (ADR D1).
 name: shfmt
 target:
   registry: ocx.sh

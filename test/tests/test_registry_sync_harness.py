@@ -632,11 +632,13 @@ def test_render_signing_fixture_substitutes_both_placeholders(tmp_path: Path) ->
     assert str(trusted_root) in rendered_config
 
     # C-073: the decoy is what makes S-061's "the publish side ignores this
-    # config's Fulcio" assertion falsifiable -- a publish that fell through to
+    # config's endpoints" assertion falsifiable -- a publish that fell through to
     # the config would fail loudly against an unresolvable host. It must
-    # survive rendering, and no rekor override may join it.
-    assert 'fulcio_url = "https://fulcio.invalid"' in rendered_config
-    assert "rekor_url" not in rendered_config, "the verification config carries no rekor override"
+    # survive rendering, under the public authority's table, and no fulcio
+    # override may join it.
+    assert 'rekor_url = "https://rekor.invalid"' in rendered_config
+    assert '[sigstore."fulcio.sigstore.dev"]' in rendered_config
+    assert "fulcio_url" not in rendered_config, "the verification config carries no fulcio override"
 
 
 def test_wait_for_sigstore_leaves_every_polled_endpoint_answering(sigstore_stack: SigstoreStack) -> None:

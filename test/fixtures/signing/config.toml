@@ -1,7 +1,7 @@
 # Verification-side config for the mirror-signing harness (WP 5, C-073).
 #
-# Deliberately carries ONLY [trust.sigstore].trusted_root -- no rekor
-# override -- so the harness can assert the mirror's PUBLISH side (the
+# Deliberately carries ONLY the public-authority table (trusted_root plus an
+# inert decoy Rekor URL) so the harness can assert the mirror's PUBLISH side (the
 # sign.keyless.fulcio/.rekor refs in mirror.yml, resolved by the mirror
 # itself per adr_mirror_signing.md D1) never reads this file's endpoints
 # (S-061). `trusted_root` is a bare path with no scheme
@@ -16,12 +16,14 @@
 # CA keys. A relative path baked in at commit time cannot survive both a
 # plain checkout and an agent worktree, where the sibling `../ocx` is two
 # levels further up (`src.helpers.main_checkout_root`).
-[trust.sigstore]
+[sigstore."fulcio.sigstore.dev"]
 trusted_root = "__TRUSTED_ROOT_PATH__"
 
-# Decoy: verify never dials Fulcio, only reads the trusted-root bundle
+# Decoy: verify never dials Rekor here, only reads the trusted-root bundle
 # above. An invalid host here is what lets S-061 assert the publish leg
 # ignores this file's endpoints entirely -- a publish that fell through to
 # this config would fail loudly (DNS/connect error) rather than silently
-# succeeding against the real ocx sigstore stack.
-fulcio_url = "https://fulcio.invalid"
+# succeeding against the real ocx sigstore stack. The table is keyed by the
+# public authority because verify resolves its trust root there; a table's
+# Fulcio URL must match its key, so the decoy is the Rekor URL.
+rekor_url = "https://rekor.invalid"

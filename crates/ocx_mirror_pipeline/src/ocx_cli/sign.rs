@@ -13,7 +13,7 @@
 //! [`invoke_sign_reference`] once its push returns.
 //!
 //! The mirror resolves every `Ref` itself rather than handing ocx a
-//! `[trust.sigstore]` table: that table is one global per machine and
+//! `[sigstore."<authority>"]` table: that table is one global per machine and
 //! consumer-side, so a host that consumes public `ocx.sh` packages could not
 //! also publish against a corporate Sigstore. Endpoints therefore always
 //! travel as explicit flags, and the two secret-class values
@@ -35,7 +35,7 @@ use ocx_mirror_spec::{KeyConfig, KeylessConfig, Ref, SignConfig};
 /// omitted.
 ///
 /// Mirror-owned rather than left to ocx's own default: C-052 requires both
-/// endpoints on every keyless argv, so that a fleet `[trust.sigstore]` naming
+/// endpoints on every keyless argv, so that a fleet `[sigstore."<authority>"]` naming
 /// a different Fulcio cannot change what this mirror publishes against.
 pub(crate) const DEFAULT_FULCIO_URL: &str = "https://fulcio.sigstore.dev";
 
@@ -189,7 +189,7 @@ fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
 /// takes its own `KeyRef` grammar — a bare path, `file://PATH`, or `env://NAME`
 /// whose variable holds the PEM itself — which [`Ref`]'s rendering is already a
 /// subset of. Everything else is resolved here: endpoints because they must not
-/// fall through to `[trust.sigstore]`, secrets because ocx offers no flag that
+/// fall through to `[sigstore."<authority>"]`, secrets because ocx offers no flag that
 /// would keep them off argv.
 ///
 /// # Errors
@@ -263,7 +263,7 @@ fn resolve_keyless(
 /// `--no-rekor-upload`.
 ///
 /// Silence means `--no-rekor-upload`, never a fleet
-/// `[trust.sigstore].rekor_upload`: an omitted `rekor:` must not push a
+/// `[sigstore."<authority>"].rekor_upload`: an omitted `rekor:` must not push a
 /// private digest to the public transparency log (ADR D1).
 fn resolve_key(
     key: &KeyConfig,
