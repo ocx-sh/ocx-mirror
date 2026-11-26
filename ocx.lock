@@ -1,9 +1,9 @@
 [metadata]
 lock_version = 4
 declaration_hash_version = 1
-declaration_hash = "sha256:e596251ac7cd48a6c3bc78e35c7c100945bf25f0c91405c899b0a5ce5d20cf13"
+declaration_hash = "sha256:367d69505cb37bf88f381e11eb4b435ca6211a5a3acc5fbe078dfcf35334ac35"
 generated_by = "ocx 0.6.8"
-generated_at = "2026-11-25T14:04:26Z"
+generated_at = "2026-11-26T22:57:27Z"
 
 [[tool]]
 name = "bazelisk"
@@ -76,15 +76,15 @@ declared = "ocx.sh/lychee/lychee:0.24.2"
 name = "ocx"
 group = "default"
 repository = "ghcr.io/ocx-sh/dev/cli"
-declared = "ghcr.io/ocx-sh/dev/cli:0.6.8-pr779_20261125132518"
+declared = "ghcr.io/ocx-sh/dev/cli:0.6.8-pr779_20261126223904"
 
 [tool.platforms]
-"darwin/amd64" = "sha256:fb98e084f587d7585224aa5defa4f6a77d437e1f0c5978bf0aefe2232e015391"
-"darwin/arm64" = "sha256:53feffbecf123416fcada04be6c45367c7c4ed3128d3e4e773d8bff63495cad3"
-"linux/amd64" = "sha256:b95d9aff4fcc096289b5c2ef28e0537912be7bab72d8214478550679e573a597"
-"linux/arm64" = "sha256:2bf33e19d964b48f52029ade2ce52db895759b7c906aa389bc1031735b979767"
-"windows/amd64" = "sha256:aee2937bddf3140978393f279eb47a71cedf36605156b52a661e8ec71562341f"
-"windows/arm64" = "sha256:67e8e08dbf2f00c72ecaccf54fc968565c511aee4800be6386ad12d0e5644dbe"
+"darwin/amd64" = "sha256:99ba70938186d3fedabb1bc88bceab1c28762b0c87126eb335d5d1d507d03173"
+"darwin/arm64" = "sha256:ae478888aa8bf5f14d4f7f4b4eef2d856af22f3824e06e6e4155fd13c312862d"
+"linux/amd64" = "sha256:ef3f832c348a03e551d78ec770b507dd939e80dfb5dde3d3dac897a8e2b70d87"
+"linux/arm64" = "sha256:daa8b52c34a98b3b9a7e01e954f25795f64051b47eedf82653e6b8cce81e2e3a"
+"windows/amd64" = "sha256:6269e684553f02ff3237354c303de957c55bff03cb60c3de228262da74a9c71e"
+"windows/arm64" = "sha256:b9aa0ed3b192682a756eb0348f96797a45723b127d9bedae7c5f8217a414b9f1"
 
 [[tool]]
 name = "prek"

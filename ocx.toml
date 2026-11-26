@@ -6,7 +6,7 @@ uv = "ocx.sh/astral-sh/uv:0.13.0"
 lychee = "ocx.sh/lychee/lychee:0.24.2"
 prek = "ocx.sh/prek/prek:0.5.5"
 actionlint = "ocx.sh/actionlint/actionlint:1.7.12"
-ocx = "ghcr.io/ocx-sh/dev/cli:0.6.8-pr779_20261125132518"  # pull-request build of ocx-sh/ocx#779; replace with the canary of ocx main (or the release) before this merges
+ocx = "ghcr.io/ocx-sh/dev/cli:0.6.8-pr779_20261126223904"  # pull-request build of ocx-sh/ocx#779; replace with the canary of ocx main (or the release) before this merges
 zot = "ocx.sh/project-zot/zot:2.1.21"
 
 # CI installs `default,<role>` per job and ocx rejects an undeclared group, so every role is declared.
