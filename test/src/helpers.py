@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import NamedTuple
+from urllib.parse import urlparse
 
 import pytest
 
@@ -571,10 +572,14 @@ def mint_identity_token(target: Path) -> Path:
     return target
 
 
-def render_signing_fixture(dest: Path, trusted_root: Path, token_path: Path) -> Path:
+def render_signing_fixture(
+    dest: Path, trusted_root: Path, token_path: Path, fulcio_url: str, rekor_url: str
+) -> Path:
     """Renders `fixtures/signing/` into ``dest`` and returns the `mirror.yml` path.
 
-    The one seat that substitutes ``__TRUSTED_ROOT_PATH__`` (config.toml) and
+    The one seat that substitutes ``__TRUSTED_ROOT_PATH__``,
+    ``__SIGSTORE_AUTHORITY__`` (the host[:port] of ``fulcio_url``),
+    ``__FULCIO_URL__`` and ``__REKOR_URL__`` (config.toml) and
     ``__IDENTITY_TOKEN_PATH__`` (mirror.yml) -- C-073, amended 2026-09-02.
     Neither path survives being baked in: the trusted root sits in a sibling
     checkout resolved at runtime, and the dex token is minted per session, so
@@ -597,6 +602,14 @@ def render_signing_fixture(dest: Path, trusted_root: Path, token_path: Path) -> 
     spec.write_text(spec.read_text().replace("__IDENTITY_TOKEN_PATH__", str(token_path.resolve())))
 
     config = dest / "config.toml"
-    config.write_text(config.read_text().replace("__TRUSTED_ROOT_PATH__", str(trusted_root.resolve())))
+    text = config.read_text()
+    for placeholder, value in (
+        ("__TRUSTED_ROOT_PATH__", str(trusted_root.resolve())),
+        ("__SIGSTORE_AUTHORITY__", urlparse(fulcio_url).netloc),
+        ("__FULCIO_URL__", fulcio_url),
+        ("__REKOR_URL__", rekor_url),
+    ):
+        text = text.replace(placeholder, value)
+    config.write_text(text)
 
     return spec

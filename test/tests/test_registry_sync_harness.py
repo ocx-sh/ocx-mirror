@@ -597,7 +597,7 @@ def test_mirror_runner_follows_a_zot_registry_override(
 # ---------------------------------------------------------------------------
 
 
-def test_render_signing_fixture_substitutes_both_placeholders(tmp_path: Path) -> None:
+def test_render_signing_fixture_substitutes_every_placeholder(tmp_path: Path) -> None:
     """C-073 (amended 2026-09-02): `render_signing_fixture` is the one seat that
     substitutes `__TRUSTED_ROOT_PATH__` and `__IDENTITY_TOKEN_PATH__`.
 
@@ -618,7 +618,9 @@ def test_render_signing_fixture_substitutes_both_placeholders(tmp_path: Path) ->
     token_path.write_text("header.payload.signature\n")
     dest = tmp_path / "signing-spec"
 
-    returned = render_signing_fixture(dest, trusted_root, token_path)
+    returned = render_signing_fixture(
+        dest, trusted_root, token_path, "http://localhost:5575", "http://localhost:3020"
+    )
 
     assert returned.exists(), "the returned path must name a file that was written"
     assert dest in returned.parents, f"the returned path must live under dest; got {returned}"
@@ -631,12 +633,18 @@ def test_render_signing_fixture_substitutes_both_placeholders(tmp_path: Path) ->
     assert f"file://{token_path}" in rendered_spec, "the identity token must be named as a file:// ref"
     assert str(trusted_root) in rendered_config
 
-    # C-073: the decoy is what makes S-061's "the publish side ignores this
-    # config's Fulcio" assertion falsifiable -- a publish that fell through to
-    # the config would fail loudly against an unresolvable host. It must
-    # survive rendering, and no rekor override may join it.
-    assert 'fulcio_url = "https://fulcio.invalid"' in rendered_config
-    assert "rekor_url" not in rendered_config, "the verification config carries no rekor override"
+    # The stack's table is keyed by its Fulcio URL's host[:port], and that
+    # table's `fulcio_url` matches the key.
+    assert '[sigstore."localhost:5575"]' in rendered_config
+    assert 'fulcio_url = "http://localhost:5575"' in rendered_config
+    assert 'rekor_url = "http://localhost:3020"' in rendered_config
+    for placeholder in ("__SIGSTORE_AUTHORITY__", "__FULCIO_URL__", "__REKOR_URL__"):
+        assert placeholder not in rendered_config, "no placeholder may survive rendering"
+
+    # No decoy table: ocx resolves the public instance for a key-mode verify
+    # too, so a decoy Rekor URL there fails every key verify.
+    assert "rekor.invalid" not in rendered_config
+    assert "fulcio.sigstore.dev" not in rendered_config
 
 
 def test_wait_for_sigstore_leaves_every_polled_endpoint_answering(sigstore_stack: SigstoreStack) -> None:
